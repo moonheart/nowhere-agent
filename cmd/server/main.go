@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"nowhere-agent/internal/config"
+	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/platform/db"
 )
@@ -46,6 +47,10 @@ func run() error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
+	identityStore := identity.NewStore(pool)
+	identitySvc := identity.NewService(identityStore)
+	identity.NewHandler(identitySvc).Register(mux)
 
 	srv := &http.Server{
 		Addr:         cfg.HTTP.Addr,
