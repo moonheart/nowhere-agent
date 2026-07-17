@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-07-17
+goal: "Establish core architecture: self-built Go agent loop with custom
+  provider abstraction, per-session Docker sandboxing behind a SandboxPort,
+  read/write-split long-term memory behind a MemoryPort with a scheduled
+  dreaming worker, and a progressively-loaded three-scope skill system."
