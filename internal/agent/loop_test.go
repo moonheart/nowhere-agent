@@ -1,0 +1,193 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/toolruntime"
+)
+
+// scriptProvider emits canned event sequences, one per Stream call.
+type scriptProvider struct {
+	mu     sync.Mutex
+	script [][]provider.Event
+	calls  int
+}
+
+func (p *scriptProvider) Name() string { return "script" }
+
+func (p *scriptProvider) Stream(provider.Request) (<-chan provider.Event, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.calls >= len(p.script) {
+		return nil, errors.New("no more scripted responses")
+	}
+	evs := p.script[p.calls]
+	p.calls++
+	ch := make(chan provider.Event, len(evs))
+	for _, e := range evs {
+		ch <- e
+	}
+	close(ch)
+	return ch, nil
+}
+
+// textResponse builds a script entry producing a single text block.
+func textResponse(text string) []provider.Event {
+	return []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: text},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: 1, OutputTokens: 1}},
+	}
+}
+
+// toolUseResponse builds a script entry that requests a tool call.
+func toolUseResponse(id, name, jsonArgs string) []provider.Event {
+	return []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: id, ToolName: name, ToolInput: map[string]any{}}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: jsonArgs},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop},
+	}
+}
+
+// memEmitter collects emitted events.
+type memEmitter struct {
+	mu     sync.Mutex
+	events []EventKind
+}
+
+func (m *memEmitter) Emit(_ context.Context, kind EventKind, _ any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, kind)
+	return nil
+}
+
+func (m *memEmitter) count(kind EventKind) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, k := range m.events {
+		if k == kind {
+			n++
+		}
+	}
+	return n
+}
+
+type echoTool struct{}
+
+func (echoTool) Name() string           { return "echo" }
+func (echoTool) Description() string    { return "echoes input" }
+func (echoTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (echoTool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
+func (echoTool) Timeout() time.Duration { return time.Second }
+func (echoTool) Call(_ context.Context, args map[string]any) (toolruntime.Result, error) {
+	return toolruntime.Result{Content: "echo-result"}, nil
+}
+
+func TestLoopSingleTurn(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{textResponse("hello world")}}
+	reg := toolruntime.NewRegistry()
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(produced) != 1 {
+		t.Fatalf("expected 1 assistant message, got %d", len(produced))
+	}
+	if produced[0].Content[0].Text != "hello world" {
+		t.Errorf("text = %q", produced[0].Content[0].Text)
+	}
+	if emit.count(KindDone) != 1 {
+		t.Error("expected done event")
+	}
+	if emit.count(KindText) == 0 {
+		t.Error("expected streamed text events")
+	}
+}
+
+func TestLoopToolRoundTrip(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "echo", `{"x":1}`),
+		textResponse("final answer"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// assistant(tool_use) + user(tool_result) + assistant(final)
+	if len(produced) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %+v", len(produced), produced)
+	}
+	if produced[0].Content[0].Type != provider.BlockToolUse {
+		t.Errorf("msg0 type = %q", produced[0].Content[0].Type)
+	}
+	if produced[1].Role != provider.RoleUser || produced[1].Content[0].Type != provider.BlockToolResult {
+		t.Errorf("msg1 should be tool_result, got %+v", produced[1])
+	}
+	if produced[1].Content[0].ToolContent != "echo-result" {
+		t.Errorf("tool result content = %q", produced[1].Content[0].ToolContent)
+	}
+	if produced[2].Content[0].Text != "final answer" {
+		t.Errorf("final = %q", produced[2].Content[0].Text)
+	}
+	if emit.count(KindToolUse) != 1 || emit.count(KindToolResult) != 1 {
+		t.Errorf("tool events = use %d result %d", emit.count(KindToolUse), emit.count(KindToolResult))
+	}
+	if p.calls != 2 {
+		t.Errorf("provider called %d times want 2", p.calls)
+	}
+}
+
+func TestLoopMaxIterationsGuard(t *testing.T) {
+	// Provider always requests a tool → loop must stop at the guard.
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "echo", `{}`),
+		toolUseResponse("tu2", "echo", `{}`),
+		toolUseResponse("tu3", "echo", `{}`),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100, MaxIterations: 2})
+
+	_, err := loop.Run(context.Background(), nil, &memEmitter{})
+	if err == nil {
+		t.Fatal("expected max-iteration error")
+	}
+}
+
+func TestLoopToolInputParsed(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "echo", `{"path":"/tmp/x"}`),
+		textResponse("done"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), nil, &memEmitter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolUse := produced[0].Content[0]
+	if toolUse.ToolInput["path"] != "/tmp/x" {
+		t.Errorf("tool input = %+v", toolUse.ToolInput)
+	}
+}

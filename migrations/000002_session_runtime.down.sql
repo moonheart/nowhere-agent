@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS run_events;
+DROP TABLE IF EXISTS runs;
+DROP TABLE IF EXISTS sessions;
