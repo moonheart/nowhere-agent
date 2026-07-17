@@ -1,0 +1,17 @@
+# Go
+/bin/
+*.exe
+*.test
+
+# Node / web
+node_modules/
+web/node_modules/
+web/dist/
+
+# Env / local
+.env
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
