@@ -15,6 +15,22 @@ type Config struct {
 	HTTP HTTP
 	DB   DB
 	Log  Log
+	LLM  LLM
+	Web  Web
+}
+
+// LLM configures the default model provider for the chat endpoint.
+type LLM struct {
+	Provider string `envconfig:"LLM_PROVIDER" default:""` // anthropic | openai
+	Model    string `envconfig:"LLM_MODEL" default:""`
+	APIKey   string `envconfig:"LLM_API_KEY" default:""`
+	BaseURL  string `envconfig:"LLM_BASE_URL" default:""` // optional override/proxy
+}
+
+// Web configures serving the built frontend.
+type Web struct {
+	// Dir is the built frontend (web/dist). Empty disables static serving.
+	Dir string `envconfig:"WEB_DIR" default:""`
 }
 
 // HTTP configures the gateway server.

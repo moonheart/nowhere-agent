@@ -11,10 +11,16 @@ import (
 	"os/signal"
 	"syscall"
 
+	"nowhere-agent/internal/agent"
+	"nowhere-agent/internal/chatapi"
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/platform/db"
+	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/provider/anthropic"
+	"nowhere-agent/internal/provider/openai"
+	"nowhere-agent/internal/toolruntime"
 )
 
 func main() {
@@ -52,6 +58,27 @@ func run() error {
 	identitySvc := identity.NewService(identityStore)
 	identity.NewHandler(identitySvc).Register(mux)
 
+	// Chat endpoint: build an agent loop per request from the configured provider.
+	if adapter := buildProvider(cfg, log); adapter != nil {
+		model := cfg.LLM.Model
+		chatapi.NewHandler(func(ctx context.Context) *agent.Loop {
+			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
+				Model:           model,
+				MaxTokens:       4096,
+				MaxIterations:   25,
+				CacheablePrefix: true,
+			})
+		}, "").Register(mux)
+		log.Info("chat endpoint enabled", "provider", adapter.Name(), "model", model)
+	} else {
+		log.Warn("chat endpoint disabled: no LLM provider configured (set LLM_PROVIDER/LLM_API_KEY)")
+	}
+
+	// Serve the built frontend if present.
+	if cfg.Web.Dir != "" {
+		mux.Handle("GET /", http.FileServer(http.Dir(cfg.Web.Dir)))
+	}
+
 	srv := &http.Server{
 		Addr:         cfg.HTTP.Addr,
 		Handler:      mux,
@@ -75,5 +102,25 @@ func run() error {
 		return srv.Shutdown(shutCtx)
 	case err := <-errCh:
 		return err
+	}
+}
+
+// buildProvider constructs the configured provider adapter, or nil if not configured.
+func buildProvider(cfg config.Config, log *slog.Logger) provider.Adapter {
+	switch cfg.LLM.Provider {
+	case "anthropic":
+		var opts []anthropic.Option
+		if cfg.LLM.BaseURL != "" {
+			opts = append(opts, anthropic.WithEndpoint(cfg.LLM.BaseURL))
+		}
+		return anthropic.New(cfg.LLM.APIKey, opts...)
+	case "openai":
+		var opts []openai.Option
+		if cfg.LLM.BaseURL != "" {
+			opts = append(opts, openai.WithEndpoint(cfg.LLM.BaseURL))
+		}
+		return openai.New(cfg.LLM.APIKey, opts...)
+	default:
+		return nil
 	}
 }
