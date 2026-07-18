@@ -6,11 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/identity"
+	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
 )
 
@@ -37,6 +39,10 @@ type Handler struct {
 	// are teed into the durable run log (the episodes for dreaming) and the
 	// single-active-run lock is enforced per session.
 	runtime *session.Runtime
+	// registry, when set, executes runs on connection-independent worker
+	// goroutines (design decouple-run-ownership). serveChat submits to it and
+	// attaches; cancel is transport-independent.
+	registry *session.RunRegistry
 	// ctxBuilder, when set, composes the per-request system prompt (skills +
 	// recalled memory). Nil keeps the static system prompt (tests).
 	ctxBuilder ContextBuilder
@@ -47,9 +53,20 @@ func NewHandler(newLoop LoopFactory, systemPrompt string) *Handler {
 	return &Handler{newLoop: newLoop, system: systemPrompt}
 }
 
-// WithRuntime enables run persistence for the chat endpoint.
+// WithRuntime enables run persistence for the chat endpoint. It also wires a
+// RunRegistry over the same runtime and bus, so runs execute on connection-
+// independent workers and every client (submitter or attacher) shares the one
+// attach path. Pass a custom registry via WithRegistry to override.
 func (h *Handler) WithRuntime(rt *session.Runtime) *Handler {
 	h.runtime = rt
+	h.registry = session.NewRunRegistry(rt, rt.Bus())
+	return h
+}
+
+// WithRegistry overrides the run-execution registry (default: one built over the
+// runtime in WithRuntime).
+func (h *Handler) WithRegistry(rg *session.RunRegistry) *Handler {
+	h.registry = rg
 	return h
 }
 
@@ -103,131 +120,80 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Multi-writer prevention, checked before any streaming starts: a client
-	// submitting to a session that already has an active run is rejected with
-	// 409 (not queued). The check needs a resolved session, so it only applies
-	// when the client named an existing threadId; a fresh session can't be busy.
-	if h.runtime != nil && req.ThreadID != "" {
-		if s, err := h.runtime.GetSession(r.Context(), req.ThreadID); err == nil {
-			callerID := ""
-			if u, ok := identity.UserFromContext(r.Context()); ok {
-				callerID = u.ID
-			}
-			if sessionVisibleTo(s, callerID) {
-				if _, active, _ := h.runtime.ActiveRun(r.Context(), s.ID); active {
-					http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
-					return
-				}
-			}
-		}
-	}
-
-	// SSE headers for ui-message-stream.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("x-vercel-ai-ui-message-stream", "v1")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
-	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
-
 	history := toHistory(req)
 	loop := h.newLoop(r.Context(), h.systemPromptFor(r, req))
 
-	// When a runtime is wired, persist this request as a run within its session.
-	var emit agent.Emitter = emitter
-	var sessID, runID string
-	if h.runtime != nil {
-		s, err := h.resolveSession(r, req)
-		if err != nil {
-			emitter.Emit(r.Context(), agent.KindError, err.Error())
-			emitter.finish()
+	// No runtime wired (tests/dev): stream the loop directly with no persistence,
+	// no registry, no run-state — the pre-registry behaviour.
+	if h.runtime == nil || h.registry == nil {
+		h.serveChatDirect(w, r, loop, history)
+		return
+	}
+
+	// Resolve the session and submit the run to the registry, which executes it
+	// on a connection-independent worker goroutine. Then this handler simply
+	// attaches to the run's event stream — the identical path serveResume uses —
+	// so the submitter and every attacher are symmetric consumers (D3).
+	s, err := h.resolveSession(r, req)
+	if err != nil {
+		writeSSEError(w, err.Error())
+		return
+	}
+	sessID := s.ID
+
+	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history})
+	if err != nil {
+		// Single-active-run: a second client submitting while a run is in flight
+		// is rejected (multi-writer prevention), not queued. Checked before any
+		// SSE headers are written so the status isn't locked to 200.
+		if errors.Is(err, session.ErrRunActive) {
+			http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
 			return
 		}
-		sessID = s.ID
-		run, err := h.runtime.StartRun(r.Context(), sessID)
-		if err != nil {
-			// Single-active-run: a second client submitting while a run is in
-			// flight is rejected (multi-writer prevention), not queued. 409 tells
-			// the client the session is busy, distinct from a bad request.
-			if errors.Is(err, session.ErrRunActive) {
-				http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
-				return
-			}
-			emitter.Emit(r.Context(), agent.KindError, err.Error())
-			emitter.finish()
-			return
-		}
-		runID = run.ID
-
-		// Tell the client which session it's talking to (transient: handled by
-		// onData, not added to the message), so it can resume/replay later.
-		emitter.write(chunk{"type": "data-session", "data": map[string]any{"id": sessID}, "transient": true})
-
-		emit = &persistEmitter{inner: emitter, rt: h.runtime, sessionID: sessID, runID: runID}
-
-		// Mark the run started: persisted as the run's first event so attached
-		// clients (live fan-out) and reconnecting clients (replay) both learn the
-		// session went running.
-		_ = emit.Emit(r.Context(), agent.KindRunning, nil)
-
-		// Persist the user's message so history replay reconstructs the user
-		// side, not just the assistant's output.
-		if text := lastUserText(req); text != "" {
-			payload, _ := json.Marshal(text)
-			_ = h.runtime.AppendEvent(r.Context(), session.Event{
-				RunID:     runID,
-				SessionID: sessID,
-				Kind:      string(agent.KindUser),
-				Payload:   payload,
-			})
-		}
+		writeSSEError(w, err.Error())
+		return
 	}
 
-	// Drive the loop with a cancellable context so a Stop/cancel interrupts the
-	// in-flight run (provider stream + tool dispatch), not just the HTTP stream.
-	runCtx, cancelRun := context.WithCancel(r.Context())
-	defer cancelRun()
-	if h.runtime != nil && runID != "" {
-		h.runtime.RegisterCancel(sessID, cancelRun)
+	// Persist the user's message so history replay reconstructs the user side,
+	// not just the assistant's output.
+	if text := lastUserText(req); text != "" {
+		payload, _ := json.Marshal(text)
+		_ = h.runtime.AppendEvent(r.Context(), session.Event{
+			RunID:     run.ID,
+			SessionID: sessID,
+			Kind:      string(agent.KindUser),
+			Payload:   payload,
+		})
 	}
 
-	_, runErr := loop.Run(runCtx, history, emit)
-	if runErr != nil {
-		// A cancelled run already emitted KindCancelled; report anything else.
-		if runCtx.Err() == nil {
-			emitter.Emit(r.Context(), agent.KindError, runErr.Error())
-		}
+	// SSE headers for ui-message-stream.
+	if !writeStreamHeaders(w) {
+		return
 	}
+	// Tell the client which session it's talking to (transient: handled by onData,
+	// not added to the message), so it can resume/replay later.
+	pre := []chunk{{"type": "data-session", "data": map[string]any{"id": sessID}, "transient": true}}
 
-	// The run's terminal lifecycle event must reach the durable log and every
-	// attached client even when runCtx is cancelled — the loop's own Emit of
-	// KindCancelled rides the cancelled runCtx, so both persistence (AppendEvent
-	// ctx.Err()) and the submitter's stream (Emit ctx guard) short-circuit on it.
-	// Re-emit the terminal state on the live request context so the run provably
-	// settles for replay and for other attached clients (multi-client sync).
-	if h.runtime != nil && runID != "" && runCtx.Err() == context.Canceled {
-		emit.Emit(r.Context(), agent.KindCancelled, nil)
+	// Attach to the run from the start; the worker is already executing.
+	h.attach(w, r, sessID, run, 0, pre)
+}
+
+// serveChatDirect streams a loop's output with no run persistence (no runtime
+// wired — tests/dev). The loop runs on the request goroutine and is cancelled
+// when the client disconnects, exactly as before the registry existed.
+func (h *Handler) serveChatDirect(w http.ResponseWriter, r *http.Request, loop *agent.Loop, history []provider.Message) {
+	if !writeStreamHeaders(w) {
+		return
 	}
+	flusher := w.(http.Flusher)
+	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
+	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
 
-	// Settle the run's terminal state: cancelled beats failed when the context
-	// was cancelled (CancelRun may also settle first; the extra call is a no-op).
-	if h.runtime != nil && runID != "" {
-		status := session.RunDone
-		if runErr != nil {
-			status = session.RunFailed
-			if runCtx.Err() == context.Canceled {
-				status = session.RunCancelled
-			}
-		}
-		_ = h.runtime.CompleteRun(r.Context(), sessID, status)
+	runCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	if _, err := loop.Run(runCtx, history, emitter); err != nil && runCtx.Err() == nil {
+		emitter.Emit(r.Context(), agent.KindError, err.Error())
 	}
-
 	emitter.finish()
 }
 
@@ -292,28 +258,139 @@ func (h *Handler) authorizeSession(w http.ResponseWriter, r *http.Request, sessi
 	return s, true
 }
 
-// persistEmitter tees loop events to the SSE stream and the durable run log.
-type persistEmitter struct {
-	inner     agent.Emitter
-	rt        *session.Runtime
-	sessionID string
-	runID     string
+// writeStreamHeaders writes the SSE headers for a ui-message-stream response and
+// reports whether the connection supports streaming.
+func writeStreamHeaders(w http.ResponseWriter) bool {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("x-vercel-ai-ui-message-stream", "v1")
+	if _, ok := w.(http.Flusher); !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return false
+	}
+	return true
 }
 
-// Emit streams to the client first, then persists to the run log.
-func (p *persistEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any) error {
-	err := p.inner.Emit(ctx, kind, payload)
-	data, mErr := json.Marshal(payload)
-	if mErr != nil {
-		data = []byte("null")
+// writeSSEError streams a single error frame + finish, for failures after the
+// run may have started but before/without a clean attach.
+func writeSSEError(w http.ResponseWriter, msg string) {
+	if !writeStreamHeaders(w) {
+		return
 	}
-	_ = p.rt.AppendEvent(ctx, session.Event{
-		RunID:     p.runID,
-		SessionID: p.sessionID,
-		Kind:      string(kind),
-		Payload:   data,
-	})
-	return err
+	flusher := w.(http.Flusher)
+	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
+	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
+	emitter.Emit(context.Background(), agent.KindError, msg)
+	emitter.finish()
+}
+
+// attach streams a run's events to the client: it subscribes to the bus first
+// (so no live event falls into the subscribe/replay gap), replays the persisted
+// gap from `after`, then live-follows until the run settles or the client
+// disconnects. On the terminal event it does a final replay to fill any gap a
+// slow live consumer dropped (D6). Shared by serveChat (submitter, after=0) and
+// serveResume (attacher, after=N): every client traverses this one path (D3).
+//
+// pre is an optional set of frames written right after the `start` frame (e.g.
+// the submitter's data-session frame).
+func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID string, run session.Run, after int, pre []chunk) {
+	flusher := w.(http.Flusher)
+	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
+	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
+	for _, c := range pre {
+		emitter.write(c)
+	}
+
+	// Subscribe first: any event appended from now on is buffered on ch, so the
+	// replay below cannot race past a live event and lose it.
+	ch, unsub := h.runtime.Subscribe(sessionID, 128)
+	defer unsub()
+
+	// Replay the persisted gap. Events that arrived before the subscribe are also
+	// on ch; the offset filter dedups them.
+	maxOffset, terminal := h.replayInto(r, emitter, run, after)
+	if terminal {
+		emitter.finish()
+		return
+	}
+
+	// Live-follow buffered + new events until the run settles or the client
+	// disconnects. A periodic settle check covers the case where the run finished
+	// entirely between subscribe and now (no event will ever arrive on ch), which
+	// the purely event-driven loop cannot observe.
+	settlePoll := time.NewTicker(20 * time.Millisecond)
+	defer settlePoll.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-settlePoll.C:
+			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
+				h.fillTail(r, emitter, run, maxOffset)
+				emitter.finish()
+				return
+			}
+		case e, open := <-ch:
+			if !open {
+				// The bus never closes subscriber channels (an in-flight Publish
+				// must not panic on a closed channel), so this is defensive; the
+				// loop actually terminates on the terminal event or ActiveRun check.
+				h.fillTail(r, emitter, run, maxOffset)
+				emitter.finish()
+				return
+			}
+			if e.RunID != run.ID || e.Offset <= maxOffset {
+				continue
+			}
+			maxOffset = e.Offset
+			emitResumeEvent(r, emitter, e)
+			kind := agent.EventKind(e.Kind)
+			if kind == agent.KindDone || kind == agent.KindError || kind == agent.KindCancelled {
+				h.fillTail(r, emitter, run, maxOffset)
+				emitter.finish()
+				return
+			}
+			// The run may have settled without a further event we can observe
+			// (e.g. its terminal event was dropped as a slow consumer). Bail out
+			// once it is no longer active, filling the tail from the durable log.
+			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
+				h.fillTail(r, emitter, run, maxOffset)
+				emitter.finish()
+				return
+			}
+		}
+	}
+}
+
+// replayInto replays persisted events after `after` into the emitter, returning
+// the highest offset written and whether the run had already settled.
+func (h *Handler) replayInto(r *http.Request, emitter *sseEmitter, run session.Run, after int) (int, bool) {
+	replayed, err := h.runtime.Replay(r.Context(), run.ID, after)
+	if err != nil {
+		emitter.Emit(r.Context(), agent.KindError, err.Error())
+		return after, true
+	}
+	maxOffset := after
+	for _, e := range replayed {
+		emitResumeEvent(r, emitter, e)
+		if e.Offset > maxOffset {
+			maxOffset = e.Offset
+		}
+	}
+	return maxOffset, run.Status.Terminal()
+}
+
+// fillTail replays any events after maxOffset so a slow live consumer recovers
+// the deltas it dropped before the stream finishes (D6).
+func (h *Handler) fillTail(r *http.Request, emitter *sseEmitter, run session.Run, maxOffset int) {
+	replayed, err := h.runtime.Replay(r.Context(), run.ID, maxOffset)
+	if err != nil {
+		return
+	}
+	for _, e := range replayed {
+		emitResumeEvent(r, emitter, e)
+	}
 }
 
 // Emit implements agent.Emitter, streaming frames as the loop produces them.

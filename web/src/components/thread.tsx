@@ -5,6 +5,7 @@ import {
   MessagePrimitive,
 } from "@assistant-ui/react";
 import { Reasoning } from "@/components/reasoning";
+import { StopButton } from "@/components/stop-button";
 
 export const Thread: FC = () => {
   return (
@@ -57,9 +58,7 @@ const Composer: FC = () => (
       </ComposerPrimitive.Send>
     </ThreadPrimitive.If>
     <ThreadPrimitive.If running>
-      <ComposerPrimitive.Cancel className="rounded-xl bg-neutral-200 px-4 py-2 text-neutral-800">
-        Stop
-      </ComposerPrimitive.Cancel>
+      <StopButton className="rounded-xl bg-neutral-200 px-4 py-2 text-neutral-800" />
     </ThreadPrimitive.If>
   </ComposerPrimitive.Root>
 );

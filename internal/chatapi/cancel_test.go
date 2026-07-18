@@ -65,7 +65,17 @@ func startParkedChat(t *testing.T, mux *http.ServeMux, h *Handler, user identity
 	if len(ids) == 0 {
 		t.Fatal("chat run did not create a session")
 	}
-	return ids[0], func() { <-done }
+	sessID = ids[0]
+	// Under decoupled run ownership the parked run no longer dies with the request
+	// (its context is independent of any connection), so the test must cancel it to
+	// unblock the streaming handler. wait cancels the run, then waits for the
+	// handler goroutine to return.
+	return sessID, func() {
+		if h.registry != nil {
+			h.registry.Cancel(sessID)
+		}
+		<-done
+	}
 }
 
 // sessionIDs reads the sessions created so far for the fixed test user, via the
@@ -270,7 +280,12 @@ func (p *dripProvider) Stream(ctx context.Context, _ provider.Request) (<-chan p
 // TestDisconnectSettlesRun is the regression test for the run-leak: when the
 // client goes away mid-run (request context cancelled), the loop must unwind
 // and the run must reach a terminal state, not stay 'running' forever.
-func TestDisconnectSettlesRun(t *testing.T) {
+// TestDisconnectLeavesRunRunning verifies the decoupled-ownership behaviour
+// (design D7): a client disconnecting detaches its stream and the handler
+// returns, but the run keeps executing on its connection-independent worker —
+// it is NOT cancelled the way it was when the run lived on the request context.
+// Reaping abandoned runs is the session idle-end job (task 16.4), not disconnect.
+func TestDisconnectLeavesRunRunning(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
 	pp := &dripProvider{start: make(chan struct{})}
@@ -298,27 +313,20 @@ func TestDisconnectSettlesRun(t *testing.T) {
 	// The client disconnects.
 	clientGone()
 
-	// The handler must unwind.
+	// The handler must unwind (its attach loop sees the dead request context).
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("handler did not return after client disconnect (run leaked)")
+		t.Fatal("handler did not return after client disconnect")
 	}
 
-	// And the run must be terminal, not stuck running.
+	// But the run must still be active: disconnect detaches, it does not cancel.
 	sessions, err := rt.ListSessionsByUser(context.Background(), testUserID)
 	if err != nil || len(sessions) == 0 {
 		t.Fatalf("list sessions: %v n=%d", err, len(sessions))
 	}
-	runs, err := rt.RunsForSession(context.Background(), sessions[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("expected 1 run, got %d", len(runs))
-	}
-	if !runs[0].Status.Terminal() {
-		t.Errorf("run status = %q want terminal (not leaked running)", runs[0].Status)
+	if _, active, err := rt.ActiveRun(context.Background(), sessions[0].ID); err != nil || !active {
+		t.Errorf("run active = %v err=%v, want still active after disconnect", active, err)
 	}
 }
 

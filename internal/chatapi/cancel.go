@@ -11,7 +11,7 @@ import (
 // calls so a cancelled run terminates server-side rather than only closing the
 // HTTP stream while the model keeps generating (and the sandbox keeps running).
 func (h *Handler) serveCancel(w http.ResponseWriter, r *http.Request) {
-	if h.runtime == nil {
+	if h.registry == nil {
 		http.Error(w, `{"error":"cancel unavailable"}`, http.StatusServiceUnavailable)
 		return
 	}
@@ -24,19 +24,9 @@ func (h *Handler) serveCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cancelled, err := h.runtime.CancelRun(r.Context(), threadID)
-	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
-		return
-	}
-	if !cancelled {
-		// No active run: nothing to stop. Report success-idempotent so the
-		// client doesn't treat a late Stop (after the run finished) as an error.
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"cancelled": false})
-		return
-	}
-
+	// Cancel is transport-independent (D4): the registry interrupts the run's
+	// worker goroutine regardless of which client submitted or is attached.
+	cancelled := h.registry.Cancel(threadID)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"cancelled": true})
+	_ = json.NewEncoder(w).Encode(map[string]any{"cancelled": cancelled})
 }

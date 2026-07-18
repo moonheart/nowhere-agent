@@ -46,12 +46,14 @@ type Store interface {
 
 // Runtime coordinates run lifecycle, the single-active-run lock, and event
 // fan-out to attached clients. Transport (WS/SSE) subscribes; Runtime owns state.
+// Fan-out goes through an EventBus (in-memory single-instance by default) so a
+// Redis-backed bus can fan out across instances without this layer changing.
 type Runtime struct {
 	store Store
+	bus   EventBus
 
 	mu   sync.Mutex
-	runs map[string]*runState               // sessionID -> active run state
-	subs map[string]map[chan Event]struct{} // sessionID -> subscriber channels
+	runs map[string]*runState // sessionID -> active run state
 }
 
 type runState struct {
@@ -62,14 +64,24 @@ type runState struct {
 	cancel context.CancelFunc
 }
 
-// NewRuntime creates a Runtime over a Store.
+// NewRuntime creates a Runtime over a Store, fanning events out over an
+// in-memory bus. Use WithBus to substitute a different EventBus (e.g. Redis).
 func NewRuntime(store Store) *Runtime {
 	return &Runtime{
 		store: store,
+		bus:   NewMemBus(),
 		runs:  map[string]*runState{},
-		subs:  map[string]map[chan Event]struct{}{},
 	}
 }
+
+// WithBus sets the EventBus used for fan-out and returns the Runtime.
+func (rt *Runtime) WithBus(bus EventBus) *Runtime {
+	rt.bus = bus
+	return rt
+}
+
+// Bus returns the Runtime's EventBus, for transports that subscribe directly.
+func (rt *Runtime) Bus() EventBus { return rt.bus }
 
 // StartRun begins a new run, enforcing single-active-run. Returns ErrRunActive
 // if a run is already in progress; ErrSessionEnded if the session has ended.
@@ -117,7 +129,6 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 		rs.offset++
 		e.Offset = rs.offset
 	}
-	subs := rt.subscribersLocked(e.SessionID)
 	rt.mu.Unlock()
 
 	// The run may already have settled (e.g. CancelRun settled it while the loop
@@ -130,15 +141,11 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 		}
 	}
 
+	// Persist first (the durable log is the source of truth), then fan out live.
 	if err := rt.store.AppendEvent(ctx, e); err != nil {
 		return err
 	}
-	for ch := range subs {
-		select {
-		case ch <- e:
-		default: // drop for slow consumers rather than block the loop
-		}
-	}
+	rt.bus.Publish(e.SessionID, e)
 	return nil
 }
 
@@ -181,22 +188,9 @@ func (rt *Runtime) CreateSession(ctx context.Context, userID, title string) (Ses
 
 // Subscribe returns a channel receiving new events for a session, plus an
 // unsubscribe func. Combined with Replay it implements reconnect-and-replay.
+// It delegates to the Runtime's EventBus.
 func (rt *Runtime) Subscribe(sessionID string, buffer int) (<-chan Event, func()) {
-	ch := make(chan Event, buffer)
-	rt.mu.Lock()
-	if rt.subs[sessionID] == nil {
-		rt.subs[sessionID] = map[chan Event]struct{}{}
-	}
-	rt.subs[sessionID][ch] = struct{}{}
-	rt.mu.Unlock()
-
-	unsub := func() {
-		rt.mu.Lock()
-		delete(rt.subs[sessionID], ch)
-		close(ch)
-		rt.mu.Unlock()
-	}
-	return ch, unsub
+	return rt.bus.Subscribe(sessionID, buffer)
 }
 
 // Replay returns persisted events for a run after the given offset, for a
@@ -256,9 +250,4 @@ func (rt *Runtime) CancelRun(ctx context.Context, sessionID string) (bool, error
 		return false, err
 	}
 	return true, nil
-}
-
-// subscribersLocked returns the subscriber set; caller holds rt.mu.
-func (rt *Runtime) subscribersLocked(sessionID string) map[chan Event]struct{} {
-	return rt.subs[sessionID]
 }

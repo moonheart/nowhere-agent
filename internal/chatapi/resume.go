@@ -4,18 +4,15 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/google/uuid"
-
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/session"
 )
 
 // serveResume handles POST /api/chat/resume?threadId=<id>&after=<offset>: it
 // streams a session's in-progress (or last) run back to a reconnecting client.
-// It subscribes BEFORE replaying so no event falls into the gap between the
-// two, then replays the persisted gap and live-follows new events. The body
-// uses the same ui-message-stream frames as /api/chat so the client's
-// history.resume() can decode it with the identical pipeline.
+// It shares the single attach path with serveChat (D3): subscribe → replay the
+// gap → live-follow. The body uses the same ui-message-stream frames as
+// /api/chat so the client's history.resume() decodes it with the same pipeline.
 func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
 		http.Error(w, `{"error":"resume unavailable"}`, http.StatusServiceUnavailable)
@@ -46,88 +43,19 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// An in-flight run is always re-streamed from the start. The attaching
-	// client's follow renders ONE assistant message built from this whole
-	// stream; honouring a non-zero `after` for an active run would split the
-	// run into a snapshot bubble (already-loaded prefix) plus a continuation
-	// bubble (the follow), because the runtime's resume creates a NEW assistant
-	// message rather than extending the loaded one. The `after` offset is only
-	// meaningful for a settled run, where it bounds the replay.
+	// client's follow renders ONE assistant message built from this whole stream;
+	// honouring a non-zero `after` for an active run would split the run into a
+	// snapshot bubble plus a continuation bubble, because the runtime's resume
+	// creates a NEW assistant message rather than extending the loaded one. The
+	// `after` offset is only meaningful for a settled run, where it bounds replay.
 	if !run.Status.Terminal() {
 		after = 0
 	}
 
-	// SSE headers for ui-message-stream.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("x-vercel-ai-ui-message-stream", "v1")
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+	if !writeStreamHeaders(w) {
 		return
 	}
-
-	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
-	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
-
-	// Subscribe first: any event appended from now on is buffered on ch, so the
-	// replay below cannot race past a live event and lose it.
-	ch, unsub := h.runtime.Subscribe(threadID, 128)
-	defer unsub()
-
-	// Replay the persisted gap (events up to and including whatever landed
-	// before the subscribe are also on ch; the offset filter dedups them).
-	replayed, err := h.runtime.Replay(r.Context(), run.ID, after)
-	if err != nil {
-		emitter.Emit(r.Context(), agent.KindError, err.Error())
-		emitter.finish()
-		return
-	}
-	maxOffset := after
-	for _, e := range replayed {
-		emitResumeEvent(r, emitter, e)
-		if e.Offset > maxOffset {
-			maxOffset = e.Offset
-		}
-	}
-
-	// If the run already settled, replay alone is the whole answer.
-	if run.Status.Terminal() {
-		emitter.finish()
-		return
-	}
-
-	// Live-follow buffered + new events until the run settles or the client
-	// disconnects. After each event we re-check the run state so a run that
-	// ended in the subscribe/replay window still terminates the stream.
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case e, open := <-ch:
-			if !open {
-				emitter.finish()
-				return
-			}
-			if e.RunID != run.ID || e.Offset <= maxOffset {
-				continue
-			}
-			maxOffset = e.Offset
-			emitResumeEvent(r, emitter, e)
-			kind := agent.EventKind(e.Kind)
-			if kind == agent.KindDone || kind == agent.KindError || kind == agent.KindCancelled {
-				emitter.finish()
-				return
-			}
-			// The run may have settled without a further event we can observe
-			// (e.g. its terminal event was dropped as a slow-consumer). Bail out
-			// once it is no longer active rather than block forever.
-			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), threadID); !stillActive {
-				emitter.finish()
-				return
-			}
-		}
-	}
+	h.attach(w, r, threadID, run, after, nil)
 }
 
 // latestRun returns the most recent run in the session regardless of state.

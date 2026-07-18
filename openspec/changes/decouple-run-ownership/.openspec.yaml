@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-07-18
+goal: "Decouple run execution from the submitter's HTTP request: runs are owned
+  by a registry-driven worker behind an EventBus port, attach and cancel become
+  transport-symmetric, and the durable run log stays the single source of truth.
+  Establishes the EventBus seam for a later Redis multi-instance increment."
