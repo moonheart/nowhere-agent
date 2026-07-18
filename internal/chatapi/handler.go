@@ -43,6 +43,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat", h.serveChat)
 }
 
+// RegisterAuthed mounts the route behind auth middleware, so each chat request
+// resolves to an authenticated user (sessions are user-owned).
+func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) http.Handler) {
+	mux.Handle("POST /api/chat", auth(http.HandlerFunc(h.serveChat)))
+}
+
 // sseEmitter adapts agent.Emitter to write ui-message-stream frames live.
 type sseEmitter struct {
 	w           http.ResponseWriter

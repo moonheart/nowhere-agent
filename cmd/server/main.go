@@ -57,7 +57,8 @@ func run() error {
 
 	identityStore := identity.NewStore(pool)
 	identitySvc := identity.NewService(identityStore)
-	identity.NewHandler(identitySvc).Register(mux)
+	identityHandler := identity.NewHandler(identitySvc)
+	identityHandler.Register(mux)
 
 	// Durable session runtime over Postgres: chat requests persist as runs,
 	// and the run log doubles as the episodes for dreaming.
@@ -73,8 +74,8 @@ func run() error {
 				MaxIterations:   25,
 				CacheablePrefix: true,
 			})
-		}, "").WithRuntime(sessionRuntime).Register(mux)
-		log.Info("chat endpoint enabled", "provider", adapter.Name(), "model", model)
+		}, "").WithRuntime(sessionRuntime).RegisterAuthed(mux, identityHandler.RequireAuth)
+		log.Info("chat endpoint enabled (auth required)", "provider", adapter.Name(), "model", model)
 	} else {
 		log.Warn("chat endpoint disabled: no LLM provider configured (set LLM_PROVIDER/LLM_API_KEY)")
 	}

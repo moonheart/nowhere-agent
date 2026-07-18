@@ -34,6 +34,14 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/me", h.requireAuth(h.me))
 }
 
+// RequireAuth is middleware that resolves the bearer token to a user and
+// stores it on the request context (see UserFromContext). It rejects requests
+// without a valid token with 401. Exported so other endpoints (e.g. chat) can
+// protect their routes.
+func (h *Handler) RequireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(h.requireAuth(next.ServeHTTP))
+}
+
 type credentialsRequest struct {
 	Email       string `json:"email"`
 	Password    string `json:"password"`
