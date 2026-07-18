@@ -4,6 +4,7 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
 } from "@assistant-ui/react";
+import { Reasoning } from "@/components/reasoning";
 
 export const Thread: FC = () => {
   return (
@@ -39,7 +40,7 @@ const UserMessage: FC = () => (
 const AssistantMessage: FC = () => (
   <MessagePrimitive.Root className="flex justify-start">
     <div className="max-w-[80%] rounded-2xl bg-neutral-100 px-4 py-2 text-neutral-900">
-      <MessagePrimitive.Parts />
+      <MessagePrimitive.Parts components={{ Reasoning }} />
     </div>
   </MessagePrimitive.Root>
 );
