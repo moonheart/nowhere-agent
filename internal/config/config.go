@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
 )
 
@@ -55,8 +56,13 @@ type Log struct {
 	Format string `envconfig:"LOG_FORMAT" default:"text"`  // text|json
 }
 
-// Load reads configuration from the environment.
+// Load reads configuration from the environment. It first loads a local .env
+// file (if present) without overriding variables already set in the process
+// environment — so real env vars (e.g. injected in prod) always win.
 func Load() (Config, error) {
+	// Best-effort: missing .env is fine (prod injects real env vars).
+	_ = godotenv.Load()
+
 	var c Config
 	if err := envconfig.Process("", &c); err != nil {
 		return Config{}, fmt.Errorf("process env config: %w", err)
