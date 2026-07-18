@@ -40,7 +40,7 @@
 - [x] 4.2 Tool dispatch + registry
 - [x] 4.3 Streaming output to gateway (WS/SSE)
 - [ ] 4.4 Context-window management (short-term memory in-loop)
-- [ ] 4.5 Memory recall injection (read side) + skill L0/L1 loading
+- [x] 4.5 Memory recall injection (read side) + skill L0/L1 loading
 
 ## 5. sandbox
 - [x] 5.1 `SandboxPort` interface (create/destroy/exec/file-ops/materialize/solidify)
