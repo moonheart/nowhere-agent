@@ -46,8 +46,48 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// active reports whether a run is still in flight. The client sets
+	// unstable_resume only then; resuming a completed run would start a NEW
+	// assistant message after the loaded one (duplicate), because resume is a
+	// continuation of an unfinished run, not a re-read of history.
+	_, active, err := h.runtime.ActiveRun(r.Context(), threadID)
+	if err != nil {
+		active = false
+	}
+
+	// after is the highest event offset the client already has (the newest run's
+	// persisted max). resume() passes it back so the server streams only events
+	// that landed after this snapshot — not the whole run again (which would
+	// duplicate the assistant reply load() just restored).
+	after := 0
+	if len(msgs) > 0 {
+		if n, err := h.latestRunMaxOffset(r, threadID); err == nil {
+			after = n
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs})
+	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "after": after})
+}
+
+// latestRunMaxOffset returns the newest run's max persisted event offset — the
+// point the client's history snapshot already covers.
+func (h *Handler) latestRunMaxOffset(r *http.Request, sessionID string) (int, error) {
+	run, ok := h.latestRun(r, sessionID)
+	if !ok {
+		return 0, nil
+	}
+	events, err := h.runtime.Replay(r.Context(), run.ID, 0)
+	if err != nil {
+		return 0, err
+	}
+	max := 0
+	for _, e := range events {
+		if e.Offset > max {
+			max = e.Offset
+		}
+	}
+	return max, nil
 }
 
 // buildHistory reads every run's events for the session and folds them into an

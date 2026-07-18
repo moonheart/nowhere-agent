@@ -31,16 +31,24 @@ function authHeaders(): Record<string, string> {
   return token ? { authorization: `Bearer ${token}` } : {};
 }
 
-async function loadMessages(): Promise<ThreadMessageLike[]> {
+async function loadHistory(): Promise<{
+  messages: ThreadMessageLike[];
+  active: boolean;
+  after: number;
+}> {
   const threadId = getSessionId();
-  if (!threadId) return [];
+  if (!threadId) return { messages: [], active: false, after: 0 };
   const res = await fetch(
     `/api/chat/history?threadId=${encodeURIComponent(threadId)}`,
     { headers: authHeaders() },
   );
-  if (!res.ok) return [];
-  const data = (await res.json()) as { messages?: HistoryMessage[] };
-  return (data.messages ?? []).map(
+  if (!res.ok) return { messages: [], active: false, after: 0 };
+  const data = (await res.json()) as {
+    messages?: HistoryMessage[];
+    active?: boolean;
+    after?: number;
+  };
+  const messages = (data.messages ?? []).map(
     (m): ThreadMessageLike => ({
       id: m.id,
       role: m.role === "assistant" ? "assistant" : "user",
@@ -51,21 +59,38 @@ async function loadMessages(): Promise<ThreadMessageLike[]> {
       ),
     }),
   );
+  return {
+    messages,
+    active: data.active === true,
+    after: typeof data.after === "number" ? data.after : 0,
+  };
 }
+
+// lastLoadedAfter is the run-event offset the most recent load() snapshot
+// already covered. resume() passes it to the server so a reconnect streams only
+// events that arrived after the snapshot — resuming from 0 would replay the
+// whole run and duplicate the assistant reply.
+let lastLoadedAfter = 0;
 
 export const threadHistory: ThreadHistoryAdapter = {
   async load() {
-    const messages = await loadMessages();
-    // unstable_resume asks the runtime to call resume() after import, so a
-    // reloaded page re-streams the session's run instead of sitting static.
-    return { ...ExportedMessageRepository.fromArray(messages), unstable_resume: true };
+    const { messages, active, after } = await loadHistory();
+    lastLoadedAfter = after;
+    // unstable_resume asks the runtime to call resume() after import — but the
+    // runtime starts a NEW assistant message at the head for it. Only opt in
+    // when a run is genuinely still in flight; resuming a completed run would
+    // duplicate the assistant reply that load() already restored.
+    return {
+      ...ExportedMessageRepository.fromArray(messages),
+      unstable_resume: active,
+    };
   },
 
   async *resume() {
     const threadId = getSessionId();
     if (!threadId) return;
     const res = await fetch(
-      `/api/chat/resume?threadId=${encodeURIComponent(threadId)}&after=0`,
+      `/api/chat/resume?threadId=${encodeURIComponent(threadId)}&after=${lastLoadedAfter}`,
       { method: "POST", headers: authHeaders() },
     );
     if (!res.ok || !res.body) return;

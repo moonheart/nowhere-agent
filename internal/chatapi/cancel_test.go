@@ -2,8 +2,10 @@ package chatapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -274,5 +276,96 @@ func TestDisconnectSettlesRun(t *testing.T) {
 	}
 	if !runs[0].Status.Terminal() {
 		t.Errorf("run status = %q want terminal (not leaked running)", runs[0].Status)
+	}
+}
+
+// TestHistoryActiveFlag verifies GET /history reports whether a run is still in
+// flight, so the client only opts into resume (unstable_resume) for a genuinely
+// unfinished run — resuming a completed one would duplicate the assistant reply.
+func TestHistoryActiveFlag(t *testing.T) {
+	h, rt, pp := newParkedHandler()
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: testUserID}
+
+	sessID, wait := startParkedChat(t, mux, h, user)
+	defer wait()
+	<-pp.start // run mid-flight
+
+	getActive := func() bool {
+		req := httptest.NewRequest("GET", "/api/chat/history?threadId="+sessID, nil)
+		req = req.WithContext(identity.NewContextWithUser(req.Context(), user))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("history status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Active bool `json:"active"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.Active
+	}
+
+	if !getActive() {
+		t.Error("active = false while a run is in flight, want true")
+	}
+
+	// Finish the run (cancel it), then history must report inactive.
+	if _, err := rt.CancelRun(context.Background(), sessID); err != nil {
+		t.Fatal(err)
+	}
+	if getActive() {
+		t.Error("active = true after the run settled, want false")
+	}
+}
+
+// TestHistoryReportsAfterOffset verifies GET /history returns the newest run's
+// max persisted offset, which the client passes back to resume() so a reconnect
+// streams only new events rather than replaying the whole run.
+func TestHistoryReportsAfterOffset(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	runChat(t, mux, `{"messages":[{"role":"user","content":"q1"}]}`)
+	sessID := store.Sessions()[0].ID
+
+	req := httptest.NewRequest("GET", "/api/chat/history?threadId="+sessID, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history status = %d", rec.Code)
+	}
+	var resp struct {
+		Active bool `json:"active"`
+		After  int  `json:"after"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Active {
+		t.Error("active = true for a finished run, want false")
+	}
+	// The completed run persisted user + thinking/text + done events; the max
+	// offset must be > 0 so resume(after) can skip already-loaded content.
+	if resp.After <= 0 {
+		t.Errorf("after = %d, want > 0 (max persisted offset)", resp.After)
+	}
+
+	// And resume from that offset streams nothing new (run is done, no events
+	// after it), rather than replaying the whole run.
+	rreq := httptest.NewRequest("POST", "/api/chat/resume?threadId="+sessID+"&after="+strconv.Itoa(resp.After), nil)
+	rrec := httptest.NewRecorder()
+	mux.ServeHTTP(rrec, rreq)
+	if rrec.Code != http.StatusOK {
+		t.Fatalf("resume status = %d", rrec.Code)
+	}
+	if strings.Contains(rrec.Body.String(), "text-delta") {
+		t.Errorf("resume(after=max) replayed content; want none\n%s", rrec.Body.String())
 	}
 }
