@@ -149,6 +149,16 @@ func (rt *Runtime) ActiveRun(ctx context.Context, sessionID string) (Run, bool, 
 	return rt.store.ActiveRun(ctx, sessionID)
 }
 
+// GetSession fetches a session by id (pass-through to the store).
+func (rt *Runtime) GetSession(ctx context.Context, id string) (Session, error) {
+	return rt.store.GetSession(ctx, id)
+}
+
+// CreateSession creates a session for a user (pass-through to the store).
+func (rt *Runtime) CreateSession(ctx context.Context, userID, title string) (Session, error) {
+	return rt.store.CreateSession(ctx, userID, title)
+}
+
 // Subscribe returns a channel receiving new events for a session, plus an
 // unsubscribe func. Combined with Replay it implements reconnect-and-replay.
 func (rt *Runtime) Subscribe(sessionID string, buffer int) (<-chan Event, func()) {

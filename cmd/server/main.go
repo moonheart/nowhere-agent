@@ -20,6 +20,7 @@ import (
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/provider/anthropic"
 	"nowhere-agent/internal/provider/openai"
+	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/toolruntime"
 )
 
@@ -58,6 +59,10 @@ func run() error {
 	identitySvc := identity.NewService(identityStore)
 	identity.NewHandler(identitySvc).Register(mux)
 
+	// Durable session runtime over Postgres: chat requests persist as runs,
+	// and the run log doubles as the episodes for dreaming.
+	sessionRuntime := session.NewRuntime(session.NewPGStore(pool))
+
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
@@ -68,7 +73,7 @@ func run() error {
 				MaxIterations:   25,
 				CacheablePrefix: true,
 			})
-		}, "").Register(mux)
+		}, "").WithRuntime(sessionRuntime).Register(mux)
 		log.Info("chat endpoint enabled", "provider", adapter.Name(), "model", model)
 	} else {
 		log.Warn("chat endpoint disabled: no LLM provider configured (set LLM_PROVIDER/LLM_API_KEY)")

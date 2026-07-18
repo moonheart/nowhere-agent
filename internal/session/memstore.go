@@ -123,3 +123,34 @@ func (m *MemStore) EventsAfter(_ context.Context, runID string, after int) ([]Ev
 	sort.Slice(out, func(i, j int) bool { return out[i].Offset < out[j].Offset })
 	return out, nil
 }
+
+// Sessions returns all sessions (test/inspection helper).
+func (m *MemStore) Sessions() []Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		out = append(out, *s)
+	}
+	return out
+}
+
+// RunsFor returns all runs for a session (test/inspection helper).
+func (m *MemStore) RunsFor(sessionID string) []Run {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Run, 0, len(m.bySess[sessionID]))
+	for _, r := range m.bySess[sessionID] {
+		out = append(out, *r)
+	}
+	return out
+}
+
+// EventsFor returns all events for a run (test/inspection helper).
+func (m *MemStore) EventsFor(runID string) []Event {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Event, len(m.events[runID]))
+	copy(out, m.events[runID])
+	return out
+}
