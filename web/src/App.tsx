@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useDataStreamRuntime } from "@assistant-ui/react-data-stream";
 import { Thread } from "@/components/thread";
@@ -6,7 +6,7 @@ import { LoginForm } from "@/components/login";
 import { SessionList } from "@/components/SessionList";
 import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
-import { threadHistory } from "@/lib/history";
+import { threadHistory, attachStream, hasActiveRun } from "@/lib/history";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -46,6 +46,45 @@ function Chat({
     adapters: { history: threadHistory },
     onError: (e) => console.error("chat error", e),
   });
+
+  // Multi-client attach (design D13): while this client is idle, poll the
+  // session to notice a run started on another tab/device and live-follow it
+  // via resumeRun. The runtime aborts any prior stream before a new one, so a
+  // run started locally that we then also detect overlaps safely (dedup), and
+  // the poll self-pauses while we're already streaming. Cheap (no WS) and only
+  // fires when this client isn't already running.
+  useEffect(() => {
+    let cancelled = false;
+    let attaching = false;
+    const tick = async () => {
+      if (cancelled || attaching) return;
+      const threadId = getSessionId();
+      if (!threadId) return;
+      if (runtime.thread.getState().isRunning) return;
+      let active = false;
+      try {
+        active = await hasActiveRun();
+      } catch {
+        return; // transient failure; try again next tick
+      }
+      if (cancelled || !active || runtime.thread.getState().isRunning) return;
+      attaching = true;
+      try {
+        // parentId: null → startRun appends the streamed run after the current
+        // head, which is the user message this run is answering.
+        await runtime.thread.resumeRun({ parentId: null, stream: attachStream });
+      } catch {
+        // Attach is best-effort; a failed follow is retried next tick.
+      } finally {
+        attaching = false;
+      }
+    };
+    const id = setInterval(tick, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [runtime]);
 
   return (
     <AssistantRuntimeProvider runtime={runtime} key={conversationKey}>

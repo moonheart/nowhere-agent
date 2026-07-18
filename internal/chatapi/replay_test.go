@@ -52,8 +52,9 @@ func runChat(t *testing.T, mux *http.ServeMux, body string) string {
 	return rec.Body.String()
 }
 
-// TestChatPersistsUserMessage verifies the user's text is written to the run
-// log as the first event, so history replay can rebuild the user side.
+// TestChatPersistsUserMessage verifies the run's events open with the running
+// lifecycle marker followed by the user's text, so history replay can rebuild
+// the user side (and attached clients learn the run started).
 func TestChatPersistsUserMessage(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
@@ -67,11 +68,17 @@ func TestChatPersistsUserMessage(t *testing.T) {
 	runs := store.RunsFor(sess.ID)
 	events := store.EventsFor(runs[0].ID)
 
-	if len(events) == 0 || events[0].Kind != string(agent.KindUser) {
-		t.Fatalf("first event should be the user message, got %+v", events)
+	if len(events) < 2 {
+		t.Fatalf("expected at least running+user events, got %+v", events)
+	}
+	if events[0].Kind != string(agent.KindRunning) {
+		t.Errorf("first event should be the running marker, got %q", events[0].Kind)
+	}
+	if events[1].Kind != string(agent.KindUser) {
+		t.Fatalf("second event should be the user message, got %+v", events[1])
 	}
 	var text string
-	if err := json.Unmarshal(events[0].Payload, &text); err != nil || text != "who is Doudou" {
+	if err := json.Unmarshal(events[1].Payload, &text); err != nil || text != "who is Doudou" {
 		t.Errorf("user payload = %q (err %v)", text, err)
 	}
 }

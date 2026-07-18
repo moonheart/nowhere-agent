@@ -29,6 +29,10 @@ const (
 	// KindUser marks a persisted user message. It is not emitted by the loop
 	// itself; the transport writes it so replay reconstructs the user side.
 	KindUser EventKind = "user"
+	// KindRunning marks the moment a run starts. The transport persists it as the
+	// run's first event so an attached client (a second tab/device on the same
+	// session) learns a run began — both live (via fan-out) and on replay.
+	KindRunning EventKind = "running"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).

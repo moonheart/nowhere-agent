@@ -138,6 +138,49 @@ func TestCancelStopsInFlightRun(t *testing.T) {
 	}
 }
 
+// TestCancelPersistsTerminalEvent is the regression test for the cancelled-run
+// gap: the run's terminal KindCancelled must be persisted (and thus replayable /
+// broadcastable to attached clients) even though the run's context is cancelled.
+// The loop rides the cancelled runCtx, whose ctx.Err() would otherwise make both
+// the SSE emit and the durable AppendEvent short-circuit — dropping the terminal
+// event so attached clients never see the run end.
+func TestCancelPersistsTerminalEvent(t *testing.T) {
+	h, rt, pp := newParkedHandler()
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: testUserID}
+
+	sessID, wait := startParkedChat(t, mux, h, user)
+	<-pp.start
+
+	req := httptest.NewRequest("POST", "/api/chat/cancel?threadId="+sessID, nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), user))
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+	wait()
+
+	runs, err := rt.RunsForSession(context.Background(), sessID)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs: %v n=%d", err, len(runs))
+	}
+	events, err := rt.Replay(context.Background(), runs[0].ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawCancelled bool
+	for _, e := range events {
+		if e.Kind == string(agent.KindCancelled) {
+			sawCancelled = true
+		}
+	}
+	if !sawCancelled {
+		kinds := make([]string, len(events))
+		for i, e := range events {
+			kinds[i] = e.Kind
+		}
+		t.Errorf("terminal cancelled event not persisted; run event kinds = %v", kinds)
+	}
+}
+
 func TestCancelIdempotentWhenNoActiveRun(t *testing.T) {
 	h, rt, _ := newParkedHandler()
 	mux := http.NewServeMux()

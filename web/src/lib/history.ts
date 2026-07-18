@@ -11,6 +11,7 @@
 
 import {
   ExportedMessageRepository,
+  type ChatModelRunResult,
   type ThreadAssistantMessagePart,
   type ThreadHistoryAdapter,
   type ThreadMessageLike,
@@ -72,6 +73,63 @@ async function loadHistory(): Promise<{
 // whole run and duplicate the assistant reply.
 let lastLoadedAfter = 0;
 
+// resumeStream fetches the run's SSE from `after` and yields accumulated
+// assistant-message snapshots, the ChatModelRunResult shape the runtime
+// consumes when following a run. Shared by the reload path (history.resume)
+// and live multi-client attach.
+async function* resumeStream(
+  after: number,
+): AsyncGenerator<ChatModelRunResult, void, unknown> {
+  const threadId = getSessionId();
+  if (!threadId) return;
+  const res = await fetch(
+    `/api/chat/resume?threadId=${encodeURIComponent(threadId)}&after=${after}`,
+    { method: "POST", headers: authHeaders() },
+  );
+  if (!res.ok || !res.body) return;
+
+  const accumulated = res.body
+    .pipeThrough(new UIMessageStreamDecoder())
+    .pipeThrough(new AssistantMessageAccumulator());
+  // The accumulator's `parts` is the full accumulated content at each chunk
+  // (text deltas extend the trailing part in place), so we yield every
+  // snapshot; the runtime replaces content each time, growing the message.
+  for await (const message of asAsyncIterableStream(accumulated)) {
+    yield {
+      content: message.parts as unknown as ThreadAssistantMessagePart[],
+      status: message.status,
+    };
+  }
+}
+
+// attachStream re-streams the session's in-flight run from the beginning, for a
+// client attaching to a run started elsewhere (another tab/device). Exporting
+// it lets App.tsx hand it to threadRuntime.resumeRun() — the runtime aborts any
+// prior stream for us, so overlapping attaches dedup themselves.
+export function attachStream(): ReturnType<typeof resumeStream> {
+  return resumeStream(0);
+}
+
+// hasActiveRun reports whether the session's run is still in flight. Used by
+// the idle-poll that lets a second client notice a run started elsewhere. It
+// reads only the `active` flag, skipping loadHistory()'s message rebuild and
+// offset scan so the frequent poll stays cheap.
+export async function hasActiveRun(): Promise<boolean> {
+  const threadId = getSessionId();
+  if (!threadId) return false;
+  try {
+    const res = await fetch(
+      `/api/chat/history?threadId=${encodeURIComponent(threadId)}`,
+      { headers: authHeaders() },
+    );
+    if (!res.ok) return false;
+    const data = (await res.json()) as { active?: boolean };
+    return data.active === true;
+  } catch {
+    return false;
+  }
+}
+
 export const threadHistory: ThreadHistoryAdapter = {
   async load() {
     const { messages, active, after } = await loadHistory();
@@ -86,27 +144,8 @@ export const threadHistory: ThreadHistoryAdapter = {
     };
   },
 
-  async *resume() {
-    const threadId = getSessionId();
-    if (!threadId) return;
-    const res = await fetch(
-      `/api/chat/resume?threadId=${encodeURIComponent(threadId)}&after=${lastLoadedAfter}`,
-      { method: "POST", headers: authHeaders() },
-    );
-    if (!res.ok || !res.body) return;
-
-    const accumulated = res.body
-      .pipeThrough(new UIMessageStreamDecoder())
-      .pipeThrough(new AssistantMessageAccumulator());
-    // The accumulator's `parts` is the full accumulated content at each chunk
-    // (text deltas extend the trailing part in place), so we yield every
-    // snapshot; the runtime replaces content each time, growing the message.
-    for await (const message of asAsyncIterableStream(accumulated)) {
-      yield {
-        content: message.parts as unknown as ThreadAssistantMessagePart[],
-        status: message.status,
-      };
-    }
+  resume() {
+    return resumeStream(lastLoadedAfter);
   },
 
   // Server persists every event; nothing to write from the client.

@@ -138,13 +138,19 @@ func (h *Handler) latestRun(r *http.Request, sessionID string) (session.Run, boo
 // the matching ui-message-stream frame, reusing the emitter's block framing.
 func emitResumeEvent(r *http.Request, emitter *sseEmitter, e session.Event) {
 	switch agent.EventKind(e.Kind) {
+	case agent.KindRunning, agent.KindDone:
+		// Lifecycle events: no content payload, just the run-status frame so an
+		// attached client syncs run state (start / natural finish).
+		emitter.Emit(r.Context(), agent.EventKind(e.Kind), nil)
 	case agent.KindThinking, agent.KindText, agent.KindError:
 		emitter.Emit(r.Context(), agent.EventKind(e.Kind), decodeTextPayload(e.Payload))
+	case agent.KindCancelled:
+		emitter.Emit(r.Context(), agent.KindCancelled, nil)
 	case agent.KindToolUse, agent.KindToolResult:
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.EventKind(e.Kind), m)
 		}
 	}
-	// KindUser / KindDone are not assistant output; the client already has the
-	// user message and finish() closes the message.
+	// KindUser is not assistant output; the client already has the user message
+	// and finish() closes the message.
 }

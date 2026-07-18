@@ -3,6 +3,7 @@ package chatapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 
@@ -102,6 +103,25 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Multi-writer prevention, checked before any streaming starts: a client
+	// submitting to a session that already has an active run is rejected with
+	// 409 (not queued). The check needs a resolved session, so it only applies
+	// when the client named an existing threadId; a fresh session can't be busy.
+	if h.runtime != nil && req.ThreadID != "" {
+		if s, err := h.runtime.GetSession(r.Context(), req.ThreadID); err == nil {
+			callerID := ""
+			if u, ok := identity.UserFromContext(r.Context()); ok {
+				callerID = u.ID
+			}
+			if sessionVisibleTo(s, callerID) {
+				if _, active, _ := h.runtime.ActiveRun(r.Context(), s.ID); active {
+					http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
+					return
+				}
+			}
+		}
+	}
+
 	// SSE headers for ui-message-stream.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -132,6 +152,13 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		sessID = s.ID
 		run, err := h.runtime.StartRun(r.Context(), sessID)
 		if err != nil {
+			// Single-active-run: a second client submitting while a run is in
+			// flight is rejected (multi-writer prevention), not queued. 409 tells
+			// the client the session is busy, distinct from a bad request.
+			if errors.Is(err, session.ErrRunActive) {
+				http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
+				return
+			}
 			emitter.Emit(r.Context(), agent.KindError, err.Error())
 			emitter.finish()
 			return
@@ -142,8 +169,15 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		// onData, not added to the message), so it can resume/replay later.
 		emitter.write(chunk{"type": "data-session", "data": map[string]any{"id": sessID}, "transient": true})
 
-		// Persist the user's message as the run's first event so history replay
-		// reconstructs the user side, not just the assistant's output.
+		emit = &persistEmitter{inner: emitter, rt: h.runtime, sessionID: sessID, runID: runID}
+
+		// Mark the run started: persisted as the run's first event so attached
+		// clients (live fan-out) and reconnecting clients (replay) both learn the
+		// session went running.
+		_ = emit.Emit(r.Context(), agent.KindRunning, nil)
+
+		// Persist the user's message so history replay reconstructs the user
+		// side, not just the assistant's output.
 		if text := lastUserText(req); text != "" {
 			payload, _ := json.Marshal(text)
 			_ = h.runtime.AppendEvent(r.Context(), session.Event{
@@ -153,8 +187,6 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 				Payload:   payload,
 			})
 		}
-
-		emit = &persistEmitter{inner: emitter, rt: h.runtime, sessionID: sessID, runID: runID}
 	}
 
 	// Drive the loop with a cancellable context so a Stop/cancel interrupts the
@@ -171,6 +203,16 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		if runCtx.Err() == nil {
 			emitter.Emit(r.Context(), agent.KindError, runErr.Error())
 		}
+	}
+
+	// The run's terminal lifecycle event must reach the durable log and every
+	// attached client even when runCtx is cancelled — the loop's own Emit of
+	// KindCancelled rides the cancelled runCtx, so both persistence (AppendEvent
+	// ctx.Err()) and the submitter's stream (Emit ctx guard) short-circuit on it.
+	// Re-emit the terminal state on the live request context so the run provably
+	// settles for replay and for other attached clients (multi-client sync).
+	if h.runtime != nil && runID != "" && runCtx.Err() == context.Canceled {
+		emit.Emit(r.Context(), agent.KindCancelled, nil)
 	}
 
 	// Settle the run's terminal state: cancelled beats failed when the context
@@ -289,6 +331,10 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 	}
 
 	switch kind {
+	case agent.KindRunning:
+		// A run started: broadcast a transient lifecycle frame so every attached
+		// client (not just the one that submitted) sees the session go running.
+		e.writeRunStatus("running")
 	case agent.KindThinking:
 		if !e.thinkOpen {
 			e.write(chunk{"type": "reasoning-start", "id": e.thinkID})
@@ -322,10 +368,13 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 			isErr, _ := m["is_error"].(bool)
 			e.write(chunk{"type": "tool-result", "toolCallId": id, "result": m["content"], "isError": isErr})
 		}
+	case agent.KindDone:
+		e.writeRunStatus("done")
 	case agent.KindError:
 		if s, ok := payload.(string); ok {
 			e.write(chunk{"type": "error", "errorText": s})
 		}
+		e.writeRunStatus("failed")
 	case agent.KindCancelled:
 		// Close any open block, then flag the run cancelled via a transient data
 		// frame so attached clients (and reconnects) can show it stopped early.
@@ -338,9 +387,16 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 			e.write(chunk{"type": "text-end", "id": e.textID})
 			e.textStarted = false
 		}
-		e.write(chunk{"type": "data-run", "data": map[string]any{"status": "cancelled"}, "transient": true})
+		e.writeRunStatus("cancelled")
 	}
 	return e.writeErr
+}
+
+// writeRunStatus emits a transient data-run lifecycle frame. Attached clients
+// use these to sync run state across tabs/devices (start, terminal status)
+// without touching the message content.
+func (e *sseEmitter) writeRunStatus(status string) {
+	e.write(chunk{"type": "data-run", "data": map[string]any{"status": status}, "transient": true})
 }
 
 // finish closes the text block, sends finish + [DONE].
