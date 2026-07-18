@@ -57,6 +57,8 @@ type sseEmitter struct {
 	msgID       string
 	textID      string
 	textStarted bool
+	thinkID     string
+	thinkOpen   bool
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +79,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1"}
+	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
 	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
 
 	loop := h.newLoop(r.Context())
@@ -167,7 +169,19 @@ func (e *sseEmitter) Emit(_ context.Context, kind agent.EventKind, payload any) 
 	defer e.mu.Unlock()
 
 	switch kind {
+	case agent.KindThinking:
+		if !e.thinkOpen {
+			e.write(chunk{"type": "reasoning-start", "id": e.thinkID})
+			e.thinkOpen = true
+		}
+		if s, ok := payload.(string); ok {
+			e.write(chunk{"type": "reasoning-delta", "delta": s})
+		}
 	case agent.KindText:
+		if e.thinkOpen {
+			e.write(chunk{"type": "reasoning-end"})
+			e.thinkOpen = false
+		}
 		if !e.textStarted {
 			e.write(chunk{"type": "text-start", "id": e.textID})
 			e.textStarted = true
@@ -200,6 +214,10 @@ func (e *sseEmitter) Emit(_ context.Context, kind agent.EventKind, payload any) 
 func (e *sseEmitter) finish() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.thinkOpen {
+		e.write(chunk{"type": "reasoning-end"})
+		e.thinkOpen = false
+	}
 	if e.textStarted {
 		e.write(chunk{"type": "text-end", "id": e.textID})
 	}

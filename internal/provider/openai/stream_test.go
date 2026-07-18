@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -133,3 +134,102 @@ func TestStreamEventsEndToEnd(t *testing.T) {
 type readCloser struct{ *strings.Reader }
 
 func (r readCloser) Close() error { return nil }
+
+// TestDecoderReasoningThenContent pins the reasoning-model wire format: the
+// gateway streams chain-of-thought as reasoning_content, then the answer as
+// content. Reasoning must become a thinking block that closes before the text
+// block opens.
+func TestDecoderReasoningThenContent(t *testing.T) {
+	d := newStreamDecoder()
+	var events []provider.Event
+	for _, p := range []string{
+		`{"choices":[{"delta":{"role":"assistant","reasoning_content":"We"},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{"role":"assistant","reasoning_content":" think"},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{"content":"Answer","role":"assistant"},"finish_reason":null}]}`,
+		`{"choices":[{"delta":{"content":" here","role":"assistant"},"finish_reason":"stop"}]}`,
+		`[DONE]`,
+	} {
+		events = append(events, d.feed([]byte(p))...)
+	}
+
+	var thinking, text string
+	var thinkingClosedBeforeText bool
+	sawTextStart := false
+	for _, e := range events {
+		switch e.Type {
+		case provider.EventBlockStart:
+			if e.Block != nil && e.Block.Type == provider.BlockText {
+				sawTextStart = true
+			}
+		case provider.EventBlockStop:
+			if e.Index == thinkingIndex && !sawTextStart {
+				thinkingClosedBeforeText = true
+			}
+		case provider.EventBlockDelta:
+			switch e.Index {
+			case thinkingIndex:
+				thinking += e.Delta
+			case textIndex:
+				text += e.Delta
+			}
+		}
+	}
+	if thinking != "We think" {
+		t.Errorf("thinking = %q", thinking)
+	}
+	if text != "Answer here" {
+		t.Errorf("text = %q", text)
+	}
+	if !thinkingClosedBeforeText {
+		t.Error("thinking block did not close before text block started")
+	}
+}
+
+// TestRealDeepSeekSSEFixture feeds the captured raw SSE bytes from the live
+// DeepSeek gateway through the full scanner, verifying the decoder handles the
+// real wire format (reasoning_content + content + a final usage chunk).
+func TestRealDeepSeekSSEFixture(t *testing.T) {
+	data, err := os.ReadFile("testdata/deepseek_reasoning.sse")
+	if err != nil {
+		t.Skipf("fixture unavailable: %v", err)
+	}
+
+	out := make(chan provider.Event, 256)
+	go streamEvents(readCloser{strings.NewReader(string(data))}, out)
+
+	var thinking, text string
+	var usage *provider.Usage
+	var sawStart bool
+	for ev := range out {
+		switch ev.Type {
+		case provider.EventMessageStart:
+			sawStart = true
+		case provider.EventBlockDelta:
+			switch ev.Index {
+			case thinkingIndex:
+				thinking += ev.Delta
+			case textIndex:
+				text += ev.Delta
+			}
+		case provider.EventMessageStop:
+			if ev.Usage != nil {
+				usage = ev.Usage
+			}
+		case provider.EventError:
+			t.Fatalf("decode error: %v", ev.Err)
+		}
+	}
+
+	if !sawStart {
+		t.Error("no message_start")
+	}
+	if thinking == "" {
+		t.Error("expected reasoning_content to be decoded as thinking, got none")
+	}
+	if text != "nowhere raw sse" {
+		t.Errorf("answer text = %q want %q", text, "nowhere raw sse")
+	}
+	if usage == nil || usage.OutputTokens != 24 {
+		t.Errorf("usage = %+v", usage)
+	}
+}

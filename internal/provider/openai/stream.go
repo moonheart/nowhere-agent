@@ -10,8 +10,11 @@ import (
 type chunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Content string `json:"content"`
+			// ReasoningContent carries chain-of-thought for reasoning models
+			// (e.g. DeepSeek); it streams separately from content.
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Type     string `json:"type"`
@@ -31,12 +34,22 @@ type chunk struct {
 
 // streamDecoder converts OpenAI's cumulative chunk stream into the canonical
 // ordered event stream. It is stateful: it opens a block on first content and
-// emits block-stop when finishing. Pure (fed decoded JSON, no I/O).
+// emits block-stop when finishing. Reasoning (chain-of-thought) maps to a
+// thinking block at index 0, answer text to a text block at index 1, and tool
+// calls follow. Pure (fed decoded JSON, no I/O).
 type streamDecoder struct {
-	started     bool
-	blockOpen   bool
-	seenToolIDs map[int]string
+	started      bool
+	thinkingOpen bool
+	textOpen     bool
+	seenToolIDs  map[int]string
 }
+
+// Block indexes in the canonical stream.
+const (
+	thinkingIndex = 0
+	textIndex     = 1
+	toolBaseIndex = 2
+)
 
 func newStreamDecoder() *streamDecoder {
 	return &streamDecoder{seenToolIDs: map[int]string{}}
@@ -60,34 +73,58 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 
 	if len(c.Choices) > 0 {
 		ch := c.Choices[0]
-		if ch.Delta.Content != "" {
-			if !d.blockOpen {
+
+		// Reasoning (chain-of-thought) → thinking block. Reasoning always
+		// precedes answer text; when text begins, the thinking block closes.
+		if ch.Delta.ReasoningContent != "" {
+			if !d.thinkingOpen {
 				events = append(events, provider.Event{
 					Type:  provider.EventBlockStart,
-					Index: 0,
-					Block: &provider.Block{Type: provider.BlockText},
+					Index: thinkingIndex,
+					Block: &provider.Block{Type: provider.BlockThinking},
 				})
-				d.blockOpen = true
+				d.thinkingOpen = true
 			}
 			events = append(events, provider.Event{
 				Type:  provider.EventBlockDelta,
-				Index: 0,
+				Index: thinkingIndex,
+				Delta: ch.Delta.ReasoningContent,
+			})
+		}
+
+		if ch.Delta.Content != "" {
+			if d.thinkingOpen {
+				events = append(events, provider.Event{Type: provider.EventBlockStop, Index: thinkingIndex})
+				d.thinkingOpen = false
+			}
+			if !d.textOpen {
+				events = append(events, provider.Event{
+					Type:  provider.EventBlockStart,
+					Index: textIndex,
+					Block: &provider.Block{Type: provider.BlockText},
+				})
+				d.textOpen = true
+			}
+			events = append(events, provider.Event{
+				Type:  provider.EventBlockDelta,
+				Index: textIndex,
 				Delta: ch.Delta.Content,
 			})
 		}
+
 		for _, tc := range ch.Delta.ToolCalls {
 			if tc.ID != "" {
 				d.seenToolIDs[tc.Index] = tc.ID
 				events = append(events, provider.Event{
 					Type:  provider.EventBlockStart,
-					Index: tc.Index + 1,
+					Index: tc.Index + toolBaseIndex,
 					Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: tc.ID, ToolName: tc.Function.Name, ToolInput: map[string]any{}},
 				})
 			}
 			if tc.Function.Arguments != "" {
 				events = append(events, provider.Event{
 					Type:  provider.EventBlockDelta,
-					Index: tc.Index + 1,
+					Index: tc.Index + toolBaseIndex,
 					Delta: tc.Function.Arguments,
 				})
 			}
@@ -109,12 +146,16 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 	return events
 }
 
-// finish closes any open block and emits message-stop (idempotent).
+// finish closes any open block (thinking then text) and is idempotent.
 func (d *streamDecoder) finish() []provider.Event {
 	var events []provider.Event
-	if d.blockOpen {
-		events = append(events, provider.Event{Type: provider.EventBlockStop, Index: 0})
-		d.blockOpen = false
+	if d.thinkingOpen {
+		events = append(events, provider.Event{Type: provider.EventBlockStop, Index: thinkingIndex})
+		d.thinkingOpen = false
+	}
+	if d.textOpen {
+		events = append(events, provider.Event{Type: provider.EventBlockStop, Index: textIndex})
+		d.textOpen = false
 	}
 	return events
 }
