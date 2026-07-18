@@ -34,12 +34,12 @@ CREATE TABLE IF NOT EXISTS run_events (
     id          BIGSERIAL PRIMARY KEY,
     run_id      UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     session_id  UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    offset      INT NOT NULL,               -- per-run monotonically increasing
+    seq_offset  INT NOT NULL,               -- per-run monotonically increasing
     kind        TEXT NOT NULL,              -- message|tool_use|tool_result|thinking|error|...
     payload     JSONB NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (run_id, offset)
+    UNIQUE (run_id, seq_offset)
 );
 
-CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, offset);
+CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, seq_offset);
 CREATE INDEX IF NOT EXISTS idx_run_events_session ON run_events(session_id);
