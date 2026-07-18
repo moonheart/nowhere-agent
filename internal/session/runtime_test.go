@@ -153,3 +153,98 @@ func TestListIdleSessions(t *testing.T) {
 		t.Errorf("expected 1 idle session, got %d", len(idle))
 	}
 }
+
+func TestCancelRunStopsActiveRun(t *testing.T) {
+	rt, store, sess := setup(t)
+	ctx := context.Background()
+	if _, err := rt.StartRun(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Register a cancel func the way the chat handler does.
+	cancelled := false
+	rt.RegisterCancel(sess.ID, func() { cancelled = true })
+
+	ok, err := rt.CancelRun(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected CancelRun to report a cancelled run")
+	}
+	if !cancelled {
+		t.Error("registered cancel func was not invoked")
+	}
+
+	// Run is now terminal-cancelled and the lock is released.
+	run, active, err := rt.ActiveRun(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Error("run still active after cancel")
+	}
+	_ = run
+	// Persisted status reflects cancellation.
+	runs, err := store.RunsForSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Status != RunCancelled {
+		t.Errorf("run status = %+v want cancelled", runs)
+	}
+
+	// A new run can start immediately after cancel.
+	if _, err := rt.StartRun(ctx, sess.ID); err != nil {
+		t.Errorf("expected new run to start after cancel, got %v", err)
+	}
+}
+
+func TestCancelRunNoActiveRun(t *testing.T) {
+	rt, _, sess := setup(t)
+	ok, err := rt.CancelRun(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Error("expected CancelRun to report no active run")
+	}
+}
+
+// TestAppendEventAfterSettleContinuesOffset covers the cancel race: CancelRun
+// settles the run (releasing the in-memory offset) while the loop is still
+// unwinding its terminal KindCancelled event. That late event must persist at a
+// continued offset, not restart at 0 (which replay/history would then drop).
+func TestAppendEventAfterSettleContinuesOffset(t *testing.T) {
+	rt, _, sess := setup(t)
+	ctx := context.Background()
+	run, err := rt.StartRun(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two normal in-run events.
+	for _, k := range []string{"thinking", "text"} {
+		if err := rt.AppendEvent(ctx, Event{RunID: run.ID, SessionID: sess.ID, Kind: k, Payload: []byte(`"x"`)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Settle (as CancelRun does) before the loop's terminal event lands.
+	if err := rt.CompleteRun(ctx, sess.ID, RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+	// The late terminal event still persists, continuing the offset.
+	if err := rt.AppendEvent(ctx, Event{RunID: run.ID, SessionID: sess.ID, Kind: "cancelled", Payload: []byte(`null`)}); err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := rt.Replay(ctx, run.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events after late append, got %d: %+v", len(events), events)
+	}
+	if events[2].Kind != "cancelled" || events[2].Offset != 3 {
+		t.Errorf("late event = kind %q offset %d, want cancelled at 3", events[2].Kind, events[2].Offset)
+	}
+}

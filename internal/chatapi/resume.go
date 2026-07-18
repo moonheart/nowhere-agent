@@ -103,7 +103,8 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 			}
 			maxOffset = e.Offset
 			emitResumeEvent(r, emitter, e)
-			if agent.EventKind(e.Kind) == agent.KindDone || agent.EventKind(e.Kind) == agent.KindError {
+			kind := agent.EventKind(e.Kind)
+			if kind == agent.KindDone || kind == agent.KindError || kind == agent.KindCancelled {
 				emitter.finish()
 				return
 			}

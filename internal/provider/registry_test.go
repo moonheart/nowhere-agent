@@ -1,11 +1,14 @@
 package provider
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 type fakeAdapter struct{ name string }
 
 func (f fakeAdapter) Name() string { return f.name }
-func (f fakeAdapter) Stream(Request) (<-chan Event, error) {
+func (f fakeAdapter) Stream(context.Context, Request) (<-chan Event, error) {
 	ch := make(chan Event)
 	close(ch)
 	return ch, nil

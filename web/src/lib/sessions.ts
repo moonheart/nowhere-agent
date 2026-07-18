@@ -31,6 +31,18 @@ export async function deleteSession(id: string): Promise<boolean> {
   return res.ok;
 }
 
+// cancelSession stops the session's in-flight run server-side. The client's
+// Stop button only aborts the local fetch; without this the model (and sandbox)
+// would keep running after the stream closes.
+export async function cancelSession(id: string): Promise<void> {
+  const token = getToken();
+  if (!token) return;
+  await fetch(`/api/chat/cancel?threadId=${encodeURIComponent(id)}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+  }).catch(() => {});
+}
+
 // relTime renders a compact relative timestamp for the sidebar.
 export function relTime(iso: string): string {
   const then = new Date(iso).getTime();

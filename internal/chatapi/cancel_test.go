@@ -1,0 +1,278 @@
+package chatapi
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"nowhere-agent/internal/agent"
+	"nowhere-agent/internal/identity"
+	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/session"
+	"nowhere-agent/internal/toolruntime"
+)
+
+// parkedProvider streams one text delta then waits on the run context, so the
+// run stays in-flight until cancelled — exactly what the Stop button interrupts.
+type parkedProvider struct {
+	ctx   context.Context
+	start chan struct{}
+}
+
+func (p *parkedProvider) Name() string { return "parked" }
+
+func (p *parkedProvider) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 4)
+	ch <- provider.Event{Type: provider.EventMessageStart}
+	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+	ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "thinking out loud"}
+	close(p.start)
+	go func() {
+		defer close(ch)
+		// Stay in-flight until the run context is cancelled, then stop producing.
+		<-p.ctx.Done()
+	}()
+	return ch, nil
+}
+
+// startParkedChat begins a chat run whose provider blocks until cancelled, and
+// returns once the run is mid-stream. Returns the session id and a func that
+// waits for the handler goroutine to finish.
+func startParkedChat(t *testing.T, mux *http.ServeMux, h *Handler, user identity.User) (sessID string, wait func()) {
+	t.Helper()
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"messages":[{"role":"user","content":"run long"}]}`))
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), user))
+	go func() {
+		defer close(done)
+		mux.ServeHTTP(rec, req)
+	}()
+	// Give the handler a beat to resolve the session and start the run.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(sessionIDs(h)) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ids := sessionIDs(h)
+	if len(ids) == 0 {
+		t.Fatal("chat run did not create a session")
+	}
+	return ids[0], func() { <-done }
+}
+
+// sessionIDs reads the sessions created so far for the fixed test user, via the
+// handler's runtime (same package, so the unexported field is in scope).
+func sessionIDs(h *Handler) []string {
+	if h.runtime == nil {
+		return nil
+	}
+	sessions, err := h.runtime.ListSessionsByUser(context.Background(), testUserID)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}
+
+const testUserID = "cancel-user"
+
+// newParkedHandler builds a handler whose loop blocks until the run context is
+// cancelled. The provider captures the request context via the factory.
+func newParkedHandler() (*Handler, *session.Runtime, *parkedProvider) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	pp := &parkedProvider{start: make(chan struct{})}
+	factory := func(ctx context.Context, system string) *agent.Loop {
+		pp.ctx = ctx
+		return agent.New(pp, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
+	}
+	h := NewHandler(factory, "sys").WithRuntime(rt)
+	return h, rt, pp
+}
+
+func TestCancelStopsInFlightRun(t *testing.T) {
+	h, rt, pp := newParkedHandler()
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: testUserID}
+
+	sessID, wait := startParkedChat(t, mux, h, user)
+	<-pp.start // run is mid-stream
+
+	// Cancel the active run via the endpoint (owner).
+	req := httptest.NewRequest("POST", "/api/chat/cancel?threadId="+sessID, nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"cancelled":true`) {
+		t.Errorf("cancel body = %s want cancelled:true", rec.Body.String())
+	}
+
+	wait() // the chat handler unwinds
+
+	// The run settled as cancelled, not failed/done.
+	runs, err := rt.RunsForSession(context.Background(), sessID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Status != session.RunCancelled {
+		t.Errorf("run status = %+v want cancelled", runs)
+	}
+	// The lock is released: a new run can start.
+	if _, err := rt.StartRun(context.Background(), sessID); err != nil {
+		t.Errorf("expected new run after cancel, got %v", err)
+	}
+}
+
+func TestCancelIdempotentWhenNoActiveRun(t *testing.T) {
+	h, rt, _ := newParkedHandler()
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: testUserID}
+
+	sess, err := rt.CreateSession(context.Background(), testUserID, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/api/chat/cancel?threadId="+sess.ID, nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel(no run) status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"cancelled":false`) {
+		t.Errorf("cancel(no run) body = %s want cancelled:false", rec.Body.String())
+	}
+}
+
+func TestCancelForbiddenForForeignSession(t *testing.T) {
+	h, _, pp := newParkedHandler()
+	mux := http.NewServeMux()
+	h.Register(mux)
+	owner := identity.User{ID: testUserID}
+
+	sessID, wait := startParkedChat(t, mux, h, owner)
+	<-pp.start
+	defer wait()
+
+	intruder := identity.User{ID: "someone-else"}
+	req := httptest.NewRequest("POST", "/api/chat/cancel?threadId="+sessID, nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), intruder))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("foreign cancel status = %d want 403; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Clean up: owner cancels so the parked goroutine exits.
+	cleanup := httptest.NewRequest("POST", "/api/chat/cancel?threadId="+sessID, nil)
+	cleanup = cleanup.WithContext(identity.NewContextWithUser(cleanup.Context(), owner))
+	mux.ServeHTTP(httptest.NewRecorder(), cleanup)
+}
+
+func TestCancelRequiresThreadID(t *testing.T) {
+	h, _, _ := newParkedHandler()
+	mux := http.NewServeMux()
+	h.Register(mux)
+	req := httptest.NewRequest("POST", "/api/chat/cancel", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("cancel without threadId status = %d want 400", rec.Code)
+	}
+}
+
+// dripProvider streams text deltas indefinitely until its ctx is cancelled —
+// a generation that never finishes on its own, so the only way the run settles
+// is via cancellation (Stop / client disconnect).
+type dripProvider struct {
+	start chan struct{}
+}
+
+func (p *dripProvider) Name() string { return "drip" }
+
+func (p *dripProvider) Stream(ctx context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event)
+	go func() {
+		defer close(ch)
+		close(p.start)
+		ch <- provider.Event{Type: provider.EventMessageStart}
+		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+		for i := 0; ; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "word "}:
+			}
+		}
+	}()
+	return ch, nil
+}
+
+// TestDisconnectSettlesRun is the regression test for the run-leak: when the
+// client goes away mid-run (request context cancelled), the loop must unwind
+// and the run must reach a terminal state, not stay 'running' forever.
+func TestDisconnectSettlesRun(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	pp := &dripProvider{start: make(chan struct{})}
+	factory := func(ctx context.Context, system string) *agent.Loop {
+		return agent.New(pp, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
+	}
+	h := NewHandler(factory, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	// Client request whose context we cancel to simulate the client going away.
+	reqCtx, clientGone := context.WithCancel(context.Background())
+	user := identity.User{ID: testUserID}
+	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"messages":[{"role":"user","content":"talk forever"}]}`))
+	req = req.WithContext(identity.NewContextWithUser(reqCtx, user))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		mux.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	<-pp.start // run is streaming
+
+	// The client disconnects.
+	clientGone()
+
+	// The handler must unwind.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not return after client disconnect (run leaked)")
+	}
+
+	// And the run must be terminal, not stuck running.
+	sessions, err := rt.ListSessionsByUser(context.Background(), testUserID)
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("list sessions: %v n=%d", err, len(sessions))
+	}
+	runs, err := rt.RunsForSession(context.Background(), sessions[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run, got %d", len(runs))
+	}
+	if !runs[0].Status.Terminal() {
+		t.Errorf("run status = %q want terminal (not leaked running)", runs[0].Status)
+	}
+}

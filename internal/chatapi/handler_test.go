@@ -17,7 +17,7 @@ import (
 type stubProvider struct{}
 
 func (stubProvider) Name() string { return "stub" }
-func (stubProvider) Stream(provider.Request) (<-chan provider.Event, error) {
+func (stubProvider) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
 	ch := make(chan provider.Event, 5)
 	ch <- provider.Event{Type: provider.EventMessageStart}
 	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}

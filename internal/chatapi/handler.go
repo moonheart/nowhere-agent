@@ -63,6 +63,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat", h.serveChat)
 	mux.HandleFunc("GET /api/chat/history", h.serveHistory)
 	mux.HandleFunc("POST /api/chat/resume", h.serveResume)
+	mux.HandleFunc("POST /api/chat/cancel", h.serveCancel)
 	mux.HandleFunc("GET /api/chat/sessions", h.serveSessions)
 	mux.HandleFunc("DELETE /api/chat/sessions/{id}", h.serveDeleteSession)
 }
@@ -73,6 +74,7 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	mux.Handle("POST /api/chat", auth(http.HandlerFunc(h.serveChat)))
 	mux.Handle("GET /api/chat/history", auth(http.HandlerFunc(h.serveHistory)))
 	mux.Handle("POST /api/chat/resume", auth(http.HandlerFunc(h.serveResume)))
+	mux.Handle("POST /api/chat/cancel", auth(http.HandlerFunc(h.serveCancel)))
 	mux.Handle("GET /api/chat/sessions", auth(http.HandlerFunc(h.serveSessions)))
 	mux.Handle("DELETE /api/chat/sessions/{id}", auth(http.HandlerFunc(h.serveDeleteSession)))
 }
@@ -87,6 +89,10 @@ type sseEmitter struct {
 	textStarted bool
 	thinkID     string
 	thinkOpen   bool
+	// writeErr latches the first failed write (e.g. client disconnected), so
+	// subsequent Emits report it and the loop unwinds instead of writing into
+	// the void while the run leaks.
+	writeErr error
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
@@ -151,16 +157,31 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		emit = &persistEmitter{inner: emitter, rt: h.runtime, sessionID: sessID, runID: runID}
 	}
 
-	_, runErr := loop.Run(r.Context(), history, emit)
-	if runErr != nil {
-		emitter.Emit(r.Context(), agent.KindError, runErr.Error())
+	// Drive the loop with a cancellable context so a Stop/cancel interrupts the
+	// in-flight run (provider stream + tool dispatch), not just the HTTP stream.
+	runCtx, cancelRun := context.WithCancel(r.Context())
+	defer cancelRun()
+	if h.runtime != nil && runID != "" {
+		h.runtime.RegisterCancel(sessID, cancelRun)
 	}
 
-	// Settle the run's terminal state.
+	_, runErr := loop.Run(runCtx, history, emit)
+	if runErr != nil {
+		// A cancelled run already emitted KindCancelled; report anything else.
+		if runCtx.Err() == nil {
+			emitter.Emit(r.Context(), agent.KindError, runErr.Error())
+		}
+	}
+
+	// Settle the run's terminal state: cancelled beats failed when the context
+	// was cancelled (CancelRun may also settle first; the extra call is a no-op).
 	if h.runtime != nil && runID != "" {
 		status := session.RunDone
 		if runErr != nil {
 			status = session.RunFailed
+			if runCtx.Err() == context.Canceled {
+				status = session.RunCancelled
+			}
 		}
 		_ = h.runtime.CompleteRun(r.Context(), sessID, status)
 	}
@@ -254,9 +275,18 @@ func (p *persistEmitter) Emit(ctx context.Context, kind agent.EventKind, payload
 }
 
 // Emit implements agent.Emitter, streaming frames as the loop produces them.
-func (e *sseEmitter) Emit(_ context.Context, kind agent.EventKind, payload any) error {
+// It honours ctx cancellation and reports write failures so the loop unwinds
+// (and the run settles) when the client disconnects mid-run, rather than
+// blocking forever on a dead connection.
+func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.writeErr != nil {
+		return e.writeErr
+	}
 
 	switch kind {
 	case agent.KindThinking:
@@ -296,8 +326,21 @@ func (e *sseEmitter) Emit(_ context.Context, kind agent.EventKind, payload any) 
 		if s, ok := payload.(string); ok {
 			e.write(chunk{"type": "error", "errorText": s})
 		}
+	case agent.KindCancelled:
+		// Close any open block, then flag the run cancelled via a transient data
+		// frame so attached clients (and reconnects) can show it stopped early.
+		// finish() still terminates the message normally.
+		if e.thinkOpen {
+			e.write(chunk{"type": "reasoning-end"})
+			e.thinkOpen = false
+		}
+		if e.textStarted {
+			e.write(chunk{"type": "text-end", "id": e.textID})
+			e.textStarted = false
+		}
+		e.write(chunk{"type": "data-run", "data": map[string]any{"status": "cancelled"}, "transient": true})
 	}
-	return nil
+	return e.writeErr
 }
 
 // finish closes the text block, sends finish + [DONE].
@@ -326,5 +369,10 @@ func (e *sseEmitter) write(c chunk) {
 }
 
 func (e *sseEmitter) writeRaw(s string) {
-	_, _ = e.w.Write([]byte(s))
+	if e.writeErr != nil {
+		return
+	}
+	if _, err := e.w.Write([]byte(s)); err != nil {
+		e.writeErr = err
+	}
 }

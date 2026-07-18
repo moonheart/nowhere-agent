@@ -7,6 +7,7 @@ import { SessionList } from "@/components/SessionList";
 import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory } from "@/lib/history";
+import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
 // and re-runs history.load() for the now-current sessionId.
@@ -35,6 +36,12 @@ function Chat({
           onSession(id);
         }
       }
+    },
+    // The Stop button only aborts the local fetch; also tell the backend to
+    // cancel the run so the model + sandbox stop, not just the HTTP stream.
+    onCancel: () => {
+      const id = getSessionId();
+      if (id) void cancelSession(id);
     },
     adapters: { history: threadHistory },
     onError: (e) => console.error("chat error", e),

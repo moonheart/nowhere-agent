@@ -23,6 +23,9 @@ const (
 	KindToolResult EventKind = "tool_result"
 	KindError      EventKind = "error"
 	KindDone       EventKind = "done"
+	// KindCancelled marks a run stopped early (client Stop / server cancel). It
+	// is persisted so replay/history can tell a cancelled run from a finished one.
+	KindCancelled EventKind = "cancelled"
 	// KindUser marks a persisted user message. It is not emitted by the loop
 	// itself; the transport writes it so replay reconstructs the user side.
 	KindUser EventKind = "user"
@@ -78,6 +81,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	var produced []provider.Message
 
 	for iter := 0; iter < l.config.MaxIterations; iter++ {
+		// Honour cancellation between iterations (e.g. after a tool batch).
+		if err := ctx.Err(); err != nil {
+			_ = emit.Emit(ctx, KindCancelled, nil)
+			return produced, err
+		}
+
 		req := provider.Request{
 			Model:           l.config.Model,
 			System:          l.config.System,
@@ -87,7 +96,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			CacheablePrefix: l.config.CacheablePrefix,
 		}
 
-		events, err := l.provider.Stream(req)
+		events, err := l.provider.Stream(ctx, req)
 		if err != nil {
 			_ = emit.Emit(ctx, KindError, err.Error())
 			return produced, fmt.Errorf("stream: %w", err)
@@ -95,6 +104,10 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 
 		assistant, toolCalls, err := l.consume(ctx, events, emit)
 		if err != nil {
+			if ctx.Err() != nil {
+				_ = emit.Emit(ctx, KindCancelled, nil)
+				return produced, ctx.Err()
+			}
 			_ = emit.Emit(ctx, KindError, err.Error())
 			return produced, err
 		}
@@ -104,6 +117,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		if len(toolCalls) == 0 {
 			_ = emit.Emit(ctx, KindDone, nil)
 			return produced, nil
+		}
+
+		// Don't start a tool batch the caller has already cancelled.
+		if err := ctx.Err(); err != nil {
+			_ = emit.Emit(ctx, KindCancelled, nil)
+			return produced, err
 		}
 
 		// Dispatch tool calls (concurrently) and append results.
@@ -123,7 +142,9 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 }
 
 // consume reads one provider stream into an assembled assistant message and
-// the list of tool calls, forwarding text/thinking to the emitter.
+// the list of tool calls, forwarding text/thinking to the emitter. It stops at
+// once when ctx is cancelled (client Stop / server cancel) so a run can be
+// interrupted mid-stream rather than only between iterations.
 func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit Emitter) (provider.Message, []toolruntime.Call, error) {
 	assistant := provider.Message{Role: provider.RoleAssistant}
 	var calls []toolruntime.Call
@@ -131,57 +152,75 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 	// Track open blocks to accumulate deltas.
 	open := map[int]*accumulator{}
 
-	for ev := range events {
-		switch ev.Type {
-		case provider.EventError:
-			return assistant, nil, ev.Err
-
-		case provider.EventBlockStart:
-			if ev.Block != nil {
-				open[ev.Index] = &accumulator{block: *ev.Block}
-			}
-
-		case provider.EventBlockDelta:
-			if acc, ok := open[ev.Index]; ok {
-				acc.append(ev.Delta)
-				// Stream text/thinking out incrementally.
-				switch acc.block.Type {
-				case provider.BlockText:
-					_ = emit.Emit(ctx, KindText, ev.Delta)
-				case provider.BlockThinking:
-					_ = emit.Emit(ctx, KindThinking, ev.Delta)
+	for {
+		select {
+		case <-ctx.Done():
+			return assistant, calls, ctx.Err()
+		case ev, ok := <-events:
+			if !ok {
+				// The provider closes its channel when the request is cancelled
+				// (aborting the HTTP body) as well as at natural end. A cancelled
+				// run must surface as such, not look like a clean finish.
+				if err := ctx.Err(); err != nil {
+					return assistant, calls, err
 				}
-			}
-
-		case provider.EventBlockStop:
-			if acc, ok := open[ev.Index]; ok {
-				blk := acc.finalize()
-				assistant.Content = append(assistant.Content, blk)
-				if blk.Type == provider.BlockToolUse {
-					calls = append(calls, toolruntime.Call{ID: blk.ToolUseID, Name: blk.ToolName, Args: blk.ToolInput})
-					_ = emit.Emit(ctx, KindToolUse, map[string]any{
-						"id": blk.ToolUseID, "name": blk.ToolName, "input": blk.ToolInput,
-					})
+				// Stream closed naturally: finalize any blocks still open.
+				for idx, acc := range open {
+					blk := acc.finalize()
+					assistant.Content = append(assistant.Content, blk)
+					if blk.Type == provider.BlockToolUse {
+						calls = append(calls, toolruntime.Call{ID: blk.ToolUseID, Name: blk.ToolName, Args: blk.ToolInput})
+					}
+					delete(open, idx)
 				}
-				delete(open, ev.Index)
+				return assistant, calls, nil
 			}
 
-		case provider.EventMessageStop:
-			// usage could be recorded here for observability.
+			switch ev.Type {
+			case provider.EventError:
+				return assistant, calls, ev.Err
+
+			case provider.EventBlockStart:
+				if ev.Block != nil {
+					open[ev.Index] = &accumulator{block: *ev.Block}
+				}
+
+			case provider.EventBlockDelta:
+				if acc, ok := open[ev.Index]; ok {
+					acc.append(ev.Delta)
+					// Stream text/thinking out incrementally. An emit failure
+					// (e.g. client disconnected) aborts the run so the loop
+					// unwinds and the run settles instead of leaking.
+					var emitErr error
+					switch acc.block.Type {
+					case provider.BlockText:
+						emitErr = emit.Emit(ctx, KindText, ev.Delta)
+					case provider.BlockThinking:
+						emitErr = emit.Emit(ctx, KindThinking, ev.Delta)
+					}
+					if emitErr != nil {
+						return assistant, calls, emitErr
+					}
+				}
+
+			case provider.EventBlockStop:
+				if acc, ok := open[ev.Index]; ok {
+					blk := acc.finalize()
+					assistant.Content = append(assistant.Content, blk)
+					if blk.Type == provider.BlockToolUse {
+						calls = append(calls, toolruntime.Call{ID: blk.ToolUseID, Name: blk.ToolName, Args: blk.ToolInput})
+						_ = emit.Emit(ctx, KindToolUse, map[string]any{
+							"id": blk.ToolUseID, "name": blk.ToolName, "input": blk.ToolInput,
+						})
+					}
+					delete(open, ev.Index)
+				}
+
+			case provider.EventMessageStop:
+				// usage could be recorded here for observability.
+			}
 		}
 	}
-
-	// Finalize any blocks still open (defensive).
-	for idx, acc := range open {
-		blk := acc.finalize()
-		assistant.Content = append(assistant.Content, blk)
-		if blk.Type == provider.BlockToolUse {
-			calls = append(calls, toolruntime.Call{ID: blk.ToolUseID, Name: blk.ToolName, Args: blk.ToolInput})
-		}
-		delete(open, idx)
-	}
-
-	return assistant, calls, nil
 }
 
 // dispatch runs tool calls concurrently via the registry.

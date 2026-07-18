@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,7 +25,7 @@ func TestAdapterStreamAgainstServer(t *testing.T) {
 	defer srv.Close()
 
 	a := New("test-key", WithEndpoint(srv.URL))
-	events, err := a.Stream(provider.Request{Model: "m", MaxTokens: 8, Messages: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}})
+	events, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 8, Messages: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}})
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestAdapterStreamHTTPError(t *testing.T) {
 	defer srv.Close()
 
 	a := New("k", WithEndpoint(srv.URL))
-	_, err := a.Stream(provider.Request{Model: "m", MaxTokens: 8})
+	_, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 8})
 	if err == nil {
 		t.Fatal("expected error for 429")
 	}

@@ -20,7 +20,7 @@ type scriptProvider struct {
 
 func (p *scriptProvider) Name() string { return "script" }
 
-func (p *scriptProvider) Stream(provider.Request) (<-chan provider.Event, error) {
+func (p *scriptProvider) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.calls >= len(p.script) {
@@ -189,5 +189,76 @@ func TestLoopToolInputParsed(t *testing.T) {
 	toolUse := produced[0].Content[0]
 	if toolUse.ToolInput["path"] != "/tmp/x" {
 		t.Errorf("tool input = %+v", toolUse.ToolInput)
+	}
+}
+
+func TestLoopCancelBeforeStream(t *testing.T) {
+	// A pre-cancelled context must abort the loop at the iteration guard and
+	// emit a cancelled event, not a done/error.
+	p := &scriptProvider{script: [][]provider.Event{textResponse("never")}}
+	reg := toolruntime.NewRegistry()
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before Run
+
+	_, err := loop.Run(ctx, nil, emit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v want context.Canceled", err)
+	}
+	if emit.count(KindCancelled) != 1 {
+		t.Errorf("expected 1 cancelled event, got %d", emit.count(KindCancelled))
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("cancelled run must not emit done")
+	}
+}
+
+// slowProvider emits a couple of events then parks until the test closes
+// release, so the loop exercises the mid-stream cancel path in consume().
+type slowProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *slowProvider) Name() string { return "slow" }
+
+func (p *slowProvider) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event)
+	go func() {
+		defer close(ch)
+		close(p.started)
+		ch <- provider.Event{Type: provider.EventMessageStart}
+		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+		// Park mid-stream: the loop should interrupt consume() via ctx cancel
+		// before this would ever deliver more content.
+		<-p.release
+	}()
+	return ch, nil
+}
+
+func TestLoopCancelMidStream(t *testing.T) {
+	p := &slowProvider{started: make(chan struct{}), release: make(chan struct{})}
+	reg := toolruntime.NewRegistry()
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := loop.Run(ctx, nil, emit)
+		done <- err
+	}()
+
+	<-p.started // wait until the stream is producing
+	cancel()    // interrupt mid-stream
+	err := <-done
+	close(p.release) // let the parked provider goroutine exit
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v want context.Canceled", err)
+	}
+	if emit.count(KindCancelled) != 1 {
+		t.Errorf("expected 1 cancelled event, got %d", emit.count(KindCancelled))
 	}
 }

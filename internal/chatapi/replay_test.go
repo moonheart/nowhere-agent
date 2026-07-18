@@ -20,7 +20,7 @@ import (
 type thinkingStub struct{}
 
 func (thinkingStub) Name() string { return "thinking-stub" }
-func (thinkingStub) Stream(provider.Request) (<-chan provider.Event, error) {
+func (thinkingStub) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
 	ch := make(chan provider.Event, 10)
 	ch <- provider.Event{Type: provider.EventMessageStart}
 	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockThinking}}

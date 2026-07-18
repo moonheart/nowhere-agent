@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -50,7 +51,7 @@ func run() error {
 
 	fmt.Printf("provider=%s model=%s\n", adapter.Name(), cfg.LLM.Model)
 
-	events, err := adapter.Stream(provider.Request{
+	events, err := adapter.Stream(context.Background(), provider.Request{
 		Model: cfg.LLM.Model,
 		Messages: []provider.Message{
 			provider.TextMessage(provider.RoleUser, "Reply with exactly: nowhere-agent online"),

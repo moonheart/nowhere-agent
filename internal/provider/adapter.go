@@ -1,5 +1,7 @@
 package provider
 
+import "context"
+
 // EventType discriminates streaming events. Streaming is an ordered event
 // stream (not cumulative deltas) so thinking and tool_use interleave correctly.
 type EventType string
@@ -44,6 +46,8 @@ type Adapter interface {
 
 	// Stream starts a generation and returns a channel of events. The channel
 	// is closed when generation completes or fails. The returned channel emits
-	// an EventError (and closes) on failure.
-	Stream(req Request) (<-chan Event, error)
+	// an EventError (and closes) on failure. Cancelling ctx aborts the in-flight
+	// request (closing the underlying connection) so a stopped run interrupts
+	// generation rather than letting the model finish in the background.
+	Stream(ctx context.Context, req Request) (<-chan Event, error)
 }

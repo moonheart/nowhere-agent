@@ -26,7 +26,7 @@ func (s staticKeys) Resolve(_ context.Context, userID string) (Credentials, erro
 type fakeAdapter struct{ name string }
 
 func (f fakeAdapter) Name() string { return f.name }
-func (f fakeAdapter) Stream(provider.Request) (<-chan provider.Event, error) {
+func (f fakeAdapter) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
 	ch := make(chan provider.Event)
 	close(ch)
 	return ch, nil

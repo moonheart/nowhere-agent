@@ -49,14 +49,17 @@ type Store interface {
 type Runtime struct {
 	store Store
 
-	mu      sync.Mutex
-	runs    map[string]*runState // sessionID -> active run state
-	subs    map[string]map[chan Event]struct{} // sessionID -> subscriber channels
+	mu   sync.Mutex
+	runs map[string]*runState               // sessionID -> active run state
+	subs map[string]map[chan Event]struct{} // sessionID -> subscriber channels
 }
 
 type runState struct {
-	run     Run
-	offset  int
+	run    Run
+	offset int
+	// cancel, when registered, interrupts the run's in-flight work (the agent
+	// loop + tool dispatch). Set via RegisterCancel; cleared on CompleteRun.
+	cancel context.CancelFunc
 }
 
 // NewRuntime creates a Runtime over a Store.
@@ -116,6 +119,16 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 	}
 	subs := rt.subscribersLocked(e.SessionID)
 	rt.mu.Unlock()
+
+	// The run may already have settled (e.g. CancelRun settled it while the loop
+	// was unwinding its final KindCancelled event). Continue the offset from the
+	// durable log rather than restarting at 0, so the event is still stored (and
+	// replayed) at a sensible position instead of colliding at offset 0.
+	if !ok {
+		if events, err := rt.store.EventsAfter(ctx, e.RunID, 0); err == nil && len(events) > 0 {
+			e.Offset = events[len(events)-1].Offset + 1
+		}
+	}
 
 	if err := rt.store.AppendEvent(ctx, e); err != nil {
 		return err
@@ -205,6 +218,44 @@ func (rt *Runtime) ListSessionsByUser(ctx context.Context, userID string) ([]Ses
 // DeleteSessionForUser ends a session the user owns; false if not theirs.
 func (rt *Runtime) DeleteSessionForUser(ctx context.Context, id, userID string) (bool, error) {
 	return rt.store.DeleteSessionForUser(ctx, id, userID)
+}
+
+// RegisterCancel attaches the cancel func that interrupts the active run's
+// work to the session's run state, so CancelRun can stop it. The handler calls
+// this right after deriving a cancellable context for the run. No-op if no run
+// is active.
+func (rt *Runtime) RegisterCancel(sessionID string, cancel context.CancelFunc) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rs, ok := rt.runs[sessionID]; ok {
+		rs.cancel = cancel
+	}
+}
+
+// CancelRun stops the session's active run: it invokes the registered cancel
+// func (interrupting the loop + tools) and marks the run RunCancelled, releasing
+// the single-active-run lock so a new run can start. Returns false if no run is
+// active. The actual loop observes ctx cancellation and emits a KindCancelled
+// event before unwinding.
+func (rt *Runtime) CancelRun(ctx context.Context, sessionID string) (bool, error) {
+	rt.mu.Lock()
+	rs, ok := rt.runs[sessionID]
+	if !ok {
+		rt.mu.Unlock()
+		return false, nil
+	}
+	cancel := rs.cancel
+	rt.mu.Unlock()
+
+	// Interrupt the in-flight work first so it stops promptly, then settle the
+	// terminal state. CompleteRun clears the cancel func.
+	if cancel != nil {
+		cancel()
+	}
+	if err := rt.CompleteRun(ctx, sessionID, RunCancelled); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // subscribersLocked returns the subscriber set; caller holds rt.mu.

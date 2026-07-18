@@ -42,13 +42,9 @@ func New(apiKey string, opts ...Option) *Adapter {
 // Name returns the provider identifier.
 func (a *Adapter) Name() string { return "openai" }
 
-// Stream starts a streaming generation and returns canonical events.
-func (a *Adapter) Stream(req provider.Request) (<-chan provider.Event, error) {
-	return a.StreamContext(context.Background(), req)
-}
-
-// StreamContext is Stream with a caller-supplied context for cancellation.
-func (a *Adapter) StreamContext(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+// Stream starts a streaming generation and returns canonical events. The
+// caller's ctx governs cancellation: cancelling it aborts the HTTP request.
+func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
 	apiReq, err := buildRequest(req)
 	if err != nil {
 		return nil, err
