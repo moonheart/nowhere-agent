@@ -28,8 +28,8 @@ func (stubProvider) Stream(provider.Request) (<-chan provider.Event, error) {
 	return ch, nil
 }
 
-func newTestLoop(ctx context.Context) *agent.Loop {
-	return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100})
+func newTestLoop(ctx context.Context, system string) *agent.Loop {
+	return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 }
 
 func TestServeChatStreamsUIProtocol(t *testing.T) {

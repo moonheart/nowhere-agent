@@ -16,11 +16,13 @@ import (
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
+	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/platform/db"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/provider/anthropic"
 	"nowhere-agent/internal/provider/openai"
 	"nowhere-agent/internal/session"
+	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/toolruntime"
 )
 
@@ -64,17 +66,28 @@ func run() error {
 	// and the run log doubles as the episodes for dreaming.
 	sessionRuntime := session.NewRuntime(session.NewPGStore(pool))
 
+	// Memory (PG+vector) and skill engine feed the loop's system prompt:
+	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
+	memPort := memory.NewPGPort(pool)
+	skillEngine := skill.NewEngine(skill.NewStore())
+	baseSystem := "You are nowhere-agent, a helpful AI assistant."
+	ctxBuilder := chatapi.NewContextBuilder(baseSystem, identitySvc, memPort, skillEngine)
+
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
-		chatapi.NewHandler(func(ctx context.Context) *agent.Loop {
+		chatapi.NewHandler(func(ctx context.Context, system string) *agent.Loop {
 			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           model,
+				System:          system,
 				MaxTokens:       4096,
 				MaxIterations:   25,
 				CacheablePrefix: true,
 			})
-		}, "").WithRuntime(sessionRuntime).RegisterAuthed(mux, identityHandler.RequireAuth)
+		}, baseSystem).
+			WithRuntime(sessionRuntime).
+			WithContextBuilder(ctxBuilder).
+			RegisterAuthed(mux, identityHandler.RequireAuth)
 		log.Info("chat endpoint enabled (auth required)", "provider", adapter.Name(), "model", model)
 	} else {
 		log.Warn("chat endpoint disabled: no LLM provider configured (set LLM_PROVIDER/LLM_API_KEY)")

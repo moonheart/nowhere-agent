@@ -14,8 +14,19 @@ import (
 )
 
 // LoopFactory builds an agent loop for a chat request (provider + tools wired
-// by the server). Keeping it a factory lets the handler stay transport-only.
-type LoopFactory func(ctx context.Context) *agent.Loop
+// by the server). system is the composed system prompt for this request
+// (base + skills + recalled memory). Keeping it a factory lets the handler
+// stay transport-only.
+type LoopFactory func(ctx context.Context, system string) *agent.Loop
+
+// ContextBuilder assembles the system prompt for a request: the base prompt
+// plus the L0 skill index and recalled long-term memories for the caller's
+// accessible scopes (design D5/D10 read side). It is the seam where memory
+// recall and skill L0/L1 loading feed the agent loop (task 4.5).
+type ContextBuilder interface {
+	// SystemPrompt returns the composed system prompt for the user and query.
+	SystemPrompt(ctx context.Context, user identity.User, query string) string
+}
 
 // Handler serves POST /api/chat.
 type Handler struct {
@@ -25,6 +36,9 @@ type Handler struct {
 	// are teed into the durable run log (the episodes for dreaming) and the
 	// single-active-run lock is enforced per session.
 	runtime *session.Runtime
+	// ctxBuilder, when set, composes the per-request system prompt (skills +
+	// recalled memory). Nil keeps the static system prompt (tests).
+	ctxBuilder ContextBuilder
 }
 
 // NewHandler creates a chat Handler.
@@ -35,6 +49,12 @@ func NewHandler(newLoop LoopFactory, systemPrompt string) *Handler {
 // WithRuntime enables run persistence for the chat endpoint.
 func (h *Handler) WithRuntime(rt *session.Runtime) *Handler {
 	h.runtime = rt
+	return h
+}
+
+// WithContextBuilder enables memory recall + skill L0 injection into the loop.
+func (h *Handler) WithContextBuilder(cb ContextBuilder) *Handler {
+	h.ctxBuilder = cb
 	return h
 }
 
@@ -82,8 +102,8 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
 	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
 
-	loop := h.newLoop(r.Context())
 	history := toHistory(req)
+	loop := h.newLoop(r.Context(), h.systemPromptFor(r, req))
 
 	// When a runtime is wired, persist this request as a run within its session.
 	var emit agent.Emitter = emitter
@@ -121,6 +141,20 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	emitter.finish()
+}
+
+// systemPromptFor composes the system prompt for a request: the ContextBuilder
+// (skills + recalled memory) when wired and the caller is authenticated,
+// otherwise the static base prompt.
+func (h *Handler) systemPromptFor(r *http.Request, req dataStreamRequest) string {
+	if h.ctxBuilder == nil {
+		return h.system
+	}
+	user, ok := identity.UserFromContext(r.Context())
+	if !ok {
+		return h.system
+	}
+	return h.ctxBuilder.SystemPrompt(r.Context(), user, lastUserText(req))
 }
 
 // resolveSession maps the request to a session: it resumes the session named
