@@ -296,3 +296,50 @@ func TestChatDoesNotResumeForeignSession(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionsListsOnlyCallersSessions verifies GET /sessions returns the
+// authenticated user's sessions and no one else's.
+func TestSessionsListsOnlyCallersSessions(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	// user A has two sessions, user B has one.
+	alice := identity.User{ID: "alice"}
+	for _, q := range []string{"a1", "a2"} {
+		req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"messages":[{"role":"user","content":"`+q+`"}]}`))
+		req = req.WithContext(identity.NewContextWithUser(req.Context(), alice))
+		mux.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	bob := identity.User{ID: "bob"}
+	breq := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"messages":[{"role":"user","content":"b1"}]}`))
+	breq = breq.WithContext(identity.NewContextWithUser(breq.Context(), bob))
+	mux.ServeHTTP(httptest.NewRecorder(), breq)
+
+	// Alice lists hers.
+	req := httptest.NewRequest("GET", "/api/chat/sessions", nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), alice))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("sessions status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Sessions []sessionDTO `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode sessions: %v", err)
+	}
+	if len(resp.Sessions) != 2 {
+		t.Fatalf("alice should see 2 sessions, got %d: %+v", len(resp.Sessions), resp.Sessions)
+	}
+
+	// Unauthenticated request is rejected.
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("GET", "/api/chat/sessions", nil))
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("unauthenticated sessions status = %d want 401", rec2.Code)
+	}
+}

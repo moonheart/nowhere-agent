@@ -68,6 +68,19 @@ func (m *MemStore) ListIdleSessions(_ context.Context, before time.Time) ([]Sess
 	return out, nil
 }
 
+func (m *MemStore) ListSessionsByUser(_ context.Context, userID string) ([]Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Session
+	for _, s := range m.sessions {
+		if s.UserID == userID {
+			out = append(out, *s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out, nil
+}
+
 func (m *MemStore) CreateRun(_ context.Context, sessionID string, seq int) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

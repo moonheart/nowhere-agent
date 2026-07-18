@@ -84,6 +84,29 @@ func (s *PGStore) ListIdleSessions(ctx context.Context, idleSinceEventBefore tim
 	return out, rows.Err()
 }
 
+// ListSessionsByUser returns a user's sessions, most-recently-active first.
+func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id, title, status, created_at, updated_at
+		FROM sessions
+		WHERE user_id = $1
+		ORDER BY updated_at DESC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions by user: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Session
+	for rows.Next() {
+		var sess Session
+		if err := rows.Scan(&sess.ID, &sess.UserID, &sess.Title, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan session: %w", err)
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
 // CreateRun inserts a queued run with the given per-session sequence number.
 func (s *PGStore) CreateRun(ctx context.Context, sessionID string, seq int) (Run, error) {
 	var r Run

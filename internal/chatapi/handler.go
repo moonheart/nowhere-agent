@@ -63,6 +63,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat", h.serveChat)
 	mux.HandleFunc("GET /api/chat/history", h.serveHistory)
 	mux.HandleFunc("POST /api/chat/resume", h.serveResume)
+	mux.HandleFunc("GET /api/chat/sessions", h.serveSessions)
 }
 
 // RegisterAuthed mounts the route behind auth middleware, so each chat request
@@ -71,6 +72,7 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	mux.Handle("POST /api/chat", auth(http.HandlerFunc(h.serveChat)))
 	mux.Handle("GET /api/chat/history", auth(http.HandlerFunc(h.serveHistory)))
 	mux.Handle("POST /api/chat/resume", auth(http.HandlerFunc(h.serveResume)))
+	mux.Handle("GET /api/chat/sessions", auth(http.HandlerFunc(h.serveSessions)))
 }
 
 // sseEmitter adapts agent.Emitter to write ui-message-stream frames live.

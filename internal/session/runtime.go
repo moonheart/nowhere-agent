@@ -21,6 +21,8 @@ type Store interface {
 	CreateSession(ctx context.Context, userID, title string) (Session, error)
 	GetSession(ctx context.Context, id string) (Session, error)
 	EndSession(ctx context.Context, id string) error
+	// ListSessionsByUser returns a user's sessions, most-recently-active first.
+	ListSessionsByUser(ctx context.Context, userID string) ([]Session, error)
 	// ListIdleSessions returns active sessions with no event activity since
 	// the given time (candidates for idle-end by the scheduler).
 	ListIdleSessions(ctx context.Context, idleSinceEventBefore time.Time) ([]Session, error)
@@ -190,6 +192,11 @@ func (rt *Runtime) Replay(ctx context.Context, runID string, after int) ([]Event
 // RunsForSession returns every run in a session (any state), for history replay.
 func (rt *Runtime) RunsForSession(ctx context.Context, sessionID string) ([]Run, error) {
 	return rt.store.RunsForSession(ctx, sessionID)
+}
+
+// ListSessionsByUser returns a user's sessions for the conversation list.
+func (rt *Runtime) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {
+	return rt.store.ListSessionsByUser(ctx, userID)
 }
 
 // subscribersLocked returns the subscriber set; caller holds rt.mu.
