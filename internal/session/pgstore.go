@@ -84,13 +84,14 @@ func (s *PGStore) ListIdleSessions(ctx context.Context, idleSinceEventBefore tim
 	return out, rows.Err()
 }
 
-// ListSessionsByUser returns a user's sessions, most-recently-active first.
+// ListSessionsByUser returns a user's active (non-deleted) sessions,
+// most-recently-active first. Ended sessions are hidden from the sidebar.
 func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, title, status, created_at, updated_at
 		FROM sessions
-		WHERE user_id = $1
-		ORDER BY updated_at DESC`, userID)
+		WHERE user_id = $1 AND status = $2
+		ORDER BY updated_at DESC`, userID, string(SessionActive))
 	if err != nil {
 		return nil, fmt.Errorf("list sessions by user: %w", err)
 	}
@@ -105,6 +106,18 @@ func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string) ([]Sess
 		out = append(out, sess)
 	}
 	return out, rows.Err()
+}
+
+// DeleteSessionForUser soft-deletes (ends) a session owned by userID.
+func (s *PGStore) DeleteSessionForUser(ctx context.Context, id, userID string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE sessions SET status = $3, ended_at = now(), updated_at = now()
+		WHERE id = $1 AND user_id = $2`, id, userID, string(SessionEnded))
+	if err != nil {
+		return false, fmt.Errorf("delete session: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // CreateRun inserts a queued run with the given per-session sequence number.

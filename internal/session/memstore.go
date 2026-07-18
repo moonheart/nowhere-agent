@@ -73,12 +73,23 @@ func (m *MemStore) ListSessionsByUser(_ context.Context, userID string) ([]Sessi
 	defer m.mu.Unlock()
 	var out []Session
 	for _, s := range m.sessions {
-		if s.UserID == userID {
+		if s.UserID == userID && s.Status == SessionActive {
 			out = append(out, *s)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out, nil
+}
+
+func (m *MemStore) DeleteSessionForUser(_ context.Context, id, userID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok || s.UserID != userID {
+		return false, nil
+	}
+	s.Status = SessionEnded
+	return true, nil
 }
 
 func (m *MemStore) CreateRun(_ context.Context, sessionID string, seq int) (Run, error) {

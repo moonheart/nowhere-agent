@@ -23,6 +23,9 @@ type Store interface {
 	EndSession(ctx context.Context, id string) error
 	// ListSessionsByUser returns a user's sessions, most-recently-active first.
 	ListSessionsByUser(ctx context.Context, userID string) ([]Session, error)
+	// DeleteSessionForUser soft-deletes (ends) a session owned by userID,
+	// returning false if no such session exists for that user.
+	DeleteSessionForUser(ctx context.Context, id, userID string) (bool, error)
 	// ListIdleSessions returns active sessions with no event activity since
 	// the given time (candidates for idle-end by the scheduler).
 	ListIdleSessions(ctx context.Context, idleSinceEventBefore time.Time) ([]Session, error)
@@ -197,6 +200,11 @@ func (rt *Runtime) RunsForSession(ctx context.Context, sessionID string) ([]Run,
 // ListSessionsByUser returns a user's sessions for the conversation list.
 func (rt *Runtime) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {
 	return rt.store.ListSessionsByUser(ctx, userID)
+}
+
+// DeleteSessionForUser ends a session the user owns; false if not theirs.
+func (rt *Runtime) DeleteSessionForUser(ctx context.Context, id, userID string) (bool, error) {
+	return rt.store.DeleteSessionForUser(ctx, id, userID)
 }
 
 // subscribersLocked returns the subscriber set; caller holds rt.mu.

@@ -20,6 +20,17 @@ export async function listSessions(): Promise<SessionSummary[]> {
   return data.sessions ?? [];
 }
 
+// deleteSession removes a conversation; returns true on success.
+export async function deleteSession(id: string): Promise<boolean> {
+  const token = getToken();
+  if (!token) return false;
+  const res = await fetch(`/api/chat/sessions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  return res.ok;
+}
+
 // relTime renders a compact relative timestamp for the sidebar.
 export function relTime(iso: string): string {
   const then = new Date(iso).getTime();

@@ -62,6 +62,12 @@ export default function App() {
     setConversationKey((k) => k + 1);
   };
 
+  // Deleting the active session resets to a fresh thread and refreshes the list.
+  const handleDeleteCurrent = () => {
+    startNewChat();
+    setListVersion((v) => v + 1);
+  };
+
   const switchTo = (id: string) => {
     if (id === activeSessionId) return;
     setSessionId(id);
@@ -113,6 +119,7 @@ export default function App() {
           currentId={activeSessionId}
           onSelect={switchTo}
           onNew={startNewChat}
+          onDeleteCurrent={handleDeleteCurrent}
           refreshToken={listVersion}
         />
         <div className="min-w-0 flex-1">

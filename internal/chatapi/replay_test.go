@@ -343,3 +343,55 @@ func TestSessionsListsOnlyCallersSessions(t *testing.T) {
 		t.Errorf("unauthenticated sessions status = %d want 401", rec2.Code)
 	}
 }
+
+// TestDeleteSession verifies a user can delete their own session (it leaves the
+// list) and cannot delete someone else's (404, indistinguishable).
+func TestDeleteSession(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	alice := identity.User{ID: "alice"}
+	mkChat := func(u identity.User, q string) {
+		req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"messages":[{"role":"user","content":"`+q+`"}]}`))
+		req = req.WithContext(identity.NewContextWithUser(req.Context(), u))
+		mux.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	mkChat(alice, "alice chat")
+	bob := identity.User{ID: "bob"}
+	mkChat(bob, "bob chat")
+
+	sessions := store.Sessions()
+	var aliceSess, bobSess string
+	for _, s := range sessions {
+		if s.UserID == "alice" {
+			aliceSess = s.ID
+		} else {
+			bobSess = s.ID
+		}
+	}
+
+	// Alice cannot delete Bob's session (404).
+	req := httptest.NewRequest("DELETE", "/api/chat/sessions/"+bobSess, nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), alice))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("alice deleting bob's session = %d want 404", rec.Code)
+	}
+
+	// Alice deletes her own (204) and it leaves her list.
+	req2 := httptest.NewRequest("DELETE", "/api/chat/sessions/"+aliceSess, nil)
+	req2 = req2.WithContext(identity.NewContextWithUser(req2.Context(), alice))
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNoContent {
+		t.Errorf("alice deleting own session = %d want 204", rec2.Code)
+	}
+	remaining, _ := store.ListSessionsByUser(req2.Context(), "alice")
+	if len(remaining) != 0 {
+		t.Errorf("deleted session still listed: %+v", remaining)
+	}
+}
