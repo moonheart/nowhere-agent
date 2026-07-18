@@ -23,6 +23,9 @@ const (
 	KindToolResult EventKind = "tool_result"
 	KindError      EventKind = "error"
 	KindDone       EventKind = "done"
+	// KindUser marks a persisted user message. It is not emitted by the loop
+	// itself; the transport writes it so replay reconstructs the user side.
+	KindUser EventKind = "user"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).

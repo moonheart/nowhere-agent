@@ -13,6 +13,7 @@
     "@assistant-ui/react": "^0.14.27",
     "@assistant-ui/react-data-stream": "^0.12.19",
     "@tailwindcss/vite": "^4.3.3",
+    "assistant-stream": "0.3.26",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tailwindcss": "^4.3.3"

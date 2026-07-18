@@ -143,6 +143,29 @@ func (s *PGStore) NextRunSeq(ctx context.Context, sessionID string) (int, error)
 	return next, nil
 }
 
+// RunsForSession returns all runs in a session ordered by seq, for history replay.
+func (s *PGStore) RunsForSession(ctx context.Context, sessionID string) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, seq, status, created_at
+		FROM runs
+		WHERE session_id = $1
+		ORDER BY seq`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("runs for session: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Run
+	for rows.Next() {
+		var r Run
+		if err := rows.Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // AppendEvent persists one run event (flushing an iteration to the DB).
 func (s *PGStore) AppendEvent(ctx context.Context, e Event) error {
 	err := s.db.QueryRowContext(ctx, `

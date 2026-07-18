@@ -17,6 +17,25 @@ func sseFrame(c chunk) string {
 	return "data: " + string(b) + "\n\n"
 }
 
+// decodeTextPayload extracts a string from a persisted event payload, tolerating
+// both a JSON-encoded string and a raw byte blob.
+func decodeTextPayload(payload []byte) string {
+	var s string
+	if err := json.Unmarshal(payload, &s); err != nil {
+		return string(payload)
+	}
+	return s
+}
+
+// decodeMapPayload extracts an object from a persisted event payload.
+func decodeMapPayload(payload []byte) (map[string]any, bool) {
+	var m map[string]any
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return nil, false
+	}
+	return m, true
+}
+
 // streamWriter accumulates the SSE body for a run.
 type streamWriter struct {
 	buf       []byte

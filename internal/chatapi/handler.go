@@ -61,12 +61,16 @@ func (h *Handler) WithContextBuilder(cb ContextBuilder) *Handler {
 // Register mounts the route.
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat", h.serveChat)
+	mux.HandleFunc("GET /api/chat/history", h.serveHistory)
+	mux.HandleFunc("POST /api/chat/resume", h.serveResume)
 }
 
 // RegisterAuthed mounts the route behind auth middleware, so each chat request
 // resolves to an authenticated user (sessions are user-owned).
 func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) http.Handler) {
 	mux.Handle("POST /api/chat", auth(http.HandlerFunc(h.serveChat)))
+	mux.Handle("GET /api/chat/history", auth(http.HandlerFunc(h.serveHistory)))
+	mux.Handle("POST /api/chat/resume", auth(http.HandlerFunc(h.serveResume)))
 }
 
 // sseEmitter adapts agent.Emitter to write ui-message-stream frames live.
@@ -123,6 +127,23 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		runID = run.ID
+
+		// Tell the client which session it's talking to (transient: handled by
+		// onData, not added to the message), so it can resume/replay later.
+		emitter.write(chunk{"type": "data-session", "data": map[string]any{"id": sessID}, "transient": true})
+
+		// Persist the user's message as the run's first event so history replay
+		// reconstructs the user side, not just the assistant's output.
+		if text := lastUserText(req); text != "" {
+			payload, _ := json.Marshal(text)
+			_ = h.runtime.AppendEvent(r.Context(), session.Event{
+				RunID:     runID,
+				SessionID: sessID,
+				Kind:      string(agent.KindUser),
+				Payload:   payload,
+			})
+		}
+
 		emit = &persistEmitter{inner: emitter, rt: h.runtime, sessionID: sessID, runID: runID}
 	}
 
@@ -158,19 +179,50 @@ func (h *Handler) systemPromptFor(r *http.Request, req dataStreamRequest) string
 }
 
 // resolveSession maps the request to a session: it resumes the session named
-// by threadId when it exists, otherwise creates a new one for the caller.
+// by threadId when it exists and belongs to the caller, otherwise creates a
+// new one for the caller.
 func (h *Handler) resolveSession(r *http.Request, req dataStreamRequest) (session.Session, error) {
 	userID := ""
 	if u, ok := identity.UserFromContext(r.Context()); ok {
 		userID = u.ID
 	}
 	if req.ThreadID != "" {
-		if s, err := h.runtime.GetSession(r.Context(), req.ThreadID); err == nil {
+		if s, err := h.runtime.GetSession(r.Context(), req.ThreadID); err == nil && sessionVisibleTo(s, userID) {
 			return s, nil
 		}
-		// Unknown thread id: fall through and create a fresh session.
+		// Unknown or foreign thread id: fall through and create a fresh session.
 	}
 	return h.runtime.CreateSession(r.Context(), userID, lastUserText(req))
+}
+
+// sessionVisibleTo reports whether a caller may read/act on a session. A
+// session is visible to its owner; when the caller is authenticated, only
+// their own sessions qualify (a user-owned session is never shared cross-user).
+func sessionVisibleTo(s session.Session, callerID string) bool {
+	if callerID == "" {
+		// Unauthenticated (tests/dev): only anonymous sessions are visible.
+		return s.UserID == ""
+	}
+	return s.UserID == callerID
+}
+
+// authorizeSession resolves a session by id and checks the caller may access
+// it, writing the appropriate HTTP error and returning ok=false otherwise.
+func (h *Handler) authorizeSession(w http.ResponseWriter, r *http.Request, sessionID string) (session.Session, bool) {
+	s, err := h.runtime.GetSession(r.Context(), sessionID)
+	if err != nil {
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return session.Session{}, false
+	}
+	callerID := ""
+	if u, ok := identity.UserFromContext(r.Context()); ok {
+		callerID = u.ID
+	}
+	if !sessionVisibleTo(s, callerID) {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return session.Session{}, false
+	}
+	return s, true
 }
 
 // persistEmitter tees loop events to the SSE stream and the durable run log.

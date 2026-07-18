@@ -94,7 +94,7 @@
 ## 13. session-runtime
 - [x] 13.1 Run state machine (queued/running/waiting_approval/done/failed/cancelled)
 - [x] 13.2 Durable run event log (append-only)
-- [ ] 13.3 WS/SSE subscription + reconnect/replay from offset
+- [x] 13.3 WS/SSE subscription + reconnect/replay from offset
 - [ ] 13.4 Run stop/cancel propagating to tools + sandbox
 - [ ] 13.5 Multi-client attach to one session
 

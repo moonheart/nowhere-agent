@@ -19,6 +19,12 @@ func UserFromContext(ctx context.Context) (User, bool) {
 	return u, ok
 }
 
+// NewContextWithUser stores u on the context, as RequireAuth does. Exported so
+// other packages' tests can build authenticated requests without a database.
+func NewContextWithUser(ctx context.Context, u User) context.Context {
+	return context.WithValue(ctx, userContextKey, u)
+}
+
 // Handler exposes identity endpoints over HTTP.
 type Handler struct {
 	svc *Service

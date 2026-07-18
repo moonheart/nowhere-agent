@@ -31,6 +31,8 @@ type Store interface {
 	ActiveRun(ctx context.Context, sessionID string) (Run, bool, error)
 	// NextRunSeq returns the next sequence number for a session's run.
 	NextRunSeq(ctx context.Context, sessionID string) (int, error)
+	// RunsForSession returns all runs in a session, for history replay.
+	RunsForSession(ctx context.Context, sessionID string) ([]Run, error)
 
 	AppendEvent(ctx context.Context, e Event) error
 	// EventsAfter returns events for a run with offset > after, ordered.
@@ -183,6 +185,11 @@ func (rt *Runtime) Subscribe(sessionID string, buffer int) (<-chan Event, func()
 // reconnecting client to catch up.
 func (rt *Runtime) Replay(ctx context.Context, runID string, after int) ([]Event, error) {
 	return rt.store.EventsAfter(ctx, runID, after)
+}
+
+// RunsForSession returns every run in a session (any state), for history replay.
+func (rt *Runtime) RunsForSession(ctx context.Context, sessionID string) ([]Run, error) {
+	return rt.store.RunsForSession(ctx, sessionID)
 }
 
 // subscribersLocked returns the subscriber set; caller holds rt.mu.

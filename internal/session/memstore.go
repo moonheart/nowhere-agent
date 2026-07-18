@@ -103,6 +103,16 @@ func (m *MemStore) NextRunSeq(_ context.Context, sessionID string) (int, error) 
 	return len(m.bySess[sessionID]) + 1, nil
 }
 
+func (m *MemStore) RunsForSession(_ context.Context, sessionID string) ([]Run, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]Run, 0, len(m.bySess[sessionID]))
+	for _, r := range m.bySess[sessionID] {
+		out = append(out, *r)
+	}
+	return out, nil
+}
+
 func (m *MemStore) AppendEvent(_ context.Context, e Event) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
