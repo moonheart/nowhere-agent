@@ -45,6 +45,17 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// An in-flight run is always re-streamed from the start. The attaching
+	// client's follow renders ONE assistant message built from this whole
+	// stream; honouring a non-zero `after` for an active run would split the
+	// run into a snapshot bubble (already-loaded prefix) plus a continuation
+	// bubble (the follow), because the runtime's resume creates a NEW assistant
+	// message rather than extending the loaded one. The `after` offset is only
+	// meaningful for a settled run, where it bounds the replay.
+	if !run.Status.Terminal() {
+		after = 0
+	}
+
 	// SSE headers for ui-message-stream.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

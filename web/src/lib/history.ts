@@ -134,17 +134,29 @@ export const threadHistory: ThreadHistoryAdapter = {
   async load() {
     const { messages, active, after } = await loadHistory();
     lastLoadedAfter = after;
+    // When a run is in flight, drop the trailing partial assistant message from
+    // the snapshot. The follow (resume) re-streams the whole run and renders
+    // that message itself; importing a partial assistant message AND following
+    // would split the run into two bubbles — the runtime's resume always starts
+    // a NEW assistant message rather than extending the imported one. The
+    // server also re-streams an active run from offset 0 regardless of `after`.
+    const imported =
+      active && messages.length > 0 && messages.at(-1)?.role === "assistant"
+        ? messages.slice(0, -1)
+        : messages;
     // unstable_resume asks the runtime to call resume() after import — but the
     // runtime starts a NEW assistant message at the head for it. Only opt in
     // when a run is genuinely still in flight; resuming a completed run would
     // duplicate the assistant reply that load() already restored.
     return {
-      ...ExportedMessageRepository.fromArray(messages),
+      ...ExportedMessageRepository.fromArray(imported),
       unstable_resume: active,
     };
   },
 
   resume() {
+    // For an in-flight run the server re-streams from 0, so the follow builds
+    // the full assistant message. (lastLoadedAfter only bounds a settled run.)
     return resumeStream(lastLoadedAfter);
   },
 

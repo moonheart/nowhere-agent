@@ -198,6 +198,53 @@ func TestMultiClientAttachSameStream(t *testing.T) {
 	}
 }
 
+// TestResumeActiveRunIgnoresAfterOffset is the regression test for the tab2
+// duplicate-reply bug: resuming an IN-FLIGHT run must re-stream from the start
+// even when the client passes a non-zero `after`. The follow renders ONE
+// assistant message from the whole stream; honouring `after` for an active run
+// would split it into a snapshot bubble plus a continuation bubble.
+func TestResumeActiveRunIgnoresAfterOffset(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	p := newGatedProvider("alpha ", "beta")
+	h := NewHandler(gatedLoop(p), "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	owner := identity.User{ID: "owner"}
+
+	sessID, wait := startRunAsync(t, mux, p, owner, `{"messages":[{"role":"user","content":"go"}]}`)
+	defer wait()
+
+	// Attach mid-run (gate still shut) with a large `after`, then release the
+	// run. The server must ignore `after` for the active run and stream from the
+	// beginning (running + user + all content), not just the post-offset tail.
+	attached := make(chan string, 1)
+	go func() {
+		req := httptest.NewRequest("POST", "/api/chat/resume?threadId="+sessID+"&after=999", nil)
+		req = req.WithContext(identity.NewContextWithUser(req.Context(), owner))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		attached <- rec.Body.String()
+	}()
+	time.Sleep(50 * time.Millisecond) // let the attach subscribe
+	close(p.gate)
+
+	var body string
+	select {
+	case body = <-attached:
+	case <-time.After(3 * time.Second):
+		t.Fatal("active-run resume did not return")
+	}
+	// The key assertion: the stream began from the run's start (running marker +
+	// first delta), proving `after=999` was ignored for the active run. Later
+	// deltas may drop to a slow test consumer, so don't require every one.
+	for _, want := range []string{`"status":"running"`, `"delta":"alpha "`, "data: [DONE]"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("active-run resume(after=999) missing %q — must stream from start\n---\n%s", want, body)
+		}
+	}
+}
+
 // TestConcurrentRunStartConflict verifies single-active-run / multi-writer
 // prevention: a second client submitting while a run is in flight is rejected
 // with 409, and only ONE run exists.

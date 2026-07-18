@@ -47,15 +47,13 @@ function Chat({
     onError: (e) => console.error("chat error", e),
   });
 
-  // Multi-client attach (design D13): while this client is idle on an EMPTY
-  // thread, poll the session to notice a run started on another tab/device and
-  // live-follow it via resumeRun. The runtime aborts any prior stream before a
-  // new one, so overlapping attaches dedup — EXCEPT at startup, where load()
-  // also sets unstable_resume and the runtime starts its own follow. Two
-  // concurrent follows would each create a NEW assistant message (the "2
-  // bubbles" bug), so the poll must only fire when the thread has no messages:
-  // a thread with messages was populated by load(), whose unstable_resume
-  // already owns the in-flight run's follow.
+  // Multi-client attach (design D13): while this client is idle, poll the
+  // session to notice a run started on another tab/device and live-follow it
+  // via resumeRun. The follow re-streams the whole run and renders ONE new
+  // assistant message; the runtime aborts any prior stream before a new one, so
+  // a poll attach racing the load+resume follow just re-follows (aborting the
+  // stale stream) rather than duplicating — the resume stream replaces the
+  // same new message's content each time.
   useEffect(() => {
     let cancelled = false;
     let attaching = false;
@@ -63,21 +61,14 @@ function Chat({
       if (cancelled || attaching) return;
       const threadId = getSessionId();
       if (!threadId) return;
-      const state = runtime.thread.getState();
-      if (state.isRunning || state.isLoading) return;
-      // load() populated the thread (and set unstable_resume for an active
-      // run), so its resume path is the single follower. Only an empty thread
-      // needs the poll to attach.
-      if (state.messages.length > 0) return;
+      if (runtime.thread.getState().isRunning) return;
       let active = false;
       try {
         active = await hasActiveRun();
       } catch {
         return; // transient failure; try again next tick
       }
-      if (cancelled || !active) return;
-      const s2 = runtime.thread.getState();
-      if (s2.isRunning || s2.messages.length > 0) return;
+      if (cancelled || !active || runtime.thread.getState().isRunning) return;
       attaching = true;
       try {
         // parentId: null → startRun appends the streamed run after the current
