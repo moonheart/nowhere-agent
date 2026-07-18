@@ -6,7 +6,8 @@
 CREATE TABLE IF NOT EXISTS team_api_keys (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     team_id    UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    provider   TEXT NOT NULL,              -- anthropic | openai | ...
+    -- anthropic | openai | ...
+    provider   TEXT NOT NULL,
     api_key    TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
