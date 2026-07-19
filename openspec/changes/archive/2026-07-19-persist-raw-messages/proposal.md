@@ -16,6 +16,17 @@ A secondary defect this exposes: the Anthropic adapter folds the thinking `signa
 
 Adopt the decision already made: **store every conversation message in its original, full-block form, in a dedicated message table, and rebuild cross-run history from that store (authoritative), ignoring client-sent history.**
 
+## What Changes
+
+- **New `messages` table** (migration `000006`): one row per canonical `provider.Message` — `id`, `session_id`, `run_id`, `seq` (monotonic within session), `role`, `content jsonb` (full `[]Block`), `created_at`. Indexed by `(session_id, seq)`.
+- **New `MessageStore` port** (`internal/session`) with PG and in-memory implementations.
+- **Persist full blocks**: assembled assistant messages and tool-result messages are written as complete `Message` rows (thinking signature included), alongside the existing run event log.
+- **Thinking-signature capture fixed**: `signature_delta` routed to `Block.ThinkingSignature` instead of being concatenated into thinking text.
+- **Authoritative cross-run history**: `serveChat` rebuilds `[]provider.Message` for a `threadId` from the `messages` table; client-sent history is ignored for persisted sessions.
+- **Image blocks**: new `provider.BlockImage` carries a workspace-relative path (never base64 in DB); `workspace.ImageStore` normalizes to WebP and confines paths; a pre-send transform materializes path → base64 every turn; an authenticated endpoint serves images to the session owner.
+- **Oversized text truncation**: large `tool_result` text is truncated with a marker before persistence.
+- **Slim block persistence**: JSON tags omit empty fields; the materialized `ImageData` is never serialized (`json:"-"`).
+
 Concretely:
 
 - **New `messages` table** (migration `000006`): one row per canonical `provider.Message` — `id`, `session_id`, `run_id`, `seq` (monotonic within session), `role`, `content jsonb` (the full `[]Block`: text, thinking **with signature**, tool_use, tool_result), `created_at`. Indexed by `(session_id, seq)`.

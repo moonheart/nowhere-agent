@@ -2,8 +2,12 @@
 
 ## MODIFIED Requirements
 
-### Requirement: Thinking round-trips with its signature
+### Requirement: Thinking round-trip
 Thinking blocks SHALL carry their provider signature as a distinct, preserved value so it can be persisted and sent back to the provider on subsequent turns. The signature SHALL NOT be merged into the thinking text.
+
+#### Scenario: Multi-turn thinking
+- **WHEN** an assistant message contains thinking and the conversation continues
+- **THEN** the thinking blocks are included in the next request to providers that require them
 
 #### Scenario: Signature captured separately
 - **WHEN** the provider streams a thinking block followed by a signature delta
