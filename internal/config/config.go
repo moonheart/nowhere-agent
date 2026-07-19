@@ -18,6 +18,8 @@ type Config struct {
 	Log  Log
 	LLM  LLM
 	Web  Web
+	// Workspace configures per-session image storage (persist-raw-messages).
+	Workspace Workspace
 }
 
 // LLM configures the default model provider for the chat endpoint.
@@ -32,6 +34,14 @@ type LLM struct {
 type Web struct {
 	// Dir is the built frontend (web/dist). Empty disables static serving.
 	Dir string `envconfig:"WEB_DIR" default:""`
+}
+
+// Workspace configures the per-session workspace storage that backs image
+// payloads referenced by conversation messages (persist-raw-messages).
+type Workspace struct {
+	// Dir is the local root under which per-session image files are stored
+	// (<dir>/<sessionID>/<name>.webp). Empty disables image storage.
+	Dir string `envconfig:"WORKSPACE_DIR" default:""`
 }
 
 // HTTP configures the gateway server.

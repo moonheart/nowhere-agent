@@ -24,6 +24,7 @@ import (
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/toolruntime"
+	"nowhere-agent/internal/workspace"
 )
 
 func main() {
@@ -66,6 +67,17 @@ func run() error {
 	// and the run log doubles as the episodes for dreaming.
 	sessionRuntime := session.NewRuntime(session.NewPGStore(pool))
 
+	// Full-block conversation record (persist-raw-messages): messages are
+	// persisted in original form and cross-run history is rebuilt from it.
+	messageStore := session.NewPGMessageStore(pool)
+
+	// Workspace image store: image payloads referenced by messages live as
+	// WebP files under a per-session dir; the messages table holds pointers.
+	var imageStore *workspace.ImageStore
+	if cfg.Workspace.Dir != "" {
+		imageStore = workspace.NewImageStore(cfg.Workspace.Dir)
+	}
+
 	// Memory (PG+vector) and skill engine feed the loop's system prompt:
 	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
 	memPort := memory.NewPGPort(pool)
@@ -76,7 +88,7 @@ func run() error {
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
-		chatapi.NewHandler(func(ctx context.Context, system string) *agent.Loop {
+		handler := chatapi.NewHandler(func(ctx context.Context, system string) *agent.Loop {
 			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           model,
 				System:          system,
@@ -86,8 +98,12 @@ func run() error {
 			})
 		}, baseSystem).
 			WithRuntime(sessionRuntime).
-			WithContextBuilder(ctxBuilder).
-			RegisterAuthed(mux, identityHandler.RequireAuth)
+			WithMessageStore(messageStore).
+			WithContextBuilder(ctxBuilder)
+		if imageStore != nil {
+			handler = handler.WithImageStore(imageStore)
+		}
+		handler.RegisterAuthed(mux, identityHandler.RequireAuth)
 		log.Info("chat endpoint enabled (auth required)", "provider", adapter.Name(), "model", model)
 	} else {
 		log.Warn("chat endpoint disabled: no LLM provider configured (set LLM_PROVIDER/LLM_API_KEY)")

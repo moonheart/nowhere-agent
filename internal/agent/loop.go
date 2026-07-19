@@ -73,6 +73,14 @@ func New(p provider.Adapter, tools *toolruntime.Registry, cfg Config) *Loop {
 	return &Loop{provider: p, tools: tools, config: cfg}
 }
 
+// WithImages sets the image resolver used to materialize BlockImage paths to
+// base64 before each send. It is called once per run, after the loop is built,
+// when the session (and thus the confined resolver) is known.
+func (l *Loop) WithImages(res provider.ImageResolver) *Loop {
+	l.config.Images = res
+	return l
+}
+
 // toolDefs converts registered tools to provider tool definitions.
 func (l *Loop) toolDefs() []provider.ToolDefinition {
 	all := l.tools.All()

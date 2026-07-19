@@ -169,6 +169,13 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	}
 	sessID := s.ID
 
+	// Bind the image materializer to this session so any BlockImage in the
+	// rebuilt history or produced output resolves within this session's
+	// workspace (confined). Set before the run starts.
+	if h.images != nil {
+		loop.WithImages(h.images.ResolverFor(sessID))
+	}
+
 	// Build the user turn's message so the run worker can persist it (full-block
 	// conversation record) in addition to the replay event below.
 	var userMsg *provider.Message

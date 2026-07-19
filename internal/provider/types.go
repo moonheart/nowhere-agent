@@ -24,38 +24,41 @@ const (
 )
 
 // Block is one unit of message content. Only the fields relevant to Type are set.
+// The JSON tags control how blocks are persisted (messages.content) and shipped
+// over the wire: empty fields are omitted, and the materialized base64 payload
+// (ImageData) is never serialized — it is transient, rebuilt at send time.
 type Block struct {
-	Type BlockType
+	Type BlockType `json:"type"`
 
 	// Text (BlockText)
-	Text string
+	Text string `json:"text,omitempty"`
 
 	// Thinking (BlockThinking) — must round-trip back to the provider.
-	Thinking          string
-	ThinkingSignature string
+	Thinking          string `json:"thinking,omitempty"`
+	ThinkingSignature string `json:"thinking_signature,omitempty"`
 
 	// Tool use (BlockToolUse) — assistant requesting a tool call.
-	ToolUseID string
-	ToolName  string
-	ToolInput map[string]any
+	ToolUseID string         `json:"tool_use_id,omitempty"`
+	ToolName  string         `json:"tool_name,omitempty"`
+	ToolInput map[string]any `json:"tool_input,omitempty"`
 
 	// Tool result (BlockToolResult) — the result fed back to the model.
-	ToolResultID string // matches the ToolUseID it answers
-	ToolContent  string
-	IsError      bool
+	ToolResultID string `json:"tool_result_id,omitempty"` // matches the ToolUseID it answers
+	ToolContent  string `json:"tool_content,omitempty"`
+	IsError      bool   `json:"is_error,omitempty"`
 
 	// Image (BlockImage) — a reference to an image, never the payload. The
 	// image bytes live in the session workspace; the block carries a
 	// workspace-relative path. It is materialized to the provider-native base64
 	// source at send time (every turn, byte-stable for prompt caching).
-	MediaType string // e.g. "image/webp"
-	ImagePath string // workspace-relative path
+	MediaType string `json:"media_type,omitempty"` // e.g. "image/webp"
+	ImagePath string `json:"image_path,omitempty"` // workspace-relative path
 	// ImageData holds base64 image bytes, populated only transiently by the
-	// pre-send materialization transform. It is never persisted.
-	ImageData string
+	// pre-send materialization transform. It is never persisted (json:"-").
+	ImageData string `json:"-"`
 
 	// CachePoint marks this block's prefix as cacheable when true.
-	CachePoint bool
+	CachePoint bool `json:"cache_point,omitempty"`
 }
 
 // Message is one turn in a conversation. Content is an ordered block array.

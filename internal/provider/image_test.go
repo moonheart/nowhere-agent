@@ -3,7 +3,9 @@ package provider
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +82,23 @@ func TestMaterializeImagesNilResolver(t *testing.T) {
 	out := MaterializeImages(context.Background(), req, nil)
 	if out.Messages[0].Content[0].ImageData != "" {
 		t.Error("nil resolver must leave blocks untouched")
+	}
+}
+
+// TestImageDataNeverSerialized guards the core invariant (persist-raw-messages
+// D6): the materialized base64 payload must never enter the persisted form.
+// Only the path pointer and media type persist.
+func TestImageDataNeverSerialized(t *testing.T) {
+	b := Block{Type: BlockImage, MediaType: "image/webp", ImagePath: "img/a.webp", ImageData: "QUJDREVG"}
+	data, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if strings.Contains(s, "QUJDREVG") || strings.Contains(s, "ImageData") || strings.Contains(s, "image_data") {
+		t.Errorf("base64 payload leaked into serialized block: %s", s)
+	}
+	if !strings.Contains(s, "img/a.webp") || !strings.Contains(s, "image/webp") {
+		t.Errorf("pointer/media_type must persist: %s", s)
 	}
 }
