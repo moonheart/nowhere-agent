@@ -20,6 +20,7 @@ type Adapter struct {
 	endpoint   string
 	anthroVer  string
 	httpClient *http.Client
+	recorder   *provider.RawRecorder
 }
 
 // Option customizes the Adapter.
@@ -31,6 +32,11 @@ func WithEndpoint(url string) Option { return func(a *Adapter) { a.endpoint = ur
 // WithHTTPClient overrides the HTTP client.
 func WithHTTPClient(c *http.Client) Option { return func(a *Adapter) { a.httpClient = c } }
 
+// WithRawRecorder records raw request/response wire bytes (for debugging).
+func WithRawRecorder(r *provider.RawRecorder) Option {
+	return func(a *Adapter) { a.recorder = r }
+}
+
 // New creates an Anthropic adapter.
 func New(apiKey string, opts ...Option) *Adapter {
 	a := &Adapter{
@@ -38,6 +44,7 @@ func New(apiKey string, opts ...Option) *Adapter {
 		endpoint:   defaultEndpoint,
 		anthroVer:  "2023-06-01",
 		httpClient: http.DefaultClient,
+		recorder:   provider.NewRawRecorder(""),
 	}
 	for _, o := range opts {
 		o(a)
@@ -74,9 +81,29 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		return nil, fmt.Errorf("anthropic status %d: %s", resp.StatusCode, string(b))
 	}
 
+	// Record the raw request/response wire bytes. The response is tee'd so the
+	// SSE stream is captured as it is read, without buffering the whole body.
+	respSink := a.recorder.Exchange(a.Name(), body)
+	recorded := io.TeeReader(resp.Body, respSink)
+
 	out := make(chan provider.Event, 16)
-	go streamEvents(resp.Body, out)
+	go streamEvents(teeCloser{recorded, resp.Body, respSink}, out)
 	return out, nil
+}
+
+// teeCloser couples the tee'd reader with the underlying body and the
+// recording sink so closing finalizes both.
+type teeCloser struct {
+	r    io.Reader
+	body io.Closer
+	sink io.Closer
+}
+
+func (tc teeCloser) Read(p []byte) (int, error) { return tc.r.Read(p) }
+func (tc teeCloser) Close() error {
+	err := tc.body.Close()
+	_ = tc.sink.Close() // finalize the recorded response even if body close failed
+	return err
 }
 
 // streamEvents reads the SSE body and emits canonical events until EOF.

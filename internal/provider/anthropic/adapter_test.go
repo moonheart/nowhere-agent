@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"nowhere-agent/internal/provider"
@@ -50,6 +53,43 @@ func TestAdapterStreamAgainstServer(t *testing.T) {
 	}
 	if lastText != "Yo" {
 		t.Errorf("delta text = %q", lastText)
+	}
+}
+
+// TestAdapterRecordsRawExchange verifies the recorder captures the raw request
+// body and the streamed response bytes, and never the auth header.
+func TestAdapterRecordsRawExchange(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"message_start\"}\n\n"))
+		w.Write([]byte("data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":1}}\n\n"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	a := New("secret-key", WithEndpoint(srv.URL), WithRawRecorder(provider.NewRawRecorder(dir)))
+	events, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 8, Messages: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	for range events { // drain to flush the recorded response
+	}
+
+	files, _ := filepath.Glob(filepath.Join(dir, "anthropic", "*.req"))
+	if len(files) != 1 {
+		t.Fatalf("expected 1 recorded request, got %v", files)
+	}
+	req, _ := os.ReadFile(files[0])
+	if !strings.Contains(string(req), `"model":"m"`) {
+		t.Errorf("recorded request missing body: %s", req)
+	}
+	if strings.Contains(string(req), "secret-key") {
+		t.Error("auth material must never be recorded")
+	}
+
+	resp, _ := os.ReadFile(strings.TrimSuffix(files[0], ".req") + ".resp")
+	if !strings.Contains(string(resp), "message_start") || !strings.Contains(string(resp), "output_tokens") {
+		t.Errorf("recorded response missing SSE bytes: %s", resp)
 	}
 }
 

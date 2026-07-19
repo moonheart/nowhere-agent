@@ -28,6 +28,10 @@ type LLM struct {
 	Model    string `envconfig:"LLM_MODEL" default:""`
 	APIKey   string `envconfig:"LLM_API_KEY" default:""`
 	BaseURL  string `envconfig:"LLM_BASE_URL" default:""` // optional override/proxy
+	// RawLogDir, when set, records every raw LLM HTTP request/response pair to
+	// <dir>/<provider>/<timestamp>-<seq>.{req,resp} for offline inspection.
+	// Auth headers are never written. Empty disables recording.
+	RawLogDir string `envconfig:"LLM_RAW_LOG_DIR" default:""`
 }
 
 // Web configures serving the built frontend.

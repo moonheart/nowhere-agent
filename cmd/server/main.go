@@ -142,18 +142,24 @@ func run() error {
 
 // buildProvider constructs the configured provider adapter, or nil if not configured.
 func buildProvider(cfg config.Config, log *slog.Logger) provider.Adapter {
+	recorder := provider.NewRawRecorder(cfg.LLM.RawLogDir)
+	if recorder.Enabled() {
+		log.Info("recording raw LLM request/response", "dir", cfg.LLM.RawLogDir)
+	}
 	switch cfg.LLM.Provider {
 	case "anthropic":
 		var opts []anthropic.Option
 		if cfg.LLM.BaseURL != "" {
 			opts = append(opts, anthropic.WithEndpoint(cfg.LLM.BaseURL))
 		}
+		opts = append(opts, anthropic.WithRawRecorder(recorder))
 		return anthropic.New(cfg.LLM.APIKey, opts...)
 	case "openai":
 		var opts []openai.Option
 		if cfg.LLM.BaseURL != "" {
 			opts = append(opts, openai.WithEndpoint(cfg.LLM.BaseURL))
 		}
+		opts = append(opts, openai.WithRawRecorder(recorder))
 		return openai.New(cfg.LLM.APIKey, opts...)
 	default:
 		return nil
