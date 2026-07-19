@@ -23,6 +23,11 @@ import (
 // stay transport-only.
 type LoopFactory func(ctx context.Context, system string) *agent.Loop
 
+// ToolBinder attaches session-scoped tools to a loop once the session id is
+// known (file-tools D6). The server implements it by ensuring the session's
+// sandbox and registering the file tools bound to it. Nil disables tools.
+type ToolBinder func(ctx context.Context, loop *agent.Loop, sessionID string)
+
 // ContextBuilder assembles the system prompt for a request: the base prompt
 // plus the L0 skill index and recalled long-term memories for the caller's
 // accessible scopes (design D5/D10 read side). It is the seam where memory
@@ -54,6 +59,9 @@ type Handler struct {
 	// rebuilds cross-run history from it (ignoring client-sent history) and the
 	// run registry persists assembled messages into it.
 	msgStore session.MessageStore
+	// bindTools, when set, attaches session-scoped tools (file tools bound to
+	// the session's sandbox) to each loop after the session is resolved.
+	bindTools ToolBinder
 }
 
 // NewHandler creates a chat Handler.
@@ -99,6 +107,14 @@ func (h *Handler) WithImageStore(is *workspace.ImageStore) *Handler {
 // WithContextBuilder enables memory recall + skill L0 injection into the loop.
 func (h *Handler) WithContextBuilder(cb ContextBuilder) *Handler {
 	h.ctxBuilder = cb
+	return h
+}
+
+// WithToolBinder enables per-session tool wiring (file-tools): the binder runs
+// for each run after the session is resolved, attaching the session's
+// sandbox-bound tools to the loop.
+func (h *Handler) WithToolBinder(b ToolBinder) *Handler {
+	h.bindTools = b
 	return h
 }
 
@@ -174,6 +190,13 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// workspace (confined). Set before the run starts.
 	if h.images != nil {
 		loop.WithImages(h.images.ResolverFor(sessID))
+	}
+
+	// Attach this session's sandbox-bound tools (file-tools) now that the
+	// session id is known. The binder ensures the session's sandbox and
+	// registers its file tools into the loop's registry.
+	if h.bindTools != nil {
+		h.bindTools(r.Context(), loop, sessID)
 	}
 
 	// Build the user turn's message so the run worker can persist it (full-block

@@ -22,6 +22,19 @@ type Config struct {
 	Workspace Workspace
 	// Stream configures the live content broker (redis-stream-live).
 	Stream Stream
+	// Sandbox configures the per-session sandbox backend for built-in tools.
+	Sandbox Sandbox
+}
+
+// Sandbox selects the per-session sandbox backend that built-in file tools run
+// against (file-tools). "off" (default) registers no tools; "local" confines
+// files to a per-session host directory; "docker" isolates each session in a
+// container.
+type Sandbox struct {
+	Backend string `envconfig:"SANDBOX_BACKEND" default:"off"` // off | local | docker
+	// WorkspaceDir is the host root for the local backend's per-session
+	// directories. Empty falls back to WORKSPACE_DIR.
+	WorkspaceDir string `envconfig:"SANDBOX_WORKSPACE_DIR" default:""`
 }
 
 // Stream selects the live content broker that fans run output out to clients.

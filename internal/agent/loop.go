@@ -146,6 +146,16 @@ func (l *Loop) WithImages(res provider.ImageResolver) *Loop {
 	return l
 }
 
+// WithTools replaces the loop's tool registry. It is called once per run, after
+// the loop is built, when the session (and thus its sandbox-bound tools) is
+// known. Nil is ignored, leaving the existing registry in place.
+func (l *Loop) WithTools(reg *toolruntime.Registry) *Loop {
+	if reg != nil {
+		l.tools = reg
+	}
+	return l
+}
+
 // toolDefs converts registered tools to provider tool definitions.
 func (l *Loop) toolDefs() []provider.ToolDefinition {
 	all := l.tools.All()

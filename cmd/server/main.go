@@ -22,9 +22,11 @@ import (
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/provider/anthropic"
 	"nowhere-agent/internal/provider/openai"
+	"nowhere-agent/internal/sandbox"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/toolruntime"
+	"nowhere-agent/internal/toolruntime/builtin"
 	"nowhere-agent/internal/workspace"
 )
 
@@ -94,6 +96,39 @@ func run() error {
 		imageStore = workspace.NewImageStore(cfg.Workspace.Dir)
 	}
 
+	// Sandbox for built-in tools (file-tools): a per-session sandbox Manager
+	// over the configured backend. The tool binder (below) ensures the session's
+	// sandbox and registers its file tools for each run. "off" leaves tools
+	// unregistered (pre-file-tools behaviour).
+	var sandboxMgr *sandbox.Manager
+	var sandboxPort sandbox.Port
+	switch cfg.Sandbox.Backend {
+	case "local":
+		root := cfg.Sandbox.WorkspaceDir
+		if root == "" {
+			root = cfg.Workspace.Dir
+		}
+		if root == "" {
+			return fmt.Errorf("SANDBOX_BACKEND=local requires SANDBOX_WORKSPACE_DIR or WORKSPACE_DIR")
+		}
+		sandboxPort = sandbox.NewLocalPort(root)
+		log.Info("sandbox backend: local fs", "root", root)
+	case "docker":
+		dp, err := sandbox.NewDockerPort()
+		if err != nil {
+			return fmt.Errorf("docker sandbox: %w", err)
+		}
+		sandboxPort = dp
+		log.Info("sandbox backend: docker")
+	case "off", "":
+		log.Info("sandbox backend: off (no built-in tools)")
+	default:
+		return fmt.Errorf("unknown SANDBOX_BACKEND %q", cfg.Sandbox.Backend)
+	}
+	if sandboxPort != nil {
+		sandboxMgr = sandbox.NewManager(sandboxPort)
+	}
+
 	// Memory (PG+vector) and skill engine feed the loop's system prompt:
 	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
 	memPort := memory.NewPGPort(pool)
@@ -127,6 +162,21 @@ func run() error {
 			WithContextBuilder(ctxBuilder)
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
+		}
+		if sandboxMgr != nil {
+			handler = handler.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string) {
+				h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{})
+				if err != nil {
+					log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
+					return
+				}
+				reg := toolruntime.NewRegistry()
+				for _, t := range builtin.FileTools(sandboxPort, h) {
+					reg.Register(t)
+				}
+				loop.WithTools(reg)
+			})
+			log.Info("file tools enabled (read_file/write_file/list_dir)")
 		}
 		handler.RegisterAuthed(mux, identityHandler.RequireAuth)
 		if compressor != nil {
