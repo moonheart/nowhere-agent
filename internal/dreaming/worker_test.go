@@ -7,6 +7,7 @@ import (
 
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
 )
 
@@ -26,19 +27,27 @@ func (f *fakeLLM) Complete(_ context.Context, _ string) (string, int, error) {
 // fakeEpisodeSource serves canned sessions+episodes.
 type fakeEpisodeSource struct {
 	sessions  []session.Session
-	episodes  map[string][]session.Event
+	episodes  map[string][]session.StoredMessage
 	processed []string
 }
 
 func (f *fakeEpisodeSource) EndedSessions(context.Context) ([]session.Session, error) {
 	return f.sessions, nil
 }
-func (f *fakeEpisodeSource) Episodes(_ context.Context, id string) ([]session.Event, error) {
+func (f *fakeEpisodeSource) Episodes(_ context.Context, id string) ([]session.StoredMessage, error) {
 	return f.episodes[id], nil
 }
 func (f *fakeEpisodeSource) MarkProcessed(_ context.Context, id string) error {
 	f.processed = append(f.processed, id)
 	return nil
+}
+
+// textMsg builds a stored user text message for tests.
+func textMsg(text string) session.StoredMessage {
+	return session.StoredMessage{
+		Role:    provider.RoleUser,
+		Content: []provider.Block{{Type: provider.BlockText, Text: text}},
+	}
 }
 
 func endedSession(id, userID string) session.Session {
@@ -49,8 +58,8 @@ func TestWorkerExtractsAndStoresFacts(t *testing.T) {
 	sess := endedSession("s1", "user1")
 	src := &fakeEpisodeSource{
 		sessions: []session.Session{sess},
-		episodes: map[string][]session.Event{
-			"s1": {{RunID: "r1", SessionID: "s1", Payload: []byte(`"user likes go"`)}},
+		episodes: map[string][]session.StoredMessage{
+			"s1": {textMsg("user likes go")},
 		},
 	}
 	mem := memory.NewMemPort()
@@ -89,9 +98,9 @@ func TestWorkerBudgetStopsProcessing(t *testing.T) {
 	}
 	src := &fakeEpisodeSource{
 		sessions: sessions,
-		episodes: map[string][]session.Event{
-			"s1": {{Payload: []byte(`"a"`)}},
-			"s2": {{Payload: []byte(`"b"`)}},
+		episodes: map[string][]session.StoredMessage{
+			"s1": {textMsg("a")},
+			"s2": {textMsg("b")},
 		},
 	}
 	llm := &fakeLLM{output: "fact", tokens: 100}
@@ -118,7 +127,7 @@ func TestWorkerReorganizeDeprecatesContradicted(t *testing.T) {
 
 	src := &fakeEpisodeSource{
 		sessions: []session.Session{endedSession("s1", "u1")},
-		episodes: map[string][]session.Event{"s1": {{Payload: []byte(`"x"`)}}},
+		episodes: map[string][]session.StoredMessage{"s1": {textMsg("x")}},
 	}
 	llm := &fakeLLM{output: "user no longer uses vim", tokens: 10}
 	w := NewWorker(src, mem, llm, Budget{MaxTokens: 100})
@@ -142,7 +151,7 @@ func TestWorkerReorganizeDeprecatesContradicted(t *testing.T) {
 func TestWorkerEmptyEpisodesMarksProcessed(t *testing.T) {
 	src := &fakeEpisodeSource{
 		sessions: []session.Session{endedSession("s1", "u1")},
-		episodes: map[string][]session.Event{"s1": {}},
+		episodes: map[string][]session.StoredMessage{"s1": {}},
 	}
 	w := NewWorker(src, memory.NewMemPort(), &fakeLLM{}, Budget{MaxTokens: 100})
 	res, err := w.Run(context.Background())
@@ -160,7 +169,7 @@ func TestWorkerEmptyEpisodesMarksProcessed(t *testing.T) {
 func TestWorkerLLMErrorPropagates(t *testing.T) {
 	src := &fakeEpisodeSource{
 		sessions: []session.Session{endedSession("s1", "u1")},
-		episodes: map[string][]session.Event{"s1": {{Payload: []byte(`"x"`)}}},
+		episodes: map[string][]session.StoredMessage{"s1": {textMsg("x")}},
 	}
 	llm := &fakeLLM{err: errors.New("llm down"), tokens: 5}
 	w := NewWorker(src, memory.NewMemPort(), llm, Budget{MaxTokens: 100})

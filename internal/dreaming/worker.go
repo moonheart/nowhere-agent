@@ -11,6 +11,7 @@ import (
 
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
 )
 
@@ -33,12 +34,15 @@ type Result struct {
 	BudgetExhausted   bool
 }
 
-// EpisodeSource provides episodes (persisted run events) for ended sessions.
+// EpisodeSource provides episodes (persisted conversation messages) for ended
+// sessions. Episodes come from the session's full-block message record
+// (redis-stream-live D6), not the run event log — the message store holds the
+// complete conversation content the worker consolidates.
 type EpisodeSource interface {
 	// EndedSessions returns sessions eligible for dreaming (ended, unprocessed).
 	EndedSessions(ctx context.Context) ([]session.Session, error)
-	// Episodes returns the run events for a session, ordered.
-	Episodes(ctx context.Context, sessionID string) ([]session.Event, error)
+	// Episodes returns the session's persisted messages, ordered by seq.
+	Episodes(ctx context.Context, sessionID string) ([]session.StoredMessage, error)
 	// MarkProcessed records that a session's episodes were dreamed over.
 	MarkProcessed(ctx context.Context, sessionID string) error
 }
@@ -100,7 +104,7 @@ func (w *Worker) Run(ctx context.Context) (Result, error) {
 
 // processSession runs the pipeline for one session's episodes, staying within
 // the remaining token budget. Returns memories written and tokens used.
-func (w *Worker) processSession(ctx context.Context, sess session.Session, eps []session.Event, remainingBudget int) (int, int, error) {
+func (w *Worker) processSession(ctx context.Context, sess session.Session, eps []session.StoredMessage, remainingBudget int) (int, int, error) {
 	// 1. EXTRACT: episodes → facts/preferences.
 	facts, tokens, err := w.extract(ctx, eps, remainingBudget)
 	if err != nil {
@@ -121,12 +125,24 @@ func (w *Worker) processSession(ctx context.Context, sess session.Session, eps [
 }
 
 // extract uses the LLM to pull durable facts/preferences from episodes.
-func (w *Worker) extract(ctx context.Context, eps []session.Event, budget int) ([]string, int, error) {
-	// Build the extraction prompt from episode payloads.
+func (w *Worker) extract(ctx context.Context, eps []session.StoredMessage, budget int) ([]string, int, error) {
+	// Build the extraction prompt from the conversation's message blocks. Text
+	// and thinking carry the prose; tool_use/tool_result name the action and its
+	// outcome, so the extractor sees what the agent did as well as what it said.
 	var b strings.Builder
-	for _, e := range eps {
-		b.WriteString(string(e.Payload))
-		b.WriteString("\n")
+	for _, m := range eps {
+		for _, blk := range m.Content {
+			switch blk.Type {
+			case provider.BlockText:
+				b.WriteString(string(m.Role) + ": " + blk.Text + "\n")
+			case provider.BlockThinking:
+				b.WriteString(string(m.Role) + " (thinking): " + blk.Thinking + "\n")
+			case provider.BlockToolUse:
+				b.WriteString("tool_use: " + blk.ToolName + "\n")
+			case provider.BlockToolResult:
+				b.WriteString("tool_result: " + blk.ToolContent + "\n")
+			}
+		}
 	}
 	out, tokens, err := w.llm.Complete(ctx, extractPrompt(b.String()))
 	if err != nil {
