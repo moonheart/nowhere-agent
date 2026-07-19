@@ -1,0 +1,10 @@
+schema: spec-driven
+created: 2026-07-19
+goal: "Wire context compression into the agent loop so a long session stays within
+  the model's context budget instead of failing or truncating silently. The loop
+  maintains a working view (the messages actually sent to the model) separate from
+  the authoritative full history (messages table, untouched). When the view crosses
+  a per-model budget, older turns are summarized by an LLM compressor (a no-tools
+  call over the same provider adapter) and the view shrinks; the durable record is
+  never rewritten. Split by conversation round (not message count) so tool_use /
+  tool_result pairs are never severed, and repair pairing before every send."
