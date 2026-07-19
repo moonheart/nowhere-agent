@@ -222,8 +222,9 @@ func TestAppendEventAfterSettleContinuesOffset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two normal in-run events.
-	for _, k := range []string{"thinking", "text"} {
+	// Two normal in-run lifecycle events (content kinds go to the broker, not the
+	// durable log, so use lifecycle kinds to exercise offset continuation).
+	for _, k := range []string{"running", "user"} {
 		if err := rt.AppendEvent(ctx, Event{RunID: run.ID, SessionID: sess.ID, Kind: k, Payload: []byte(`"x"`)}); err != nil {
 			t.Fatal(err)
 		}

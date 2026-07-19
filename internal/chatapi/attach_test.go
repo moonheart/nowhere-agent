@@ -184,17 +184,19 @@ func TestMultiClientAttachSameStream(t *testing.T) {
 	}
 	<-attachDone
 
-	// A client attaching after the run completes replays the full stream from
-	// the durable log (no slow-consumer drop on the replay path).
+	// A client attaching after the run completes gets a clean termination: the
+	// settled content is delivered via /history (from the message store), not
+	// re-streamed here (redis-stream-live).
 	req := httptest.NewRequest("POST", "/api/chat/resume?threadId="+sessID+"&after=0", nil)
 	req = req.WithContext(identity.NewContextWithUser(req.Context(), owner))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	body := rec.Body.String()
-	for _, want := range []string{`"delta":"alpha "`, `"delta":"beta "`, `"delta":"gamma"`, `"status":"done"`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("post-completion attach missing %q\n---\n%s", want, body)
-		}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("post-completion attach should terminate cleanly\n---\n%s", body)
+	}
+	if strings.Contains(body, `"delta":"alpha "`) {
+		t.Errorf("settled run must not re-stream content deltas (served by /history)\n---\n%s", body)
 	}
 }
 
@@ -329,8 +331,9 @@ func TestCancelBroadcastToAttachedClients(t *testing.T) {
 	}
 }
 
-// TestRuntimeFanoutToManySubscribers verifies the Runtime fans each appended
-// event out to every subscriber channel (the in-memory attach mechanism).
+// TestRuntimeFanoutToManySubscribers verifies the Runtime's live broker fans
+// each content frame out to every subscriber channel (the in-memory attach
+// mechanism for streaming deltas).
 func TestRuntimeFanoutToManySubscribers(t *testing.T) {
 	rt := session.NewRuntime(session.NewMemStore())
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
@@ -343,10 +346,10 @@ func TestRuntimeFanoutToManySubscribers(t *testing.T) {
 	}
 
 	const subs = 3
-	chans := make([]<-chan session.Event, subs)
+	chans := make([]<-chan session.StreamEvent, subs)
 	unsubs := make([]func(), subs)
 	for i := range chans {
-		chans[i], unsubs[i] = rt.Subscribe(sess.ID, 8)
+		chans[i], unsubs[i] = rt.Broker().Subscribe(sess.ID, 8)
 		defer unsubs[i]()
 	}
 
@@ -363,7 +366,7 @@ func TestRuntimeFanoutToManySubscribers(t *testing.T) {
 				t.Errorf("subscriber %d got kind %q", i, e.Kind)
 			}
 		case <-time.After(time.Second):
-			t.Errorf("subscriber %d did not receive the fanned-out event", i)
+			t.Errorf("subscriber %d did not receive the fanned-out frame", i)
 		}
 	}
 }

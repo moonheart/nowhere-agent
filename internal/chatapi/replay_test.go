@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/identity"
@@ -110,7 +111,7 @@ func TestChatEmitsSessionFrame(t *testing.T) {
 func TestHistoryRebuildsConversation(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
-	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt).WithMessageStore(session.NewMemMessageStore())
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -161,12 +162,57 @@ func TestHistoryRebuildsConversation(t *testing.T) {
 	}
 }
 
-// TestResumeReplaysRun verifies POST /resume streams the run's persisted events
-// after the offset as ui-message-stream frames.
+// TestResumeReplaysRun verifies POST /resume streams an in-flight run's output
+// back to a reconnecting client: the client that attaches mid-run receives the
+// run's content deltas (live + broker-retained) and a clean termination.
 func TestResumeReplaysRun(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
-	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	p := newGatedProvider("Doudou ", "is your cat")
+	h := NewHandler(gatedLoop(p), "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	owner := identity.User{ID: "owner"}
+
+	sessID, wait := startRunAsync(t, mux, p, owner, `{"messages":[{"role":"user","content":"q1"}]}`)
+	defer wait()
+
+	// A client attaches while the run is still in flight.
+	resumed := make(chan string, 1)
+	go func() {
+		req := httptest.NewRequest("POST", "/api/chat/resume?threadId="+sessID+"&after=0", nil)
+		req = req.WithContext(identity.NewContextWithUser(req.Context(), owner))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		resumed <- rec.Body.String()
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let the attach subscribe
+	close(p.gate)                     // release the run's content
+
+	select {
+	case out := <-resumed:
+		for _, want := range []string{
+			`"status":"running"`, // durable lifecycle replay marks the run started
+			`"delta":"Doudou "`,  // content delta from the live broker
+			"data: [DONE]",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("resume stream missing %q\n---\n%s", want, out)
+			}
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("resume did not stream the in-flight run")
+	}
+}
+
+// TestResumeSettledRunStreamsNothing verifies resuming a completed run does not
+// re-stream content (the settled content is delivered via /history from the
+// message store); it just terminates cleanly.
+func TestResumeSettledRunStreamsNothing(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt).WithMessageStore(session.NewMemMessageStore())
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -176,21 +222,12 @@ func TestResumeReplaysRun(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/chat/resume?threadId="+sessID+"&after=0", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("resume status = %d body=%s", rec.Code, rec.Body.String())
-	}
 	out := rec.Body.String()
-	for _, want := range []string{
-		`"type":"reasoning-start"`,
-		`"delta":"pondering "`,
-		`"type":"text-start"`,
-		`"delta":"Doudou "`,
-		`"type":"finish"`,
-		"data: [DONE]",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("resume stream missing %q\n---\n%s", want, out)
-		}
+	if strings.Contains(out, `"delta":"Doudou "`) {
+		t.Errorf("settled resume must not re-stream content (served by /history)\n---\n%s", out)
+	}
+	if !strings.Contains(out, "data: [DONE]") {
+		t.Errorf("settled resume should still terminate\n---\n%s", out)
 	}
 }
 

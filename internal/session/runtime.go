@@ -46,11 +46,16 @@ type Store interface {
 
 // Runtime coordinates run lifecycle, the single-active-run lock, and event
 // fan-out to attached clients. Transport (WS/SSE) subscribes; Runtime owns state.
-// Fan-out goes through an EventBus (in-memory single-instance by default) so a
-// Redis-backed bus can fan out across instances without this layer changing.
+//
+// Delivery is split by latency budget (design redis-stream-live D1): streaming
+// content deltas go to a StreamBroker with no database on the path, while
+// lifecycle events (running/done/error/cancelled/user) are persisted to the
+// durable run event log and fanned out over the EventBus. The durability
+// boundary for content is the assembled message (MessageStore), not the token.
 type Runtime struct {
-	store Store
-	bus   EventBus
+	store  Store
+	bus    EventBus
+	broker StreamBroker
 
 	mu   sync.Mutex
 	runs map[string]*runState // sessionID -> active run state
@@ -64,24 +69,37 @@ type runState struct {
 	cancel context.CancelFunc
 }
 
-// NewRuntime creates a Runtime over a Store, fanning events out over an
-// in-memory bus. Use WithBus to substitute a different EventBus (e.g. Redis).
+// NewRuntime creates a Runtime over a Store, fanning lifecycle events out over
+// an in-memory bus and content deltas over an in-memory broker. Use WithBus /
+// WithBroker to substitute multi-instance implementations (e.g. Redis).
 func NewRuntime(store Store) *Runtime {
 	return &Runtime{
-		store: store,
-		bus:   NewMemBus(),
-		runs:  map[string]*runState{},
+		store:  store,
+		bus:    NewMemBus(),
+		broker: NewMemBroker(0),
+		runs:   map[string]*runState{},
 	}
 }
 
-// WithBus sets the EventBus used for fan-out and returns the Runtime.
+// WithBus sets the EventBus used for lifecycle fan-out and returns the Runtime.
 func (rt *Runtime) WithBus(bus EventBus) *Runtime {
 	rt.bus = bus
 	return rt
 }
 
+// WithBroker sets the StreamBroker used for live content delivery and returns
+// the Runtime.
+func (rt *Runtime) WithBroker(b StreamBroker) *Runtime {
+	rt.broker = b
+	return rt
+}
+
 // Bus returns the Runtime's EventBus, for transports that subscribe directly.
 func (rt *Runtime) Bus() EventBus { return rt.bus }
+
+// Broker returns the Runtime's StreamBroker, for transports that read the live
+// content stream directly.
+func (rt *Runtime) Broker() StreamBroker { return rt.broker }
 
 // StartRun begins a new run, enforcing single-active-run. Returns ErrRunActive
 // if a run is already in progress; ErrSessionEnded if the session has ended.
@@ -120,9 +138,20 @@ func (rt *Runtime) StartRun(ctx context.Context, sessionID string) (Run, error) 
 	return run, nil
 }
 
-// AppendEvent persists an event (flushing the iteration to the DB) and fans it
-// out to subscribers. This is the single write path for run output.
+// AppendEvent routes one event by kind. Streaming content deltas are published
+// to the live broker WITHOUT touching the database (the hot path must not wait
+// on a write); lifecycle events are persisted to the durable log and fanned out
+// over the bus. This is the single write path for run output.
 func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
+	if isContentKind(e.Kind) {
+		_, err := rt.broker.Publish(ctx, e.SessionID, StreamEvent{
+			RunID:   e.RunID,
+			Kind:    e.Kind,
+			Payload: e.Payload,
+		})
+		return err
+	}
+
 	rt.mu.Lock()
 	rs, ok := rt.runs[e.SessionID]
 	if ok {
@@ -149,6 +178,18 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 	return nil
 }
 
+// isContentKind reports whether an event kind is a streaming content delta that
+// belongs on the live broker (not the durable per-token log). Lifecycle kinds
+// (running/done/error/cancelled/user) are persisted to run_events.
+func isContentKind(kind string) bool {
+	switch kind {
+	case "text", "thinking", "tool_use", "tool_result":
+		return true
+	default:
+		return false
+	}
+}
+
 // CompleteRun marks the active run done/failed/cancelled and releases the lock.
 func (rt *Runtime) CompleteRun(ctx context.Context, sessionID string, status RunStatus) error {
 	if !status.Terminal() {
@@ -162,6 +203,9 @@ func (rt *Runtime) CompleteRun(ctx context.Context, sessionID string, status Run
 	}
 	delete(rt.runs, sessionID)
 	rt.mu.Unlock()
+	// The run is settling: its live content stream has served its purpose and is
+	// scheduled for cleanup (durable content is already in the message store).
+	_ = rt.broker.Settle(ctx, sessionID)
 	return rt.store.UpdateRunStatus(ctx, rs.run.ID, status)
 }
 

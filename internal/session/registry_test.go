@@ -95,6 +95,11 @@ func eventsOfKind(t *testing.T, rt *Runtime, runID string, kind string) []Event 
 
 func TestSubmitRunsToCompletion(t *testing.T) {
 	rt, rg, sess := newRegistrySession(t)
+	// Subscribe to the live broker before the run so we capture content frames as
+	// they stream (the broker clears retained frames on settle, so we collect live).
+	contentCh, unsub := rt.Broker().Subscribe(sess.ID, 64)
+	defer unsub()
+
 	run, err := rg.Submit(context.Background(), sess.ID, RunWork{
 		Loop: registryLoop(&stubProvider{deltas: []string{"hello", " world"}}),
 	})
@@ -105,11 +110,29 @@ func TestSubmitRunsToCompletion(t *testing.T) {
 	if got := waitSettle(t, rt, sess.ID); got != RunDone {
 		t.Errorf("final status = %v want done", got)
 	}
-	if got := len(eventsOfKind(t, rt, run.ID, string(agent.KindText))); got != 2 {
-		t.Errorf("text events = %d want 2", got)
+	// Content deltas go to the live broker, not the durable log; lifecycle (done)
+	// stays in run_events. (redis-stream-live)
+	textCount := 0
+	drain := true
+	for drain {
+		select {
+		case e := <-contentCh:
+			if e.Kind == string(agent.KindText) {
+				textCount++
+			}
+		default:
+			drain = false
+		}
+	}
+	if textCount != 2 {
+		t.Errorf("broker text frames = %d want 2", textCount)
 	}
 	if got := len(eventsOfKind(t, rt, run.ID, string(agent.KindDone))); got != 1 {
 		t.Errorf("done events = %d want 1", got)
+	}
+	// No content deltas in the durable log.
+	if got := len(eventsOfKind(t, rt, run.ID, string(agent.KindText))); got != 0 {
+		t.Errorf("run_events text rows = %d want 0 (content lives in the broker/messages)", got)
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -373,13 +372,13 @@ func TestHistoryActiveFlag(t *testing.T) {
 	}
 }
 
-// TestHistoryReportsAfterOffset verifies GET /history returns the newest run's
-// max persisted offset, which the client passes back to resume() so a reconnect
-// streams only new events rather than replaying the whole run.
-func TestHistoryReportsAfterOffset(t *testing.T) {
+// TestHistoryReportsActiveForSettledRun verifies GET /history reports a
+// completed run as inactive, and that a follow-up resume does not re-stream the
+// settled content (which is delivered by /history from the message store).
+func TestHistoryReportsActiveForSettledRun(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
-	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt).WithMessageStore(session.NewMemMessageStore())
 	mux := http.NewServeMux()
 	h.Register(mux)
 
@@ -394,7 +393,6 @@ func TestHistoryReportsAfterOffset(t *testing.T) {
 	}
 	var resp struct {
 		Active bool `json:"active"`
-		After  int  `json:"after"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -402,21 +400,15 @@ func TestHistoryReportsAfterOffset(t *testing.T) {
 	if resp.Active {
 		t.Error("active = true for a finished run, want false")
 	}
-	// The completed run persisted user + thinking/text + done events; the max
-	// offset must be > 0 so resume(after) can skip already-loaded content.
-	if resp.After <= 0 {
-		t.Errorf("after = %d, want > 0 (max persisted offset)", resp.After)
-	}
 
-	// And resume from that offset streams nothing new (run is done, no events
-	// after it), rather than replaying the whole run.
-	rreq := httptest.NewRequest("POST", "/api/chat/resume?threadId="+sessID+"&after="+strconv.Itoa(resp.After), nil)
+	// Resume on the settled run streams nothing (content comes from /history).
+	rreq := httptest.NewRequest("POST", "/api/chat/resume?threadId="+sessID+"&after=0", nil)
 	rrec := httptest.NewRecorder()
 	mux.ServeHTTP(rrec, rreq)
 	if rrec.Code != http.StatusOK {
 		t.Fatalf("resume status = %d", rrec.Code)
 	}
 	if strings.Contains(rrec.Body.String(), "text-delta") {
-		t.Errorf("resume(after=max) replayed content; want none\n%s", rrec.Body.String())
+		t.Errorf("settled resume replayed content; want none (served by /history)\n%s", rrec.Body.String())
 	}
 }

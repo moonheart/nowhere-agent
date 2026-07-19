@@ -26,7 +26,7 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.authorizeSession(w, r, threadID); !ok {
 		return
 	}
-	after, _ := strconv.Atoi(r.URL.Query().Get("after"))
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 
 	// Pick the run to resume: the active one if any, else the latest.
 	run, ok, err := h.runtime.ActiveRun(r.Context(), threadID)
@@ -73,23 +73,27 @@ func (h *Handler) latestRun(r *http.Request, sessionID string) (session.Run, boo
 	return latest, true
 }
 
-// emitResumeEvent converts one persisted run event (Kind + JSON payload) into
+// emitStreamEvent converts one live content frame (Kind + JSON payload) into
 // the matching ui-message-stream frame, reusing the emitter's block framing.
-func emitResumeEvent(r *http.Request, emitter *sseEmitter, e session.Event) {
+// It is the live-delivery counterpart to emitResumeEvent: same render, but the
+// source is the StreamBroker, not the durable run event log.
+func emitStreamEvent(r *http.Request, emitter *sseEmitter, e session.StreamEvent) {
 	switch agent.EventKind(e.Kind) {
-	case agent.KindRunning, agent.KindDone:
-		// Lifecycle events: no content payload, just the run-status frame so an
-		// attached client syncs run state (start / natural finish).
-		emitter.Emit(r.Context(), agent.EventKind(e.Kind), nil)
 	case agent.KindThinking, agent.KindText, agent.KindError:
 		emitter.Emit(r.Context(), agent.EventKind(e.Kind), decodeTextPayload(e.Payload))
-	case agent.KindCancelled:
-		emitter.Emit(r.Context(), agent.KindCancelled, nil)
 	case agent.KindToolUse, agent.KindToolResult:
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.EventKind(e.Kind), m)
 		}
 	}
-	// KindUser is not assistant output; the client already has the user message
-	// and finish() closes the message.
+}
+
+// emitLifecycleEvent renders a durable lifecycle event (running/done/cancelled)
+// as a run-status frame so an attached client syncs run state. Lifecycle events
+// carry no content payload.
+func emitLifecycleEvent(r *http.Request, emitter *sseEmitter, e session.Event) {
+	switch agent.EventKind(e.Kind) {
+	case agent.KindRunning, agent.KindDone, agent.KindCancelled:
+		emitter.Emit(r.Context(), agent.EventKind(e.Kind), nil)
+	}
 }

@@ -344,16 +344,17 @@ func writeSSEError(w http.ResponseWriter, msg string) {
 	emitter.finish()
 }
 
-// attach streams a run's events to the client: it subscribes to the bus first
-// (so no live event falls into the subscribe/replay gap), replays the persisted
-// gap from `after`, then live-follows until the run settles or the client
-// disconnects. On the terminal event it does a final replay to fill any gap a
-// slow live consumer dropped (D6). Shared by serveChat (submitter, after=0) and
-// serveResume (attacher, after=N): every client traverses this one path (D3).
+// attach streams a run's output to the client over the live StreamBroker (no
+// database on the path). It subscribes first (so no live frame falls into the
+// subscribe/catch-up gap), replays the retained buffer from `after`, then
+// live-follows until the run settles or the client disconnects. Content frames
+// come from the broker; the run's settled state comes from the runtime (the
+// durable lifecycle log). Shared by serveChat (submitter, after=0) and
+// serveResume (attacher): every client traverses this one path.
 //
 // pre is an optional set of frames written right after the `start` frame (e.g.
 // the submitter's data-session frame).
-func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID string, run session.Run, after int, pre []chunk) {
+func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID string, run session.Run, after int64, pre []chunk) {
 	flusher := w.(http.Flusher)
 	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
 	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
@@ -361,23 +362,52 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 		emitter.write(c)
 	}
 
-	// Subscribe first: any event appended from now on is buffered on ch, so the
-	// replay below cannot race past a live event and lose it.
-	ch, unsub := h.runtime.Subscribe(sessionID, 128)
-	defer unsub()
-
-	// Replay the persisted gap. Events that arrived before the subscribe are also
-	// on ch; the offset filter dedups them.
-	maxOffset, terminal := h.replayInto(r, emitter, run, after)
-	if terminal {
+	// A settled run has no live stream: its content is durable in the message
+	// store and delivered to the client via serveHistory, so there is nothing to
+	// attach to here. Just close the message cleanly.
+	if run.Status.Terminal() {
 		emitter.finish()
 		return
 	}
 
-	// Live-follow buffered + new events until the run settles or the client
-	// disconnects. A periodic settle check covers the case where the run finished
-	// entirely between subscribe and now (no event will ever arrive on ch), which
-	// the purely event-driven loop cannot observe.
+	broker := h.runtime.Broker()
+
+	// Subscribe to BOTH channels before any catch-up, so nothing published during
+	// the catch-up below is lost: content deltas from the broker (no DB on the
+	// path) and lifecycle events from the bus (running/cancelled — the latter
+	// terminates this stream even when no further content frame arrives).
+	contentCh, unsubContent := broker.Subscribe(sessionID, 256)
+	defer unsubContent()
+	lifecycleCh, unsubLifecycle := h.runtime.Subscribe(sessionID, 16)
+	defer unsubLifecycle()
+
+	// Replay the run's durable lifecycle events (running) so a client that
+	// attached after they were published still learns the run started. Lifecycle
+	// is low-volume, so a durable replay here is cheap and off the hot path.
+	if lifecycle, err := h.runtime.Replay(r.Context(), run.ID, 0); err == nil {
+		for _, e := range lifecycle {
+			if agent.EventKind(e.Kind) == agent.KindUser {
+				continue // the client already has its own user message
+			}
+			emitLifecycleEvent(r, emitter, e)
+		}
+	}
+
+	// Catch up on content frames retained in the broker that this client hasn't seen.
+	maxOffset := after
+	if retained, err := broker.Read(r.Context(), sessionID, after); err == nil {
+		for _, e := range retained {
+			if e.RunID != run.ID || e.Offset <= maxOffset {
+				continue
+			}
+			maxOffset = e.Offset
+			emitStreamEvent(r, emitter, e)
+		}
+	}
+
+	// Live-follow until the run settles or the client disconnects. A periodic
+	// settle check covers the case where the run finished between subscribe and
+	// now (no frame will ever arrive), which the frame-driven loop can't observe.
 	settlePoll := time.NewTicker(20 * time.Millisecond)
 	defer settlePoll.Stop()
 	for {
@@ -386,16 +416,21 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			return
 		case <-settlePoll.C:
 			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
-				h.fillTail(r, emitter, run, maxOffset)
 				emitter.finish()
 				return
 			}
-		case e, open := <-ch:
+		case e, open := <-lifecycleCh:
 			if !open {
-				// The bus never closes subscriber channels (an in-flight Publish
-				// must not panic on a closed channel), so this is defensive; the
-				// loop actually terminates on the terminal event or ActiveRun check.
-				h.fillTail(r, emitter, run, maxOffset)
+				continue
+			}
+			if e.RunID != run.ID {
+				continue
+			}
+			emitLifecycleEvent(r, emitter, e)
+			// A terminal lifecycle event ends the run; the settle check will close
+			// the stream on the next tick (giving any trailing content a chance).
+		case e, open := <-contentCh:
+			if !open {
 				emitter.finish()
 				return
 			}
@@ -403,52 +438,13 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 				continue
 			}
 			maxOffset = e.Offset
-			emitResumeEvent(r, emitter, e)
-			kind := agent.EventKind(e.Kind)
-			if kind == agent.KindDone || kind == agent.KindError || kind == agent.KindCancelled {
-				h.fillTail(r, emitter, run, maxOffset)
-				emitter.finish()
-				return
-			}
-			// The run may have settled without a further event we can observe
-			// (e.g. its terminal event was dropped as a slow consumer). Bail out
-			// once it is no longer active, filling the tail from the durable log.
+			emitStreamEvent(r, emitter, e)
+			// The run may have settled without a further frame we can observe.
 			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
-				h.fillTail(r, emitter, run, maxOffset)
 				emitter.finish()
 				return
 			}
 		}
-	}
-}
-
-// replayInto replays persisted events after `after` into the emitter, returning
-// the highest offset written and whether the run had already settled.
-func (h *Handler) replayInto(r *http.Request, emitter *sseEmitter, run session.Run, after int) (int, bool) {
-	replayed, err := h.runtime.Replay(r.Context(), run.ID, after)
-	if err != nil {
-		emitter.Emit(r.Context(), agent.KindError, err.Error())
-		return after, true
-	}
-	maxOffset := after
-	for _, e := range replayed {
-		emitResumeEvent(r, emitter, e)
-		if e.Offset > maxOffset {
-			maxOffset = e.Offset
-		}
-	}
-	return maxOffset, run.Status.Terminal()
-}
-
-// fillTail replays any events after maxOffset so a slow live consumer recovers
-// the deltas it dropped before the stream finishes (D6).
-func (h *Handler) fillTail(r *http.Request, emitter *sseEmitter, run session.Run, maxOffset int) {
-	replayed, err := h.runtime.Replay(r.Context(), run.ID, maxOffset)
-	if err != nil {
-		return
-	}
-	for _, e := range replayed {
-		emitResumeEvent(r, emitter, e)
 	}
 }
 

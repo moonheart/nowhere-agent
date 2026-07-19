@@ -47,10 +47,11 @@ func TestChatPersistsRunWithRuntime(t *testing.T) {
 		t.Errorf("run status = %q want done", runs[0].Status)
 	}
 
-	// Events (text + done) should be persisted for replay.
+	// Lifecycle events are persisted to the durable log; streaming content deltas
+	// are NOT (they go to the live broker — redis-stream-live).
 	events := store.EventsFor(runs[0].ID)
 	if len(events) == 0 {
-		t.Fatal("expected persisted events for the run")
+		t.Fatal("expected persisted lifecycle events for the run")
 	}
 	var sawText, sawDone bool
 	for _, e := range events {
@@ -64,8 +65,11 @@ func TestChatPersistsRunWithRuntime(t *testing.T) {
 			t.Errorf("event offset not assigned: %+v", e)
 		}
 	}
-	if !sawText || !sawDone {
-		t.Errorf("expected text and done events, got %+v", events)
+	if sawText {
+		t.Errorf("content delta persisted to run_events (should be broker-only): %+v", events)
+	}
+	if !sawDone {
+		t.Errorf("expected done lifecycle event, got %+v", events)
 	}
 }
 
