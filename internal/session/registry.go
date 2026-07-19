@@ -32,6 +32,10 @@ func marshalPayload(payload any) []byte {
 type RunWork struct {
 	Loop    *agent.Loop
 	History []provider.Message
+	// UserMessage is the new user turn that started this run. When set and a
+	// MessageStore is wired, the worker persists it as the run's first message
+	// before driving the loop, so the conversation record includes the user side.
+	UserMessage *provider.Message
 }
 
 // RunRegistry owns run execution. Where Runtime owns run state (the
@@ -42,6 +46,11 @@ type RunWork struct {
 type RunRegistry struct {
 	rt  *Runtime
 	bus EventBus
+
+	// msgStore, when set, receives the loop's assembled messages (user,
+	// assistant, tool-result) for full-block persistence (persist-raw-messages).
+	// Nil disables message persistence (tests/dev).
+	msgStore MessageStore
 
 	mu      sync.Mutex
 	workers map[string]*runWorker // sessionID -> active worker
@@ -57,6 +66,12 @@ type runWorker struct {
 // NewRunRegistry creates a registry over a Runtime (state) and EventBus (fan-out).
 func NewRunRegistry(rt *Runtime, bus EventBus) *RunRegistry {
 	return &RunRegistry{rt: rt, bus: bus, workers: map[string]*runWorker{}}
+}
+
+// WithMessageStore wires full-block message persistence and returns the registry.
+func (rg *RunRegistry) WithMessageStore(ms MessageStore) *RunRegistry {
+	rg.msgStore = ms
+	return rg
 }
 
 // Submit starts a run for the session and executes it on a dedicated goroutine.
@@ -99,6 +114,18 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 	}()
 
 	emit := &registryEmitter{rg: rg, sessionID: sessionID, runID: run.ID}
+
+	// Persist the user turn that started this run as its first message, so the
+	// conversation record (the compression/history source) includes the user side.
+	if rg.msgStore != nil && work.UserMessage != nil {
+		_, _ = rg.msgStore.AppendMessage(context.Background(), StoredMessage{
+			SessionID: sessionID,
+			RunID:     run.ID,
+			Role:      work.UserMessage.Role,
+			Content:   work.UserMessage.Content,
+		})
+	}
+
 	_, runErr := work.Loop.Run(runCtx, work.History, emit)
 
 	// Determine terminal status; cancelled beats failed when the ctx was cancelled.
@@ -190,6 +217,44 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Assembled conversation messages go to the MessageStore for full-block
+	// persistence. They are NOT written to run_events: KindMessage is a
+	// persistence signal, not a render frame, and the durable run log already
+	// carries the text/thinking/tool frames the UI replays.
+	if kind == agent.KindMessage {
+		e.persistMessage(ctx, payload)
+		return nil
+	}
 	e.rg.append(ctx, e.sessionID, e.runID, kind, payload)
 	return nil
+}
+
+// persistMessage stores one assembled message in the MessageStore. The payload
+// is the provider.Message the loop emitted. Persistence is best-effort: a
+// failure is logged but does not abort the run (the run's render stream is
+// unaffected).
+func (e *registryEmitter) persistMessage(ctx context.Context, payload any) {
+	if e.rg.msgStore == nil {
+		return
+	}
+	msg, ok := payload.(provider.Message)
+	if !ok {
+		// Tolerate a marshalled-then-decoded message (map shape) too.
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return
+		}
+	}
+	// Use a background context: by the time the final assistant message is
+	// emitted the run ctx may already be cancelled, and we still want the
+	// message persisted (mirrors the terminal-event re-publish on a live ctx).
+	_, _ = e.rg.msgStore.AppendMessage(context.Background(), StoredMessage{
+		SessionID: e.sessionID,
+		RunID:     e.runID,
+		Role:      msg.Role,
+		Content:   msg.Content,
+	})
 }

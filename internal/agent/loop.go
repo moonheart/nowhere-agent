@@ -23,6 +23,11 @@ const (
 	KindToolResult EventKind = "tool_result"
 	KindError      EventKind = "error"
 	KindDone       EventKind = "done"
+	// KindMessage carries a fully-assembled conversation message (payload:
+	// provider.Message) so the run path can persist it in original block form.
+	// It is emitted once per completed message: each assistant message and each
+	// tool-result message. It is a persistence signal, not a render frame.
+	KindMessage EventKind = "message"
 	// KindCancelled marks a run stopped early (client Stop / server cancel). It
 	// is persisted so replay/history can tell a cancelled run from a finished one.
 	KindCancelled EventKind = "cancelled"
@@ -116,6 +121,10 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			return produced, err
 		}
 		produced = append(produced, assistant)
+		// Expose the assembled assistant message for full-block persistence
+		// (persist-raw-messages). Emit failures here don't abort the run — the
+		// persistence listener drops them — so ignore the error.
+		_ = emit.Emit(ctx, KindMessage, assistant)
 
 		// No tool calls → final answer; loop ends.
 		if len(toolCalls) == 0 {
@@ -139,7 +148,10 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				"is_error":    res.IsError,
 			})
 		}
-		produced = append(produced, toolResultMessage(toolCalls, results))
+		resultMsg := toolResultMessage(toolCalls, results)
+		produced = append(produced, resultMsg)
+		// Expose the assembled tool-result message for full-block persistence.
+		_ = emit.Emit(ctx, KindMessage, resultMsg)
 	}
 
 	return produced, fmt.Errorf("max iterations (%d) exceeded", l.config.MaxIterations)

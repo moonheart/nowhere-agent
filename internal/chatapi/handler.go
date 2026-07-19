@@ -70,6 +70,15 @@ func (h *Handler) WithRegistry(rg *session.RunRegistry) *Handler {
 	return h
 }
 
+// WithMessageStore wires full-block message persistence into the run-execution
+// registry (persist-raw-messages). Call after WithRuntime/WithRegistry.
+func (h *Handler) WithMessageStore(ms session.MessageStore) *Handler {
+	if h.registry != nil {
+		h.registry.WithMessageStore(ms)
+	}
+	return h
+}
+
 // WithContextBuilder enables memory recall + skill L0 injection into the loop.
 func (h *Handler) WithContextBuilder(cb ContextBuilder) *Handler {
 	h.ctxBuilder = cb
@@ -141,7 +150,15 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	}
 	sessID := s.ID
 
-	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history})
+	// Build the user turn's message so the run worker can persist it (full-block
+	// conversation record) in addition to the replay event below.
+	var userMsg *provider.Message
+	if text := lastUserText(req); text != "" {
+		m := provider.TextMessage(provider.RoleUser, text)
+		userMsg = &m
+	}
+
+	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history, UserMessage: userMsg})
 	if err != nil {
 		// Single-active-run: a second client submitting while a run is in flight
 		// is rejected (multi-writer prevention), not queued. Checked before any
