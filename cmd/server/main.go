@@ -14,6 +14,7 @@ import (
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/chatapi"
 	"nowhere-agent/internal/config"
+	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/memory"
@@ -103,6 +104,13 @@ func run() error {
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
+		// Context compression (context-compression): the loop compresses its
+		// working view as it approaches the model's context window, using a
+		// no-tools summarize call over the same adapter (LLMCompressor).
+		var compressor contextmgmt.Compressor
+		if cfg.LLM.ContextWindow > 0 {
+			compressor = contextmgmt.NewLLMCompressor(adapter, model)
+		}
 		handler := chatapi.NewHandler(func(ctx context.Context, system string) *agent.Loop {
 			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           model,
@@ -110,6 +118,8 @@ func run() error {
 				MaxTokens:       4096,
 				MaxIterations:   25,
 				CacheablePrefix: true,
+				ContextWindow:   cfg.LLM.ContextWindow,
+				Compressor:      compressor,
 			})
 		}, baseSystem).
 			WithRuntime(sessionRuntime).
@@ -119,6 +129,9 @@ func run() error {
 			handler = handler.WithImageStore(imageStore)
 		}
 		handler.RegisterAuthed(mux, identityHandler.RequireAuth)
+		if compressor != nil {
+			log.Info("context compression enabled", "window", cfg.LLM.ContextWindow)
+		}
 		log.Info("chat endpoint enabled (auth required)", "provider", adapter.Name(), "model", model)
 	} else {
 		log.Warn("chat endpoint disabled: no LLM provider configured (set LLM_PROVIDER/LLM_API_KEY)")

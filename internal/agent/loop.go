@@ -77,6 +77,10 @@ type Config struct {
 	// MaxCompressFailures is the circuit breaker: after this many consecutive
 	// compression failures the loop stops compressing for the run (default 3).
 	MaxCompressFailures int
+	// MaxOverflowRetries bounds the reactive context-overflow fallback: how many
+	// times the loop drops the oldest round and retries after the provider
+	// rejects a request as too large (default 3).
+	MaxOverflowRetries int
 }
 
 // Loop runs the think→tool→think cycle.
@@ -100,7 +104,38 @@ func New(p provider.Adapter, tools *toolruntime.Registry, cfg Config) *Loop {
 	if cfg.MaxCompressFailures <= 0 {
 		cfg.MaxCompressFailures = 3
 	}
+	if cfg.MaxOverflowRetries <= 0 {
+		cfg.MaxOverflowRetries = 3
+	}
 	return &Loop{provider: p, tools: tools, config: cfg}
+}
+
+func (l *Loop) maxOverflowRetries() int { return l.config.MaxOverflowRetries }
+
+// attempt runs one provider call over the given working view and consumes the
+// stream into an assembled assistant message + tool calls. It returns the
+// provider error verbatim (no KindError emit) so the caller can distinguish a
+// retriable context-overflow from a fatal failure.
+func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (provider.Message, []toolruntime.Call, error) {
+	req := provider.Request{
+		Model:           l.config.Model,
+		System:          l.config.System,
+		Messages:        view,
+		Tools:           l.toolDefs(),
+		MaxTokens:       l.config.MaxTokens,
+		CacheablePrefix: l.config.CacheablePrefix,
+	}
+	// Materialize image blocks (path → base64) before every send so the
+	// provider receives the payload; byte-stable across turns for caching.
+	if l.config.Images != nil {
+		req = provider.MaterializeImages(ctx, req, l.config.Images)
+	}
+
+	events, err := l.provider.Stream(ctx, req)
+	if err != nil {
+		return provider.Message{}, nil, fmt.Errorf("stream: %w", err)
+	}
+	return l.consume(ctx, events, emit)
 }
 
 // WithImages sets the image resolver used to materialize BlockImage paths to
@@ -163,27 +198,18 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			l.compressFailures++
 		}
 
-		req := provider.Request{
-			Model:           l.config.Model,
-			System:          l.config.System,
-			Messages:        view,
-			Tools:           l.toolDefs(),
-			MaxTokens:       l.config.MaxTokens,
-			CacheablePrefix: l.config.CacheablePrefix,
+		assistant, toolCalls, err := l.attempt(ctx, view, emit)
+		for attempts := 0; err != nil && provider.IsContextOverflow(err) && attempts < l.maxOverflowRetries(); attempts++ {
+			// Reactive fallback (design D7): the threshold trigger mis-estimated
+			// and the provider rejected the request as too large. Drop the oldest
+			// round and retry rather than failing the run.
+			shrunk, ok := contextmgmt.DropOldestRound(view)
+			if !ok {
+				break // nothing safe left to drop
+			}
+			view = shrunk
+			assistant, toolCalls, err = l.attempt(ctx, view, emit)
 		}
-		// Materialize image blocks (path → base64) before every send so the
-		// provider receives the payload; byte-stable across turns for caching.
-		if l.config.Images != nil {
-			req = provider.MaterializeImages(ctx, req, l.config.Images)
-		}
-
-		events, err := l.provider.Stream(ctx, req)
-		if err != nil {
-			_ = emit.Emit(ctx, KindError, err.Error())
-			return produced, fmt.Errorf("stream: %w", err)
-		}
-
-		assistant, toolCalls, err := l.consume(ctx, events, emit)
 		if err != nil {
 			if ctx.Err() != nil {
 				_ = emit.Emit(ctx, KindCancelled, nil)

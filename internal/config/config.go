@@ -43,6 +43,10 @@ type LLM struct {
 	// <dir>/<provider>/<timestamp>-<seq>.{req,resp} for offline inspection.
 	// Auth headers are never written. Empty disables recording.
 	RawLogDir string `envconfig:"LLM_RAW_LOG_DIR" default:""`
+	// ContextWindow is the model's context window in tokens. The agent loop
+	// compresses its working view when it approaches this window (context-
+	// compression). 0 disables in-loop compression.
+	ContextWindow int `envconfig:"LLM_CONTEXT_WINDOW" default:"0"`
 }
 
 // Web configures serving the built frontend.

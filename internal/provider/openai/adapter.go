@@ -74,6 +74,11 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		// Surface context-overflow as a typed error so the loop can shrink the
+		// working view and retry instead of failing the run (design D7).
+		if ov := provider.ClassifyHTTPError(resp.StatusCode, string(b)); ov != nil {
+			return nil, ov
+		}
 		return nil, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(b))
 	}
 

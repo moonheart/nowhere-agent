@@ -81,3 +81,16 @@ func countAnswered(m provider.Message, want map[string]struct{}) int {
 	}
 	return n
 }
+
+// DropOldestRound removes the oldest round from msgs and repairs pairing, so a
+// reactive context-overflow retry can shrink the working view without severing
+// a tool pair (design D7). Returns the shortened list; if msgs holds a single
+// round (nothing safe to drop), it returns msgs unchanged with ok=false.
+func DropOldestRound(msgs []provider.Message) (out []provider.Message, ok bool) {
+	rounds := groupRounds(msgs)
+	if len(rounds) <= 1 {
+		return msgs, false
+	}
+	rest := msgs[rounds[0].end:]
+	return EnsurePairing(rest), true
+}
