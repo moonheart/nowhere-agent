@@ -15,7 +15,10 @@ type Policy struct {
 	// Threshold is the fraction of MaxTokens at which compression triggers
 	// (e.g. 0.8). Compression runs when estimated tokens exceed it.
 	Threshold float64
-	// KeepRecent is how many recent messages are always preserved verbatim.
+	// KeepRecent is how many recent rounds are always preserved verbatim. A
+	// round is an assistant message plus the tool_result answers to its tool_use
+	// blocks (design D2): keeping whole rounds — not a raw message count — is
+	// what guarantees a tool_use is never severed from its tool_result.
 	KeepRecent int
 }
 
@@ -39,6 +42,13 @@ func estimateTokens(msgs []provider.Message) int {
 	return total / 4
 }
 
+// EstimateTokens exposes the approximate token count of a message set, so the
+// agent loop can size its working view against the model's context window
+// (design D5) using the same heuristic compression triggers on.
+func EstimateTokens(msgs []provider.Message) int {
+	return estimateTokens(msgs)
+}
+
 // ShouldCompress reports whether the history exceeds the trigger threshold.
 func ShouldCompress(history []provider.Message, p Policy) bool {
 	if p.MaxTokens <= 0 || p.Threshold <= 0 {
@@ -53,9 +63,12 @@ type Compressor interface {
 	Summarize(dropped []provider.Message) (string, error)
 }
 
-// Compress reduces history when over threshold: older messages are summarized
-// into a single system-anchored summary message and recent messages are kept
-// verbatim (sliding-window). If under threshold, history is returned unchanged.
+// Compress reduces history when over threshold: older rounds are summarized
+// into a single system-anchored summary message and the most recent KeepRecent
+// rounds are kept verbatim (sliding window over rounds, not messages). The
+// result is passed through EnsurePairing so the split can never leave an
+// unpaired tool_use/tool_result. If under threshold, history is returned
+// unchanged.
 func Compress(history []provider.Message, p Policy, c Compressor) ([]provider.Message, error) {
 	if !ShouldCompress(history, p) {
 		return history, nil
@@ -64,12 +77,20 @@ func Compress(history []provider.Message, p Policy, c Compressor) ([]provider.Me
 	if keep < 0 {
 		keep = 0
 	}
-	if keep >= len(history) {
+
+	rounds := groupRounds(history)
+	if keep >= len(rounds) {
 		return history, nil
 	}
 
-	dropped := history[:len(history)-keep]
-	recent := history[len(history)-keep:]
+	// Split on a round boundary: everything before the first kept round is
+	// summarized, the kept rounds pass through verbatim.
+	splitIdx := rounds[len(rounds)-keep].start
+	if keep == 0 {
+		splitIdx = len(history)
+	}
+	dropped := history[:splitIdx]
+	recent := history[splitIdx:]
 
 	summary, err := c.Summarize(dropped)
 	if err != nil {
@@ -78,8 +99,8 @@ func Compress(history []provider.Message, p Policy, c Compressor) ([]provider.Me
 
 	summaryMsg := provider.TextMessage(provider.RoleUser,
 		"[Earlier conversation summarized]\n"+summary)
-	out := make([]provider.Message, 0, keep+1)
+	out := make([]provider.Message, 0, len(recent)+1)
 	out = append(out, summaryMsg)
 	out = append(out, recent...)
-	return out, nil
+	return EnsurePairing(out), nil
 }
