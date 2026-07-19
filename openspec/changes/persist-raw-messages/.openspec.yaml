@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-07-18
+goal: "Persist every conversation message in its original full-block form in a
+  dedicated messages table (thinking incl. signature, tool_use, tool_result), and
+  rebuild cross-run history from that authoritative store instead of trusting
+  client-sent history. Fixes thinking-signature capture. Prerequisite for task 4.4
+  context-window compression, which needs a faithful history to summarize."
