@@ -7,12 +7,17 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/toolruntime"
 )
+
+// errCompressionSkipped is returned by maybeCompress when the circuit breaker
+// has tripped, so the caller doesn't count it as a fresh failure or a success.
+var errCompressionSkipped = errors.New("compression skipped: circuit breaker tripped")
 
 // EventKind classifies loop events persisted by the session runtime.
 type EventKind string
@@ -145,11 +150,16 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		view := contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), produced...))
 		// Compress the view when it crosses the budget. A compression failure
 		// trips the circuit breaker rather than aborting the run; a success (or a
-		// no-op under threshold) resets the consecutive-failure count.
-		if compressed, err := l.maybeCompress(ctx, view); err == nil {
+		// no-op under threshold) resets the consecutive-failure count. A skipped
+		// attempt (breaker already tripped) leaves the count alone.
+		compressed, err := l.maybeCompress(ctx, view)
+		switch {
+		case err == nil:
 			view = compressed
 			l.compressFailures = 0
-		} else {
+		case errors.Is(err, errCompressionSkipped):
+			// breaker already tripped — don't re-count
+		default:
 			l.compressFailures++
 		}
 
@@ -316,7 +326,10 @@ func (l *Loop) maybeCompress(ctx context.Context, view []provider.Message) ([]pr
 		return view, nil
 	}
 	if l.compressFailures >= l.config.MaxCompressFailures {
-		return view, nil // breaker tripped: stop paying for a failing summarizer
+		// Breaker tripped: don't even call the failing summarizer. Return a
+		// sentinel so the caller leaves the count alone (neither a fresh failure
+		// nor a success that would reset it).
+		return view, errCompressionSkipped
 	}
 	// Usable window reserves room for the model's reply (design D5).
 	budget := l.config.ContextWindow - l.config.MaxTokens
