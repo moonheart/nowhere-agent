@@ -1,0 +1,8 @@
+schema: spec-driven
+created: 2026-07-19
+goal: "Split live token fan-out from durable persistence behind a StreamBroker port
+  so the web client's SSE stream is no longer gated by a synchronous Postgres write
+  per token (restoring ~provider-speed throughput). run_events is slimmed to
+  lifecycle-only (content already lives in the messages table). Provide Mem and
+  Redis Streams implementations behind one port so single->multi-instance is a
+  config swap; reconnect reads the live stream first, then falls back to messages."
