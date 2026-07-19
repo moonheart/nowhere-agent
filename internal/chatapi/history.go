@@ -17,8 +17,15 @@ type historyMessage struct {
 }
 
 type historyPart struct {
-	Type string `json:"type"` // "text" | "reasoning"
-	Text string `json:"text"`
+	Type string `json:"type"`           // "text" | "reasoning" | "tool-call"
+	Text string `json:"text,omitempty"` // text/reasoning payload
+
+	// tool-call fields (assistant-ui ToolCallMessagePart)
+	ToolCallID string `json:"toolCallId,omitempty"`
+	ToolName   string `json:"toolName,omitempty"`
+	ArgsText   string `json:"argsText,omitempty"`
+	Result     any    `json:"result,omitempty"`
+	IsError    bool   `json:"isError,omitempty"`
 }
 
 // serveHistory handles GET /api/chat/history?threadId=<id>: it rebuilds the
@@ -61,8 +68,10 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 
 // buildHistory reads the session's persisted messages and folds them into an
 // ordered message list. Each stored message becomes one history message; the
-// assistant's thinking/text blocks become ordered content parts. Tool blocks are
-// elided from the rendered history (they are render frames, not prose).
+// assistant's thinking/text blocks become ordered content parts. Tool calls are
+// rendered as tool-call parts: a tool_use block starts a call and the matching
+// tool_result block (keyed by id) fills in its result, so a reloaded client sees
+// the tool activity, not just the prose.
 func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMessage, error) {
 	if h.msgStore == nil {
 		return nil, nil
@@ -73,6 +82,9 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 	}
 
 	var msgs []historyMessage
+	// calls indexes the tool-call parts already appended, keyed by tool_use id,
+	// so a tool_result can be merged back onto its call.
+	calls := map[string]*historyPart{}
 	for _, m := range stored {
 		hm := historyMessage{ID: fmt.Sprintf("msg-%d", m.ID), Role: string(m.Role)}
 		for _, b := range m.Content {
@@ -81,6 +93,25 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 				appendPartText(&hm, "text", b.Text)
 			case provider.BlockThinking:
 				appendPartText(&hm, "reasoning", b.Thinking)
+			case provider.BlockToolUse:
+				argsText := "{}"
+				if b.ToolInput != nil {
+					if data, err := json.Marshal(b.ToolInput); err == nil {
+						argsText = string(data)
+					}
+				}
+				hm.Content = append(hm.Content, historyPart{
+					Type:       "tool-call",
+					ToolCallID: b.ToolUseID,
+					ToolName:   b.ToolName,
+					ArgsText:   argsText,
+				})
+				calls[b.ToolUseID] = &hm.Content[len(hm.Content)-1]
+			case provider.BlockToolResult:
+				if call, ok := calls[b.ToolResultID]; ok {
+					call.Result = b.ToolContent
+					call.IsError = b.IsError
+				}
 			}
 		}
 		if len(hm.Content) > 0 {

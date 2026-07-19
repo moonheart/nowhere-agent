@@ -21,15 +21,37 @@ import {
   UIMessageStreamDecoder,
 } from "assistant-stream";
 import { asAsyncIterableStream } from "assistant-stream/utils";
+import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
 
-type HistoryPart = { type: "text" | "reasoning"; text: string };
+type HistoryPart =
+  | { type: "text" | "reasoning"; text: string }
+  | {
+      type: "tool-call";
+      toolCallId: string;
+      toolName: string;
+      argsText: string;
+      result?: unknown;
+      isError?: boolean;
+    };
 type HistoryMessage = { id: string; role: string; content: HistoryPart[] };
 
 function authHeaders(): Record<string, string> {
   const token = getToken();
   return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+// parseToolArgs best-effort parses a tool call's argsText back to an object for
+// the runtime's `args` field; the raw argsText is always carried alongside, so
+// an unparseable fragment still renders.
+function parseToolArgs(argsText: string): ReadonlyJSONObject {
+  try {
+    const v = JSON.parse(argsText);
+    return v && typeof v === "object" ? (v as ReadonlyJSONObject) : {};
+  } catch {
+    return {};
+  }
 }
 
 async function loadHistory(): Promise<{
@@ -53,11 +75,23 @@ async function loadHistory(): Promise<{
     (m): ThreadMessageLike => ({
       id: m.id,
       role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content.map((p) =>
-        p.type === "reasoning"
-          ? { type: "reasoning", text: p.text }
-          : { type: "text", text: p.text },
-      ),
+      content: m.content.map((p): ThreadAssistantMessagePart => {
+        if (p.type === "reasoning") {
+          return { type: "reasoning", text: p.text };
+        }
+        if (p.type === "tool-call") {
+          return {
+            type: "tool-call",
+            toolCallId: p.toolCallId,
+            toolName: p.toolName,
+            argsText: p.argsText,
+            args: parseToolArgs(p.argsText),
+            result: p.result,
+            isError: p.isError,
+          };
+        }
+        return { type: "text", text: p.text };
+      }),
     }),
   );
   return {
