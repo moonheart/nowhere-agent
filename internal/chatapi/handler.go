@@ -50,6 +50,10 @@ type Handler struct {
 	// images, when set, serves workspace image files to the session owner via
 	// GET /api/chat/sessions/{id}/files/... (persist-raw-messages D6).
 	images *workspace.ImageStore
+	// msgStore, when set, is the authoritative conversation record: serveChat
+	// rebuilds cross-run history from it (ignoring client-sent history) and the
+	// run registry persists assembled messages into it.
+	msgStore session.MessageStore
 }
 
 // NewHandler creates a chat Handler.
@@ -75,8 +79,10 @@ func (h *Handler) WithRegistry(rg *session.RunRegistry) *Handler {
 }
 
 // WithMessageStore wires full-block message persistence into the run-execution
-// registry (persist-raw-messages). Call after WithRuntime/WithRegistry.
+// registry and authoritative history rebuild (persist-raw-messages). Call after
+// WithRuntime/WithRegistry.
 func (h *Handler) WithMessageStore(ms session.MessageStore) *Handler {
+	h.msgStore = ms
 	if h.registry != nil {
 		h.registry.WithMessageStore(ms)
 	}
@@ -169,6 +175,22 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	if text := lastUserText(req); text != "" {
 		m := provider.TextMessage(provider.RoleUser, text)
 		userMsg = &m
+	}
+
+	// Authoritative history (persist-raw-messages): when this request resumes an
+	// existing session and a MessageStore is wired, rebuild the conversation from
+	// the durable record — with full blocks (thinking+signature, tool_use,
+	// tool_result) — instead of trusting the client-sent messages, which are
+	// text-only and forgeable. The new user turn is appended so the loop sees the
+	// complete conversation. For a fresh session (or no store) the client history
+	// is all there is, so fall back to it.
+	if h.msgStore != nil && req.ThreadID != "" && s.ID == req.ThreadID {
+		if stored, err := h.msgStore.MessagesFor(r.Context(), sessID); err == nil && len(stored) > 0 {
+			history = storedMessagesToProvider(stored)
+			if userMsg != nil {
+				history = append(history, *userMsg)
+			}
+		}
 	}
 
 	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history, UserMessage: userMsg})

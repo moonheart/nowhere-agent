@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/session"
 )
 
 // dataStreamRequest mirrors the body the assistant-ui data-stream runtime POSTs.
@@ -88,6 +89,17 @@ func lastUserText(req dataStreamRequest) string {
 		}
 	}
 	return ""
+}
+
+// storedMessagesToProvider converts durable StoredMessages back into canonical
+// provider messages for the loop, preserving full blocks (thinking+signature,
+// tool_use, tool_result).
+func storedMessagesToProvider(stored []session.StoredMessage) []provider.Message {
+	out := make([]provider.Message, 0, len(stored))
+	for _, m := range stored {
+		out = append(out, provider.Message{Role: m.Role, Content: m.Content})
+	}
+	return out
 }
 
 var _ = http.MethodPost // referenced by handler registration elsewhere
