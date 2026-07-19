@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"nowhere-agent/internal/agent"
+	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
 )
 
@@ -122,7 +123,7 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 			SessionID: sessionID,
 			RunID:     run.ID,
 			Role:      work.UserMessage.Role,
-			Content:   work.UserMessage.Content,
+			Content:   contextmgmt.TruncateBlocksForPersistence(work.UserMessage.Content),
 		})
 	}
 
@@ -255,6 +256,6 @@ func (e *registryEmitter) persistMessage(ctx context.Context, payload any) {
 		SessionID: e.sessionID,
 		RunID:     e.runID,
 		Role:      msg.Role,
-		Content:   msg.Content,
+		Content:   contextmgmt.TruncateBlocksForPersistence(msg.Content),
 	})
 }
