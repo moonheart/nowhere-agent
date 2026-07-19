@@ -1,6 +1,7 @@
 package contextmgmt
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -74,7 +75,7 @@ func TestCompressNeverSeversToolPair(t *testing.T) {
 	}
 	p := Policy{MaxTokens: 10, Threshold: 0.8, KeepRecent: 1}
 	c := &stubCompressor{}
-	out, err := Compress(msgs, p, c)
+	out, err := Compress(context.Background(), msgs, p, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func TestCompressKeepsRecentRoundVerbatim(t *testing.T) {
 	}
 	p := Policy{MaxTokens: 10, Threshold: 0.8, KeepRecent: 2}
 	c := &stubCompressor{}
-	out, err := Compress(msgs, p, c)
+	out, err := Compress(context.Background(), msgs, p, c)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package contextmgmt
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -10,7 +11,7 @@ import (
 // stubCompressor returns a fixed summary without any LLM.
 type stubCompressor struct{ got []provider.Message }
 
-func (s *stubCompressor) Summarize(dropped []provider.Message) (string, error) {
+func (s *stubCompressor) Summarize(_ context.Context, dropped []provider.Message) (string, error) {
 	s.got = dropped
 	return "SUMMARY", nil
 }
@@ -43,7 +44,7 @@ func TestCompressNoOpUnderThreshold(t *testing.T) {
 	p := Policy{MaxTokens: 100000, Threshold: 0.8, KeepRecent: 2}
 	h := bigHistory(3, 10)
 	c := &stubCompressor{}
-	out, err := Compress(h, p, c)
+	out, err := Compress(context.Background(), h, p, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +60,7 @@ func TestCompressKeepsRecentAndSummarizes(t *testing.T) {
 	p := Policy{MaxTokens: 10, Threshold: 0.8, KeepRecent: 2}
 	h := bigHistory(6, 100)
 	c := &stubCompressor{}
-	out, err := Compress(h, p, c)
+	out, err := Compress(context.Background(), h, p, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,7 @@ func TestCompressKeepRecentExceedsHistory(t *testing.T) {
 	p := Policy{MaxTokens: 10, Threshold: 0.8, KeepRecent: 100}
 	h := bigHistory(3, 100)
 	c := &stubCompressor{}
-	out, err := Compress(h, p, c)
+	out, err := Compress(context.Background(), h, p, c)
 	if err != nil {
 		t.Fatal(err)
 	}

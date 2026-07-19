@@ -5,6 +5,8 @@
 package contextmgmt
 
 import (
+	"context"
+
 	"nowhere-agent/internal/provider"
 )
 
@@ -58,9 +60,10 @@ func ShouldCompress(history []provider.Message, p Policy) bool {
 }
 
 // Compressor summarizes dropped history. Implemented by an LLM caller or a
-// simple heuristic. It must NOT write to long-term memory.
+// simple heuristic. It must NOT write to long-term memory. The ctx honours
+// cancellation: a cancelled run aborts an in-flight summarize.
 type Compressor interface {
-	Summarize(dropped []provider.Message) (string, error)
+	Summarize(ctx context.Context, dropped []provider.Message) (string, error)
 }
 
 // Compress reduces history when over threshold: older rounds are summarized
@@ -69,7 +72,7 @@ type Compressor interface {
 // result is passed through EnsurePairing so the split can never leave an
 // unpaired tool_use/tool_result. If under threshold, history is returned
 // unchanged.
-func Compress(history []provider.Message, p Policy, c Compressor) ([]provider.Message, error) {
+func Compress(ctx context.Context, history []provider.Message, p Policy, c Compressor) ([]provider.Message, error) {
 	if !ShouldCompress(history, p) {
 		return history, nil
 	}
@@ -92,7 +95,7 @@ func Compress(history []provider.Message, p Policy, c Compressor) ([]provider.Me
 	dropped := history[:splitIdx]
 	recent := history[splitIdx:]
 
-	summary, err := c.Summarize(dropped)
+	summary, err := c.Summarize(ctx, dropped)
 	if err != nil {
 		return nil, err
 	}
