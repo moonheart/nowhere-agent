@@ -192,6 +192,7 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 			case provider.EventBlockDelta:
 				if acc, ok := open[ev.Index]; ok {
 					acc.append(ev.Delta)
+					acc.appendSignature(ev.SignatureDelta)
 					// Stream text/thinking out incrementally. An emit failure
 					// (e.g. client disconnected) aborts the run so the loop
 					// unwinds and the run settles instead of leaking.
@@ -248,9 +249,10 @@ func toolResultMessage(calls []toolruntime.Call, results []toolruntime.Result) p
 
 // accumulator assembles a block from streaming deltas.
 type accumulator struct {
-	block provider.Block
-	text  string
-	json  string
+	block     provider.Block
+	text      string
+	json      string
+	signature string
 }
 
 func (a *accumulator) append(delta string) {
@@ -262,6 +264,13 @@ func (a *accumulator) append(delta string) {
 	}
 }
 
+// appendSignature collects a thinking-block signature fragment. Signatures
+// stream as their own delta kind and must be kept off the text so the block's
+// ThinkingSignature round-trips cleanly.
+func (a *accumulator) appendSignature(sig string) {
+	a.signature += sig
+}
+
 func (a *accumulator) finalize() provider.Block {
 	b := a.block
 	switch b.Type {
@@ -269,6 +278,9 @@ func (a *accumulator) finalize() provider.Block {
 		b.Text = a.text
 	case provider.BlockThinking:
 		b.Thinking = a.text
+		if a.signature != "" {
+			b.ThinkingSignature = a.signature
+		}
 	case provider.BlockToolUse:
 		if a.json != "" {
 			var input map[string]any

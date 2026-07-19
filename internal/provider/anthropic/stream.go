@@ -73,9 +73,10 @@ func decodeEvent(data []byte) (provider.Event, bool) {
 			return provider.Event{}, false
 		}
 		return provider.Event{
-			Type:  provider.EventBlockDelta,
-			Index: se.Index,
-			Delta: deltaText(se.Delta),
+			Type:           provider.EventBlockDelta,
+			Index:          se.Index,
+			Delta:          deltaText(se.Delta),
+			SignatureDelta: signatureDelta(se.Delta),
 		}, true
 
 	case "content_block_stop":
@@ -121,11 +122,18 @@ func deltaText(d *rawDelta) string {
 		return d.Thinking
 	case "input_json_delta":
 		return d.PartialJSON
-	case "signature_delta":
-		return d.Signature
 	default:
 		return ""
 	}
+}
+
+// signatureDelta extracts the signature fragment from a signature_delta,
+// keeping it out of the thinking text stream.
+func signatureDelta(d *rawDelta) string {
+	if d.Type == "signature_delta" {
+		return d.Signature
+	}
+	return ""
 }
 
 func convertUsage(u *rawUsage) *provider.Usage {

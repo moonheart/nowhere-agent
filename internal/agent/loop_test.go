@@ -173,6 +173,49 @@ func TestLoopMaxIterationsGuard(t *testing.T) {
 	}
 }
 
+// thinkingWithSignatureResponse builds a script entry with a thinking block whose
+// signature streams as a separate SignatureDelta, then a text block.
+func thinkingWithSignatureResponse(think, sig, text string) []provider.Event {
+	return []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockThinking}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: think},
+		{Type: provider.EventBlockDelta, Index: 0, SignatureDelta: sig},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventBlockStart, Index: 1, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 1, Delta: text},
+		{Type: provider.EventBlockStop, Index: 1},
+		{Type: provider.EventMessageStop},
+	}
+}
+
+// TestLoopThinkingSignatureCaptured verifies the signature lands on
+// ThinkingSignature and is NOT concatenated into the thinking text.
+func TestLoopThinkingSignatureCaptured(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		thinkingWithSignatureResponse("let me think", "sig-xyz", "answer"),
+	}}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), nil, &memEmitter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(produced) != 1 || len(produced[0].Content) != 2 {
+		t.Fatalf("expected 1 msg with 2 blocks, got %+v", produced)
+	}
+	th := produced[0].Content[0]
+	if th.Type != provider.BlockThinking {
+		t.Fatalf("block0 type = %q", th.Type)
+	}
+	if th.Thinking != "let me think" {
+		t.Errorf("Thinking = %q, want pure text (no signature)", th.Thinking)
+	}
+	if th.ThinkingSignature != "sig-xyz" {
+		t.Errorf("ThinkingSignature = %q, want sig-xyz", th.ThinkingSignature)
+	}
+}
+
 func TestLoopToolInputParsed(t *testing.T) {
 	p := &scriptProvider{script: [][]provider.Event{
 		toolUseResponse("tu1", "echo", `{"path":"/tmp/x"}`),

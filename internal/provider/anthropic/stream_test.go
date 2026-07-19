@@ -71,6 +71,21 @@ func TestDecodeInputJSONDelta(t *testing.T) {
 	}
 }
 
+// TestDecodeSignatureDelta verifies the signature streams on its own channel,
+// not folded into Delta (so it never lands in the thinking text).
+func TestDecodeSignatureDelta(t *testing.T) {
+	ev := decode(t, `{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-abc"}}`)
+	if ev.Type != provider.EventBlockDelta {
+		t.Fatalf("got %q", ev.Type)
+	}
+	if ev.SignatureDelta != "sig-abc" {
+		t.Errorf("SignatureDelta = %q, want sig-abc", ev.SignatureDelta)
+	}
+	if ev.Delta != "" {
+		t.Errorf("Delta = %q, want empty (signature must not enter text)", ev.Delta)
+	}
+}
+
 func TestDecodeBlockStop(t *testing.T) {
 	ev := decode(t, `{"type":"content_block_stop","index":2}`)
 	if ev.Type != provider.EventBlockStop || ev.Index != 2 {

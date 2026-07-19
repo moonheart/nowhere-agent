@@ -30,6 +30,12 @@ type Event struct {
 	// partial JSON of the input.
 	Delta string
 
+	// SignatureDelta carries a thinking-block signature fragment for
+	// EventBlockDelta (Anthropic `signature_delta`). It is kept separate from
+	// Delta so the signature round-trips via Block.ThinkingSignature instead of
+	// being concatenated into the thinking text.
+	SignatureDelta string
+
 	// Usage is set on EventMessageStop.
 	Usage *Usage
 
