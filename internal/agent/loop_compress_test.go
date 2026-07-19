@@ -1,0 +1,184 @@
+package agent
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+
+	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/toolruntime"
+)
+
+// recordingProvider answers every Stream with a fixed text reply and records
+// each request so tests can inspect what the loop actually sent.
+type recordingProvider struct {
+	mu       sync.Mutex
+	requests []provider.Request
+	reply    string
+}
+
+func (p *recordingProvider) Name() string { return "rec" }
+
+func (p *recordingProvider) Stream(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
+	p.mu.Lock()
+	p.requests = append(p.requests, req)
+	p.mu.Unlock()
+	ch := make(chan provider.Event, 5)
+	for _, e := range textResponse(p.reply) {
+		ch <- e
+	}
+	close(ch)
+	return ch, nil
+}
+
+func (p *recordingProvider) last() provider.Request {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.requests[len(p.requests)-1]
+}
+
+// stubCompressor yields a fixed summary and counts invocations.
+type stubCompressor struct {
+	calls int
+	err   error
+}
+
+func (s *stubCompressor) Summarize(_ context.Context, _ []provider.Message) (string, error) {
+	s.calls++
+	if s.err != nil {
+		return "", s.err
+	}
+	return "SUMMARY-OF-OLDER-TURNS", nil
+}
+
+// bigConversation builds a history whose estimated tokens exceed the budget.
+func bigConversation(turns int, size int) []provider.Message {
+	msgs := make([]provider.Message, 0, turns*2)
+	for i := 0; i < turns; i++ {
+		msgs = append(msgs,
+			provider.TextMessage(provider.RoleUser, strings.Repeat("u", size)),
+			provider.TextMessage(provider.RoleAssistant, strings.Repeat("a", size)),
+		)
+	}
+	return msgs
+}
+
+func TestLoopCompressesViewOverBudget(t *testing.T) {
+	rp := &recordingProvider{reply: "final"}
+	comp := &stubCompressor{}
+	cfg := Config{
+		Model: "m", MaxTokens: 100, ContextWindow: 200, Compressor: comp,
+	}
+	loop := New(rp, toolruntime.NewRegistry(), cfg)
+
+	// ~big history: estimated tokens far above (200-100)*0.8 = 80.
+	history := bigConversation(6, 400)
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	if comp.calls == 0 {
+		t.Fatal("compressor should have run over budget")
+	}
+	// The request the provider actually received must be the compressed view:
+	// it carries the summary, not the full verbatim history.
+	sent := rp.last()
+	var sawSummary bool
+	for _, m := range sent.Messages {
+		for _, b := range m.Content {
+			if strings.Contains(b.Text, "SUMMARY-OF-OLDER-TURNS") {
+				sawSummary = true
+			}
+		}
+	}
+	if !sawSummary {
+		t.Error("provider request should carry the compression summary")
+	}
+	// And the compressed view is smaller than the input history.
+	if len(sent.Messages) >= len(history) {
+		t.Errorf("compressed view (%d msgs) should be smaller than history (%d msgs)", len(sent.Messages), len(history))
+	}
+}
+
+func TestLoopSkipsCompressionWhenUnconfigured(t *testing.T) {
+	rp := &recordingProvider{reply: "ok"}
+	// No Compressor / no ContextWindow: compression disabled.
+	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	history := bigConversation(6, 400)
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	sent := rp.last()
+	// The full history is sent verbatim (plus nothing dropped).
+	if len(sent.Messages) != len(history) {
+		t.Errorf("expected full history sent (%d), got %d", len(history), len(sent.Messages))
+	}
+}
+
+func TestLoopCompressionCircuitBreaker(t *testing.T) {
+	rp := &recordingProvider{reply: "final"}
+	comp := &stubCompressor{err: errors.New("summarizer down")}
+	cfg := Config{
+		Model: "m", MaxTokens: 100, ContextWindow: 200, Compressor: comp,
+		MaxCompressFailures: 2,
+	}
+	loop := New(rp, toolruntime.NewRegistry(), cfg)
+
+	history := bigConversation(6, 400)
+	// Drive several iterations worth of compress attempts: each Run does one
+	// iteration (text reply ends the loop), so call Run repeatedly.
+	for i := 0; i < 5; i++ {
+		if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Compressor attempted at most MaxCompressFailures times before the breaker
+	// stopped further attempts. (compressFailures persists across Runs here
+	// because they share the Loop — the breaker is per-Loop-lifetime.)
+	if comp.calls > 2 {
+		t.Errorf("compressor called %d times, breaker should cap at 2", comp.calls)
+	}
+	// The run still completed (compression failure didn't abort it).
+	if len(rp.requests) == 0 {
+		t.Error("runs should complete despite compression failure")
+	}
+}
+
+func TestLoopRepairsUnpairedHistoryBeforeSend(t *testing.T) {
+	rp := &recordingProvider{reply: "final"}
+	// History with a dangling tool_use (cancelled before the result): the loop
+	// must synthesize a result so the provider gets a valid conversation.
+	dangling := provider.Message{
+		Role: provider.RoleAssistant,
+		Content: []provider.Block{
+			{Type: provider.BlockToolUse, ToolUseID: "t1", ToolName: "search", ToolInput: map[string]any{}},
+		},
+	}
+	history := []provider.Message{
+		provider.TextMessage(provider.RoleUser, "hi"),
+		dangling,
+	}
+	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	sent := rp.last()
+	// Every tool_use in the sent view must have a matching tool_result.
+	uses, results := map[string]bool{}, map[string]bool{}
+	for _, m := range sent.Messages {
+		for _, b := range m.Content {
+			switch b.Type {
+			case provider.BlockToolUse:
+				uses[b.ToolUseID] = true
+			case provider.BlockToolResult:
+				results[b.ToolResultID] = true
+			}
+		}
+	}
+	for id := range uses {
+		if !results[id] {
+			t.Errorf("sent view has dangling tool_use %q", id)
+		}
+	}
+}

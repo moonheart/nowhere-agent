@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/toolruntime"
 )
@@ -56,6 +57,21 @@ type Config struct {
 	// send (every turn, byte-stable for prompt caching). Nil leaves image
 	// blocks as-is (they degrade to text placeholders downstream).
 	Images provider.ImageResolver
+
+	// ContextWindow is the model's context window in tokens. Combined with
+	// MaxTokens (the reserved reply space) it bounds the working view: the loop
+	// compresses when the view exceeds CompressThreshold of (ContextWindow −
+	// MaxTokens). Zero disables in-loop compression.
+	ContextWindow int
+	// Compressor summarizes dropped history when the working view is
+	// compressed. Nil disables compression (the view grows unbounded).
+	Compressor contextmgmt.Compressor
+	// CompressThreshold is the fraction of the usable window at which
+	// compression triggers (default 0.8).
+	CompressThreshold float64
+	// MaxCompressFailures is the circuit breaker: after this many consecutive
+	// compression failures the loop stops compressing for the run (default 3).
+	MaxCompressFailures int
 }
 
 // Loop runs the think→tool→think cycle.
@@ -63,12 +79,21 @@ type Loop struct {
 	provider provider.Adapter
 	tools    *toolruntime.Registry
 	config   Config
+	// compressFailures counts consecutive compression failures in the current
+	// run, for the circuit breaker (design D6).
+	compressFailures int
 }
 
 // New creates a Loop.
 func New(p provider.Adapter, tools *toolruntime.Registry, cfg Config) *Loop {
 	if cfg.MaxIterations == 0 {
 		cfg.MaxIterations = 25
+	}
+	if cfg.CompressThreshold <= 0 {
+		cfg.CompressThreshold = 0.8
+	}
+	if cfg.MaxCompressFailures <= 0 {
+		cfg.MaxCompressFailures = 3
 	}
 	return &Loop{provider: p, tools: tools, config: cfg}
 }
@@ -98,6 +123,12 @@ func (l *Loop) toolDefs() []provider.ToolDefinition {
 // Run executes the loop for a conversation history, streaming output to the
 // emitter. It returns the final assembled assistant messages produced. The
 // history is the short-term memory; it is not persisted to long-term memory.
+//
+// The loop works over a working view of the conversation (history + what it
+// produces). When the view approaches the model's context window it is
+// compressed (older rounds summarized); compression rewrites only the view —
+// the durable conversation record the caller keeps is never touched (design
+// D1), and the split respects tool_use/tool_result pairing (D2/D3).
 func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter) ([]provider.Message, error) {
 	var produced []provider.Message
 
@@ -108,10 +139,24 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			return produced, err
 		}
 
+		// Assemble the working view for this turn and repair tool pairing before
+		// every send (a prior cancel or a compression split can leave an unpaired
+		// block, which the provider would reject).
+		view := contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), produced...))
+		// Compress the view when it crosses the budget. A compression failure
+		// trips the circuit breaker rather than aborting the run; a success (or a
+		// no-op under threshold) resets the consecutive-failure count.
+		if compressed, err := l.maybeCompress(ctx, view); err == nil {
+			view = compressed
+			l.compressFailures = 0
+		} else {
+			l.compressFailures++
+		}
+
 		req := provider.Request{
 			Model:           l.config.Model,
 			System:          l.config.System,
-			Messages:        append(append([]provider.Message{}, history...), produced...),
+			Messages:        view,
 			Tools:           l.toolDefs(),
 			MaxTokens:       l.config.MaxTokens,
 			CacheablePrefix: l.config.CacheablePrefix,
@@ -260,6 +305,30 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 // dispatch runs tool calls concurrently via the registry.
 func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolruntime.Result {
 	return l.tools.CallAll(ctx, calls)
+}
+
+// maybeCompress compresses the working view when it crosses the context budget,
+// returning the (possibly unchanged) view to send. Compression is skipped when
+// it is not configured or the circuit breaker has tripped; the durable record
+// is never touched — only the view handed to the provider shrinks (D1/D5).
+func (l *Loop) maybeCompress(ctx context.Context, view []provider.Message) ([]provider.Message, error) {
+	if l.config.Compressor == nil || l.config.ContextWindow <= 0 {
+		return view, nil
+	}
+	if l.compressFailures >= l.config.MaxCompressFailures {
+		return view, nil // breaker tripped: stop paying for a failing summarizer
+	}
+	// Usable window reserves room for the model's reply (design D5).
+	budget := l.config.ContextWindow - l.config.MaxTokens
+	if budget <= 0 {
+		budget = l.config.ContextWindow
+	}
+	policy := contextmgmt.Policy{
+		MaxTokens:  budget,
+		Threshold:  l.config.CompressThreshold,
+		KeepRecent: 2, // recent rounds stay verbatim; older rounds are summarized
+	}
+	return contextmgmt.Compress(ctx, view, policy, l.config.Compressor)
 }
 
 // toolResultMessage builds the user-role message carrying tool results back.
