@@ -7,6 +7,7 @@ import {
 import { Reasoning } from "@/components/reasoning";
 import { StopButton } from "@/components/stop-button";
 import { ToolCall } from "@/components/tool-call";
+import { MarkdownText } from "@/components/markdown-text";
 
 export const Thread: FC = () => {
   return (
@@ -44,6 +45,7 @@ const AssistantMessage: FC = () => (
     <div className="max-w-[80%] rounded-2xl bg-neutral-100 px-4 py-2 text-neutral-900">
       <MessagePrimitive.Parts
         components={{
+          Text: MarkdownText,
           Reasoning,
           tools: { Fallback: ToolCall },
         }}
