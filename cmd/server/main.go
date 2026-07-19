@@ -67,6 +67,21 @@ func run() error {
 	// and the run log doubles as the episodes for dreaming.
 	sessionRuntime := session.NewRuntime(session.NewPGStore(pool))
 
+	// Live content broker (redis-stream-live): in-memory for single instance,
+	// Redis Streams for multi-instance. Selected via STREAM_BROKER; a redis
+	// broker that is unreachable at boot fails fast (a multi-instance deploy
+	// with a dead broker is a misconfiguration worth surfacing).
+	if cfg.Stream.Broker == "redis" {
+		broker := session.NewRedisBroker(cfg.Stream.RedisAddr, 0, 0)
+		if err := session.PingRedis(ctx, cfg.Stream.RedisAddr); err != nil {
+			return fmt.Errorf("stream broker redis at %s: %w", cfg.Stream.RedisAddr, err)
+		}
+		sessionRuntime = sessionRuntime.WithBroker(broker)
+		log.Info("live content broker: redis streams", "addr", cfg.Stream.RedisAddr)
+	} else {
+		log.Info("live content broker: in-memory (single instance)")
+	}
+
 	// Full-block conversation record (persist-raw-messages): messages are
 	// persisted in original form and cross-run history is rebuilt from it.
 	messageStore := session.NewPGMessageStore(pool)

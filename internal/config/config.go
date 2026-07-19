@@ -20,6 +20,17 @@ type Config struct {
 	Web  Web
 	// Workspace configures per-session image storage (persist-raw-messages).
 	Workspace Workspace
+	// Stream configures the live content broker (redis-stream-live).
+	Stream Stream
+}
+
+// Stream selects the live content broker that fans run output out to clients.
+// "mem" (default) is the single-instance in-memory broker; "redis" fans out
+// across instances via Redis Streams.
+type Stream struct {
+	Broker string `envconfig:"STREAM_BROKER" default:"mem"` // mem | redis
+	// RedisAddr is the Redis address used when Broker=redis.
+	RedisAddr string `envconfig:"REDIS_ADDR" default:"localhost:6379"`
 }
 
 // LLM configures the default model provider for the chat endpoint.
