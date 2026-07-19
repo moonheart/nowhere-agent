@@ -20,6 +20,7 @@ const (
 	BlockToolUse    BlockType = "tool_use"
 	BlockToolResult BlockType = "tool_result"
 	BlockThinking   BlockType = "thinking"
+	BlockImage      BlockType = "image"
 )
 
 // Block is one unit of message content. Only the fields relevant to Type are set.
@@ -42,6 +43,16 @@ type Block struct {
 	ToolResultID string // matches the ToolUseID it answers
 	ToolContent  string
 	IsError      bool
+
+	// Image (BlockImage) — a reference to an image, never the payload. The
+	// image bytes live in the session workspace; the block carries a
+	// workspace-relative path. It is materialized to the provider-native base64
+	// source at send time (every turn, byte-stable for prompt caching).
+	MediaType string // e.g. "image/webp"
+	ImagePath string // workspace-relative path
+	// ImageData holds base64 image bytes, populated only transiently by the
+	// pre-send materialization transform. It is never persisted.
+	ImageData string
 
 	// CachePoint marks this block's prefix as cacheable when true.
 	CachePoint bool

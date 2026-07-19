@@ -14,6 +14,7 @@ import (
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
+	"nowhere-agent/internal/workspace"
 )
 
 // LoopFactory builds an agent loop for a chat request (provider + tools wired
@@ -46,6 +47,9 @@ type Handler struct {
 	// ctxBuilder, when set, composes the per-request system prompt (skills +
 	// recalled memory). Nil keeps the static system prompt (tests).
 	ctxBuilder ContextBuilder
+	// images, when set, serves workspace image files to the session owner via
+	// GET /api/chat/sessions/{id}/files/... (persist-raw-messages D6).
+	images *workspace.ImageStore
 }
 
 // NewHandler creates a chat Handler.
@@ -79,6 +83,13 @@ func (h *Handler) WithMessageStore(ms session.MessageStore) *Handler {
 	return h
 }
 
+// WithImageStore wires workspace image serving (GET .../files/...) for the
+// session owner. Call after WithRuntime.
+func (h *Handler) WithImageStore(is *workspace.ImageStore) *Handler {
+	h.images = is
+	return h
+}
+
 // WithContextBuilder enables memory recall + skill L0 injection into the loop.
 func (h *Handler) WithContextBuilder(cb ContextBuilder) *Handler {
 	h.ctxBuilder = cb
@@ -93,6 +104,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat/cancel", h.serveCancel)
 	mux.HandleFunc("GET /api/chat/sessions", h.serveSessions)
 	mux.HandleFunc("DELETE /api/chat/sessions/{id}", h.serveDeleteSession)
+	mux.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
 }
 
 // RegisterAuthed mounts the route behind auth middleware, so each chat request
@@ -104,6 +116,7 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	mux.Handle("POST /api/chat/cancel", auth(http.HandlerFunc(h.serveCancel)))
 	mux.Handle("GET /api/chat/sessions", auth(http.HandlerFunc(h.serveSessions)))
 	mux.Handle("DELETE /api/chat/sessions/{id}", auth(http.HandlerFunc(h.serveDeleteSession)))
+	mux.Handle("GET /api/chat/sessions/{id}/files/{path...}", auth(http.HandlerFunc(h.serveFile)))
 }
 
 // sseEmitter adapts agent.Emitter to write ui-message-stream frames live.

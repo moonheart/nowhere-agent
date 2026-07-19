@@ -48,7 +48,17 @@ type apiBlock struct {
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
 
+	// Source carries an image payload (base64) for type=="image".
+	Source *apiImageSource `json:"source,omitempty"`
+
 	CacheCtl *cacheControl `json:"cache_control,omitempty"`
+}
+
+// apiImageSource is the Anthropic image source shape: base64 data + media type.
+type apiImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // e.g. "image/webp"
+	Data      string `json:"data"`       // base64 bytes
 }
 
 type apiTool struct {
@@ -112,6 +122,18 @@ func convertBlocks(blocks []provider.Block) []apiBlock {
 			out = append(out, apiBlock{Type: "tool_use", ID: b.ToolUseID, Name: b.ToolName, Input: b.ToolInput})
 		case provider.BlockToolResult:
 			out = append(out, apiBlock{Type: "tool_result", ToolUseID: b.ToolResultID, Content: b.ToolContent, IsError: b.IsError})
+		case provider.BlockImage:
+			// Materialized blocks carry base64 in ImageData; emit the native
+			// image source. Unmaterialized blocks (no data) degrade to a text
+			// placeholder so the request still sends.
+			if b.ImageData != "" {
+				out = append(out, apiBlock{
+					Type:   "image",
+					Source: &apiImageSource{Type: "base64", MediaType: b.MediaType, Data: b.ImageData},
+				})
+			} else {
+				out = append(out, apiBlock{Type: "text", Text: "[image unavailable: " + b.ImagePath + "]"})
+			}
 		}
 	}
 	return out

@@ -104,6 +104,11 @@ func convertMessage(m provider.Message) ([]apiMessage, error) {
 			})
 		case provider.BlockThinking:
 			// Not representable; intentionally dropped.
+		case provider.BlockImage:
+			// OpenAI content here is a plain string; degrade images to a text
+			// reference. (The OpenAI-compat gateway in use does not accept image
+			// parts on this path; Anthropic is the image-capable provider.)
+			text += "[image: " + b.ImagePath + "]"
 		}
 	}
 

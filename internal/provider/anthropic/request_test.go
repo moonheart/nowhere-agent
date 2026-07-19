@@ -86,3 +86,28 @@ func TestConvertBlocksTextCachePoint(t *testing.T) {
 		t.Error("expected cache_control on text block with CachePoint")
 	}
 }
+
+func TestConvertBlocksImageMaterialized(t *testing.T) {
+	out := convertBlocks([]provider.Block{
+		{Type: provider.BlockImage, MediaType: "image/webp", ImagePath: "img/a.webp", ImageData: "QUJD"},
+	})
+	if len(out) != 1 || out[0].Type != "image" {
+		t.Fatalf("expected image block, got %+v", out)
+	}
+	if out[0].Source == nil || out[0].Source.Type != "base64" || out[0].Source.MediaType != "image/webp" || out[0].Source.Data != "QUJD" {
+		t.Errorf("image source wrong: %+v", out[0].Source)
+	}
+}
+
+func TestConvertBlocksImageUnmaterialized(t *testing.T) {
+	// No ImageData (e.g. dangling path) → text placeholder, request still sends.
+	out := convertBlocks([]provider.Block{
+		{Type: provider.BlockImage, MediaType: "image/webp", ImagePath: "img/gone.webp"},
+	})
+	if len(out) != 1 || out[0].Type != "text" {
+		t.Fatalf("expected text placeholder, got %+v", out)
+	}
+	if out[0].Text == "" || out[0].Source != nil {
+		t.Errorf("placeholder wrong: %+v", out[0])
+	}
+}

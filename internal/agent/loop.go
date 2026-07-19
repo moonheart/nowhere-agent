@@ -52,6 +52,10 @@ type Config struct {
 	MaxTokens       int
 	MaxIterations   int // guard against infinite loops
 	CacheablePrefix bool
+	// Images, when set, materializes BlockImage paths to base64 before each
+	// send (every turn, byte-stable for prompt caching). Nil leaves image
+	// blocks as-is (they degrade to text placeholders downstream).
+	Images provider.ImageResolver
 }
 
 // Loop runs the think→tool→think cycle.
@@ -103,6 +107,11 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			Tools:           l.toolDefs(),
 			MaxTokens:       l.config.MaxTokens,
 			CacheablePrefix: l.config.CacheablePrefix,
+		}
+		// Materialize image blocks (path → base64) before every send so the
+		// provider receives the payload; byte-stable across turns for caching.
+		if l.config.Images != nil {
+			req = provider.MaterializeImages(ctx, req, l.config.Images)
 		}
 
 		events, err := l.provider.Stream(ctx, req)
