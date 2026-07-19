@@ -3,10 +3,10 @@
 ## MODIFIED Requirements
 
 ### Requirement: Durable run event log
-Run **lifecycle** events SHALL be appended to a durable, ordered event log (`run_events`) that records run state transitions (running, done, error, cancelled). The durable log SHALL NOT be used to store per-token content deltas; conversation content is the province of the message store (persist-raw-messages), and live content delivery is the province of the stream broker.
+Run **lifecycle** events SHALL be appended to a durable, ordered event log (`run_events`) that records run state transitions (running, done, error, cancelled) and the user message. The durable log SHALL NOT store per-token content deltas; conversation content is the province of the message store (persist-raw-messages), and live content delivery is the province of the stream broker.
 
-#### Scenario: Lifecycle events persisted
-- **WHEN** the loop emits a lifecycle event (running, done, error, cancelled)
+#### Scenario: Events persisted
+- **WHEN** the loop emits a lifecycle event (running, done, error, cancelled) or a user message
 - **THEN** it is appended to the run's durable log
 
 #### Scenario: Content deltas not persisted to run_events
@@ -14,24 +14,24 @@ Run **lifecycle** events SHALL be appended to a durable, ordered event log (`run
 - **THEN** it is NOT written to `run_events` (it goes to the live stream broker), so a run produces O(lifecycle) rows, not O(tokens)
 
 ### Requirement: Event bus fan-out
-Run events SHALL be fanned out to attached clients through a replaceable broker abstraction (in-memory for single instance, Redis-backed for multi-instance) without changing session or transport logic. Live content fan-out SHALL NOT wait on a durable write; the durability boundary for content is the assembled message, not the individual token.
+Run events SHALL be fanned out to attached clients through a replaceable broker abstraction (in-memory for single instance, Redis-backed for multi-instance) without changing session or transport logic. Live **content** fan-out SHALL NOT wait on a durable write; the durability boundary for content is the assembled message, not the individual token. Lifecycle events are persisted to the run event log before fan-out.
 
-#### Scenario: Live fan-out not gated by persistence
+#### Scenario: Live fan-out through the bus
 - **WHEN** a run emits a streaming content delta
-- **THEN** it is published to attached clients without waiting on a database write
+- **THEN** it is published to attached clients via the live broker without waiting on a database write
 
-#### Scenario: Lifecycle persisted before settle
+#### Scenario: Terminal event precedes settle
 - **WHEN** a run reaches a terminal state
-- **THEN** the terminal lifecycle event is persisted to the durable log before the run is marked settled, so attached clients observe it
+- **THEN** the terminal lifecycle event is persisted to the durable log and published before the run is marked settled, so attached clients observe it
 
-#### Scenario: Broker replaceable across instances
-- **WHEN** the deployment changes from single-instance to multi-instance
-- **THEN** swapping the in-memory broker for the Redis broker (config only) makes a live run's stream visible to clients connected to any instance, with no change to session or transport logic
+#### Scenario: Gap filled from the durable log
+- **WHEN** an attached client misses live frames (slow consumer or reconnect)
+- **THEN** the missed content is recovered from the broker's retained stream (Read after the client's last offset); lifecycle events remain recoverable from the durable run event log
 
 ### Requirement: Reconnect and replay
 A client SHALL be able to reconnect and recover the run's in-flight output. While the run's live stream survives, the client re-reads the stream from its last received offset; once the stream has been cleaned up (run settled), the authoritative content comes from the durable message store.
 
-#### Scenario: Resume from the live stream
+#### Scenario: Resume after disconnect
 - **WHEN** a client reconnects to an active run with a last-received stream offset
 - **THEN** all stream frames after that offset are re-delivered in order, then live-followed
 
