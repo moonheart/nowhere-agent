@@ -24,6 +24,16 @@ type Config struct {
 	Stream Stream
 	// Sandbox configures the per-session sandbox backend for built-in tools.
 	Sandbox Sandbox
+	// Subagent configures the spawn_agent tool (subagent capability).
+	Subagent Subagent
+}
+
+// Subagent configures the spawn_agent tool. It is only wired when a sandbox
+// backend is configured (subagents need a tool pool). MaxDepth bounds recursive
+// nesting; a child at the maximum depth does not receive the spawn tool.
+type Subagent struct {
+	Enabled  bool `envconfig:"SUBAGENT_ENABLED" default:"true"`
+	MaxDepth int  `envconfig:"SUBAGENT_MAX_DEPTH" default:"3"`
 }
 
 // Sandbox selects the per-session sandbox backend that built-in file tools run
@@ -86,16 +96,16 @@ type HTTP struct {
 
 // DB configures Postgres.
 type DB struct {
-	DSN             string `envconfig:"DB_DSN" default:"postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable"`
-	MaxOpenConns    int    `envconfig:"DB_MAX_OPEN_CONNS" default:"20"`
-	MaxIdleConns    int    `envconfig:"DB_MAX_IDLE_CONNS" default:"5"`
+	DSN             string        `envconfig:"DB_DSN" default:"postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable"`
+	MaxOpenConns    int           `envconfig:"DB_MAX_OPEN_CONNS" default:"20"`
+	MaxIdleConns    int           `envconfig:"DB_MAX_IDLE_CONNS" default:"5"`
 	ConnMaxLifetime time.Duration `envconfig:"DB_CONN_MAX_LIFETIME" default:"30m"`
 }
 
 // Log configures logging.
 type Log struct {
 	Level  string `envconfig:"LOG_LEVEL" default:"debug"` // debug|info|warn|error
-	Format string `envconfig:"LOG_FORMAT" default:"text"`  // text|json
+	Format string `envconfig:"LOG_FORMAT" default:"text"` // text|json
 }
 
 // Load reads configuration from the environment. It first loads a local .env

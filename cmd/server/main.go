@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"nowhere-agent/internal/agent"
+	"nowhere-agent/internal/agentdef"
 	"nowhere-agent/internal/chatapi"
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/contextmgmt"
@@ -25,6 +26,7 @@ import (
 	"nowhere-agent/internal/sandbox"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
+	"nowhere-agent/internal/subagent"
 	"nowhere-agent/internal/toolruntime"
 	"nowhere-agent/internal/toolruntime/builtin"
 	"nowhere-agent/internal/workspace"
@@ -146,6 +148,33 @@ func run() error {
 		if cfg.LLM.ContextWindow > 0 {
 			compressor = contextmgmt.NewLLMCompressor(adapter, model)
 		}
+
+		// Subagent factory (subagent capability): builds a child loop for a
+		// resolved definition. System prompt and model come from the definition
+		// (model falls back to the parent's); the child's tool registry is set by
+		// the spawn tool via WithTools. Closes over the provider so the subagent
+		// package needs no wiring dependency.
+		subStore := agentdef.NewStore()
+		subFactory := func(_ context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
+			childModel := def.Model
+			if childModel == "" {
+				childModel = model
+			}
+			maxIter := 25
+			if def.MaxTurns > 0 {
+				maxIter = def.MaxTurns
+			}
+			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
+				Model:           childModel,
+				System:          def.System,
+				MaxTokens:       4096,
+				MaxIterations:   maxIter,
+				CacheablePrefix: true,
+				ContextWindow:   cfg.LLM.ContextWindow,
+				Compressor:      compressor,
+			})
+		}
+
 		handler := chatapi.NewHandler(func(ctx context.Context, system string) *agent.Loop {
 			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           model,
@@ -174,9 +203,18 @@ func run() error {
 				for _, t := range builtin.FileTools(sandboxPort, h) {
 					reg.Register(t)
 				}
+				// Subagent spawn tool: children draw from a scoped view of this
+				// run's registry, so nested loops share the session's sandbox-bound
+				// file tools. Registered after the file tools so it can see them.
+				if cfg.Subagent.Enabled {
+					reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, cfg.Subagent.MaxDepth))
+				}
 				loop.WithTools(reg)
 			})
 			log.Info("file tools enabled (read_file/write_file/list_dir)")
+			if cfg.Subagent.Enabled {
+				log.Info("subagent tool enabled (spawn_agent)", "max_depth", cfg.Subagent.MaxDepth)
+			}
 		}
 		handler.RegisterAuthed(mux, identityHandler.RequireAuth)
 		if compressor != nil {
