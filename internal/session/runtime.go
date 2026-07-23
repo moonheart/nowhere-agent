@@ -183,7 +183,7 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 // (running/done/error/cancelled/user) are persisted to run_events.
 func isContentKind(kind string) bool {
 	switch kind {
-	case "text", "thinking", "tool_use", "tool_result":
+	case "text", "thinking", "tool_use", "tool_result", "subagent":
 		return true
 	default:
 		return false

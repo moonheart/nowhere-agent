@@ -9,7 +9,7 @@ import { RightPanel } from "@/components/right-panel";
 import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun } from "@/lib/history";
-import { resetActivity } from "@/lib/activity";
+import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -38,6 +38,10 @@ function Chat({
           setSessionId(id);
           onSession(id);
         }
+      } else if (d.name === "subagent") {
+        // Live subagent progress (from a spawn_agent tool call) — feed the
+        // right panel's Runs tab; transient, never part of the message.
+        reportSubagentActivity(d.data as SubagentSignal);
       }
     },
     // The Stop button only aborts the local fetch; also tell the backend to

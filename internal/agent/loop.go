@@ -44,6 +44,10 @@ const (
 	// run's first event so an attached client (a second tab/device on the same
 	// session) learns a run began — both live (via fan-out) and on replay.
 	KindRunning EventKind = "running"
+	// KindSubagent carries a subagent activity signal (a child loop's phase/tool)
+	// for the run panel. It is a live-only content event (broker-routed, never
+	// persisted): a UI progress hint, not part of the conversation record.
+	KindSubagent EventKind = "subagent"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).

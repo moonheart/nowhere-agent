@@ -8,6 +8,7 @@ import (
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/subagent"
 )
 
 // marshalPayload encodes an event payload for the durable log. The run_events
@@ -126,6 +127,13 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 			Content:   contextmgmt.TruncateBlocksForPersistence(work.UserMessage.Content),
 		})
 	}
+
+	// Install a subagent activity sink so any spawn_agent tool call in this run
+	// forwards its child's progress to the run panel as live-only content events
+	// (never persisted). Nested subagents at any depth share this one sink.
+	runCtx = subagent.WithSink(runCtx, func(a subagent.Activity) {
+		rg.append(runCtx, sessionID, run.ID, agent.KindSubagent, a)
+	})
 
 	_, runErr := work.Loop.Run(runCtx, work.History, emit)
 

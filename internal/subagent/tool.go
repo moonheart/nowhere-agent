@@ -151,7 +151,16 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 	childCtx := withDepth(ctx, childDepth)
 	history := []provider.Message{provider.TextMessage(provider.RoleUser, prompt)}
 
-	msgs, runErr := child.Run(childCtx, history, discardEmitter{})
+	// Forward the child's progress to the run panel when a sink is installed
+	// (runtime path); otherwise the child runs black-box. Only the collapsed
+	// result reaches the parent either way.
+	var emitter agent.Emitter = discardEmitter{}
+	if sink := sinkFrom(ctx); sink != nil {
+		sink(Activity{AgentType: def.Name, Depth: childDepth, Phase: "start"})
+		emitter = activityEmitter{sink: sink, agentType: def.Name, depth: childDepth}
+	}
+
+	msgs, runErr := child.Run(childCtx, history, emitter)
 	if runErr != nil {
 		// Surface any partial output the subagent produced before failing.
 		res := collapse(msgs)
@@ -171,9 +180,10 @@ func errf(format string, a ...any) toolruntime.Result {
 	return toolruntime.Result{Content: fmt.Sprintf(format, a...), IsError: true}
 }
 
-// discardEmitter drops all child loop events. v1 subagents are black-box: only
-// the collapsed final result reaches the parent. (A forwarding emitter feeding
-// the web activity feed is a documented future enhancement.)
+// discardEmitter drops all child loop events. It is the fallback when no
+// activity sink is installed (no runtime, e.g. tests/dev): the child stays fully
+// black-box and only its collapsed result reaches the parent. When a sink is
+// present the tool uses activityEmitter instead (see activity.go).
 type discardEmitter struct{}
 
 func (discardEmitter) Emit(context.Context, agent.EventKind, any) error { return nil }

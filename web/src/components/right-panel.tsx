@@ -11,9 +11,10 @@ import {
   XCircle,
   Loader2,
   ChevronRight,
+  Bot,
   type LucideIcon,
 } from "lucide-react";
-import { useActivity, type ToolActivity } from "@/lib/activity";
+import { useActivity, type ToolActivity, type SubagentRun } from "@/lib/activity";
 
 type TabId = "workspace" | "runs" | "memory" | "skills";
 
@@ -174,8 +175,8 @@ const FileIcon: FC<{ path: string }> = ({ path }) => {
 /* ---------- Runs ---------- */
 
 const RunsTab: FC = () => {
-  const { tools } = useActivity();
-  if (tools.length === 0) {
+  const { tools, subagents } = useActivity();
+  if (tools.length === 0 && subagents.length === 0) {
     return (
       <EmptyState
         icon={Activity}
@@ -185,13 +186,57 @@ const RunsTab: FC = () => {
     );
   }
   return (
-    <ul className="p-2">
-      {[...tools].reverse().map((t) => (
-        <RunRow key={t.id} tool={t} />
-      ))}
-    </ul>
+    <div className="p-2">
+      {subagents.length > 0 && (
+        <div className="mb-2">
+          <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
+            Subagents
+          </div>
+          <ul>
+            {[...subagents].reverse().map((s) => (
+              <SubagentRow key={s.id} run={s} />
+            ))}
+          </ul>
+        </div>
+      )}
+      {tools.length > 0 && (
+        <ul>
+          {[...tools].reverse().map((t) => (
+            <RunRow key={t.id} tool={t} />
+          ))}
+        </ul>
+      )}
+    </div>
   );
 };
+
+const SubagentRow: FC<{ run: SubagentRun }> = ({ run }) => (
+  <li className="mb-1 rounded-lg border border-violet-100 bg-violet-50/40 px-2.5 py-2">
+    <div className="flex items-center gap-2">
+      {run.status === "running" ? (
+        <Loader2 size={14} className="shrink-0 animate-spin text-violet-500" />
+      ) : run.status === "error" ? (
+        <XCircle size={14} className="shrink-0 text-red-500" />
+      ) : (
+        <CheckCircle2 size={14} className="shrink-0 text-emerald-500" />
+      )}
+      <Bot size={13} className="shrink-0 text-violet-400" />
+      <span className="min-w-0 flex-1 truncate text-xs font-medium text-neutral-800">
+        {run.agentType}
+      </span>
+      {run.depth > 1 && (
+        <span className="rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-600">
+          L{run.depth}
+        </span>
+      )}
+    </div>
+    {run.tools.length > 0 && (
+      <div className="mt-1 pl-6 font-mono text-[10px] text-neutral-500">
+        {run.tools.join(" · ")}
+      </div>
+    )}
+  </li>
+);
 
 const RunRow: FC<{ tool: ToolActivity }> = ({ tool }) => {
   const [open, setOpen] = useState(false);

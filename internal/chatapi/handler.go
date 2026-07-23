@@ -523,6 +523,12 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 			isErr, _ := m["is_error"].(bool)
 			e.write(chunk{"type": "tool-result", "toolCallId": id, "result": m["content"], "isError": isErr})
 		}
+	case agent.KindSubagent:
+		// Subagent progress: a transient data frame the client routes to the run
+		// panel (via onData), never added to the message content.
+		if m, ok := payload.(map[string]any); ok {
+			e.write(chunk{"type": "data-subagent", "data": m, "transient": true})
+		}
 	case agent.KindDone:
 		e.writeRunStatus("done")
 	case agent.KindError:

@@ -37,11 +37,11 @@ green before commit. No `Co-Authored-By` trailer.
 - [x] 5.2 Provide the `SubagentFactory` closure over the provider/model/compressor so a child loop is built with `def.System`, `def.Model` (fallback parent model), `def.MaxTurns`.
 - [x] 5.3 Register `spawn_agent` into each run's registry alongside the file tools (via the existing `ToolBinder` seam), passing the run's parent registry. Children share the session sandbox via the shared file-tool instances (D6).
 - [x] 5.4 Config: `SUBAGENT_MAX_DEPTH` (default 3), `SUBAGENT_ENABLED` (default on).
-- [ ] 5.5 Chat-path end-to-end test (fake provider through the handler). Deferred — the mechanism is covered end-to-end at the tool+loop level in §4.7; a handler-level test is a follow-up.
+- [x] 5.5 Chat-path end-to-end test (fake provider through the handler). — `internal/chatapi/subagent_e2e_test.go` (`TestChatSpawnsSubagent`): parent calls spawn_agent via ToolBinder, child's collapsed result lands as the parent tool_result, parent finishes with its own answer.
 
-## 6. Optional: activity feed (web right-panel Runs tab)
+## 6. Activity feed (web right-panel Runs tab)
 
-- [ ] 6.1 Forward child loop events to the activity channel. Deferred per proposal — v1 subagents are black-box (`discardEmitter`); the collapsed result is the contract. Not required for the capability.
+- [x] 6.1 Forward child loop events to the run panel. `agent.KindSubagent` (live-only content event); `subagent.WithSink`/`activityEmitter` forward child tool-use/done/error as `Activity{agentType,depth,phase,tool}`; run worker injects the sink → broker; attach maps it to a transient `data-subagent` frame (never a message part); web `onData` → `reportSubagentActivity` → Runs tab shows subagent runs with their tool sequence. Deterministic tests in `internal/subagent/activity_test.go`.
 
 ## 7. Validation
 

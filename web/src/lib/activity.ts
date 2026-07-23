@@ -17,12 +17,34 @@ export type ToolActivity = {
   at: number;
 };
 
+// A subagent run aggregated from the backend's live `data-subagent` activity
+// signals (start → tool… → done/error). It is a UI progress hint only; the
+// subagent's actual output reaches the model as the spawn_agent tool result.
+export type SubagentRun = {
+  id: number;
+  agentType: string;
+  depth: number;
+  tools: string[];
+  status: "running" | "done" | "error";
+  at: number;
+};
+
+export type SubagentSignal = {
+  agentType: string;
+  depth: number;
+  phase: "start" | "tool" | "done" | "error";
+  tool?: string;
+};
+
 export type ActivityState = {
   /** Tool calls in the order they started, updated in place as they finish. */
   tools: ToolActivity[];
+  /** Subagent runs spawned during this conversation. */
+  subagents: SubagentRun[];
 };
 
-let state: ActivityState = { tools: [] };
+let state: ActivityState = { tools: [], subagents: [] };
+let subagentSeq = 0;
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -48,16 +70,49 @@ export function reportToolCall(entry: Omit<ToolActivity, "at"> & { at?: number }
   if (existing >= 0) {
     const tools = state.tools.slice();
     tools[existing] = { ...tools[existing], ...record };
-    setState({ tools });
+    setState({ ...state, tools });
   } else {
-    setState({ tools: [...state.tools, record] });
+    setState({ ...state, tools: [...state.tools, record] });
   }
+}
+
+// reportSubagentActivity folds one live subagent signal into the aggregated run
+// list: `start` opens a run, `tool` appends to the most recent running run at
+// that depth, `done`/`error` closes it. Depth matching keeps a grandchild's
+// tools off its parent's entry.
+export function reportSubagentActivity(sig: SubagentSignal) {
+  const runs = state.subagents.slice();
+  if (sig.phase === "start") {
+    runs.push({
+      id: subagentSeq++,
+      agentType: sig.agentType,
+      depth: sig.depth,
+      tools: [],
+      status: "running",
+      at: Date.now(),
+    });
+  } else {
+    let idx = -1;
+    for (let i = runs.length - 1; i >= 0; i--) {
+      if (runs[i].status === "running" && runs[i].depth === sig.depth) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) return; // stray signal (start dropped); ignore
+    const run = { ...runs[idx] };
+    if (sig.phase === "tool" && sig.tool) run.tools = [...run.tools, sig.tool];
+    else if (sig.phase === "done") run.status = "done";
+    else if (sig.phase === "error") run.status = "error";
+    runs[idx] = run;
+  }
+  setState({ ...state, subagents: runs.slice(-50) });
 }
 
 // resetActivity clears per-conversation activity when switching threads so the
 // panel doesn't show a previous chat's runs.
 export function resetActivity() {
-  setState({ tools: [] });
+  setState({ tools: [], subagents: [] });
 }
 
 export function subscribeActivity(cb: () => void): () => void {
