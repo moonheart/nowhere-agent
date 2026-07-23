@@ -48,7 +48,7 @@ func TestDecoderToolCall(t *testing.T) {
 		events = append(events, d.feed([]byte(p))...)
 	}
 
-	var sawToolStart bool
+	var sawToolStart, sawToolStop bool
 	var args string
 	for _, e := range events {
 		if e.Type == provider.EventBlockStart && e.Block != nil && e.Block.Type == provider.BlockToolUse {
@@ -57,12 +57,20 @@ func TestDecoderToolCall(t *testing.T) {
 				t.Errorf("tool block wrong: %+v", e.Block)
 			}
 		}
+		if e.Type == provider.EventBlockStop && e.Index == toolBaseIndex {
+			sawToolStop = true
+		}
 		if e.Type == provider.EventBlockDelta {
 			args += e.Delta
 		}
 	}
 	if !sawToolStart {
 		t.Error("no tool_use block start")
+	}
+	// The tool_use block must be closed (block-stop) so the loop emits its
+	// tool-use event; without it the tool result is orphaned on the client.
+	if !sawToolStop {
+		t.Error("no tool_use block stop — tool call left open at finish")
 	}
 	if args != `{"path}` {
 		t.Errorf("tool args = %q", args)

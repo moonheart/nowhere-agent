@@ -298,6 +298,14 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 					assistant.Content = append(assistant.Content, blk)
 					if blk.Type == provider.BlockToolUse {
 						calls = append(calls, toolruntime.Call{ID: blk.ToolUseID, Name: blk.ToolName, Args: blk.ToolInput})
+						// Emit the tool-use event here too (mirroring EventBlockStop):
+						// a provider that closes the stream without a block-stop for a
+						// tool call (e.g. OpenAI's finish) would otherwise dispatch the
+						// call and emit its result with no preceding tool-use event,
+						// orphaning the result on the client.
+						_ = emit.Emit(ctx, KindToolUse, map[string]any{
+							"id": blk.ToolUseID, "name": blk.ToolName, "input": blk.ToolInput,
+						})
 					}
 					delete(open, idx)
 				}

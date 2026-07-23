@@ -305,3 +305,45 @@ func TestLoopCancelMidStream(t *testing.T) {
 		t.Errorf("expected 1 cancelled event, got %d", emit.count(KindCancelled))
 	}
 }
+
+// toolUseNoStop emits a tool_use block that is never closed with an
+// EventBlockStop before the stream ends — the shape the OpenAI adapter produced
+// before it closed tool blocks in finish(). The loop must still emit KindToolUse
+// (from its channel-close finalization) so the client sees a tool-call before
+// the tool-result.
+func toolUseNoStop(id, name, jsonArgs string) []provider.Event {
+	return []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: id, ToolName: name, ToolInput: map[string]any{}}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: jsonArgs},
+		// No EventBlockStop / EventMessageStop: the channel just closes.
+	}
+}
+
+func TestLoopEmitsToolUseWhenBlockLeftOpen(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseNoStop("c1", "echo", `{}`),
+		textResponse("done"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}, emit)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// Every dispatched tool call must have a preceding tool-use event, even when
+	// the provider left the block open at stream close.
+	if got := emit.count(KindToolUse); got != 1 {
+		t.Errorf("KindToolUse count = %d, want 1", got)
+	}
+	if got := emit.count(KindToolResult); got != 1 {
+		t.Errorf("KindToolResult count = %d, want 1", got)
+	}
+	// And the run completes with the final text after the tool round-trip.
+	if len(produced) == 0 || produced[len(produced)-1].Content[0].Text != "done" {
+		t.Errorf("final produced = %+v", produced)
+	}
+}

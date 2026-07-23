@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"sort"
 
 	"nowhere-agent/internal/provider"
 )
@@ -146,7 +147,12 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 	return events
 }
 
-// finish closes any open block (thinking then text) and is idempotent.
+// finish closes any open block (thinking, text, and tool calls) and is
+// idempotent. OpenAI streams tool calls with no explicit per-call terminator —
+// they stay open until finish_reason/[DONE] — so tool blocks must be closed
+// here too. Without their block-stop the loop finalizes them only at stream
+// close and never emits the tool-use event, orphaning the tool result on the
+// client (which then rejects a result for an unknown tool-call id).
 func (d *streamDecoder) finish() []provider.Event {
 	var events []provider.Event
 	if d.thinkingOpen {
@@ -156,6 +162,17 @@ func (d *streamDecoder) finish() []provider.Event {
 	if d.textOpen {
 		events = append(events, provider.Event{Type: provider.EventBlockStop, Index: textIndex})
 		d.textOpen = false
+	}
+	if len(d.seenToolIDs) > 0 {
+		idxs := make([]int, 0, len(d.seenToolIDs))
+		for i := range d.seenToolIDs {
+			idxs = append(idxs, i)
+		}
+		sort.Ints(idxs)
+		for _, i := range idxs {
+			events = append(events, provider.Event{Type: provider.EventBlockStop, Index: i + toolBaseIndex})
+		}
+		d.seenToolIDs = map[int]string{}
 	}
 	return events
 }
