@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { useDataStreamRuntime } from "@assistant-ui/react-data-stream";
+import { LogOut } from "lucide-react";
 import { Thread } from "@/components/thread";
 import { LoginForm } from "@/components/login";
 import { SessionList } from "@/components/SessionList";
+import { RightPanel } from "@/components/right-panel";
 import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun } from "@/lib/history";
+import { resetActivity } from "@/lib/activity";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -106,6 +109,7 @@ export default function App() {
   const startNewChat = () => {
     clearSessionId();
     setActiveSessionId(null);
+    resetActivity();
     setConversationKey((k) => k + 1);
   };
 
@@ -119,6 +123,7 @@ export default function App() {
     if (id === activeSessionId) return;
     setSessionId(id);
     setActiveSessionId(id);
+    resetActivity();
     setConversationKey((k) => k + 1);
   };
 
@@ -135,10 +140,7 @@ export default function App() {
 
   if (!token) {
     return (
-      <div className="flex h-dvh flex-col bg-white text-neutral-900">
-        <header className="border-b border-neutral-200 px-4 py-3 font-semibold">
-          nowhere-agent
-        </header>
+      <div className="flex h-dvh flex-col bg-neutral-50 text-neutral-900">
         <div className="min-h-0 flex-1">
           <LoginForm onSuccess={() => setToken(getToken())} />
         </div>
@@ -147,19 +149,30 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-dvh flex-col bg-white text-neutral-900">
-      <header className="flex items-center border-b border-neutral-200 px-4 py-3">
-        <span className="font-semibold">nowhere-agent</span>
-        <button
-          type="button"
-          onClick={() => {
-            clearSessionId();
-            void logout().finally(() => setToken(null));
-          }}
-          className="ml-auto text-sm text-neutral-500 hover:text-neutral-800"
-        >
-          Sign out
-        </button>
+    <div className="flex h-dvh flex-col bg-neutral-50 text-neutral-900">
+      <header className="flex h-12 items-center gap-3 border-b border-neutral-200 bg-white px-4">
+        <div className="flex items-center gap-2">
+          <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-violet-600 text-xs font-bold text-white">
+            n
+          </span>
+          <span className="text-sm font-semibold tracking-tight">
+            nowhere-agent
+          </span>
+        </div>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            title="Sign out"
+            onClick={() => {
+              clearSessionId();
+              void logout().finally(() => setToken(null));
+            }}
+            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800"
+          >
+            <LogOut size={15} />
+            Sign out
+          </button>
+        </div>
       </header>
       <div className="flex min-h-0 flex-1">
         <SessionList
@@ -169,9 +182,10 @@ export default function App() {
           onDeleteCurrent={handleDeleteCurrent}
           refreshToken={listVersion}
         />
-        <div className="min-w-0 flex-1">
+        <main className="min-w-0 flex-1 bg-white">
           <Chat conversationKey={conversationKey} onSession={handleNewSession} />
-        </div>
+        </main>
+        <RightPanel />
       </div>
     </div>
   );

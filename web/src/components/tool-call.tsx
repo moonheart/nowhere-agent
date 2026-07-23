@@ -1,5 +1,6 @@
-import { useState, type FC } from "react";
+import { useEffect, useState, type FC } from "react";
 import type { ToolCallMessagePartProps } from "@assistant-ui/react";
+import { reportToolCall } from "@/lib/activity";
 
 /**
  * Renders a tool call (file read/write, etc.) as a collapsible block in the
@@ -13,10 +14,25 @@ export const ToolCall: FC<ToolCallMessagePartProps> = ({
   result,
   isError,
   status,
+  toolCallId,
 }) => {
   const running = status?.type === "running";
   const [open, setOpen] = useState(false);
   const expanded = running || open;
+
+  // Publish to the right panel's Runs/Workspace feed. Re-reports on each render
+  // as the call streams from running → done, keyed by toolCallId so the feed
+  // upserts rather than duplicates.
+  useEffect(() => {
+    reportToolCall({
+      id: toolCallId ?? `${toolName}`,
+      toolName,
+      argsText: argsText ?? "",
+      result,
+      isError,
+      status: running ? "running" : isError ? "error" : "done",
+    });
+  }, [toolCallId, toolName, argsText, result, isError, running]);
 
   const resultText =
     result === undefined || result === null
