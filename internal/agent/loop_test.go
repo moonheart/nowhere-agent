@@ -13,19 +13,21 @@ import (
 
 // scriptProvider emits canned event sequences, one per Stream call.
 type scriptProvider struct {
-	mu     sync.Mutex
-	script [][]provider.Event
-	calls  int
+	mu       sync.Mutex
+	script   [][]provider.Event
+	calls    int
+	requests []provider.Request
 }
 
 func (p *scriptProvider) Name() string { return "script" }
 
-func (p *scriptProvider) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+func (p *scriptProvider) Stream(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.calls >= len(p.script) {
 		return nil, errors.New("no more scripted responses")
 	}
+	p.requests = append(p.requests, req)
 	evs := p.script[p.calls]
 	p.calls++
 	ch := make(chan provider.Event, len(evs))
@@ -345,5 +347,90 @@ func TestLoopEmitsToolUseWhenBlockLeftOpen(t *testing.T) {
 	// And the run completes with the final text after the tool round-trip.
 	if len(produced) == 0 || produced[len(produced)-1].Content[0].Text != "done" {
 		t.Errorf("final produced = %+v", produced)
+	}
+}
+
+// TestToolResultMessageFillsEmpty pins fix A: a tool returning empty content
+// (e.g. list_dir on an empty workspace) must still produce a tool_result block
+// with non-empty ToolContent. An empty one serializes to a `role:"tool"`
+// message with no content field, which the OpenAI/deepseek gateway 400s on,
+// aborting the run right after the tool batch.
+func TestToolResultMessageFillsEmpty(t *testing.T) {
+	calls := []toolruntime.Call{
+		{ID: "c1", Name: "list_dir", Args: map[string]any{}},
+		{ID: "c2", Name: "read_file", Args: map[string]any{}},
+	}
+	results := []toolruntime.Result{
+		{Content: ""},          // empty → placeholder
+		{Content: "real data"}, // non-empty → untouched
+	}
+
+	msg := toolResultMessage(calls, results)
+	if msg.Role != provider.RoleUser {
+		t.Errorf("role = %q", msg.Role)
+	}
+	if len(msg.Content) != 2 {
+		t.Fatalf("blocks = %d, want 2", len(msg.Content))
+	}
+	if got := msg.Content[0].ToolContent; got != emptyToolResultPlaceholder {
+		t.Errorf("empty result content = %q, want placeholder %q", got, emptyToolResultPlaceholder)
+	}
+	if got := msg.Content[1].ToolContent; got != "real data" {
+		t.Errorf("non-empty result content = %q, want preserved", got)
+	}
+	for i, b := range msg.Content {
+		if b.Type != provider.BlockToolResult || b.ToolResultID != calls[i].ID {
+			t.Errorf("block %d = %+v", i, b)
+		}
+	}
+}
+
+// emptyTool returns empty content, like list_dir on an empty workspace.
+type emptyTool struct{}
+
+func (emptyTool) Name() string           { return "empty" }
+func (emptyTool) Description() string    { return "returns nothing" }
+func (emptyTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (emptyTool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
+func (emptyTool) Timeout() time.Duration { return time.Second }
+func (emptyTool) Call(context.Context, map[string]any) (toolruntime.Result, error) {
+	return toolruntime.Result{Content: ""}, nil
+}
+
+// TestLoopEmptyToolResultRoundTrip is the end-to-end regression for the live
+// 400: a tool with empty output goes through a full loop, and the SECOND
+// request sent to the provider must carry a non-empty tool_result content.
+// Before fix A the block had ToolContent="", which the OpenAI adapter drops via
+// omitempty → a `role:"tool"` message with no content field → gateway 400.
+func TestLoopEmptyToolResultRoundTrip(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "empty", `{}`),
+		textResponse("done"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(emptyTool{})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	if _, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}, &memEmitter{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(p.requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2 (tool round-trip)", len(p.requests))
+	}
+	// The second request's messages end with the tool_result message.
+	second := p.requests[1]
+	last := second.Messages[len(second.Messages)-1]
+	if last.Role != provider.RoleUser || len(last.Content) == 0 {
+		t.Fatalf("second request last message = %+v", last)
+	}
+	blk := last.Content[0]
+	if blk.Type != provider.BlockToolResult {
+		t.Fatalf("block type = %q, want tool_result", blk.Type)
+	}
+	if blk.ToolContent == "" {
+		t.Error("tool_result content sent to provider is empty — would 400 on OpenAI/deepseek")
+	}
+	if blk.ToolContent != emptyToolResultPlaceholder {
+		t.Errorf("tool_result content = %q, want placeholder", blk.ToolContent)
 	}
 }

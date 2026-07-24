@@ -100,6 +100,24 @@ func TestListDirTool(t *testing.T) {
 	}
 }
 
+// TestListDirToolEmpty pins the C fix: an empty workspace directory must yield
+// a non-empty placeholder, not "" — an empty tool_result serializes to a tool
+// message with no content field, which the OpenAI/deepseek gateway 400s on.
+func TestListDirToolEmpty(t *testing.T) {
+	_, _, tools := newMemTools(t)
+
+	res, _ := toolByName(tools, "list_dir").Call(context.Background(), map[string]any{})
+	if res.IsError {
+		t.Fatalf("list failed: %s", res.Content)
+	}
+	if res.Content == "" {
+		t.Error("empty directory must not produce empty content")
+	}
+	if !strings.Contains(res.Content, "empty") {
+		t.Errorf("expected an empty-directory note, got %q", res.Content)
+	}
+}
+
 func TestSchemasAreObjects(t *testing.T) {
 	_, _, tools := newMemTools(t)
 	for _, tl := range tools {

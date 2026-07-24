@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
@@ -210,6 +211,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			// breaker already tripped — don't re-count
 		default:
 			l.compressFailures++
+			slog.Warn("agent: compression failed; using uncompressed view", "iter", iter, "err", err, "failures", l.compressFailures)
 		}
 
 		assistant, toolCalls, err := l.attempt(ctx, view, emit)
@@ -226,9 +228,11 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		}
 		if err != nil {
 			if ctx.Err() != nil {
+				slog.Info("agent: run cancelled", "iter", iter, "ctx_err", ctx.Err(), "attempt_err", err)
 				_ = emit.Emit(ctx, KindCancelled, nil)
 				return produced, ctx.Err()
 			}
+			slog.Error("agent: provider attempt failed; run aborting", "iter", iter, "err", err, "view_msgs", len(view))
 			_ = emit.Emit(ctx, KindError, err.Error())
 			return produced, err
 		}
@@ -393,18 +397,30 @@ func (l *Loop) maybeCompress(ctx context.Context, view []provider.Message) ([]pr
 }
 
 // toolResultMessage builds the user-role message carrying tool results back.
+// A tool that returns empty content (e.g. list_dir on an empty workspace) is
+// given a placeholder: an empty tool_result serializes to a `role:"tool"`
+// message with no content field, which providers (OpenAI/deepseek gateway)
+// reject with a 400 — aborting the run right after the tool batch.
 func toolResultMessage(calls []toolruntime.Call, results []toolruntime.Result) provider.Message {
 	msg := provider.Message{Role: provider.RoleUser}
 	for i, res := range results {
+		content := res.Content
+		if content == "" {
+			content = emptyToolResultPlaceholder
+		}
 		msg.Content = append(msg.Content, provider.Block{
 			Type:         provider.BlockToolResult,
 			ToolResultID: calls[i].ID,
-			ToolContent:  res.Content,
+			ToolContent:  content,
 			IsError:      res.IsError,
 		})
 	}
 	return msg
 }
+
+// emptyToolResultPlaceholder stands in for a tool that produced no output, so
+// the serialized tool message always carries a non-empty content field.
+const emptyToolResultPlaceholder = "(no output)"
 
 // accumulator assembles a block from streaming deltas.
 type accumulator struct {

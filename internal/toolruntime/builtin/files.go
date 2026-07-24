@@ -80,8 +80,10 @@ type fileWriteTool struct {
 	h  sandbox.Handle
 }
 
-func (t *fileWriteTool) Name() string        { return "write_file" }
-func (t *fileWriteTool) Description() string { return "Write content to a file in the session workspace (overwrites)" }
+func (t *fileWriteTool) Name() string { return "write_file" }
+func (t *fileWriteTool) Description() string {
+	return "Write content to a file in the session workspace (overwrites)"
+}
 func (t *fileWriteTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -115,8 +117,10 @@ type listDirTool struct {
 	h  sandbox.Handle
 }
 
-func (t *listDirTool) Name() string        { return "list_dir" }
-func (t *listDirTool) Description() string { return "List entries in a directory of the session workspace" }
+func (t *listDirTool) Name() string { return "list_dir" }
+func (t *listDirTool) Description() string {
+	return "List entries in a directory of the session workspace"
+}
 func (t *listDirTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -138,6 +142,9 @@ func (t *listDirTool) Call(ctx context.Context, args map[string]any) (toolruntim
 	names, err := t.sb.ListDir(ctx, t.h, path)
 	if err != nil {
 		return toolruntime.Result{Content: fmt.Sprintf("list_dir failed: %v", err), IsError: true}, nil
+	}
+	if len(names) == 0 {
+		return toolruntime.Result{Content: "(empty directory)"}, nil
 	}
 	return toolruntime.Result{Content: strings.Join(names, "\n")}, nil
 }
