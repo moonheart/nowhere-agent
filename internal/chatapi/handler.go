@@ -515,6 +515,15 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 			id, _ := m["id"].(string)
 			name, _ := m["name"].(string)
 			e.write(chunk{"type": "tool-call-start", "toolCallId": id, "toolName": name})
+			// assistant-ui streams tool args via tool-call-delta frames (the start
+			// frame carries only id+name). Emit the full input as one delta so the
+			// live UI shows the arguments; otherwise it renders "{}" until reload
+			// (the history path marshals ToolInput separately and is unaffected).
+			if input, ok := m["input"]; ok && input != nil {
+				if data, err := json.Marshal(input); err == nil {
+					e.write(chunk{"type": "tool-call-delta", "toolCallId": id, "argsText": string(data)})
+				}
+			}
 			e.write(chunk{"type": "tool-call-end", "toolCallId": id})
 		}
 	case agent.KindToolResult:

@@ -7,6 +7,8 @@ package toolruntime
 import (
 	"context"
 	"time"
+
+	"nowhere-agent/internal/provider"
 )
 
 // Risk classifies a tool's danger level; execution-permission (D10) uses it to
@@ -30,6 +32,11 @@ type Result struct {
 	Content string
 	// IsError marks the result as a failure (model sees it as an error).
 	IsError bool
+	// Nested carries a tool call's nested content blocks (a subagent's thinking /
+	// text / tool-call conversation), for spawn_agent results. It is persisted
+	// and replayed to the UI as the sub-conversation; it is NEVER fed back to the
+	// model (the model only sees the collapsed Content).
+	Nested []provider.Block
 }
 
 // Tool is the unified contract. Implementations must be safe for concurrent use.

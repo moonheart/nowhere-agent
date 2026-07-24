@@ -47,6 +47,12 @@ type Block struct {
 	ToolContent  string `json:"tool_content,omitempty"`
 	IsError      bool   `json:"is_error,omitempty"`
 
+	// ToolMessages carries a tool call's nested content (a subagent's thinking /
+	// text / tool-call blocks), for spawn_agent results. It is persisted and used
+	// to rebuild the sub-conversation in history; it is NEVER sent back to the
+	// provider (the model only sees the collapsed ToolContent).
+	ToolMessages []Block `json:"tool_messages,omitempty"`
+
 	// Image (BlockImage) — a reference to an image, never the payload. The
 	// image bytes live in the session workspace; the block carries a
 	// workspace-relative path. It is materialized to the provider-native base64

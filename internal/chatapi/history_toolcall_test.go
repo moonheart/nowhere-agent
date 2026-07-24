@@ -64,3 +64,183 @@ func TestBuildHistoryIncludesToolCalls(t *testing.T) {
 		t.Error("isError should be false")
 	}
 }
+
+// TestBuildHistoryNestsSubagentConversation verifies a spawn_agent tool_result's
+// persisted ToolMessages become a nested sub-conversation on the tool-call part,
+// so a reloaded client renders the child's thinking/text/tools — not just the
+// collapsed result.
+func TestBuildHistoryNestsSubagentConversation(t *testing.T) {
+	ms := session.NewMemMessageStore()
+	sess := "sess-1"
+	append := func(role provider.Role, blocks ...provider.Block) {
+		if _, err := ms.AppendMessage(context.Background(), session.StoredMessage{
+			SessionID: sess, RunID: "r1", Role: role, Content: blocks,
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	append(provider.RoleUser, provider.Block{Type: provider.BlockText, Text: "delegate"})
+	append(provider.RoleAssistant,
+		provider.Block{Type: provider.BlockToolUse, ToolUseID: "sp1", ToolName: "spawn_agent", ToolInput: map[string]any{"prompt": "x"}},
+	)
+	// The child's tool_result carries its sub-conversation in ToolMessages.
+	append(provider.RoleUser,
+		provider.Block{
+			Type:         provider.BlockToolResult,
+			ToolResultID: "sp1",
+			ToolContent:  "child findings",
+			ToolMessages: []provider.Block{
+				{Type: provider.BlockThinking, Thinking: "let me look"},
+				{Type: provider.BlockToolUse, ToolUseID: "c1", ToolName: "read_file", ToolInput: map[string]any{"path": "a.txt"}},
+				{Type: provider.BlockToolResult, ToolResultID: "c1", ToolContent: "file body"},
+				{Type: provider.BlockThinking, Thinking: "now verify"},
+				{Type: provider.BlockText, Text: "child findings"},
+			},
+		},
+	)
+	append(provider.RoleAssistant, provider.Block{Type: provider.BlockText, Text: "done"})
+
+	h := NewHandler(newTestLoop, "sys").WithMessageStore(ms)
+	req := httptest.NewRequest("GET", "/api/chat/history?threadId="+sess, nil)
+	msgs, err := h.buildHistory(req, sess)
+	if err != nil {
+		t.Fatalf("buildHistory: %v", err)
+	}
+
+	var found *historyPart
+	for i := range msgs {
+		for j := range msgs[i].Content {
+			if msgs[i].Content[j].Type == "tool-call" && msgs[i].Content[j].ToolName == "spawn_agent" {
+				found = &msgs[i].Content[j]
+			}
+		}
+	}
+	if found == nil {
+		t.Fatalf("no spawn_agent tool-call part: %+v", msgs)
+	}
+	if found.Result != "child findings" {
+		t.Errorf("collapsed result = %v", found.Result)
+	}
+	if len(found.Messages) != 1 {
+		t.Fatalf("expected 1 nested assistant message, got %d: %+v", len(found.Messages), found.Messages)
+	}
+	nested := found.Messages[0]
+	// Reasoning across turns folds into a single leading part (not one per turn).
+	var reasoningParts, textParts, toolParts int
+	var reasoningText string
+	for _, p := range nested.Content {
+		switch p.Type {
+		case "reasoning":
+			reasoningParts++
+			reasoningText = p.Text
+		case "text":
+			textParts++
+			if p.Text != "child findings" {
+				t.Errorf("nested text = %q", p.Text)
+			}
+		case "tool-call":
+			toolParts++
+			if p.ToolName != "read_file" || p.Result != "file body" {
+				t.Errorf("nested tool = %+v", p)
+			}
+		}
+	}
+	if reasoningParts != 1 {
+		t.Errorf("reasoning parts = %d, want 1 (folded across turns)", reasoningParts)
+	}
+	if !strings.Contains(reasoningText, "let me look") || !strings.Contains(reasoningText, "now verify") {
+		t.Errorf("folded reasoning = %q, want both turns' thinking", reasoningText)
+	}
+	if textParts != 1 || toolParts != 1 {
+		t.Errorf("parts: text=%d tool=%d, want 1/1", textParts, toolParts)
+	}
+}
+
+// TestBuildHistoryMergesOneTurnIntoOneBubble reproduces the reported regression:
+// a single logical reply that spawns a subagent then verifies (spawn_agent →
+// tool_result → read_file → tool_result → final text) must reload as ONE
+// assistant message, not one bubble per round. This is what made a live run look
+// like a single block but its reload look "split into 3".
+func TestBuildHistoryMergesOneTurnIntoOneBubble(t *testing.T) {
+	ms := session.NewMemMessageStore()
+	sess := "sess-1"
+	append := func(role provider.Role, blocks ...provider.Block) {
+		if _, err := ms.AppendMessage(context.Background(), session.StoredMessage{
+			SessionID: sess, RunID: "r1", Role: role, Content: blocks,
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	append(provider.RoleUser, provider.Block{Type: provider.BlockText, Text: "测试子代理, 里面写一个文件"})
+	append(provider.RoleAssistant,
+		provider.Block{Type: provider.BlockThinking, Thinking: "spawn a subagent"},
+		provider.Block{Type: provider.BlockToolUse, ToolUseID: "sp1", ToolName: "spawn_agent", ToolInput: map[string]any{"prompt": "x"}},
+	)
+	append(provider.RoleUser,
+		provider.Block{Type: provider.BlockToolResult, ToolResultID: "sp1", ToolContent: "child output"},
+	)
+	append(provider.RoleAssistant,
+		provider.Block{Type: provider.BlockThinking, Thinking: "verify the file"},
+		provider.Block{Type: provider.BlockText, Text: "子代理测试成功！让我确认一下文件内容:"},
+		provider.Block{Type: provider.BlockToolUse, ToolUseID: "rd1", ToolName: "read_file", ToolInput: map[string]any{"path": "f.txt"}},
+	)
+	append(provider.RoleUser,
+		provider.Block{Type: provider.BlockToolResult, ToolResultID: "rd1", ToolContent: "file body"},
+	)
+	append(provider.RoleAssistant,
+		provider.Block{Type: provider.BlockThinking, Thinking: "test passed"},
+		provider.Block{Type: provider.BlockText, Text: "✅ 子代理测试成功!"},
+	)
+
+	h := NewHandler(newTestLoop, "sys").WithMessageStore(ms)
+	req := httptest.NewRequest("GET", "/api/chat/history?threadId="+sess, nil)
+	msgs, err := h.buildHistory(req, sess)
+	if err != nil {
+		t.Fatalf("buildHistory: %v", err)
+	}
+
+	// Expect exactly 2 messages: the user's prompt + ONE merged assistant reply.
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages (user + 1 merged assistant), got %d: %+v", len(msgs), roles(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[1].Role != "assistant" {
+		t.Fatalf("roles = %v, want [user assistant]", roles(msgs))
+	}
+	asst := msgs[1]
+	// The merged reply must carry both tool calls and all three thinking/text beats.
+	var sawSpawn, sawRead bool
+	var textRunes int
+	for _, p := range asst.Content {
+		switch p.Type {
+		case "tool-call":
+			if p.ToolName == "spawn_agent" {
+				sawSpawn = true
+				if p.Result != "child output" {
+					t.Errorf("spawn_agent result = %v", p.Result)
+				}
+			}
+			if p.ToolName == "read_file" {
+				sawRead = true
+				if p.Result != "file body" {
+					t.Errorf("read_file result = %v", p.Result)
+				}
+			}
+		case "text":
+			textRunes += len(p.Text)
+		}
+	}
+	if !sawSpawn || !sawRead {
+		t.Errorf("merged reply missing tool calls: spawn=%v read=%v\n%+v", sawSpawn, sawRead, asst.Content)
+	}
+	if textRunes == 0 {
+		t.Error("merged reply has no text parts")
+	}
+}
+
+func roles(msgs []historyMessage) []string {
+	out := make([]string, len(msgs))
+	for i, m := range msgs {
+		out[i] = m.Role
+	}
+	return out
+}

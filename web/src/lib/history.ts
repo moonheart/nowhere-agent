@@ -34,6 +34,8 @@ type HistoryPart =
       argsText: string;
       result?: unknown;
       isError?: boolean;
+      /** Nested sub-conversation (a spawn_agent child's turns). */
+      messages?: HistoryMessage[];
     };
 type HistoryMessage = { id: string; role: string; content: HistoryPart[] };
 
@@ -54,6 +56,37 @@ function parseToolArgs(argsText: string): ReadonlyJSONObject {
   }
 }
 
+// mapPart converts one history part to a ThreadMessageLike part, recursing into
+// a tool-call's nested sub-conversation (a spawn_agent child's turns).
+function mapPart(p: HistoryPart): ThreadAssistantMessagePart {
+  if (p.type === "reasoning") {
+    return { type: "reasoning", text: p.text };
+  }
+  if (p.type === "tool-call") {
+    return {
+      type: "tool-call",
+      toolCallId: p.toolCallId,
+      toolName: p.toolName,
+      argsText: p.argsText,
+      args: parseToolArgs(p.argsText),
+      result: p.result,
+      isError: p.isError,
+      ...(p.messages && p.messages.length > 0
+        ? { messages: p.messages.map(mapMessage) as never }
+        : {}),
+    };
+  }
+  return { type: "text", text: p.text };
+}
+
+function mapMessage(m: HistoryMessage): ThreadMessageLike {
+  return {
+    id: m.id,
+    role: m.role === "assistant" ? "assistant" : "user",
+    content: m.content.map(mapPart),
+  };
+}
+
 async function loadHistory(): Promise<{
   messages: ThreadMessageLike[];
   active: boolean;
@@ -71,29 +104,7 @@ async function loadHistory(): Promise<{
     active?: boolean;
     after?: number;
   };
-  const messages = (data.messages ?? []).map(
-    (m): ThreadMessageLike => ({
-      id: m.id,
-      role: m.role === "assistant" ? "assistant" : "user",
-      content: m.content.map((p): ThreadAssistantMessagePart => {
-        if (p.type === "reasoning") {
-          return { type: "reasoning", text: p.text };
-        }
-        if (p.type === "tool-call") {
-          return {
-            type: "tool-call",
-            toolCallId: p.toolCallId,
-            toolName: p.toolName,
-            argsText: p.argsText,
-            args: parseToolArgs(p.argsText),
-            result: p.result,
-            isError: p.isError,
-          };
-        }
-        return { type: "text", text: p.text };
-      }),
-    }),
-  );
+  const messages = (data.messages ?? []).map(mapMessage);
   return {
     messages,
     active: data.active === true,

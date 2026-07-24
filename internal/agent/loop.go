@@ -413,6 +413,7 @@ func toolResultMessage(calls []toolruntime.Call, results []toolruntime.Result) p
 			ToolResultID: calls[i].ID,
 			ToolContent:  content,
 			IsError:      res.IsError,
+			ToolMessages: res.Nested,
 		})
 	}
 	return msg

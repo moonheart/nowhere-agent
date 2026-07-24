@@ -138,4 +138,21 @@ func TestChatSpawnsSubagent(t *testing.T) {
 	if finalText != "parent answer" {
 		t.Errorf("final text = %q, want %q", finalText, "parent answer")
 	}
+
+	// The child's progress surfaces as live data-subagent frames tagged with the
+	// spawn_agent tool-call id (sp1), so the chat UI can nest output under the
+	// right card. The broker is best-effort for a fast in-process run (later
+	// frames can be dropped when the run outruns the attach), so assert the
+	// leading start frame — which carries the toolCallId link — rather than the
+	// full stream. The stream-forwarding itself is unit-tested in subagent.
+	stream := rec.Body.String()
+	for _, want := range []string{
+		`"type":"data-subagent"`,
+		`"phase":"start"`,
+		`"toolCallId":"sp1"`,
+	} {
+		if !strings.Contains(stream, want) {
+			t.Errorf("live stream missing %q\n---\n%s", want, stream)
+		}
+	}
 }

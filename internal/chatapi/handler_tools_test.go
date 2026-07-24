@@ -106,6 +106,16 @@ func TestChatToolBinderDrivesFileTools(t *testing.T) {
 		}
 	}
 
+	// The live stream must carry the tool args as a tool-call-delta frame so the
+	// UI can render the arguments the model sent; without it the call shows "{}".
+	// (Regression: tool-call-start previously jumped straight to tool-call-end.)
+	if !strings.Contains(out, `"type":"tool-call-delta"`) {
+		t.Errorf("stream missing tool-call-delta (args) frame\n---\n%s", out)
+	}
+	if !strings.Contains(out, `note.txt`) {
+		t.Errorf("tool-call-delta should carry the args (path), got none\n---\n%s", out)
+	}
+
 	// The file the agent wrote must actually exist in the session sandbox.
 	if len(store.Sessions()) != 1 {
 		t.Fatalf("expected 1 session, got %d", len(store.Sessions()))

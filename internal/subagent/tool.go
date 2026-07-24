@@ -153,11 +153,13 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 
 	// Forward the child's progress to the run panel when a sink is installed
 	// (runtime path); otherwise the child runs black-box. Only the collapsed
-	// result reaches the parent either way.
+	// result reaches the parent either way. The call id tags every signal so the
+	// UI nests this child's streamed output under the right spawn_agent card.
+	callID := toolruntime.CallIDFrom(ctx)
 	var emitter agent.Emitter = discardEmitter{}
 	if sink := sinkFrom(ctx); sink != nil {
-		sink(Activity{AgentType: def.Name, Depth: childDepth, Phase: "start"})
-		emitter = activityEmitter{sink: sink, agentType: def.Name, depth: childDepth}
+		sink(Activity{AgentType: def.Name, Depth: childDepth, Phase: "start", ToolCallID: callID})
+		emitter = activityEmitter{sink: sink, agentType: def.Name, depth: childDepth, toolCallID: callID}
 	}
 
 	msgs, runErr := child.Run(childCtx, history, emitter)

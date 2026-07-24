@@ -78,7 +78,11 @@ func (r *Registry) CallAll(ctx context.Context, calls []Call) []Result {
 		wg.Add(1)
 		go func(i int, c Call) {
 			defer wg.Done()
-			results[i] = r.Call(ctx, c.Name, c.Args)
+			// Expose the call's id on the ctx so a tool that emits progress (the
+			// spawn tool) can tag its output frames with the tool-call they belong
+			// to, letting the UI nest them under the right call when several run
+			// in parallel.
+			results[i] = r.Call(ContextWithCallID(ctx, c.ID), c.Name, c.Args)
 		}(i, c)
 	}
 	wg.Wait()
@@ -90,4 +94,18 @@ type Call struct {
 	ID   string
 	Name string
 	Args map[string]any
+}
+
+// callIDKey is the ctx key carrying the in-flight tool call's id.
+type callIDKey struct{}
+
+// ContextWithCallID returns ctx carrying the tool call id being dispatched.
+func ContextWithCallID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, callIDKey{}, id)
+}
+
+// CallIDFrom returns the tool call id placed by ContextWithCallID, or "".
+func CallIDFrom(ctx context.Context) string {
+	s, _ := ctx.Value(callIDKey{}).(string)
+	return s
 }
