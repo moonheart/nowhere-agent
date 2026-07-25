@@ -60,6 +60,10 @@ type MCP struct {
 type Subagent struct {
 	Enabled  bool `envconfig:"SUBAGENT_ENABLED" default:"true"`
 	MaxDepth int  `envconfig:"SUBAGENT_MAX_DEPTH" default:"3"`
+	// MaxTotal caps the total subagent runs per top-level request; MaxConcurrent
+	// caps how many run at once. Together they bound fan-out cost / fork bombs.
+	MaxTotal      int `envconfig:"SUBAGENT_MAX_TOTAL" default:"32"`
+	MaxConcurrent int `envconfig:"SUBAGENT_MAX_CONCURRENT" default:"8"`
 }
 
 // Sandbox selects the per-session sandbox backend that built-in file tools run

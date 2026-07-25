@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nowhere-agent/internal/agent"
@@ -21,6 +22,13 @@ const defaultMaxDepth = 3
 
 // defaultTimeout bounds a single subagent run.
 const defaultTimeout = 5 * time.Minute
+
+// Fan-out budget defaults: bound the total subagent runs and concurrency per
+// top-level run so a single prompt can't trigger a fork/cost bomb.
+const (
+	defaultMaxTotal      = 32
+	defaultMaxConcurrent = 8
+)
 
 // LoopFactory builds a child agent.Loop for a resolved definition at the given
 // nesting depth. The server supplies it (closing over the provider adapter,
@@ -40,12 +48,19 @@ type SpawnTool struct {
 	scopes   []identity.ScopeRef
 	maxDepth int
 	timeout  time.Duration
+	// maxTotal caps the total subagent runs across the whole run tree; spawned
+	// counts them. sem caps concurrent child runs. One SpawnTool instance is
+	// shared by every nested subagent in a run, so this budget is per-run.
+	maxTotal int
+	spawned  atomic.Int64
+	sem      chan struct{}
 }
 
 // NewSpawnTool creates a spawn tool over a definition store, the run's tool
 // registry, and a child-loop factory. maxDepth <= 0 uses the default. scopes
 // default to system scope (v1 resolves built-in + system definitions; per-user
-// authored definitions are future work).
+// authored definitions are future work). Fan-out is bounded by default budgets;
+// override with WithBudget.
 func NewSpawnTool(store *agentdef.Store, parent *toolruntime.Registry, factory LoopFactory, maxDepth int, scopes ...identity.ScopeRef) *SpawnTool {
 	if maxDepth <= 0 {
 		maxDepth = defaultMaxDepth
@@ -60,7 +75,22 @@ func NewSpawnTool(store *agentdef.Store, parent *toolruntime.Registry, factory L
 		scopes:   scopes,
 		maxDepth: maxDepth,
 		timeout:  defaultTimeout,
+		maxTotal: defaultMaxTotal,
+		sem:      make(chan struct{}, defaultMaxConcurrent),
 	}
+}
+
+// WithBudget bounds subagent fan-out for the whole run tree: maxTotal caps the
+// total number of subagent runs, maxConcurrent caps how many run at once.
+// Non-positive values keep the defaults. Call once at setup, before any spawn.
+func (t *SpawnTool) WithBudget(maxTotal, maxConcurrent int) *SpawnTool {
+	if maxTotal > 0 {
+		t.maxTotal = maxTotal
+	}
+	if maxConcurrent > 0 {
+		t.sem = make(chan struct{}, maxConcurrent)
+	}
+	return t
 }
 
 // Name identifies the tool.
@@ -130,6 +160,12 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 		return errf("%v", err), nil
 	}
 
+	// Per-run total-spawn budget (this tool instance is shared across the whole
+	// run tree): bound cost and prevent a fork/cost bomb from unbounded fan-out.
+	if int(t.spawned.Add(1)) > t.maxTotal {
+		return errf("subagent budget exhausted (at most %d subagent runs per request) — complete the task with fewer agents", t.maxTotal), nil
+	}
+
 	childDepth := depth + 1
 
 	// Build the child's scoped tool pool: the def's allow-list (plus any skill
@@ -160,6 +196,15 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 	if sink := sinkFrom(ctx); sink != nil {
 		sink(Activity{AgentType: def.Name, Depth: childDepth, Phase: "start", ToolCallID: callID})
 		emitter = activityEmitter{sink: sink, agentType: def.Name, depth: childDepth, toolCallID: callID}
+	}
+
+	// Bound concurrent child runs to limit goroutine/CPU/memory pressure under
+	// wide fan-out; wait for a slot or bail out if the run is cancelled.
+	select {
+	case t.sem <- struct{}{}:
+		defer func() { <-t.sem }()
+	case <-ctx.Done():
+		return errf("cancelled while waiting for a subagent slot"), nil
 	}
 
 	msgs, runErr := child.Run(childCtx, history, emitter)

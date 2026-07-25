@@ -276,7 +276,8 @@ func run() error {
 				// run's registry, so nested loops share the session's tools.
 				// Registered last so it can see them.
 				if cfg.Subagent.Enabled {
-					reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, cfg.Subagent.MaxDepth))
+					reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, cfg.Subagent.MaxDepth).
+						WithBudget(cfg.Subagent.MaxTotal, cfg.Subagent.MaxConcurrent))
 				}
 				loop.WithTools(reg)
 			})
