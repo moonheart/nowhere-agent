@@ -16,6 +16,7 @@ import (
 	"nowhere-agent/internal/chatapi"
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/contextmgmt"
+	"nowhere-agent/internal/dreaming"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/mcp"
@@ -26,6 +27,7 @@ import (
 	"nowhere-agent/internal/provider/anthropic"
 	"nowhere-agent/internal/provider/openai"
 	"nowhere-agent/internal/sandbox"
+	"nowhere-agent/internal/scheduler"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/subagent"
@@ -72,7 +74,8 @@ func run() error {
 
 	// Durable session runtime over Postgres: chat requests persist as runs,
 	// and the run log doubles as the episodes for dreaming.
-	sessionRuntime := session.NewRuntime(session.NewPGStore(pool))
+	sessionStore := session.NewPGStore(pool)
+	sessionRuntime := session.NewRuntime(sessionStore)
 
 	// Reconcile runs stranded non-terminal by a previous process (their in-memory
 	// workers died with it): mark them failed at startup so they don't read as
@@ -206,6 +209,29 @@ func run() error {
 		var compressor contextmgmt.Compressor
 		if cfg.LLM.ContextWindow > 0 {
 			compressor = contextmgmt.NewLLMCompressor(adapter, model)
+		}
+
+		// Dreaming worker + the scheduler that drives it (capability-gaps K1+K2).
+		// The worker consolidates ended sessions' episodes into long-term memory;
+		// the scheduler fires it every DREAMING_INTERVAL. Idempotency rests on the
+		// sessions.dreamed_at marker (migration 000008), not the scheduler's
+		// in-memory last-run map, so the catch-up run at every boot only processes
+		// sessions not already dreamed over. The scheduler runs in a goroutine like
+		// the HTTP server and stops when the root context is cancelled.
+		if cfg.Dreaming.Enabled {
+			source := dreaming.NewStoreSource(sessionStore, messageStore)
+			llm := dreaming.NewProviderLLM(adapter, model)
+			worker := dreaming.NewWorker(source, memPort, llm, dreaming.Budget{MaxTokens: cfg.Dreaming.MaxTokens})
+			sched := scheduler.New(log, scheduler.Job{
+				Name:     "dreaming",
+				Interval: cfg.Dreaming.Interval,
+				Run: func(ctx context.Context) error {
+					_, err := worker.Run(ctx)
+					return err
+				},
+			})
+			go sched.Start(ctx)
+			log.Info("dreaming worker enabled", "interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens)
 		}
 
 		// Subagent factory (subagent capability): builds a child loop for a

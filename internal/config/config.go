@@ -30,6 +30,9 @@ type Config struct {
 	MCP MCP
 	// Permission configures the execution-permission gate over tool risks.
 	Permission Permission
+	// Dreaming configures the offline dreaming worker and the scheduler that
+	// drives it (capability-gaps K1+K2).
+	Dreaming Dreaming
 }
 
 // Permission maps each tool risk class to a decision for the execution-permission
@@ -52,6 +55,18 @@ type Permission struct {
 type MCP struct {
 	Enabled    bool   `envconfig:"MCP_ENABLED" default:"false"`
 	SearxngURL string `envconfig:"MCP_SEARXNG_URL" default:"https://searxng-mcp.moonheart.dev/mcp"`
+}
+
+// Dreaming configures the offline dreaming worker (capability-gap K1) and the
+// scheduler that drives it (K2). Disabled by default: each pass spends LLM
+// tokens and requires a configured provider, so it is an explicit opt-in. When
+// enabled, the server starts a scheduler that runs the worker every Interval,
+// consolidating ended sessions' episodes into long-term memory, bounded by
+// MaxTokens per pass.
+type Dreaming struct {
+	Enabled   bool          `envconfig:"DREAMING_ENABLED" default:"false"`
+	Interval  time.Duration `envconfig:"DREAMING_INTERVAL" default:"1h"`
+	MaxTokens int           `envconfig:"DREAMING_MAX_TOKENS" default:"100000"`
 }
 
 // Subagent configures the spawn_agent tool. It is only wired when a sandbox
