@@ -297,6 +297,20 @@ func run() error {
 		if sandboxMgr != nil || mcpClient != nil {
 			handler = handler.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string) {
 				reg := toolruntime.NewRegistry()
+				// Read-only load_skill (capability-gap K3a): the agent loads a
+				// skill's instructions / resource files. Registered whenever any
+				// skill is present (independent of the sandbox); scopes mirror the
+				// context builder (caller user + teams + system). It executes
+				// nothing — skill script execution is K3b, gated on C17.
+				if len(skillEngine.LoadL0(ctx, nil)) > 0 {
+					scopes := []identity.ScopeRef{identity.SystemScope()}
+					if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
+						if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
+							scopes = sc
+						}
+					}
+					reg.Register(skill.NewLoadTool(skillEngine, scopes))
+				}
 				if sandboxMgr != nil {
 					h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
 						Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(cfg.Sandbox.Network)},
