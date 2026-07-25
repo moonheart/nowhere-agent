@@ -26,6 +26,18 @@ type Config struct {
 	Sandbox Sandbox
 	// Subagent configures the spawn_agent tool (subagent capability).
 	Subagent Subagent
+	// MCP configures the MCP client integrations (mcp capability).
+	MCP MCP
+}
+
+// MCP configures the built-in SearXNG MCP integration. Enabled is off by
+// default; when on, the server connects to the SearXNG MCP endpoint over
+// Streamable HTTP and registers its tools into each run's tool registry.
+// SearxngURL defaults to the hosted instance and may be overridden for a
+// self-hosted deployment.
+type MCP struct {
+	Enabled    bool   `envconfig:"MCP_ENABLED" default:"false"`
+	SearxngURL string `envconfig:"MCP_SEARXNG_URL" default:"https://searxng-mcp.moonheart.dev/mcp"`
 }
 
 // Subagent configures the spawn_agent tool. It is only wired when a sandbox

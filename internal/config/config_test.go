@@ -23,6 +23,35 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
+func TestMCPDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MCP.Enabled {
+		t.Error("MCP should be disabled by default")
+	}
+	if cfg.MCP.SearxngURL != "https://searxng-mcp.moonheart.dev/mcp" {
+		t.Errorf("got searxng url %q, want hosted default", cfg.MCP.SearxngURL)
+	}
+}
+
+func TestMCPFromEnv(t *testing.T) {
+	t.Setenv("MCP_ENABLED", "true")
+	t.Setenv("MCP_SEARXNG_URL", "http://localhost:9999/mcp")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.MCP.Enabled {
+		t.Error("MCP should be enabled from MCP_ENABLED=true")
+	}
+	if cfg.MCP.SearxngURL != "http://localhost:9999/mcp" {
+		t.Errorf("got searxng url %q, want override", cfg.MCP.SearxngURL)
+	}
+}
+
 func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("HTTP_ADDR", ":9999")
 	t.Setenv("LOG_LEVEL", "warn")

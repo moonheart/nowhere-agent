@@ -18,6 +18,7 @@ import (
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
+	"nowhere-agent/internal/mcp"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/platform/db"
 	"nowhere-agent/internal/provider"
@@ -141,6 +142,20 @@ func run() error {
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
+
+		// MCP integration (mcp capability): connect to the configured SearXNG MCP
+		// server over Streamable HTTP and list its tools once. The client is shared
+		// across runs; the ToolBinder registers its tools into each run's registry
+		// so subagents inherit them via the scoped view. Fail fast on a handshake
+		// error — enabling MCP against an unreachable server is a misconfiguration.
+		var mcpClient *mcp.Client
+		if cfg.MCP.Enabled {
+			mcpClient = mcp.NewSearxng(cfg.MCP.SearxngURL, 0)
+			if err := mcpClient.Connect(ctx); err != nil {
+				return fmt.Errorf("mcp searxng connect: %w", err)
+			}
+			log.Info("mcp searxng connected", "url", cfg.MCP.SearxngURL, "tools", len(mcpClient.Tools()))
+		}
 		// Context compression (context-compression): the loop compresses its
 		// working view as it approaches the model's context window, using a
 		// no-tools summarize call over the same adapter (LLMCompressor).
@@ -192,26 +207,43 @@ func run() error {
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
 		}
-		if sandboxMgr != nil {
+		// Tool binder: attach session-scoped tools to each run. Runs when the
+		// sandbox (file tools) OR MCP (network tools) is configured; MCP tools need
+		// no sandbox, so they must register even when the sandbox is off.
+		if sandboxMgr != nil || mcpClient != nil {
 			handler = handler.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string) {
-				h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{})
-				if err != nil {
-					log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
-					return
-				}
 				reg := toolruntime.NewRegistry()
-				for _, t := range builtin.FileTools(sandboxPort, h) {
-					reg.Register(t)
+				if sandboxMgr != nil {
+					h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{})
+					if err != nil {
+						log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
+					} else {
+						for _, t := range builtin.FileTools(sandboxPort, h) {
+							reg.Register(t)
+						}
+					}
+				}
+				// MCP tools (network): registered into the same run registry so
+				// children scoped from it inherit them.
+				if mcpClient != nil {
+					for _, t := range mcpClient.Tools() {
+						reg.Register(t)
+					}
 				}
 				// Subagent spawn tool: children draw from a scoped view of this
-				// run's registry, so nested loops share the session's sandbox-bound
-				// file tools. Registered after the file tools so it can see them.
+				// run's registry, so nested loops share the session's tools.
+				// Registered last so it can see them.
 				if cfg.Subagent.Enabled {
 					reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, cfg.Subagent.MaxDepth))
 				}
 				loop.WithTools(reg)
 			})
-			log.Info("file tools enabled (read_file/write_file/list_dir)")
+			if sandboxMgr != nil {
+				log.Info("file tools enabled (read_file/write_file/list_dir)")
+			}
+			if mcpClient != nil {
+				log.Info("mcp tools enabled", "server", mcpClient.Server(), "count", len(mcpClient.Tools()))
+			}
 			if cfg.Subagent.Enabled {
 				log.Info("subagent tool enabled (spawn_agent)", "max_depth", cfg.Subagent.MaxDepth)
 			}
