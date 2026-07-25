@@ -11,7 +11,11 @@ The system SHALL expose all tools to the agent loop through a single Tool interf
 - **THEN** it uses the same Tool contract whether the tool is built-in, from a skill, or from an MCP server
 
 ### Requirement: Tool sources
-The runtime SHALL support built-in tools, skill-provided (L2) scripts, and a seam for MCP tool servers. Built-in tools are constructed per session and bound to that session's sandbox, so a tool physically cannot address another session's files.
+The runtime SHALL support built-in tools, skill-provided (L2) scripts, and MCP tool servers
+over the Streamable HTTP transport. Built-in tools are constructed per session and bound to
+that session's sandbox, so a tool physically cannot address another session's files. MCP tools
+are adapted to the same Tool interface (see the `mcp` capability), so the loop never depends on
+a tool's origin.
 
 #### Scenario: Built-in tools available
 - **WHEN** a session runs
@@ -22,8 +26,8 @@ The runtime SHALL support built-in tools, skill-provided (L2) scripts, and a sea
 - **THEN** it is dispatched through the same Tool interface and executed in the sandbox
 
 #### Scenario: MCP seam
-- **WHEN** an MCP tool server is configured
-- **THEN** its tools are exposed through the Tool interface without changing the loop
+- **WHEN** an MCP tool server is configured over Streamable HTTP
+- **THEN** its tools are listed, adapted to the Tool interface, registered into the loop's tool registry, and callable without changing the loop
 
 ### Requirement: Schema delivery
 Each tool SHALL provide a machine-readable schema delivered to the model in the provider's function-calling format.
