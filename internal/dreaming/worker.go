@@ -1,8 +1,14 @@
 // Package dreaming implements the dreaming capability (design D6): a scheduled
 // offline worker that is the ONLY writer to long-term memory. It reads
-// persisted run episodes for ended sessions and consolidates them into
-// user/team-scoped long-term memories via an extract → compress → reorganize →
-// reflect pipeline, bounded by an LLM budget.
+// persisted run episodes for sessions with unconsolidated messages and
+// consolidates them into user/team-scoped long-term memories via an extract →
+// compress → reorganize → reflect pipeline, bounded by an LLM budget.
+//
+// Dreaming is INCREMENTAL (capability-gap K1, watermark model): each session
+// carries a high-water mark (the messages.id consolidated up to), and the worker
+// learns from the messages beyond it. A conversation therefore stays open and
+// resumable while it is being learned from — learning no longer requires the
+// session to end.
 package dreaming
 
 import (
@@ -34,17 +40,30 @@ type Result struct {
 	BudgetExhausted   bool
 }
 
-// EpisodeSource provides episodes (persisted conversation messages) for ended
-// sessions. Episodes come from the session's full-block message record
-// (redis-stream-live D6), not the run event log — the message store holds the
-// complete conversation content the worker consolidates.
+// EpisodeSource provides episodes (persisted conversation messages) for
+// sessions that have messages the worker has not yet consolidated. Episodes
+// come from the session's full-block message record (redis-stream-live D6), not
+// the run event log — the message store holds the complete conversation content
+// the worker consolidates.
 type EpisodeSource interface {
-	// EndedSessions returns sessions eligible for dreaming (ended, unprocessed).
-	EndedSessions(ctx context.Context) ([]session.Session, error)
-	// Episodes returns the session's persisted messages, ordered by seq.
-	Episodes(ctx context.Context, sessionID string) ([]session.StoredMessage, error)
-	// MarkProcessed records that a session's episodes were dreamed over.
-	MarkProcessed(ctx context.Context, sessionID string) error
+	// PendingSessions returns sessions with messages beyond their dreamed
+	// watermark (any status — open conversations are learnable), oldest first,
+	// each carrying the watermark to start from.
+	PendingSessions(ctx context.Context) ([]PendingSession, error)
+	// Episodes returns the session's persisted messages with id > afterSeq (the
+	// watermark), ordered by seq — only the not-yet-dreamed tail.
+	Episodes(ctx context.Context, sessionID string, afterSeq int64) ([]session.StoredMessage, error)
+	// MarkProcessed advances the session's dreamed watermark to the newest
+	// message the worker consumed, so the next pass starts after it.
+	MarkProcessed(ctx context.Context, sessionID string, newSeq int64) error
+}
+
+// PendingSession is a session eligible for a dreaming pass: it has messages the
+// worker has not yet consolidated. Seq is the watermark (messages.id) to resume
+// from — 0 means nothing consolidated yet.
+type PendingSession struct {
+	session.Session
+	Seq int64
 }
 
 // Worker consolidates episodes into long-term memory.
@@ -67,7 +86,7 @@ func NewWorker(episodes EpisodeSource, mem memory.Port, llm LLM, budget Budget) 
 func (w *Worker) Run(ctx context.Context) (Result, error) {
 	var res Result
 
-	sessions, err := w.episodes.EndedSessions(ctx)
+	sessions, err := w.episodes.PendingSessions(ctx)
 	if err != nil {
 		return res, err
 	}
@@ -78,16 +97,17 @@ func (w *Worker) Run(ctx context.Context) (Result, error) {
 			break
 		}
 
-		eps, err := w.episodes.Episodes(ctx, sess.ID)
+		eps, err := w.episodes.Episodes(ctx, sess.ID, sess.Seq)
 		if err != nil {
 			return res, err
 		}
 		if len(eps) == 0 {
-			_ = w.episodes.MarkProcessed(ctx, sess.ID)
+			// Race: the messages were consumed (or the session was deleted) between
+			// the eligibility scan and now — nothing to do, and nothing to advance.
 			continue
 		}
 
-		written, tokens, err := w.processSession(ctx, sess, eps, w.budget.MaxTokens-res.TokensUsed)
+		written, tokens, err := w.processSession(ctx, sess.Session, eps, w.budget.MaxTokens-res.TokensUsed)
 		if err != nil {
 			return res, err
 		}
@@ -95,15 +115,18 @@ func (w *Worker) Run(ctx context.Context) (Result, error) {
 		res.MemoriesWritten += written
 		res.TokensUsed += tokens
 
-		if err := w.episodes.MarkProcessed(ctx, sess.ID); err != nil {
+		// Advance the watermark to the newest message consumed. Episodes are
+		// seq-ordered (and ids ascend with seq), so the last is the maximum.
+		if err := w.episodes.MarkProcessed(ctx, sess.ID, eps[len(eps)-1].ID); err != nil {
 			return res, err
 		}
 	}
 	return res, nil
 }
 
-// processSession runs the pipeline for one session's episodes, staying within
-// the remaining token budget. Returns memories written and tokens used.
+// processSession runs the pipeline for one batch of a session's episodes,
+// staying within the remaining token budget. Returns memories written and
+// tokens used.
 func (w *Worker) processSession(ctx context.Context, sess session.Session, eps []session.StoredMessage, remainingBudget int) (int, int, error) {
 	// 1. EXTRACT: episodes → facts/preferences.
 	facts, tokens, err := w.extract(ctx, eps, remainingBudget)

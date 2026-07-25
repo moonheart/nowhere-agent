@@ -24,21 +24,26 @@ func (f *fakeLLM) Complete(_ context.Context, _ string) (string, int, error) {
 	return f.output, f.tokens, f.err
 }
 
-// fakeEpisodeSource serves canned sessions+episodes.
+// fakeEpisodeSource serves canned pending sessions + episodes (watermark model).
 type fakeEpisodeSource struct {
-	sessions  []session.Session
+	sessions  []PendingSession
 	episodes  map[string][]session.StoredMessage
 	processed []string
+	lastSeq   map[string]int64
 }
 
-func (f *fakeEpisodeSource) EndedSessions(context.Context) ([]session.Session, error) {
+func (f *fakeEpisodeSource) PendingSessions(context.Context) ([]PendingSession, error) {
 	return f.sessions, nil
 }
-func (f *fakeEpisodeSource) Episodes(_ context.Context, id string) ([]session.StoredMessage, error) {
+func (f *fakeEpisodeSource) Episodes(_ context.Context, id string, _ int64) ([]session.StoredMessage, error) {
 	return f.episodes[id], nil
 }
-func (f *fakeEpisodeSource) MarkProcessed(_ context.Context, id string) error {
+func (f *fakeEpisodeSource) MarkProcessed(_ context.Context, id string, seq int64) error {
 	f.processed = append(f.processed, id)
+	if f.lastSeq == nil {
+		f.lastSeq = map[string]int64{}
+	}
+	f.lastSeq[id] = seq
 	return nil
 }
 
@@ -50,14 +55,14 @@ func textMsg(text string) session.StoredMessage {
 	}
 }
 
-func endedSession(id, userID string) session.Session {
-	return session.Session{ID: id, UserID: userID, Status: session.SessionEnded}
+func pending(id, userID string) PendingSession {
+	return PendingSession{Session: session.Session{ID: id, UserID: userID, Status: session.SessionActive}, Seq: 0}
 }
 
 func TestWorkerExtractsAndStoresFacts(t *testing.T) {
-	sess := endedSession("s1", "user1")
+	sess := pending("s1", "user1")
 	src := &fakeEpisodeSource{
-		sessions: []session.Session{sess},
+		sessions: []PendingSession{sess},
 		episodes: map[string][]session.StoredMessage{
 			"s1": {textMsg("user likes go")},
 		},
@@ -92,12 +97,8 @@ func TestWorkerExtractsAndStoresFacts(t *testing.T) {
 }
 
 func TestWorkerBudgetStopsProcessing(t *testing.T) {
-	sessions := []session.Session{
-		endedSession("s1", "u1"),
-		endedSession("s2", "u2"),
-	}
 	src := &fakeEpisodeSource{
-		sessions: sessions,
+		sessions: []PendingSession{pending("s1", "u1"), pending("s2", "u2")},
 		episodes: map[string][]session.StoredMessage{
 			"s1": {textMsg("a")},
 			"s2": {textMsg("b")},
@@ -126,7 +127,7 @@ func TestWorkerReorganizeDeprecatesContradicted(t *testing.T) {
 	mem.Store(ctx, memory.Memory{Scope: identity.UserScope("u1"), Kind: memory.KindFact, Content: "user uses vim"})
 
 	src := &fakeEpisodeSource{
-		sessions: []session.Session{endedSession("s1", "u1")},
+		sessions: []PendingSession{pending("s1", "u1")},
 		episodes: map[string][]session.StoredMessage{"s1": {textMsg("x")}},
 	}
 	llm := &fakeLLM{output: "user no longer uses vim", tokens: 10}
@@ -148,9 +149,11 @@ func TestWorkerReorganizeDeprecatesContradicted(t *testing.T) {
 	}
 }
 
-func TestWorkerEmptyEpisodesMarksProcessed(t *testing.T) {
+// TestWorkerEmptyEpisodesSkips: a session that races to empty (messages consumed
+// between scan and read) is skipped WITHOUT advancing a watermark.
+func TestWorkerEmptyEpisodesSkips(t *testing.T) {
 	src := &fakeEpisodeSource{
-		sessions: []session.Session{endedSession("s1", "u1")},
+		sessions: []PendingSession{pending("s1", "u1")},
 		episodes: map[string][]session.StoredMessage{"s1": {}},
 	}
 	w := NewWorker(src, memory.NewMemPort(), &fakeLLM{}, Budget{MaxTokens: 100})
@@ -158,23 +161,43 @@ func TestWorkerEmptyEpisodesMarksProcessed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.MemoriesWritten != 0 {
-		t.Errorf("expected 0 memories, got %d", res.MemoriesWritten)
+	if res.MemoriesWritten != 0 || res.EpisodesProcessed != 0 {
+		t.Errorf("expected a no-op pass, got %+v", res)
 	}
-	if len(src.processed) != 1 {
-		t.Error("empty session should be marked processed")
+	if len(src.processed) != 0 {
+		t.Errorf("empty episodes must not advance the watermark, processed = %v", src.processed)
 	}
 }
 
 func TestWorkerLLMErrorPropagates(t *testing.T) {
 	src := &fakeEpisodeSource{
-		sessions: []session.Session{endedSession("s1", "u1")},
+		sessions: []PendingSession{pending("s1", "u1")},
 		episodes: map[string][]session.StoredMessage{"s1": {textMsg("x")}},
 	}
 	llm := &fakeLLM{err: errors.New("llm down"), tokens: 5}
 	w := NewWorker(src, memory.NewMemPort(), llm, Budget{MaxTokens: 100})
 	if _, err := w.Run(context.Background()); err == nil {
 		t.Error("expected llm error to propagate")
+	}
+}
+
+// TestWorkerAdvancesWatermarkToNewestEpisode: after a pass the watermark lands
+// on the newest consumed message id (ids ascend with seq).
+func TestWorkerAdvancesWatermarkToNewestEpisode(t *testing.T) {
+	ep1 := textMsg("first")
+	ep1.ID = 10
+	ep2 := textMsg("second")
+	ep2.ID = 20
+	src := &fakeEpisodeSource{
+		sessions: []PendingSession{pending("s1", "u1")},
+		episodes: map[string][]session.StoredMessage{"s1": {ep1, ep2}},
+	}
+	w := NewWorker(src, memory.NewMemPort(), &fakeLLM{output: "fact", tokens: 5}, Budget{MaxTokens: 100})
+	if _, err := w.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if src.lastSeq["s1"] != 20 {
+		t.Errorf("watermark = %d want 20 (newest episode id)", src.lastSeq["s1"])
 	}
 }
 

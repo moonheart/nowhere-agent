@@ -2,44 +2,107 @@ package dreaming
 
 import (
 	"context"
+	"sort"
 
 	"nowhere-agent/internal/session"
 )
 
-// endedUndreamed is the slice of the session store the worker's eligibility
-// scan needs. *session.PGStore (and the in-memory *session.MemStore) satisfy it
-// (capability-gap K1). The narrow interface keeps the dreaming package free of
-// a dependency on the full session.Store surface.
-type endedUndreamed interface {
-	ListEndedUndreamed(ctx context.Context) ([]session.Session, error)
-	MarkDreamed(ctx context.Context, id string) error
+// undreamedScanner is the session store's native eligibility query
+// (PGStore.ListUndreamedSessions answers it in SQL). The in-memory session
+// store cannot (it can't join messages), so StoreSource falls back to a
+// per-session in-memory filter when this is absent.
+type undreamedScanner interface {
+	ListUndreamedSessions(ctx context.Context) ([]session.Session, error)
 }
 
-// StoreSource is the production EpisodeSource: it reads eligibility and the
-// dreamed marker from the session store (backed by sessions.dreamed_at,
-// migration 000008) and the episode content from the message store
-// (MessagesFor is exactly the per-session, seq-ordered record Episodes wants).
+// sessionWatermarks is the slice of the session store the worker needs for the
+// incremental watermark model (capability-gap K1). *session.PGStore and
+// *session.MemStore satisfy it.
+type sessionWatermarks interface {
+	DreamedSeq(ctx context.Context, id string) (int64, error)
+	MarkDreamedSeq(ctx context.Context, id string, seq int64) error
+}
+
+// StoreSource is the production EpisodeSource: it drives the incremental
+// watermark model off the session store (sessions.dreamed_seq, migration
+// 000009) and reads the episode tail from the message store (MessagesAfter
+// returns exactly the messages beyond a watermark, seq-ordered).
 type StoreSource struct {
-	sessions endedUndreamed
+	sessions sessionWatermarks
+	scanner  undreamedScanner // optional: nil → per-session fallback
 	messages session.MessageStore
 }
 
-// NewStoreSource wires an EpisodeSource over the session and message stores.
-func NewStoreSource(sessions endedUndreamed, messages session.MessageStore) *StoreSource {
-	return &StoreSource{sessions: sessions, messages: messages}
+// NewStoreSource wires an EpisodeSource over the session and message stores. If
+// sessions also implements ListUndreamedSessions (PGStore), eligibility uses it;
+// otherwise it is computed per session from the watermarks + message store.
+func NewStoreSource(sessions sessionWatermarks, messages session.MessageStore) *StoreSource {
+	src := &StoreSource{sessions: sessions, messages: messages}
+	if sc, ok := sessions.(undreamedScanner); ok {
+		src.scanner = sc
+	}
+	return src
 }
 
-// EndedSessions returns ended sessions not yet dreamed over, oldest first.
-func (s *StoreSource) EndedSessions(ctx context.Context) ([]session.Session, error) {
-	return s.sessions.ListEndedUndreamed(ctx)
+// PendingSessions returns sessions with undreamed messages (any status),
+// each carrying the watermark to resume from.
+func (s *StoreSource) PendingSessions(ctx context.Context) ([]PendingSession, error) {
+	if s.scanner != nil {
+		sessions, err := s.scanner.ListUndreamedSessions(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]PendingSession, 0, len(sessions))
+		for _, sess := range sessions {
+			wm, err := s.sessions.DreamedSeq(ctx, sess.ID)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, PendingSession{Session: sess, Seq: wm})
+		}
+		return out, nil
+	}
+	return s.pendingFallback(ctx)
 }
 
-// Episodes returns the session's persisted messages, ordered by seq.
-func (s *StoreSource) Episodes(ctx context.Context, sessionID string) ([]session.StoredMessage, error) {
-	return s.messages.MessagesFor(ctx, sessionID)
+// pendingFallback computes eligibility without a native store query: it lists
+// the store's sessions and keeps those that actually have messages beyond
+// their watermark. Used by the in-memory session store (and any store without
+// ListUndreamedSessions).
+func (s *StoreSource) pendingFallback(ctx context.Context) ([]PendingSession, error) {
+	type sessionLister interface {
+		Sessions() []session.Session
+	}
+	lister, ok := s.sessions.(sessionLister)
+	if !ok {
+		// No way to enumerate sessions at all: nothing to dream.
+		return nil, nil
+	}
+	all := lister.Sessions()
+	sort.Slice(all, func(i, j int) bool { return all[i].UpdatedAt.Before(all[j].UpdatedAt) })
+	var out []PendingSession
+	for _, sess := range all {
+		wm, err := s.sessions.DreamedSeq(ctx, sess.ID)
+		if err != nil {
+			return nil, err
+		}
+		msgs, err := s.messages.MessagesAfter(ctx, sess.ID, wm)
+		if err != nil {
+			return nil, err
+		}
+		if len(msgs) > 0 {
+			out = append(out, PendingSession{Session: sess, Seq: wm})
+		}
+	}
+	return out, nil
 }
 
-// MarkProcessed stamps the session dreamed so it is consumed exactly once.
-func (s *StoreSource) MarkProcessed(ctx context.Context, sessionID string) error {
-	return s.sessions.MarkDreamed(ctx, sessionID)
+// Episodes returns the session's messages beyond the watermark, ordered by seq.
+func (s *StoreSource) Episodes(ctx context.Context, sessionID string, afterSeq int64) ([]session.StoredMessage, error) {
+	return s.messages.MessagesAfter(ctx, sessionID, afterSeq)
+}
+
+// MarkProcessed advances the session's dreamed watermark.
+func (s *StoreSource) MarkProcessed(ctx context.Context, sessionID string, newSeq int64) error {
+	return s.sessions.MarkDreamedSeq(ctx, sessionID, newSeq)
 }
