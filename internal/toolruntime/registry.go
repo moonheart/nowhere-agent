@@ -107,6 +107,10 @@ type Call struct {
 	ID   string
 	Name string
 	Args map[string]any
+	// ArgsError, when non-empty, means the model's tool-call arguments could not
+	// be parsed (malformed JSON). The loop turns such a call into an is_error
+	// tool_result without dispatching it, so the model can retry with valid args.
+	ArgsError string
 }
 
 // callIDKey is the ctx key carrying the in-flight tool call's id.

@@ -298,19 +298,7 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 				}
 				// Stream closed naturally: finalize any blocks still open.
 				for idx, acc := range open {
-					blk := acc.finalize()
-					assistant.Content = append(assistant.Content, blk)
-					if blk.Type == provider.BlockToolUse {
-						calls = append(calls, toolruntime.Call{ID: blk.ToolUseID, Name: blk.ToolName, Args: blk.ToolInput})
-						// Emit the tool-use event here too (mirroring EventBlockStop):
-						// a provider that closes the stream without a block-stop for a
-						// tool call (e.g. OpenAI's finish) would otherwise dispatch the
-						// call and emit its result with no preceding tool-use event,
-						// orphaning the result on the client.
-						_ = emit.Emit(ctx, KindToolUse, map[string]any{
-							"id": blk.ToolUseID, "name": blk.ToolName, "input": blk.ToolInput,
-						})
-					}
+					l.appendFinalized(ctx, acc, &assistant, &calls, emit)
 					delete(open, idx)
 				}
 				return assistant, calls, nil
@@ -346,14 +334,7 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 
 			case provider.EventBlockStop:
 				if acc, ok := open[ev.Index]; ok {
-					blk := acc.finalize()
-					assistant.Content = append(assistant.Content, blk)
-					if blk.Type == provider.BlockToolUse {
-						calls = append(calls, toolruntime.Call{ID: blk.ToolUseID, Name: blk.ToolName, Args: blk.ToolInput})
-						_ = emit.Emit(ctx, KindToolUse, map[string]any{
-							"id": blk.ToolUseID, "name": blk.ToolName, "input": blk.ToolInput,
-						})
-					}
+					l.appendFinalized(ctx, acc, &assistant, &calls, emit)
 					delete(open, ev.Index)
 				}
 
@@ -364,9 +345,51 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 	}
 }
 
-// dispatch runs tool calls concurrently via the registry.
+// appendFinalized finalizes an accumulator, appends its block to the assistant
+// message, and — for a tool_use block — records the tool call (carrying any
+// argument-parse error) and emits the tool-use frame. Shared by the natural
+// stream-close path and EventBlockStop so both handle malformed args the same.
+func (l *Loop) appendFinalized(ctx context.Context, acc *accumulator, assistant *provider.Message, calls *[]toolruntime.Call, emit Emitter) {
+	blk, argErr := acc.finalize()
+	assistant.Content = append(assistant.Content, blk)
+	if blk.Type != provider.BlockToolUse {
+		return
+	}
+	call := toolruntime.Call{ID: blk.ToolUseID, Name: blk.ToolName, Args: blk.ToolInput}
+	if argErr != nil {
+		call.ArgsError = argErr.Error()
+	}
+	*calls = append(*calls, call)
+	// Emit the tool-use event so a provider that closes the stream without a
+	// block-stop for a tool call (e.g. OpenAI's finish) still shows a tool-call
+	// before its result, rather than orphaning the result on the client.
+	_ = emit.Emit(ctx, KindToolUse, map[string]any{
+		"id": blk.ToolUseID, "name": blk.ToolName, "input": blk.ToolInput,
+	})
+}
+
+// dispatch runs tool calls concurrently via the registry. A call whose
+// arguments failed to parse (ArgsError set) is not dispatched: it becomes an
+// is_error result inline so the model can retry with valid JSON, while results
+// stay index-aligned with calls for tool_use/tool_result pairing.
 func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolruntime.Result {
-	return l.tools.CallAll(ctx, calls)
+	results := make([]toolruntime.Result, len(calls))
+	live := make([]toolruntime.Call, 0, len(calls))
+	liveIdx := make([]int, 0, len(calls))
+	for i, c := range calls {
+		if c.ArgsError != "" {
+			results[i] = toolruntime.Result{Content: "invalid tool arguments: " + c.ArgsError, IsError: true}
+			continue
+		}
+		live = append(live, c)
+		liveIdx = append(liveIdx, i)
+	}
+	if len(live) > 0 {
+		for j, r := range l.tools.CallAll(ctx, live) {
+			results[liveIdx[j]] = r
+		}
+	}
+	return results
 }
 
 // maybeCompress compresses the working view when it crosses the context budget,
@@ -447,8 +470,9 @@ func (a *accumulator) appendSignature(sig string) {
 	a.signature += sig
 }
 
-func (a *accumulator) finalize() provider.Block {
+func (a *accumulator) finalize() (provider.Block, error) {
 	b := a.block
+	var argErr error
 	switch b.Type {
 	case provider.BlockText:
 		b.Text = a.text
@@ -460,10 +484,12 @@ func (a *accumulator) finalize() provider.Block {
 	case provider.BlockToolUse:
 		if a.json != "" {
 			var input map[string]any
-			if err := json.Unmarshal([]byte(a.json), &input); err == nil {
+			if err := json.Unmarshal([]byte(a.json), &input); err != nil {
+				argErr = fmt.Errorf("tool arguments are not valid JSON: %w", err)
+			} else {
 				b.ToolInput = input
 			}
 		}
 	}
-	return b
+	return b, argErr
 }
