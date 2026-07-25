@@ -123,12 +123,28 @@ func (rt *Runtime) StartRun(ctx context.Context, sessionID string) (Run, error) 
 	}
 	rt.mu.Unlock()
 
+	// The in-memory lock only covers this process. Consult the durable store so a
+	// run started by another instance (or one left active in the DB) still blocks
+	// a new one. The partial unique index on runs is the race-free backstop; this
+	// check rejects the common, non-racing case cleanly.
+	if _, active, err := rt.store.ActiveRun(ctx, sessionID); err != nil {
+		return Run{}, err
+	} else if active {
+		return Run{}, ErrRunActive
+	}
+
 	seq, err := rt.store.NextRunSeq(ctx, sessionID)
 	if err != nil {
 		return Run{}, err
 	}
 	run, err := rt.store.CreateRun(ctx, sessionID, seq)
 	if err != nil {
+		// Lost the race to a concurrent writer for this session's active run: the
+		// partial unique index (or the seq constraint) rejected the insert.
+		// Surface it as the single-active-run error, not a raw DB failure.
+		if isActiveRunConflict(err) {
+			return Run{}, ErrRunActive
+		}
 		return Run{}, err
 	}
 	if err := rt.store.UpdateRunStatus(ctx, run.ID, RunRunning); err != nil {
