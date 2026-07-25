@@ -78,6 +78,8 @@
 
 ### L. 模型 / LLM 能力
 
+> **状态更新**:L1、L2 已在分支 `fix/loop-observability` 落地 —— L1 把 stop/finish reason 建进中立 `Event`(两适配器映射),`max_tokens` 截断显式转为错误而非静默完成;L2 累计 token 用量、发 `KindUsage` 终帧、OpenAI 请求带 `include_usage`、finish 帧上报真实 token。L3–L7 仍未做。
+
 > ✅ 已端到端且两适配器齐全:**流式 SSE、工具调用、并行工具调用**(`agent/loop.go` 的 `CallAll` 并发派发多个 tool_use)。以下是缺口。
 
 **L1 ○⭐ stop/finish 原因未建模 —— `max_tokens` 截断对 loop 不可见**
@@ -104,6 +106,8 @@
 ---
 
 ### O. 编排 / Agent 循环 / 人审
+
+> **状态更新**:O4 已在分支 `fix/loop-observability` 落地 —— 迭代触顶时补发 `KindError` 终帧(不再静默 failed)。O1/O2/O3/O5/O6 仍未做。
 
 > ✅ 已通:**运行取消全链路**(`chatapi/cancel.go` → `registry.Cancel` → ctx 取消 → 终帧,loop 在 `loop.go:295` 观察);**子代理并行扇出 + 深度/总量/并发三重预算**(架构评审 **C16** 已修,`subagent/tool.go` 的 `WithBudget`);**provider 瞬时错误重试**(架构评审 **A2** 已修,`provider/retry.go`)。以下是缺口。
 
@@ -174,6 +178,8 @@
 - **[T2]** 在 T1 之上做"跑测试"结果结构化回传。
 
 ### P1 — 修掉"静默错误"与观测盲区
+
+> **状态**:L1 / O4 / L2 已落地(分支 `fix/loop-observability`);T8 待做。
 - **[L1]** 把 stop/finish reason 建进中立 `Event`,loop 感知 `max_tokens` 截断(别当正常结束)。
 - **[O4]** 迭代触顶时优雅收尾:发 `KindError`/合成最终答复 + 终帧,别静默 `failed`。
 - **[L2 / D22]** loop 记录 usage、`finish()` 上报真实 token;OpenAI 请求带 `include_usage`。
