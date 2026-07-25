@@ -21,6 +21,7 @@ type Adapter struct {
 	anthroVer  string
 	httpClient *http.Client
 	recorder   *provider.RawRecorder
+	retry      provider.RetryPolicy
 }
 
 // Option customizes the Adapter.
@@ -37,6 +38,9 @@ func WithRawRecorder(r *provider.RawRecorder) Option {
 	return func(a *Adapter) { a.recorder = r }
 }
 
+// WithRetry overrides the transient-failure retry policy (default 3 attempts).
+func WithRetry(p provider.RetryPolicy) Option { return func(a *Adapter) { a.retry = p } }
+
 // New creates an Anthropic adapter.
 func New(apiKey string, opts ...Option) *Adapter {
 	a := &Adapter{
@@ -45,6 +49,7 @@ func New(apiKey string, opts ...Option) *Adapter {
 		anthroVer:  "2023-06-01",
 		httpClient: http.DefaultClient,
 		recorder:   provider.NewRawRecorder(""),
+		retry:      provider.DefaultRetryPolicy(),
 	}
 	for _, o := range opts {
 		o(a)
@@ -63,15 +68,20 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("content-type", "application/json")
-	httpReq.Header.Set("x-api-key", a.apiKey)
-	httpReq.Header.Set("anthropic-version", a.anthroVer)
-
-	resp, err := a.httpClient.Do(httpReq)
+	// Send with transient-failure retry (429/5xx/529 + network errors) using
+	// exponential backoff. A fresh request is built per attempt so the body
+	// reader is re-seeked. Context overflow (a non-retryable 4xx) falls through
+	// to the classification below.
+	resp, err := provider.DoWithRetry(ctx, a.retry, func() (*http.Response, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("content-type", "application/json")
+		httpReq.Header.Set("x-api-key", a.apiKey)
+		httpReq.Header.Set("anthropic-version", a.anthroVer)
+		return a.httpClient.Do(httpReq)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("do request: %w", err)
 	}

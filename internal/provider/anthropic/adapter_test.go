@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/provider"
 )
@@ -93,7 +95,8 @@ func TestAdapterRecordsRawExchange(t *testing.T) {
 	}
 }
 
-// TestAdapterStreamHTTPError verifies non-200 responses surface an error.
+// TestAdapterStreamHTTPError verifies non-200 responses surface an error. Retry
+// is disabled so the test targets classification, not backoff.
 func TestAdapterStreamHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -101,10 +104,45 @@ func TestAdapterStreamHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New("k", WithEndpoint(srv.URL))
+	a := New("k", WithEndpoint(srv.URL), WithRetry(provider.RetryPolicy{MaxAttempts: 1}))
 	_, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 8})
 	if err == nil {
 		t.Fatal("expected error for 429")
+	}
+}
+
+// TestAdapterRetriesTransientStatus verifies a retryable status (503) is retried
+// and the subsequent success streams normally.
+func TestAdapterRetriesTransientStatus(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"message_start\"}\n\n"))
+		w.Write([]byte("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n"))
+		w.Write([]byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Yo\"}}\n\n"))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithEndpoint(srv.URL), WithRetry(provider.RetryPolicy{MaxAttempts: 3, BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond}))
+	events, err := a.Stream(context.Background(), provider.Request{Model: "m", MaxTokens: 8})
+	if err != nil {
+		t.Fatalf("Stream after retry: %v", err)
+	}
+	var lastText string
+	for ev := range events {
+		if ev.Type == provider.EventBlockDelta {
+			lastText = ev.Delta
+		}
+	}
+	if lastText != "Yo" {
+		t.Errorf("delta text = %q, want Yo (stream should succeed on retry)", lastText)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("server calls = %d, want 2 (one 503 + one success)", got)
 	}
 }
 
