@@ -3,6 +3,8 @@ package toolruntime
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -47,9 +49,10 @@ func (r *Registry) All() []Tool {
 }
 
 // Call dispatches one tool call by name, applying the tool's timeout.
-// Unknown tools and errors are returned as error Results so the model can
-// self-correct rather than crashing the loop.
-func (r *Registry) Call(ctx context.Context, name string, args map[string]any) Result {
+// Unknown tools, errors, and panics are returned as error Results so the model
+// can self-correct rather than crashing the loop (or, since CallAll dispatches
+// each call on its own goroutine, the whole process).
+func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (res Result) {
 	t, ok := r.Get(name)
 	if !ok {
 		return Result{Content: fmt.Sprintf("unknown tool: %s", name), IsError: true}
@@ -62,11 +65,21 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) R
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	res, err := t.Call(ctx, args)
+	// A panicking tool must not crash the process. Convert the panic into an
+	// error result (the named return) the model sees, mirroring how a returned
+	// error is handled; log with a stack for the operator.
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("tool panicked", "tool", name, "panic", p, "stack", string(debug.Stack()))
+			res = Result{Content: fmt.Sprintf("tool %s panicked: %v", name, p), IsError: true}
+		}
+	}()
+
+	result, err := t.Call(ctx, args)
 	if err != nil {
 		return Result{Content: fmt.Sprintf("tool %s failed: %v", name, err), IsError: true}
 	}
-	return res
+	return result
 }
 
 // CallAll executes multiple tool calls concurrently and returns results in the

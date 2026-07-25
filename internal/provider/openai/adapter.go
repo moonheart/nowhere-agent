@@ -111,6 +111,14 @@ func (tc teeCloser) Close() error {
 func streamEvents(body io.ReadCloser, out chan<- provider.Event) {
 	defer close(out)
 	defer body.Close()
+	// A panic while decoding the provider stream must not crash the process.
+	// Declared last so it runs first (LIFO): out is still open, so the error
+	// event is delivered before close(out).
+	defer func() {
+		if p := recover(); p != nil {
+			out <- provider.Event{Type: provider.EventError, Err: fmt.Errorf("stream panic: %v", p)}
+		}
+	}()
 
 	dec := newStreamDecoder()
 	scanner := bufio.NewScanner(body)

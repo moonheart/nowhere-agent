@@ -3,6 +3,9 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 
 	"nowhere-agent/internal/agent"
@@ -113,6 +116,18 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 		rg.mu.Lock()
 		delete(rg.workers, sessionID)
 		rg.mu.Unlock()
+	}()
+	// A panic anywhere in the loop or its tooling must not crash the process and
+	// take every other tenant's run down with it. Recover, settle the run failed,
+	// and surface an error frame so attached clients see it end. Declared after
+	// the cleanup defers so it runs first (LIFO) and settles before they fire.
+	defer func() {
+		if p := recover(); p != nil {
+			slog.Error("run worker panicked", "session", sessionID, "run", run.ID, "panic", p, "stack", string(debug.Stack()))
+			bg := context.Background()
+			_ = rg.appendEvent(bg, sessionID, run.ID, agent.KindError, fmt.Sprintf("internal error: %v", p))
+			_ = rg.rt.CompleteRun(bg, sessionID, RunFailed)
+		}
 	}()
 
 	emit := &registryEmitter{rg: rg, sessionID: sessionID, runID: run.ID}
