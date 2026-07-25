@@ -63,6 +63,11 @@ func (p *MemPort) Exec(_ context.Context, h Handle, cmd []string) (ExecResult, e
 	return ExecResult{ExitCode: 0, Stdout: "", Stderr: "", Duration: time.Since(start)}, nil
 }
 
+// ShellArgv wraps a POSIX script for a POSIX shell (Sheller capability).
+func (p *MemPort) ShellArgv(script string) ([]string, error) {
+	return []string{"sh", "-c", script}, nil
+}
+
 // ReadFile reads an in-memory file.
 func (p *MemPort) ReadFile(_ context.Context, h Handle, path string) (io.ReadCloser, error) {
 	p.mu.Lock()

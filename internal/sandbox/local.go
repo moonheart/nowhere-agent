@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -19,12 +20,26 @@ import (
 // workspace by resolve(); the network policy is a no-op here (egress control
 // requires a container/proxy layer — see the Docker backend and task 16.1).
 type LocalPort struct {
-	root string
+	root  string
+	shell string // optional bash override (SANDBOX_SHELL); empty = auto-detect
 }
 
 // NewLocalPort creates a local fs backend rooted at root (created on demand).
 func NewLocalPort(root string) *LocalPort {
 	return &LocalPort{root: root}
+}
+
+// WithShell sets the bash executable used by run_command (Sheller). Empty keeps
+// auto-detection (bash on PATH; Git Bash on Windows). Chainable.
+func (p *LocalPort) WithShell(shell string) *LocalPort {
+	p.shell = shell
+	return p
+}
+
+// ShellArgv wraps a POSIX script for the host shell (Sheller capability): bash
+// on Linux/mac, Git Bash on Windows, honouring the configured override.
+func (p *LocalPort) ShellArgv(script string) ([]string, error) {
+	return shellArgv(runtime.GOOS, p.shell, script)
 }
 
 // Create makes the session workspace directory and returns its handle. When

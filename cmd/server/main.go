@@ -128,7 +128,7 @@ func run() error {
 		if root == "" {
 			return fmt.Errorf("SANDBOX_BACKEND=local requires SANDBOX_WORKSPACE_DIR or WORKSPACE_DIR")
 		}
-		sandboxPort = sandbox.NewLocalPort(root)
+		sandboxPort = sandbox.NewLocalPort(root).WithShell(cfg.Sandbox.Shell)
 		log.Info("sandbox backend: local fs", "root", root)
 	case "docker":
 		dp, err := sandbox.NewDockerPort()
@@ -145,6 +145,12 @@ func run() error {
 	if sandboxPort != nil {
 		sandboxMgr = sandbox.NewManager(sandboxPort)
 	}
+
+	// run_command availability: the docker backend always offers it (the command
+	// is contained in the Linux container); the local backend only when
+	// explicitly enabled via SANDBOX_LOCAL_EXEC, since there it runs on the host.
+	execEnabled := cfg.Sandbox.Backend == "docker" ||
+		(cfg.Sandbox.Backend == "local" && cfg.Sandbox.LocalExec)
 
 	// Memory (PG+vector) and skill engine feed the loop's system prompt:
 	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
@@ -263,6 +269,9 @@ func run() error {
 						for _, t := range builtin.FileTools(sandboxPort, h) {
 							reg.Register(t)
 						}
+						if execEnabled {
+							reg.Register(builtin.NewRunCommand(sandboxPort, h))
+						}
 					}
 				}
 				// MCP tools (network): registered into the same run registry so
@@ -282,7 +291,10 @@ func run() error {
 				loop.WithTools(reg)
 			})
 			if sandboxMgr != nil {
-				log.Info("file tools enabled (read_file/write_file/list_dir)")
+				log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob)")
+			}
+			if execEnabled {
+				log.Info("run_command tool enabled", "backend", cfg.Sandbox.Backend)
 			}
 			if mcpClient != nil {
 				log.Info("mcp tools enabled", "server", mcpClient.Server(), "count", len(mcpClient.Tools()))

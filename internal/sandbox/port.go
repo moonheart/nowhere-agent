@@ -85,3 +85,13 @@ type Port interface {
 type Walker interface {
 	Walk(ctx context.Context, h Handle, root string) ([]string, error)
 }
+
+// Sheller is an optional Port capability: wrap a POSIX shell script into the
+// argv that runs it under the backend's shell. It backs the run_command tool.
+// The command contract is uniform bash/POSIX across backends — docker runs it in
+// the Linux container's sh; the local backend runs it under bash (Git Bash on
+// Windows) — so a model writes one shell dialect regardless of host OS. A Port
+// that does not implement it does not offer run_command.
+type Sheller interface {
+	ShellArgv(script string) ([]string, error)
+}

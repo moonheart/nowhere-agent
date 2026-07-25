@@ -130,6 +130,12 @@ func (p *DockerPort) Destroy(ctx context.Context, h Handle) error {
 	return nil
 }
 
+// ShellArgv wraps a POSIX script for the container shell (Sheller capability).
+// The container is Linux, so `sh -c` runs the script regardless of host OS.
+func (p *DockerPort) ShellArgv(script string) ([]string, error) {
+	return []string{"sh", "-c", script}, nil
+}
+
 // Exec runs a command in the container and captures output.
 func (p *DockerPort) Exec(ctx context.Context, h Handle, cmd []string) (ExecResult, error) {
 	start := time.Now()
