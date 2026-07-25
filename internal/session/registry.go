@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strings"
 	"sync"
 
 	"nowhere-agent/internal/agent"
@@ -102,8 +103,31 @@ func (rg *RunRegistry) Submit(ctx context.Context, sessionID string, work RunWor
 	// Mark the run started so attached/replaying clients learn it began.
 	rg.append(runCtx, sessionID, run.ID, agent.KindRunning, nil)
 
+	// Record the user turn as part of run start — before the worker launches — so
+	// it deterministically precedes any run output in the durable log. Appended on
+	// the run context (not the caller's request context), it also survives the
+	// submitter disconnecting immediately after Submit. A fast run could otherwise
+	// append its terminal event before the caller recorded the user event.
+	if text := messageText(work.UserMessage); text != "" {
+		rg.append(runCtx, sessionID, run.ID, agent.KindUser, text)
+	}
+
 	go rg.execute(runCtx, sessionID, run, w, work)
 	return run, nil
+}
+
+// messageText returns the concatenated text of a message's text blocks, or "".
+func messageText(m *provider.Message) string {
+	if m == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, blk := range m.Content {
+		if blk.Type == provider.BlockText {
+			b.WriteString(blk.Text)
+		}
+	}
+	return b.String()
 }
 
 // execute drives the loop, then settles the run. The terminal lifecycle event is

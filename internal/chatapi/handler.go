@@ -236,17 +236,9 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist the user's message so history replay reconstructs the user side,
-	// not just the assistant's output.
-	if text := lastUserText(req); text != "" {
-		payload, _ := json.Marshal(text)
-		_ = h.runtime.AppendEvent(r.Context(), session.Event{
-			RunID:     run.ID,
-			SessionID: sessID,
-			Kind:      string(agent.KindUser),
-			Payload:   payload,
-		})
-	}
+	// The run's user turn is persisted by the registry at run start (before the
+	// worker launches), so history replay reconstructs the user side and the
+	// event deterministically precedes any run output.
 
 	// SSE headers for ui-message-stream.
 	if !writeStreamHeaders(w) {
