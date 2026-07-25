@@ -276,7 +276,13 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		_ = emit.Emit(ctx, KindMessage, resultMsg)
 	}
 
-	return produced, fmt.Errorf("max iterations (%d) exceeded", l.config.MaxIterations)
+	// Reached the iteration guard without a final answer. Surface it as a terminal
+	// error frame rather than a silent stop: without this emit the run still flips
+	// to failed (registry.execute), but the client sees the stream just end with no
+	// explanation. Emit KindError so a terminal frame always accompanies the failure.
+	err := fmt.Errorf("max iterations (%d) exceeded", l.config.MaxIterations)
+	_ = emit.Emit(ctx, KindError, err.Error())
+	return produced, err
 }
 
 // consume reads one provider stream into an assembled assistant message and

@@ -175,6 +175,32 @@ func TestLoopMaxIterationsGuard(t *testing.T) {
 	}
 }
 
+// TestLoopMaxIterationsEmitsError pins O4: hitting the iteration guard must emit
+// a terminal KindError, not stop silently. Before the fix the loop returned an
+// error with no emit, so the run flipped to failed with no explanatory frame and
+// the client saw the stream simply end.
+func TestLoopMaxIterationsEmitsError(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "echo", `{}`),
+		toolUseResponse("tu2", "echo", `{}`),
+		toolUseResponse("tu3", "echo", `{}`),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100, MaxIterations: 2})
+
+	if _, err := loop.Run(context.Background(), nil, emit); err == nil {
+		t.Fatal("expected max-iteration error")
+	}
+	if emit.count(KindError) != 1 {
+		t.Errorf("KindError = %d, want 1 (terminal frame at the guard)", emit.count(KindError))
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("guard exit must not emit done")
+	}
+}
+
 // thinkingWithSignatureResponse builds a script entry with a thinking block whose
 // signature streams as a separate SignatureDelta, then a text block.
 func thinkingWithSignatureResponse(think, sig, text string) []provider.Event {
