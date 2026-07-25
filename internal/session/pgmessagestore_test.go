@@ -9,7 +9,11 @@ import (
 )
 
 // setupMessageSession creates a session + run to attach messages to, and
-// returns their ids. Cleanup removes the session (cascading to runs/messages).
+// returns their ids. Cleanup HARD-deletes the session (cascading to runs and
+// messages): a soft-delete (status='ended') would leave the run 'queued', and
+// the partial unique index idx_runs_one_active_per_session would then make a
+// later test's run on a *different* session collide if rows accumulate — and
+// leave the shared dev DB dirty.
 func setupMessageSession(t *testing.T, ctx context.Context, db *sql.DB, s *PGStore) (sessionID, runID string) {
 	t.Helper()
 	userID := pgNewUser(t, db)
@@ -22,7 +26,7 @@ func setupMessageSession(t *testing.T, ctx context.Context, db *sql.DB, s *PGSto
 		t.Fatalf("create run: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = s.DeleteSessionForUser(ctx, sess.ID, sess.UserID)
+		_, _ = db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID)
 	})
 	return sess.ID, run.ID
 }
@@ -133,6 +137,12 @@ func TestPGMessageStoreSeqContinuesAcrossRuns(t *testing.T) {
 	}
 
 	// A second run on the same session must continue the session seq, not reset.
+	// run1 is still queued (active), and the single-active-run constraint
+	// (idx_runs_one_active_per_session, migration 000007) forbids a second active
+	// run in the session — so settle run1 first, as a real turn would.
+	if err := store.UpdateRunStatus(ctx, run1, RunDone); err != nil {
+		t.Fatalf("settle run1: %v", err)
+	}
 	run2, err := store.CreateRun(ctx, sessID, 2)
 	if err != nil {
 		t.Fatalf("create run2: %v", err)

@@ -56,12 +56,10 @@ func TestPGStoreIncrementalDreaming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Hard-delete the session (cascades to the run + messages) so the run doesn't
-	// linger 'queued' and trip idx_runs_one_active_per_session for later tests;
-	// and clear any such leftovers from earlier, pre-fix test runs.
+	// Hard-delete the session (cascades to the run + messages) so its run doesn't
+	// linger active for later tests.
 	t.Cleanup(func() {
 		_, _ = db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID)
-		_, _ = db.Exec(`DELETE FROM runs WHERE status IN ('queued','running','waiting_approval')`)
 	})
 
 	// Fresh session has no messages → not eligible (even before any watermark).
