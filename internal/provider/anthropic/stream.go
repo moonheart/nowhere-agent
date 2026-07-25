@@ -83,14 +83,19 @@ func decodeEvent(data []byte) (provider.Event, bool) {
 		return provider.Event{Type: provider.EventBlockStop, Index: se.Index}, true
 
 	case "message_delta":
-		// message_delta carries final usage.
-		if se.Usage == nil {
+		// message_delta carries the final stop_reason (in delta) and usage. Emit an
+		// EventMessageStop carrying whichever are present; drop only if neither is.
+		ev := provider.Event{Type: provider.EventMessageStop}
+		if se.Delta != nil {
+			ev.StopReason = mapStopReason(se.Delta.StopReason)
+		}
+		if se.Usage != nil {
+			ev.Usage = convertUsage(se.Usage)
+		}
+		if ev.StopReason == provider.StopUnknown && ev.Usage == nil {
 			return provider.Event{}, false
 		}
-		return provider.Event{
-			Type:  provider.EventMessageStop,
-			Usage: convertUsage(se.Usage),
-		}, true
+		return ev, true
 
 	case "message_stop":
 		return provider.Event{Type: provider.EventMessageStop}, true
@@ -142,5 +147,23 @@ func convertUsage(u *rawUsage) *provider.Usage {
 		OutputTokens:     u.OutputTokens,
 		CacheReadTokens:  u.CacheReadInputTokens,
 		CacheWriteTokens: u.CacheCreationTokens,
+	}
+}
+
+// mapStopReason maps Anthropic's stop_reason onto the neutral StopReason. Values
+// without a neutral constant (pause_turn, refusal, …) pass through verbatim so
+// the loop can still observe them; "" maps to StopUnknown.
+func mapStopReason(s string) provider.StopReason {
+	switch s {
+	case "end_turn":
+		return provider.StopEndTurn
+	case "max_tokens":
+		return provider.StopMaxTokens
+	case "tool_use":
+		return provider.StopToolUse
+	case "stop_sequence":
+		return provider.StopStopSequence
+	default:
+		return provider.StopReason(s)
 	}
 }

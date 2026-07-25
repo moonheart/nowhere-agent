@@ -106,6 +106,19 @@ func TestDecodeMessageDeltaUsage(t *testing.T) {
 	}
 }
 
+// TestDecodeMessageDeltaStopReason verifies the stop_reason on message_delta is
+// mapped to the neutral StopReason so a max_tokens truncation is visible to the
+// loop (it previously only read usage from message_delta and dropped the reason).
+func TestDecodeMessageDeltaStopReason(t *testing.T) {
+	ev := decode(t, `{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":50}}`)
+	if ev.Type != provider.EventMessageStop {
+		t.Fatalf("got %q", ev.Type)
+	}
+	if ev.StopReason != provider.StopMaxTokens {
+		t.Errorf("StopReason = %q, want %q", ev.StopReason, provider.StopMaxTokens)
+	}
+}
+
 func TestDecodePingIgnored(t *testing.T) {
 	if _, ok := decodeEvent([]byte(`{"type":"ping"}`)); ok {
 		t.Error("ping should be ignored")

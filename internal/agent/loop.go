@@ -127,7 +127,7 @@ func (l *Loop) maxOverflowRetries() int { return l.config.MaxOverflowRetries }
 // stream into an assembled assistant message + tool calls. It returns the
 // provider error verbatim (no KindError emit) so the caller can distinguish a
 // retriable context-overflow from a fatal failure.
-func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (provider.Message, []toolruntime.Call, error) {
+func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (provider.Message, []toolruntime.Call, turnEnd, error) {
 	req := provider.Request{
 		Model:           l.config.Model,
 		System:          l.config.System,
@@ -144,7 +144,7 @@ func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitte
 
 	events, err := l.provider.Stream(ctx, req)
 	if err != nil {
-		return provider.Message{}, nil, fmt.Errorf("stream: %w", err)
+		return provider.Message{}, nil, turnEnd{}, fmt.Errorf("stream: %w", err)
 	}
 	return l.consume(ctx, events, emit)
 }
@@ -220,7 +220,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			slog.Warn("agent: compression failed; using uncompressed view", "iter", iter, "err", err, "failures", l.compressFailures)
 		}
 
-		assistant, toolCalls, err := l.attempt(ctx, view, emit)
+		assistant, toolCalls, end, err := l.attempt(ctx, view, emit)
 		for attempts := 0; err != nil && provider.IsContextOverflow(err) && attempts < l.maxOverflowRetries(); attempts++ {
 			// Reactive fallback (design D7): the threshold trigger mis-estimated
 			// and the provider rejected the request as too large. Drop the oldest
@@ -230,7 +230,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				break // nothing safe left to drop
 			}
 			view = shrunk
-			assistant, toolCalls, err = l.attempt(ctx, view, emit)
+			assistant, toolCalls, end, err = l.attempt(ctx, view, emit)
 		}
 		if err != nil {
 			if ctx.Err() != nil {
@@ -248,8 +248,16 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// persistence listener drops them — so ignore the error.
 		_ = emit.Emit(ctx, KindMessage, assistant)
 
-		// No tool calls → final answer; loop ends.
+		// No tool calls → the turn is final. But distinguish a natural finish from
+		// a max_tokens truncation: a truncated turn is a cut-off answer, not a
+		// clean completion, so surface it as an error instead of a silent done
+		// (capability-gap L1). Without this the loop treats truncation as success.
 		if len(toolCalls) == 0 {
+			if end.stop == provider.StopMaxTokens {
+				truncErr := fmt.Errorf("response truncated: hit the max_tokens limit (%d)", l.config.MaxTokens)
+				_ = emit.Emit(ctx, KindError, truncErr.Error())
+				return produced, truncErr
+			}
 			_ = emit.Emit(ctx, KindDone, nil)
 			return produced, nil
 		}
@@ -285,13 +293,21 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	return produced, err
 }
 
+// turnEnd carries the terminal metadata of one provider turn: why generation
+// stopped (and, for L2, the reported token usage). It lets Run react to a
+// max_tokens truncation without growing consume's return list.
+type turnEnd struct {
+	stop provider.StopReason
+}
+
 // consume reads one provider stream into an assembled assistant message and
 // the list of tool calls, forwarding text/thinking to the emitter. It stops at
 // once when ctx is cancelled (client Stop / server cancel) so a run can be
 // interrupted mid-stream rather than only between iterations.
-func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit Emitter) (provider.Message, []toolruntime.Call, error) {
+func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit Emitter) (provider.Message, []toolruntime.Call, turnEnd, error) {
 	assistant := provider.Message{Role: provider.RoleAssistant}
 	var calls []toolruntime.Call
+	var end turnEnd
 
 	// Track open blocks to accumulate deltas.
 	open := map[int]*accumulator{}
@@ -299,26 +315,26 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 	for {
 		select {
 		case <-ctx.Done():
-			return assistant, calls, ctx.Err()
+			return assistant, calls, end, ctx.Err()
 		case ev, ok := <-events:
 			if !ok {
 				// The provider closes its channel when the request is cancelled
 				// (aborting the HTTP body) as well as at natural end. A cancelled
 				// run must surface as such, not look like a clean finish.
 				if err := ctx.Err(); err != nil {
-					return assistant, calls, err
+					return assistant, calls, end, err
 				}
 				// Stream closed naturally: finalize any blocks still open.
 				for idx, acc := range open {
 					l.appendFinalized(ctx, acc, &assistant, &calls, emit)
 					delete(open, idx)
 				}
-				return assistant, calls, nil
+				return assistant, calls, end, nil
 			}
 
 			switch ev.Type {
 			case provider.EventError:
-				return assistant, calls, ev.Err
+				return assistant, calls, end, ev.Err
 
 			case provider.EventBlockStart:
 				if ev.Block != nil {
@@ -340,7 +356,7 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 						emitErr = emit.Emit(ctx, KindThinking, ev.Delta)
 					}
 					if emitErr != nil {
-						return assistant, calls, emitErr
+						return assistant, calls, end, emitErr
 					}
 				}
 
@@ -351,7 +367,12 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 				}
 
 			case provider.EventMessageStop:
-				// usage could be recorded here for observability.
+				// Terminal metadata. It can arrive across several stop events
+				// (OpenAI reports the finish reason and usage in separate chunks),
+				// so keep the last non-empty stop reason seen.
+				if ev.StopReason != provider.StopUnknown {
+					end.stop = ev.StopReason
+				}
 			}
 		}
 	}

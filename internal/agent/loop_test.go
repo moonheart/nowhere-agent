@@ -201,6 +201,44 @@ func TestLoopMaxIterationsEmitsError(t *testing.T) {
 	}
 }
 
+// truncatedResponse builds a text turn whose message stop signals a max_tokens
+// truncation and carries no tool call — a cut-off final answer.
+func truncatedResponse(text string) []provider.Event {
+	return []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: text},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop, StopReason: provider.StopMaxTokens},
+	}
+}
+
+// TestLoopTruncationSurfacedAsError pins L1: a turn truncated at max_tokens with
+// no tool calls is a cut-off answer, so the loop surfaces it as an error, not a
+// clean done. Before the fix the loop inferred completion from len(calls)==0 and
+// a truncated reply looked like success.
+func TestLoopTruncationSurfacedAsError(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{truncatedResponse("partial ans")}}
+	emit := &memEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), nil, emit)
+	if err == nil {
+		t.Fatal("truncation must surface as an error, not a clean finish")
+	}
+	if emit.count(KindError) != 1 {
+		t.Errorf("KindError = %d, want 1", emit.count(KindError))
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("a truncated turn must NOT emit done")
+	}
+	// The partial text is still assembled (streamed before the stop), so it is
+	// persisted/visible even though the run is marked failed.
+	if len(produced) != 1 || produced[0].Content[0].Text != "partial ans" {
+		t.Errorf("partial content not preserved: %+v", produced)
+	}
+}
+
 // thinkingWithSignatureResponse builds a script entry with a thinking block whose
 // signature streams as a separate SignatureDelta, then a text block.
 func thinkingWithSignatureResponse(think, sig, text string) []provider.Event {

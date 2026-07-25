@@ -91,6 +91,30 @@ func TestDecoderUsage(t *testing.T) {
 	}
 }
 
+// TestDecoderFinishReasonLength verifies OpenAI's finish_reason "length" (a
+// max_tokens truncation) surfaces as StopMaxTokens on an EventMessageStop, so
+// the loop can tell it apart from a natural stop.
+func TestDecoderFinishReasonLength(t *testing.T) {
+	d := newStreamDecoder()
+	var events []provider.Event
+	for _, p := range []string{
+		`{"choices":[{"delta":{"content":"partial"},"finish_reason":""}]}`,
+		`{"choices":[{"delta":{"content":"..."},"finish_reason":"length"}]}`,
+		`[DONE]`,
+	} {
+		events = append(events, d.feed([]byte(p))...)
+	}
+	var stop provider.StopReason
+	for _, e := range events {
+		if e.Type == provider.EventMessageStop && e.StopReason != provider.StopUnknown {
+			stop = e.StopReason
+		}
+	}
+	if stop != provider.StopMaxTokens {
+		t.Errorf("stop = %q, want %q", stop, provider.StopMaxTokens)
+	}
+}
+
 func TestDecoderInvalidJSON(t *testing.T) {
 	d := newStreamDecoder()
 	events := d.feed([]byte(`{bad`))

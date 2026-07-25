@@ -39,6 +39,12 @@ type Event struct {
 	// Usage is set on EventMessageStop.
 	Usage *Usage
 
+	// StopReason is set on EventMessageStop when the adapter reports why the
+	// generation ended (Anthropic stop_reason / OpenAI finish_reason). It lets
+	// the loop distinguish a natural finish from a max_tokens truncation instead
+	// of inferring completion solely from the absence of tool calls.
+	StopReason StopReason
+
 	// Err is set on EventError.
 	Err error
 }

@@ -104,3 +104,18 @@ type Usage struct {
 	CacheReadTokens  int
 	CacheWriteTokens int
 }
+
+// StopReason is the provider-neutral reason a generation ended. Each adapter
+// maps its native value (Anthropic stop_reason / OpenAI finish_reason) onto
+// these; an unrecognised native value passes through as StopReason(raw) so the
+// loop can still log it. The empty value (StopUnknown) means the stream ended
+// without the adapter reporting a reason.
+type StopReason string
+
+const (
+	StopUnknown      StopReason = ""              // no reason reported
+	StopEndTurn      StopReason = "end_turn"      // natural completion
+	StopToolUse      StopReason = "tool_use"      // stopped to call tools
+	StopMaxTokens    StopReason = "max_tokens"    // truncated at the token limit
+	StopStopSequence StopReason = "stop_sequence" // hit a stop sequence
+)

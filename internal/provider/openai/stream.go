@@ -132,6 +132,13 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 		}
 		if ch.FinishReason != "" {
 			events = append(events, d.finish()...)
+			// Surface why generation ended (finish_reason) so the loop can tell a
+			// natural stop from a "length" truncation. Usage arrives in a later
+			// chunk (include_usage) as its own EventMessageStop; the loop merges.
+			events = append(events, provider.Event{
+				Type:       provider.EventMessageStop,
+				StopReason: mapFinishReason(ch.FinishReason),
+			})
 		}
 	}
 
@@ -175,4 +182,20 @@ func (d *streamDecoder) finish() []provider.Event {
 		d.seenToolIDs = map[int]string{}
 	}
 	return events
+}
+
+// mapFinishReason maps OpenAI's finish_reason onto the neutral StopReason.
+// Unknown values (content_filter, …) pass through verbatim so the loop can still
+// observe them; "" maps to StopUnknown.
+func mapFinishReason(s string) provider.StopReason {
+	switch s {
+	case "stop":
+		return provider.StopEndTurn
+	case "length":
+		return provider.StopMaxTokens
+	case "tool_calls", "function_call":
+		return provider.StopToolUse
+	default:
+		return provider.StopReason(s)
+	}
 }
