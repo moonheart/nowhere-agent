@@ -37,12 +37,17 @@ func capAndSpill(ctx context.Context, sb sandbox.Port, h sandbox.Handle, label, 
 	if len(full) <= spillCap {
 		return full
 	}
-	head := full[:spillKeepHead]
+	// Cut the inline head on a rune boundary so it stays valid UTF-8 and the
+	// offset handed to read_file lands on the tail's first rune — otherwise a
+	// 3-byte rune straddling spillKeepHead would show as U+FFFD both in the head
+	// and at the start of the retrieved tail (capability-gap T8).
+	cut := runeBoundaryAtOrBefore(full, spillKeepHead)
+	head := full[:cut]
 	path := spillPath(label, full)
 	if err := sb.WriteFile(ctx, h, path, strings.NewReader(full)); err != nil {
-		return head + fmt.Sprintf("\n\n… [output truncated: kept the first %d of %d bytes; the rest could not be saved (%v)]", spillKeepHead, len(full), err)
+		return head + fmt.Sprintf("\n\n… [output truncated: kept the first %d of %d bytes; the rest could not be saved (%v)]", cut, len(full), err)
 	}
-	return head + fmt.Sprintf("\n\n… [output truncated: kept the first %d of %d bytes; full output saved to %s — read the rest with read_file(path=%q, offset=%d)]", spillKeepHead, len(full), path, path, spillKeepHead)
+	return head + fmt.Sprintf("\n\n… [output truncated: kept the first %d of %d bytes; full output saved to %s — read the rest with read_file(path=%q, offset=%d)]", cut, len(full), path, path, cut)
 }
 
 // spillPath is the deterministic scratch path for a spilled result. The content

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/sandbox"
@@ -81,5 +82,39 @@ func TestSpillPathStableForSameContent(t *testing.T) {
 	}
 	if !strings.HasPrefix(a, spillDir+"/") {
 		t.Errorf("spill path not under the scratch dir: %q", a)
+	}
+}
+
+// TestCapAndSpillCutsHeadOnRuneBoundary pins the rune-safety fix for spilling: a
+// 3-byte rune straddling spillKeepHead must not be split, so the inline head is
+// valid UTF-8 and the offset in the marker lands on the tail's first rune (the
+// exact byte read_file will be told to continue from).
+func TestCapAndSpillCutsHeadOnRuneBoundary(t *testing.T) {
+	ctx := context.Background()
+	sb := sandbox.NewMemPort()
+	h, _ := sb.Create(ctx, "s", sandbox.Options{})
+	// A 1-byte prefix shifts every rune boundary off the (multiple-of-3)
+	// spillKeepHead, so a naive full[:spillKeepHead] cut would split a 汉.
+	full := "x" + strings.Repeat("汉", spillCap)
+
+	got := capAndSpill(ctx, sb, h, "run_command", full)
+
+	head, _, ok := strings.Cut(got, "\n\n… [output truncated")
+	if !ok {
+		t.Fatal("no truncation marker in spilled result")
+	}
+	if !utf8.ValidString(head) || strings.ContainsRune(head, '�') {
+		t.Error("inline head split a rune — not valid UTF-8")
+	}
+	off := markerOffset(t, got)
+	if head != full[:off] {
+		t.Errorf("head is not exactly the first %d bytes of the output", off)
+	}
+	if !utf8.ValidString(full[off:]) {
+		t.Error("tail at the marker offset is not valid UTF-8 — the cut split a rune")
+	}
+	// The cut retreated a little from spillKeepHead to reach the boundary.
+	if d := spillKeepHead - off; d < 1 || d > 3 {
+		t.Errorf("cut offset %d not just below spillKeepHead %d (retreat %d)", off, spillKeepHead, d)
 	}
 }

@@ -105,14 +105,31 @@ func (t *fileReadTool) Call(ctx context.Context, args map[string]any) (toolrunti
 		return toolruntime.Result{Content: fmt.Sprintf("(read_file: offset %d is at or past end of file; %d bytes total)", offset, len(data))}, nil
 	}
 
-	end := offset + limit
+	// Never split a multi-byte UTF-8 rune across a page boundary. Retreat the
+	// start to the rune it lands in (a hand-picked offset may be mid-rune) and
+	// cut the end on a rune boundary too, so every page is valid UTF-8 and the
+	// continuation offset we hand back is itself rune-aligned — no stray U+FFFD
+	// at page seams (capability-gap T8).
+	start := runeBoundaryAtOrBefore(data, offset)
+	end := start + limit
 	more := len(data) > end // at least one byte beyond the window
 	if !more {
 		end = len(data)
+	} else {
+		end = runeBoundaryAtOrBefore(data, end)
+		if end <= start {
+			// A single rune is wider than the whole page budget: emit it whole so
+			// we still make progress and never split it. Only reachable with a
+			// pathologically tiny limit; a default page dwarfs any rune.
+			end = start + 1
+			for end < len(data) && data[end]&0xC0 == 0x80 {
+				end++
+			}
+		}
 	}
-	page := string(data[offset:end])
+	page := string(data[start:end])
 	if more {
-		page += fmt.Sprintf("\n\n[read_file: returned bytes %d-%d; more remain, call read_file with offset=%d to continue]", offset, end, end)
+		page += fmt.Sprintf("\n\n[read_file: returned bytes %d-%d; more remain, call read_file with offset=%d to continue]", start, end, end)
 	}
 	return toolruntime.Result{Content: page}, nil
 }
@@ -134,6 +151,24 @@ func optInt(args map[string]any, key string, def int) int {
 		return int(n)
 	}
 	return def
+}
+
+// runeBoundaryAtOrBefore returns the largest index j in [0, i] at which s does
+// not sit inside a multi-byte UTF-8 rune — i.e. j == 0, j == len(s), or s[j] is
+// not a UTF-8 continuation byte (10xxxxxx). Slicing s at j therefore never
+// splits a rune, keeping paged reads and spill heads valid UTF-8 across
+// boundaries (capability-gap T8). It works on either a string or a byte slice.
+func runeBoundaryAtOrBefore[T string | []byte](s T, i int) int {
+	if i <= 0 {
+		return 0
+	}
+	if i >= len(s) {
+		return len(s)
+	}
+	for i > 0 && s[i]&0xC0 == 0x80 {
+		i--
+	}
+	return i
 }
 
 type fileWriteTool struct {
