@@ -46,7 +46,52 @@ func TestDockerNetworkMode(t *testing.T) {
 	}
 }
 
-// TestDockerPortIntegration exercises the real Docker backend end to end.
+// TestDockerHostConfigHardening verifies each session container gets resource
+// limits and privilege drops so one tenant can't exhaust or escape the host.
+// It builds the HostConfig only (no daemon needed).
+func TestDockerHostConfigHardening(t *testing.T) {
+	p := &DockerPort{image: "alpine:latest", workMt: "/workspace"}
+	hc, err := p.hostConfig(Options{WorkspaceDir: "/tmp/ws", Network: NetworkPolicy{Mode: NetworkDeny}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hc.NetworkMode != "none" {
+		t.Errorf("network mode = %q want none", hc.NetworkMode)
+	}
+	if hc.Memory <= 0 {
+		t.Error("memory limit not set")
+	}
+	if hc.NanoCPUs <= 0 {
+		t.Error("cpu limit not set")
+	}
+	if hc.PidsLimit == nil || *hc.PidsLimit <= 0 {
+		t.Error("pids limit not set (fork-bomb guard)")
+	}
+	if !hasString([]string(hc.CapDrop), "ALL") {
+		t.Errorf("CapDrop = %v, want it to contain ALL", hc.CapDrop)
+	}
+	if !hasString([]string(hc.SecurityOpt), "no-new-privileges") {
+		t.Errorf("SecurityOpt = %v, want no-new-privileges", hc.SecurityOpt)
+	}
+	if !hc.ReadonlyRootfs {
+		t.Error("rootfs should be read-only")
+	}
+	if _, ok := hc.Tmpfs["/tmp"]; !ok {
+		t.Error("expected a writable tmpfs /tmp alongside the read-only rootfs")
+	}
+	if len(hc.Mounts) != 1 || hc.Mounts[0].Source != "/tmp/ws" {
+		t.Errorf("workspace mount = %+v, want a single bind mount of /tmp/ws", hc.Mounts)
+	}
+}
+
+func hasString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
 // Skipped when no Docker daemon is reachable.
 func TestDockerPortIntegration(t *testing.T) {
 	p, err := NewDockerPort()

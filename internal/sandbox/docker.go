@@ -26,6 +26,15 @@ type DockerPort struct {
 	workMt string // container path the workspace is mounted at
 }
 
+// Per-container resource limits so one tenant cannot exhaust the shared host
+// (memory, CPU, or PID/fork-bomb). Conservative defaults sized for the built-in
+// file tools and short commands.
+const (
+	defaultMemoryLimitBytes = 512 * 1024 * 1024 // 512 MiB
+	defaultCPULimitNano     = 1_000_000_000     // 1 CPU
+	defaultPidsLimit        = 256
+)
+
 // DockerOption customizes DockerPort.
 type DockerOption func(*DockerPort)
 
@@ -56,25 +65,14 @@ func (p *DockerPort) Create(ctx context.Context, sessionID string, opts Options)
 		return Handle{}, err
 	}
 
-	netMode, err := dockerNetworkMode(opts.Network)
-	if err != nil {
-		return Handle{}, err
-	}
-
 	cfg := &container.Config{
 		Image:      img,
 		Cmd:        []string{"sleep", "infinity"},
 		WorkingDir: p.workMt,
 	}
-	hostCfg := &container.HostConfig{
-		NetworkMode: netMode,
-	}
-	if opts.WorkspaceDir != "" {
-		hostCfg.Mounts = []mount.Mount{{
-			Type:   mount.TypeBind,
-			Source: opts.WorkspaceDir,
-			Target: p.workMt,
-		}}
+	hostCfg, err := p.hostConfig(opts)
+	if err != nil {
+		return Handle{}, err
 	}
 
 	name := "nowhere-" + sanitizeName(sessionID)
@@ -86,6 +84,40 @@ func (p *DockerPort) Create(ctx context.Context, sessionID string, opts Options)
 		return Handle{}, fmt.Errorf("container start: %w", err)
 	}
 	return Handle{ID: resp.ID, SessionID: sessionID}, nil
+}
+
+// hostConfig builds the container HostConfig: the egress policy, the workspace
+// bind mount, and the isolation hardening — resource limits (memory/CPU/PID),
+// all Linux capabilities dropped, no privilege escalation, and a read-only
+// rootfs with a writable tmpfs /tmp. The file tools (Docker copy API) and the
+// internal `ls` need none of the dropped privileges. (Running as a non-root
+// UID is a further step, deferred until workspace-mount UID mapping is handled.)
+func (p *DockerPort) hostConfig(opts Options) (*container.HostConfig, error) {
+	netMode, err := dockerNetworkMode(opts.Network)
+	if err != nil {
+		return nil, err
+	}
+	pids := int64(defaultPidsLimit)
+	hostCfg := &container.HostConfig{
+		NetworkMode: netMode,
+		Resources: container.Resources{
+			Memory:    defaultMemoryLimitBytes,
+			NanoCPUs:  defaultCPULimitNano,
+			PidsLimit: &pids,
+		},
+		CapDrop:        []string{"ALL"},
+		SecurityOpt:    []string{"no-new-privileges"},
+		ReadonlyRootfs: true,
+		Tmpfs:          map[string]string{"/tmp": ""},
+	}
+	if opts.WorkspaceDir != "" {
+		hostCfg.Mounts = []mount.Mount{{
+			Type:   mount.TypeBind,
+			Source: opts.WorkspaceDir,
+			Target: p.workMt,
+		}}
+	}
+	return hostCfg, nil
 }
 
 // Destroy stops and removes the container.
