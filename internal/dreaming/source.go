@@ -35,11 +35,16 @@ type StoreSource struct {
 
 // NewStoreSource wires an EpisodeSource over the session and message stores. If
 // sessions also implements ListUndreamedSessions (PGStore), eligibility uses it;
-// otherwise it is computed per session from the watermarks + message store.
+// otherwise it is computed per session from the watermarks + message store. The
+// in-memory *session.MemStore implements the method but only to report it as
+// unsupported (it cannot join messages), so it is excluded here and takes the
+// fallback path.
 func NewStoreSource(sessions sessionWatermarks, messages session.MessageStore) *StoreSource {
 	src := &StoreSource{sessions: sessions, messages: messages}
 	if sc, ok := sessions.(undreamedScanner); ok {
-		src.scanner = sc
+		if _, isMem := sessions.(*session.MemStore); !isMem {
+			src.scanner = sc
+		}
 	}
 	return src
 }
