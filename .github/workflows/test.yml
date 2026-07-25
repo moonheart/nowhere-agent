@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cross-platform CI: the exec-surface tools are meant to run on Windows, Linux,
+# and macOS hosts, so the suite must stay green on all three. Pure-Go tools test
+# identically everywhere; docker/postgres-backed tests skip when their backend is
+# absent, so no services are provisioned here.
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
