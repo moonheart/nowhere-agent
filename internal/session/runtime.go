@@ -29,6 +29,13 @@ type Store interface {
 	// ListIdleSessions returns active sessions with no event activity since
 	// the given time (candidates for idle-end by the scheduler).
 	ListIdleSessions(ctx context.Context, idleSinceEventBefore time.Time) ([]Session, error)
+	// ListEndedUndreamed returns ended sessions not yet consumed by the dreaming
+	// worker, oldest first. This is the worker's eligibility scan (capability-gap
+	// K1): a session leaves the result the moment MarkDreamed stamps it.
+	ListEndedUndreamed(ctx context.Context) ([]Session, error)
+	// MarkDreamed records that the dreaming worker consumed a session's episodes,
+	// so ListEndedUndreamed stops returning it. Idempotent.
+	MarkDreamed(ctx context.Context, id string) error
 
 	CreateRun(ctx context.Context, sessionID string, seq int) (Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status RunStatus) error

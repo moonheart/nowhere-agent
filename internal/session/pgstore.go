@@ -84,6 +84,44 @@ func (s *PGStore) ListIdleSessions(ctx context.Context, idleSinceEventBefore tim
 	return out, rows.Err()
 }
 
+// ListEndedUndreamed returns ended sessions the dreaming worker has not yet
+// consumed (dreamed_at IS NULL), oldest-ended first. The LIMIT bounds a single
+// eligibility scan; the worker's own token budget is the real per-pass cap, and
+// the partial index idx_sessions_ended_undreamed (migration 000008) keeps this
+// query cheap as the table grows.
+func (s *PGStore) ListEndedUndreamed(ctx context.Context) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id, title, status, created_at, updated_at
+		FROM sessions
+		WHERE status = $1 AND dreamed_at IS NULL
+		ORDER BY ended_at
+		LIMIT 100`, string(SessionEnded))
+	if err != nil {
+		return nil, fmt.Errorf("list ended undreamed sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Session
+	for rows.Next() {
+		var sess Session
+		if err := rows.Scan(&sess.ID, &sess.UserID, &sess.Title, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan ended undreamed session: %w", err)
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// MarkDreamed stamps a session's dreamed_at so the dreaming worker consumes it
+// exactly once. Idempotent (re-stamping is a no-op).
+func (s *PGStore) MarkDreamed(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE sessions SET dreamed_at = now() WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("mark session dreamed: %w", err)
+	}
+	return nil
+}
+
 // ListSessionsByUser returns a user's active (non-deleted) sessions,
 // most-recently-active first. Ended sessions are hidden from the sidebar.
 func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {

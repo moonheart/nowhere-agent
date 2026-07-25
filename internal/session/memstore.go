@@ -14,9 +14,12 @@ import (
 type MemStore struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
-	runs     map[string]*Run   // runID
-	bySess   map[string][]*Run // sessionID -> runs
+	runs     map[string]*Run    // runID
+	bySess   map[string][]*Run  // sessionID -> runs
 	events   map[string][]Event // runID -> events
+	// dreamed tracks sessions the dreaming worker has consumed (the in-memory
+	// analogue of sessions.dreamed_at, migration 000008).
+	dreamed map[string]bool
 }
 
 // NewMemStore creates an empty in-memory Store.
@@ -26,6 +29,7 @@ func NewMemStore() *MemStore {
 		runs:     map[string]*Run{},
 		bySess:   map[string][]*Run{},
 		events:   map[string][]Event{},
+		dreamed:  map[string]bool{},
 	}
 }
 
@@ -66,6 +70,25 @@ func (m *MemStore) ListIdleSessions(_ context.Context, before time.Time) ([]Sess
 		}
 	}
 	return out, nil
+}
+
+func (m *MemStore) ListEndedUndreamed(_ context.Context) ([]Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Session
+	for _, s := range m.sessions {
+		if s.Status == SessionEnded && !m.dreamed[s.ID] {
+			out = append(out, *s)
+		}
+	}
+	return out, nil
+}
+
+func (m *MemStore) MarkDreamed(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dreamed[id] = true
+	return nil
 }
 
 func (m *MemStore) ListSessionsByUser(_ context.Context, userID string) ([]Session, error) {
