@@ -135,14 +135,14 @@
 
 > 本组与架构评审 §3"能力接线矩阵"高度重叠 —— 那里从"接线完备性"记录,这里从"功能后果 + 实现深度"补充。多租户 scope(user/team/system)**已稳固且有测试**(`identity/service.go:79-90`,`memory/pgport.go` scope 过滤),不在缺口内。
 
-**K1 ◐⭐ 记忆写回 / dreaming 未接线 —— agent 永远不学习**
-在线路径按设计只读;唯一的写路径是 dreaming worker,而它**完整实现+单测齐全,却从没被实例化**(`dreaming/worker.go`、`pipeline.go`;`NewWorker` 只在 `worker_test.go`)。后果:**每次对话都是失忆的,agent 从不沉淀任何长期记忆**。且即便接上也有三处半成品:(a) 无生产级 `EpisodeSource`(只有测试的 `fakeEpisodeSource`,读"已结束会话"的持久实现被显式推迟);(b) 无 `dreamed_at`/已处理标记列,会重复处理;(c) 包注释宣传"extract→compress→reorganize→reflect"四阶段,**只实现了 extract+reorganize,compress 和 reflect 根本没写**,`KindInsight`/`KindSummary` 记忆类型从不产出,只写 `KindFact`(`worker.go:167-172`)。
+**K1 ◐⭐ 记忆写回 / dreaming 已接线(2 阶段)— 在线对话开始沉淀记忆**
+在线路径按设计只读;唯一的写路径 dreaming worker 现已实例化并周期运行(`main.go` 在 `DREAMING_ENABLED=true` 时经 scheduler 驱动)。生产 `EpisodeSource`(`dreaming/source.go` 读 `session`+`messages` store)、`sessions.dreamed_at` 幂等标记(migration `000008`)、provider 排流的 `LLM`(`dreaming/llm.go`)均已落地并单测。**仍是 2 阶段**:extract→reorganize 只写 `KindFact`;包注释宣传的 compress→reflect 未实现,`KindInsight`/`KindSummary` 从不产出(`worker.go` 仍只写 `KindFact`)—— 作为独立增量跟进。
 
-**K2 ◐⭐ 调度器 / 主动性未启动 —— 纯 request/response**
-通用 `Scheduler`(命名 interval job、1s tick、启动 catch-up)已实现(`scheduler/scheduler.go`),但**从没被 `Start`**(全树无非测试构造点,`main.go` 不 import 它)。**agent 无法在没有用户 HTTP 请求时做任何事** —— 无定时任务、无 cron、无 timer/wakeup、无后台触发。它设计上要驱动的 dreaming、沙箱延迟销毁、配额滚动因此全部悬空。`config` 连开关旋钮都没有(不改代码开不了)。附带:调度器自身的"重启 catch-up"只靠内存 `lastRun` map(`scheduler.go:28,36`),重启不持久。
+**K2 ◐⭐ 调度器已启动(驱动 dreaming)— 周期性后台工作打通**
+通用 `Scheduler`(命名 interval job、1s tick、启动 catch-up,`scheduler/scheduler.go`)现已在 `main.go` 实例化并 `go Start(ctx)`,随 root ctx 停,以 `DREAMING_INTERVAL` 周期驱动 dreaming worker。**config 开关**:`DREAMING_ENABLED`(默认关,因花钱且需 provider)/`DREAMING_INTERVAL`/`DREAMING_MAX_TOKENS`。附带:调度器"重启 catch-up"仍只靠内存 `lastRun` map,但 dreaming 幂等靠 `dreamed_at`(migration `000008`),重启不会重复处理;沙箱延迟销毁(`Manager.Sweep`)、配额滚动作为后续 job 仍是一行 wrapper 可挂。
 
-**K3 ◐⭐ 技能运行时未接线 + 生产目录为空**
-技能引擎的 L0 索引**已接进 system prompt**(`chatapi/context.go:48`),但:(a) skill store 是内存的、**生产环境从没被 seed**(`Store.Put` 无非测试调用方,也没有技能表/磁盘加载器)→ `RenderL0Prompt` 线上恒返回空;(b) 让模型**按需拉取技能全文(L1)或执行技能脚本(L2)** 的 `LoadL1/LoadL2*` 只在测试里被调,loop 的工具注册表里**没有技能工具**。所以技能系统线上基本是空壳:看不见、拉不出、跑不了。
+**K3 ◐⭐ 技能运行时:只读(K3a)已接线,脚本执行(K3b)仍卡在 C17**
+(a) **已 seed**:`skill.LoadDir` 从 `SKILLS_DIR` 把每个含 `SKILL.md` 的子目录 seed 成系统作用域技能(→ `RenderL0Prompt`/`context.go:48` 的 L0 索引点亮,不再恒空);`main.go` 保留并 seed `*skill.Store`。(b) **只读拉取已注册**:`load_skill` 工具(`skill/loadtool.go`,`RiskReadOnly`,调 `Engine.LoadL1`/`LoadL2Resource`)已注册进 tool binder,模型可按需拉技能全文/资源。(c) **脚本执行仍未接**:`ScriptTool`(`sh -c` 拼接未转义模型 args,local 后端 = 宿主机 RCE,即 C17)刻意不注册,disk loader 也跳过 `Scripts` —— 待 C17 修复后再点亮。
 
 **K4 ◐ 向量语义召回缺 embedder,退化为关键词**
 在线召回按 Postgres 全文检索 `ts_rank/plainto_tsquery`(`memory/pgport.go:55-81`)。真正的 `RecallVector`(pgvector 余弦,`pgport.go:86-111`)和 `embedding` 列都在,但**全仓没有任何 embedder** 去生成向量(注释 `pgport.go:53-54`:"the agent loop has no embedder")。语义相似召回不可用,只能关键词命中。
@@ -163,7 +163,7 @@
 | 工具调用人工批准 | ◑ 仅同步拒绝,无挂起-恢复 | O2 |
 | token 用量/成本上报 | ◑ 丢弃 | L2 |
 | 结构化输出 | ○ 无 | L3 |
-| 从记忆学习 | ◐ dreaming 未接 | K1 |
+| 从记忆学习 | ◐ dreaming 已接(2 阶段);compress/reflect 未做 | K1 |
 
 > **叙事**:上表左列基本定义了"一个能自主完成开发任务的 agent"。本仓在**执行面**(T)和**学习/主动性**(K)两块差得最多,而这两块又恰好大半是"接线而非造轮子"。
 
@@ -186,9 +186,14 @@
 - **[T8]** 大输出分页 / 截断尾部落盘可回取。
 
 ### P2 — 激活"死代码"差异化能力(接线为主)
+
+> **状态**:K2 / K1(2 阶段)/ K3a 已落地(分支 `feat/scheduler-dreaming`)。K3b(脚本执行)仍卡在 C17;K1 的 compress/reflect 与 K4/L6 未做。
 - **[K2]** 启动 `Scheduler`(加 config 开关)→ 作为下面两项的驱动。
+  ✅ 已在 `main.go` 实例化并 `go Start(ctx)`(随 root ctx 停),驱动 dreaming job;开关 `DREAMING_ENABLED`(默认关)。调度器 `lastRun` 仍内存态,但 dreaming 幂等靠 `dreamed_at`,故可接受。
 - **[K1]** 接线 dreaming(补生产 `EpisodeSource` + `dreamed_at` 列 + compress/reflect 阶段)让记忆真正学习。
+  ✅ **2 阶段已接线**:migration `000008` 加 `sessions.dreamed_at` + 部分索引;`session.Store` 新增 `ListEndedUndreamed`/`MarkDreamed`(PG+Mem);`dreaming.NewStoreSource` 为生产 `EpisodeSource`、`dreaming.NewProviderLLM` 排空 `provider.Adapter` 实现 `LLM.Complete`;scheduler 周期性跑 worker,写 `KindFact` 到 `memory.PGPort`。**compress/reflect 仍缺**(`KindSummary`/`KindInsight` 不产出)—— 独立增量。
 - **[K3]** 给 skill store 加磁盘/DB 加载器 + 注册技能工具(前置:先解决 C17 的 exec 安全)。
+  ✅ **K3a(只读)已接线**:`skill.LoadDir` 从 `SKILLS_DIR` seed 系统作用域技能(跳过脚本)→ L0 索引(`context.go:48`)点亮;只读 `load_skill` 工具(`skill/loadtool.go`,`RiskReadOnly`,不执行)已注册进 tool binder。**K3b(脚本执行 ScriptTool)仍卡在 C17**(模型可控 args 未转义进 `sh -c`,local 后端 = 宿主机 RCE),loader 故意不加载脚本。
 - **[K4]** 引入 embedder 点亮向量召回;**[L6]** 接线 routing 做多模型/故障转移。
 
 ### P3 — 交互与产品化
@@ -225,9 +230,9 @@
 | O4 | ○⭐ | 编排 | 迭代触顶=静默失败,无终帧 | `agent/loop.go:279` |
 | O5 | ◑ | 编排 | `RunQueued` 不是真队列 | `runtime.go:120,150` |
 | O6 | ○ | 编排 | 子代理 fire-and-forget,无协作 | `subagent/tool.go:188`、`collapse.go:19` |
-| K1 | ◐⭐ | 记忆 | dreaming 未接线,agent 从不学习 | `dreaming/worker.go`(仅测试构造) |
-| K2 | ◐⭐ | 主动性 | 调度器从未 Start,纯 request/response | `scheduler/scheduler.go` |
-| K3 | ◐⭐ | 技能 | 技能运行时未接线 + L0 目录空 | `skill/engine.go:44`、`store.go:22` |
+| K1 | ◐⭐ | 记忆 | dreaming 已接(2 阶段,写 KindFact);compress/reflect 未做 | `main.go`(scheduler 驱动)、`dreaming/source.go`、`llm.go` |
+| K2 | ◐⭐ | 主动性 | 调度器已 Start(驱动 dreaming;开关 DREAMING_ENABLED) | `main.go`、`scheduler/scheduler.go` |
+| K3 | ◐⭐ | 技能 | K3a 已接(seed + L0 + 只读 load_skill);K3b 脚本执行卡 C17 | `skill/loader.go`、`loadtool.go`、`main.go` |
 | K4 | ◐ | 记忆 | 无 embedder,向量召回退化为关键词 | `memory/pgport.go:53,86` |
 
 ---
