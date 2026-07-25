@@ -343,6 +343,12 @@ func writeStreamHeaders(w http.ResponseWriter) bool {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return false
 	}
+	// Clear the per-connection write deadline for this streaming response: the
+	// server's WriteTimeout would otherwise abort a long-running SSE stream (an
+	// agent run can last far longer than a normal response) mid-run. Non-streaming
+	// endpoints keep the timeout. Best-effort — a server without deadline support
+	// is unaffected.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	return true
 }
 
