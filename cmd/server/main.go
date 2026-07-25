@@ -158,7 +158,19 @@ func run() error {
 	// Memory (PG+vector) and skill engine feed the loop's system prompt:
 	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
 	memPort := memory.NewPGPort(pool)
-	skillEngine := skill.NewEngine(skill.NewStore())
+	skillStore := skill.NewStore()
+	// Seed the skill store from disk (capability-gap K3a): each SKILL.md under
+	// SKILLS_DIR becomes a system-scope skill, lighting up the L0 index in the
+	// system prompt. Empty SKILLS_DIR leaves the runtime dormant. The loader
+	// never loads scripts — skill execution is K3b, gated on C17.
+	if cfg.Skills.Dir != "" {
+		n, err := skill.LoadDir(ctx, skillStore, cfg.Skills.Dir)
+		if err != nil {
+			return fmt.Errorf("load skills from %s: %w", cfg.Skills.Dir, err)
+		}
+		log.Info("skills seeded from disk", "dir", cfg.Skills.Dir, "count", n)
+	}
+	skillEngine := skill.NewEngine(skillStore)
 	baseSystem := "You are nowhere-agent, a helpful AI assistant."
 	ctxBuilder := chatapi.NewContextBuilder(baseSystem, identitySvc, memPort, skillEngine)
 
