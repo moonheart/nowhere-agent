@@ -88,14 +88,18 @@ func run() error {
 	// broker that is unreachable at boot fails fast (a multi-instance deploy
 	// with a dead broker is a misconfiguration worth surfacing).
 	if cfg.Stream.Broker == "redis" {
-		broker := session.NewRedisBroker(cfg.Stream.RedisAddr, 0, 0)
 		if err := session.PingRedis(ctx, cfg.Stream.RedisAddr); err != nil {
 			return fmt.Errorf("stream broker redis at %s: %w", cfg.Stream.RedisAddr, err)
 		}
-		sessionRuntime = sessionRuntime.WithBroker(broker)
-		log.Info("live content broker: redis streams", "addr", cfg.Stream.RedisAddr)
+		// Redis Streams carry live content; Redis Pub/Sub carries lifecycle events
+		// so running/done/cancelled fan out across instances too (the in-memory bus
+		// only reaches clients on this instance). Durability stays in Postgres.
+		broker := session.NewRedisBroker(cfg.Stream.RedisAddr, 0, 0)
+		eventBus := session.NewRedisEventBus(cfg.Stream.RedisAddr)
+		sessionRuntime = sessionRuntime.WithBroker(broker).WithBus(eventBus)
+		log.Info("live delivery: redis streams (content) + redis pub/sub (lifecycle)", "addr", cfg.Stream.RedisAddr)
 	} else {
-		log.Info("live content broker: in-memory (single instance)")
+		log.Info("live delivery: in-memory (single instance)")
 	}
 
 	// Full-block conversation record (persist-raw-messages): messages are
