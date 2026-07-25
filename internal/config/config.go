@@ -57,6 +57,13 @@ type Sandbox struct {
 	// WorkspaceDir is the host root for the local backend's per-session
 	// directories. Empty falls back to WORKSPACE_DIR.
 	WorkspaceDir string `envconfig:"SANDBOX_WORKSPACE_DIR" default:""`
+	// Network is the container egress policy for the docker backend: deny
+	// (default, no egress), open (full egress), or allowlist (enforced by an
+	// egress proxy; until that exists it fails closed to no egress). The local
+	// backend ignores it. Default deny: the sandbox exists for isolation and the
+	// wired tools (file I/O) need no network — multi-tenant docker deployments
+	// should keep it deny (or allowlist) rather than open.
+	Network string `envconfig:"SANDBOX_NETWORK" default:"deny"` // deny | open | allowlist
 }
 
 // Stream selects the live content broker that fans run output out to clients.

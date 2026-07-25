@@ -223,7 +223,9 @@ func run() error {
 			handler = handler.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string) {
 				reg := toolruntime.NewRegistry()
 				if sandboxMgr != nil {
-					h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{})
+					h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
+						Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(cfg.Sandbox.Network)},
+					})
 					if err != nil {
 						log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
 					} else {

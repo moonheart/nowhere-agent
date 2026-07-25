@@ -30,6 +30,17 @@ func TestDockerNetworkMode(t *testing.T) {
 	if err != nil || deny != "none" {
 		t.Errorf("deny -> %q err %v", deny, err)
 	}
+	// Allowlist must fail closed (no egress) until an enforcing proxy exists,
+	// never fall open to bridge.
+	allow, err := dockerNetworkMode(NetworkPolicy{Mode: NetworkAllowlist})
+	if err != nil || allow != "none" {
+		t.Errorf("allowlist -> %q err %v, want none (fail closed)", allow, err)
+	}
+	// An unset policy also fails closed rather than opening egress.
+	empty, err := dockerNetworkMode(NetworkPolicy{})
+	if err != nil || empty != "none" {
+		t.Errorf("empty -> %q err %v, want none (fail closed)", empty, err)
+	}
 	if _, err := dockerNetworkMode(NetworkPolicy{Mode: "bogus"}); err == nil {
 		t.Error("expected error for unknown mode")
 	}

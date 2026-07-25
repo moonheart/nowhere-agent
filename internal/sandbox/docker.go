@@ -214,19 +214,20 @@ func (p *DockerPort) ensureImage(ctx context.Context, img string) error {
 	return nil
 }
 
-// dockerNetworkMode maps a NetworkPolicy to a Docker network mode. Allowlist
-// requires an egress proxy network (TODO D3); for now open->bridge, deny->none.
+// dockerNetworkMode maps a NetworkPolicy to a Docker network mode.
 func dockerNetworkMode(np NetworkPolicy) (container.NetworkMode, error) {
 	switch np.Mode {
-	case NetworkOpen, "":
+	case NetworkOpen:
 		return "bridge", nil
-	case NetworkDeny:
+	case NetworkDeny, "":
 		return "none", nil
 	case NetworkAllowlist:
-		// TODO(D3): route through an egress proxy that enforces AllowedHosts.
-		// Until the proxy network exists, fail closed would be safest; we
-		// return bridge with a clear note rather than silently opening.
-		return "bridge", nil
+		// An allowlist requires an egress proxy that enforces AllowedHosts
+		// (TODO D3). Until that proxy network exists we FAIL CLOSED — "none", no
+		// egress — rather than "bridge", which would silently grant full egress
+		// and defeat the policy. A denied request is safe; an unexpectedly-open
+		// one is a security hole.
+		return "none", nil
 	default:
 		return "", fmt.Errorf("unknown network mode %q", np.Mode)
 	}
