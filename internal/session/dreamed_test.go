@@ -5,72 +5,88 @@ import (
 	"testing"
 )
 
-// TestMemStoreEndedUndreamed pins the dreaming worker's eligibility scan: only
-// ended, not-yet-dreamed sessions are returned; MarkDreamed takes one out of
-// the result; active and already-dreamed sessions never appear.
-func TestMemStoreEndedUndreamed(t *testing.T) {
+// TestMemStoreDreamedSeq pins the in-memory watermark: it starts at 0, advances
+// monotonically, and never moves backwards.
+func TestMemStoreDreamedSeq(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemStore()
+	s, _ := m.CreateSession(ctx, "u1", "a")
 
-	a, _ := m.CreateSession(ctx, "u1", "a")
-	b, _ := m.CreateSession(ctx, "u1", "b")
-	c, _ := m.CreateSession(ctx, "u2", "c")
-
-	// Nothing ended yet.
-	if got, _ := m.ListEndedUndreamed(ctx); len(got) != 0 {
-		t.Fatalf("no ended sessions expected, got %d", len(got))
+	if got, _ := m.DreamedSeq(ctx, s.ID); got != 0 {
+		t.Fatalf("initial dreamed_seq = %d want 0", got)
 	}
 
-	_ = m.EndSession(ctx, a.ID)
-	_ = m.EndSession(ctx, b.ID)
-	// c stays active — must never be eligible.
-
-	got, err := m.ListEndedUndreamed(ctx)
-	if err != nil {
-		t.Fatalf("ListEndedUndreamed: %v", err)
+	if err := m.MarkDreamedSeq(ctx, s.ID, 5); err != nil {
+		t.Fatalf("MarkDreamedSeq: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("want 2 ended-undreamed, got %d", len(got))
+	if got, _ := m.DreamedSeq(ctx, s.ID); got != 5 {
+		t.Errorf("dreamed_seq = %d want 5", got)
 	}
 
-	// Marking one removes it; the other remains; re-marking is a harmless no-op.
-	if err := m.MarkDreamed(ctx, a.ID); err != nil {
-		t.Fatalf("MarkDreamed: %v", err)
+	// Never backwards.
+	if err := m.MarkDreamedSeq(ctx, s.ID, 3); err != nil {
+		t.Fatalf("MarkDreamedSeq backwards: %v", err)
 	}
-	if err := m.MarkDreamed(ctx, a.ID); err != nil {
-		t.Fatalf("MarkDreamed idempotent: %v", err)
+	if got, _ := m.DreamedSeq(ctx, s.ID); got != 5 {
+		t.Errorf("dreamed_seq regressed to %d, want it to stay 5", got)
 	}
-	got, _ = m.ListEndedUndreamed(ctx)
-	if len(got) != 1 || got[0].ID != b.ID {
-		t.Fatalf("after marking a, want only b, got %+v", got)
-	}
-	for _, s := range got {
-		if s.ID == c.ID {
-			t.Errorf("active session %s must not be eligible", c.ID)
-		}
+
+	// Unknown session reads as 0.
+	if got, _ := m.DreamedSeq(ctx, "nope"); got != 0 {
+		t.Errorf("unknown session dreamed_seq = %d want 0", got)
 	}
 }
 
-// TestPGStoreEndedUndreamed exercises the same behaviour against Postgres. It
-// only asserts on the sessions this test created (the dev DB is shared), and
-// skips when no database is reachable.
-func TestPGStoreEndedUndreamed(t *testing.T) {
+// TestPGStoreIncrementalDreaming exercises the watermark model against
+// Postgres: a session with new messages is eligible (regardless of status),
+// MarkDreamedSeq advances the watermark, and MessagesAfter returns only the
+// tail. Skips when no database is reachable.
+func TestPGStoreIncrementalDreaming(t *testing.T) {
 	db := pgTestDB(t)
 	store := NewPGStore(db)
+	messages := NewPGMessageStore(db)
 	ctx := context.Background()
 	userID := pgNewUser(t, db)
 
-	ended, err := store.CreateSession(ctx, userID, "ended")
+	sess, err := store.CreateSession(ctx, userID, "incr")
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := store.CreateSession(ctx, userID, "active")
+	run, err := store.CreateRun(ctx, sess.ID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.EndSession(ctx, ended.ID); err != nil {
-		t.Fatal(err)
+	// Hard-delete the session (cascades to the run + messages) so the run doesn't
+	// linger 'queued' and trip idx_runs_one_active_per_session for later tests;
+	// and clear any such leftovers from earlier, pre-fix test runs.
+	t.Cleanup(func() {
+		_, _ = db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID)
+		_, _ = db.Exec(`DELETE FROM runs WHERE status IN ('queued','running','waiting_approval')`)
+	})
+
+	// Fresh session has no messages → not eligible (even before any watermark).
+	if eligible, err := store.ListUndreamedSessions(ctx); err != nil {
+		t.Fatalf("ListUndreamedSessions: %v", err)
+	} else {
+		for _, s := range eligible {
+			if s.ID == sess.ID {
+				t.Errorf("session with no messages must not be eligible")
+			}
+		}
 	}
+
+	appendTwo := func() (first, second StoredMessage) {
+		first, err = messages.AppendMessage(ctx, StoredMessage{SessionID: sess.ID, RunID: run.ID, Role: "user"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err = messages.AppendMessage(ctx, StoredMessage{SessionID: sess.ID, RunID: run.ID, Role: "assistant"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return first, second
+	}
+	m1, m2 := appendTwo()
 
 	contains := func(list []Session, id string) bool {
 		for _, s := range list {
@@ -81,22 +97,48 @@ func TestPGStoreEndedUndreamed(t *testing.T) {
 		return false
 	}
 
-	got, err := store.ListEndedUndreamed(ctx)
+	// Now it has undreamed messages → eligible (status is still active).
+	eligible, err := store.ListUndreamedSessions(ctx)
 	if err != nil {
-		t.Fatalf("ListEndedUndreamed: %v", err)
+		t.Fatalf("ListUndreamedSessions: %v", err)
 	}
-	if !contains(got, ended.ID) {
-		t.Errorf("ended session %s should be eligible for dreaming", ended.ID)
-	}
-	if contains(got, active.ID) {
-		t.Errorf("active session %s must not be eligible", active.ID)
+	if !contains(eligible, sess.ID) {
+		t.Errorf("active session with new messages should be eligible")
 	}
 
-	if err := store.MarkDreamed(ctx, ended.ID); err != nil {
-		t.Fatalf("MarkDreamed: %v", err)
+	// MessagesAfter the watermark returns both; after m1 only the second.
+	msgs, err := messages.MessagesAfter(ctx, sess.ID, 0)
+	if err != nil || len(msgs) != 2 {
+		t.Fatalf("MessagesAfter(0) = %d err %v want 2", len(msgs), err)
 	}
-	got, _ = store.ListEndedUndreamed(ctx)
-	if contains(got, ended.ID) {
-		t.Errorf("dreamed session %s should drop out of the eligibility scan", ended.ID)
+	msgs, err = messages.MessagesAfter(ctx, sess.ID, m1.ID)
+	if err != nil || len(msgs) != 1 || msgs[0].ID != m2.ID {
+		t.Fatalf("MessagesAfter(m1) = %+v err %v want only m2", msgs, err)
+	}
+
+	// Advance the watermark to m2 → session drops out of eligibility.
+	if err := store.MarkDreamedSeq(ctx, sess.ID, m2.ID); err != nil {
+		t.Fatalf("MarkDreamedSeq: %v", err)
+	}
+	if seq, _ := store.DreamedSeq(ctx, sess.ID); seq != m2.ID {
+		t.Errorf("dreamed_seq = %d want %d", seq, m2.ID)
+	}
+	eligible, _ = store.ListUndreamedSessions(ctx)
+	if contains(eligible, sess.ID) {
+		t.Errorf("fully-dreamed session should drop out of eligibility")
+	}
+
+	// A new message re-qualifies it, resumed after the watermark.
+	m3, err := messages.AppendMessage(ctx, StoredMessage{SessionID: sess.ID, RunID: run.ID, Role: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eligible, _ = store.ListUndreamedSessions(ctx)
+	if !contains(eligible, sess.ID) {
+		t.Errorf("session with a newer message should be eligible again")
+	}
+	msgs, _ = messages.MessagesAfter(ctx, sess.ID, m2.ID)
+	if len(msgs) != 1 || msgs[0].ID != m3.ID {
+		t.Errorf("MessagesAfter(m2) = %+v want only m3", msgs)
 	}
 }

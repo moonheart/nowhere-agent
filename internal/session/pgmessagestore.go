@@ -55,7 +55,26 @@ func (s *PGMessageStore) MessagesFor(ctx context.Context, sessionID string) ([]S
 		return nil, fmt.Errorf("messages for: %w", err)
 	}
 	defer rows.Close()
+	return scanMessages(rows)
+}
 
+// MessagesAfter returns a session's messages with id > afterID, ordered by seq.
+func (s *PGMessageStore) MessagesAfter(ctx context.Context, sessionID string, afterID int64) ([]StoredMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, run_id, seq, role, content, created_at
+		FROM messages
+		WHERE session_id = $1 AND id > $2
+		ORDER BY seq`, sessionID, afterID)
+	if err != nil {
+		return nil, fmt.Errorf("messages after: %w", err)
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
+// scanMessages reads message rows (id, session_id, run_id, seq, role, content,
+// created_at) into StoredMessages.
+func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 	var out []StoredMessage
 	for rows.Next() {
 		var m StoredMessage

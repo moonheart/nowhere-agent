@@ -36,4 +36,9 @@ type MessageStore interface {
 	// MessagesFor returns a session's messages ordered by seq (the full
 	// conversation across all runs), for authoritative history rebuild.
 	MessagesFor(ctx context.Context, sessionID string) ([]StoredMessage, error)
+
+	// MessagesAfter returns a session's messages with id > afterID, ordered by
+	// seq — the tail beyond a watermark. The dreaming worker uses it to read only
+	// the messages it has not yet consolidated (incremental model).
+	MessagesAfter(ctx context.Context, sessionID string, afterID int64) ([]StoredMessage, error)
 }

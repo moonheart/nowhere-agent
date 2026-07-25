@@ -84,20 +84,23 @@ func (s *PGStore) ListIdleSessions(ctx context.Context, idleSinceEventBefore tim
 	return out, rows.Err()
 }
 
-// ListEndedUndreamed returns ended sessions the dreaming worker has not yet
-// consumed (dreamed_at IS NULL), oldest-ended first. The LIMIT bounds a single
-// eligibility scan; the worker's own token budget is the real per-pass cap, and
-// the partial index idx_sessions_ended_undreamed (migration 000008) keeps this
-// query cheap as the table grows.
-func (s *PGStore) ListEndedUndreamed(ctx context.Context) ([]Session, error) {
+// ListUndreamedSessions returns sessions that have messages beyond their
+// dreamed watermark — the dreaming worker's eligibility scan (incremental
+// model, capability-gap K1). A session qualifies regardless of status (open
+// conversations are learnable) while it still has unconsolidated messages.
+// Ordered by last activity; the LIMIT bounds a single scan.
+func (s *PGStore) ListUndreamedSessions(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, title, status, created_at, updated_at
-		FROM sessions
-		WHERE status = $1 AND dreamed_at IS NULL
-		ORDER BY ended_at
-		LIMIT 100`, string(SessionEnded))
+		SELECT s.id, s.user_id, s.title, s.status, s.created_at, s.updated_at
+		FROM sessions s
+		WHERE EXISTS (
+			SELECT 1 FROM messages m
+			WHERE m.session_id = s.id AND m.id > s.dreamed_seq
+		)
+		ORDER BY s.updated_at
+		LIMIT 100`)
 	if err != nil {
-		return nil, fmt.Errorf("list ended undreamed sessions: %w", err)
+		return nil, fmt.Errorf("list undreamed sessions: %w", err)
 	}
 	defer rows.Close()
 
@@ -105,19 +108,31 @@ func (s *PGStore) ListEndedUndreamed(ctx context.Context) ([]Session, error) {
 	for rows.Next() {
 		var sess Session
 		if err := rows.Scan(&sess.ID, &sess.UserID, &sess.Title, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan ended undreamed session: %w", err)
+			return nil, fmt.Errorf("scan undreamed session: %w", err)
 		}
 		out = append(out, sess)
 	}
 	return out, rows.Err()
 }
 
-// MarkDreamed stamps a session's dreamed_at so the dreaming worker consumes it
-// exactly once. Idempotent (re-stamping is a no-op).
-func (s *PGStore) MarkDreamed(ctx context.Context, id string) error {
+// DreamedSeq returns a session's dreamed watermark (the messages.id the worker
+// has consolidated up to). 0 means nothing consolidated yet.
+func (s *PGStore) DreamedSeq(ctx context.Context, id string) (int64, error) {
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT dreamed_seq FROM sessions WHERE id = $1`, id).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("get dreamed_seq: %w", err)
+	}
+	return seq, nil
+}
+
+// MarkDreamedSeq advances a session's dreamed watermark, but never backwards
+// (GREATEST guards against a stale pass clobbering a newer one). Idempotent.
+func (s *PGStore) MarkDreamedSeq(ctx context.Context, id string, seq int64) error {
 	if _, err := s.db.ExecContext(ctx, `
-		UPDATE sessions SET dreamed_at = now() WHERE id = $1`, id); err != nil {
-		return fmt.Errorf("mark session dreamed: %w", err)
+		UPDATE sessions SET dreamed_seq = GREATEST(dreamed_seq, $2) WHERE id = $1`, id, seq); err != nil {
+		return fmt.Errorf("mark dreamed_seq: %w", err)
 	}
 	return nil
 }

@@ -17,19 +17,19 @@ type MemStore struct {
 	runs     map[string]*Run    // runID
 	bySess   map[string][]*Run  // sessionID -> runs
 	events   map[string][]Event // runID -> events
-	// dreamed tracks sessions the dreaming worker has consumed (the in-memory
-	// analogue of sessions.dreamed_at, migration 000008).
-	dreamed map[string]bool
+	// dreamedSeq is each session's dreaming watermark (the in-memory analogue of
+	// sessions.dreamed_seq, migration 000009): the messages.id consolidated up to.
+	dreamedSeq map[string]int64
 }
 
 // NewMemStore creates an empty in-memory Store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		sessions: map[string]*Session{},
-		runs:     map[string]*Run{},
-		bySess:   map[string][]*Run{},
-		events:   map[string][]Event{},
-		dreamed:  map[string]bool{},
+		sessions:   map[string]*Session{},
+		runs:       map[string]*Run{},
+		bySess:     map[string][]*Run{},
+		events:     map[string][]Event{},
+		dreamedSeq: map[string]int64{},
 	}
 }
 
@@ -72,22 +72,26 @@ func (m *MemStore) ListIdleSessions(_ context.Context, before time.Time) ([]Sess
 	return out, nil
 }
 
-func (m *MemStore) ListEndedUndreamed(_ context.Context) ([]Session, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var out []Session
-	for _, s := range m.sessions {
-		if s.Status == SessionEnded && !m.dreamed[s.ID] {
-			out = append(out, *s)
-		}
-	}
-	return out, nil
+// ListUndreamedSessions is not supported by MemStore: eligibility needs a join
+// against the message store (messages beyond the watermark), which the session
+// MemStore cannot see. The production store (PGStore) answers it in SQL; tests
+// drive dreaming with a fake EpisodeSource instead.
+func (m *MemStore) ListUndreamedSessions(_ context.Context) ([]Session, error) {
+	return nil, errors.New("MemStore.ListUndreamedSessions: not supported (needs the messages join; use PGStore)")
 }
 
-func (m *MemStore) MarkDreamed(_ context.Context, id string) error {
+func (m *MemStore) DreamedSeq(_ context.Context, id string) (int64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.dreamed[id] = true
+	return m.dreamedSeq[id], nil
+}
+
+func (m *MemStore) MarkDreamedSeq(_ context.Context, id string, seq int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if seq > m.dreamedSeq[id] {
+		m.dreamedSeq[id] = seq
+	}
 	return nil
 }
 
