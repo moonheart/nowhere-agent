@@ -16,13 +16,14 @@ import (
 )
 
 // FileTools returns the built-in file tools bound to a session sandbox:
-// read_file, write_file, and list_dir. Paths are workspace-relative; the
-// sandbox backend rejects any escape.
+// read_file, write_file, list_dir, and edit_file. Paths are workspace-relative;
+// the sandbox backend rejects any escape.
 func FileTools(sb sandbox.Port, h sandbox.Handle) []toolruntime.Tool {
 	return []toolruntime.Tool{
 		&fileReadTool{sb: sb, h: h},
 		&fileWriteTool{sb: sb, h: h},
 		&listDirTool{sb: sb, h: h},
+		&editFileTool{sb: sb, h: h},
 	}
 }
 
