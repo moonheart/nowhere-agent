@@ -38,6 +38,10 @@ type Store interface {
 	NextRunSeq(ctx context.Context, sessionID string) (int, error)
 	// RunsForSession returns all runs in a session, for history replay.
 	RunsForSession(ctx context.Context, sessionID string) ([]Run, error)
+	// FailStrandedRuns marks every non-terminal run failed. Called at startup to
+	// reconcile runs left running by a process that died mid-run, so they no
+	// longer read as active. Returns the number of runs updated.
+	FailStrandedRuns(ctx context.Context) (int, error)
 
 	AppendEvent(ctx context.Context, e Event) error
 	// EventsAfter returns events for a run with offset > after, ordered.
@@ -246,6 +250,15 @@ func (rt *Runtime) Replay(ctx context.Context, runID string, after int) ([]Event
 // RunsForSession returns every run in a session (any state), for history replay.
 func (rt *Runtime) RunsForSession(ctx context.Context, sessionID string) ([]Run, error) {
 	return rt.store.RunsForSession(ctx, sessionID)
+}
+
+// RecoverStrandedRuns marks runs left non-terminal by a previous process as
+// failed (startup reconciliation). Single-instance assumption: at startup no
+// run is genuinely live, so any non-terminal run is orphaned — its in-memory
+// worker died with the process — and would otherwise read as active forever,
+// hanging clients that attach to it. Returns the number of runs reconciled.
+func (rt *Runtime) RecoverStrandedRuns(ctx context.Context) (int, error) {
+	return rt.store.FailStrandedRuns(ctx)
 }
 
 // ListSessionsByUser returns a user's sessions for the conversation list.

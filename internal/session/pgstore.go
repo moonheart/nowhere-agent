@@ -168,6 +168,19 @@ func (s *PGStore) ActiveRun(ctx context.Context, sessionID string) (Run, bool, e
 	return r, true, nil
 }
 
+// FailStrandedRuns marks all non-terminal runs failed (startup reconciliation
+// for runs whose owning process died mid-run). Returns the number updated.
+func (s *PGStore) FailStrandedRuns(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE runs SET status = 'failed', finished_at = now()
+		WHERE status IN ('queued','running','waiting_approval')`)
+	if err != nil {
+		return 0, fmt.Errorf("fail stranded runs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // NextRunSeq returns the next sequence number for a session's run.
 func (s *PGStore) NextRunSeq(ctx context.Context, sessionID string) (int, error) {
 	var next int

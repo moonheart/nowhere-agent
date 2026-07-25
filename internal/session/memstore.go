@@ -127,6 +127,20 @@ func (m *MemStore) NextRunSeq(_ context.Context, sessionID string) (int, error) 
 	return len(m.bySess[sessionID]) + 1, nil
 }
 
+// FailStrandedRuns marks every non-terminal run failed (startup reconciliation).
+func (m *MemStore) FailStrandedRuns(_ context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, r := range m.runs {
+		if r.Status.Active() {
+			r.Status = RunFailed
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *MemStore) RunsForSession(_ context.Context, sessionID string) ([]Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

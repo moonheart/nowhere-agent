@@ -73,6 +73,15 @@ func run() error {
 	// and the run log doubles as the episodes for dreaming.
 	sessionRuntime := session.NewRuntime(session.NewPGStore(pool))
 
+	// Reconcile runs stranded non-terminal by a previous process (their in-memory
+	// workers died with it): mark them failed at startup so they don't read as
+	// active forever and hang clients that attach to them.
+	if n, err := sessionRuntime.RecoverStrandedRuns(ctx); err != nil {
+		log.Warn("startup run reconciliation failed", "err", err)
+	} else if n > 0 {
+		log.Info("reconciled stranded runs at startup", "count", n)
+	}
+
 	// Live content broker (redis-stream-live): in-memory for single instance,
 	// Redis Streams for multi-instance. Selected via STREAM_BROKER; a redis
 	// broker that is unreachable at boot fails fast (a multi-instance deploy
