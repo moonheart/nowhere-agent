@@ -141,6 +141,21 @@ func TestDockerPortIntegration(t *testing.T) {
 		t.Errorf("read %q want persisted", b)
 	}
 
+	// Nested write: the parent directory does not exist yet, so WriteFile must
+	// create it (the "creates parent directories" contract the spill relies on).
+	if err := p.WriteFile(ctx, h, "/workspace/.nowhere/tool-results/x.txt", strings.NewReader("spilled")); err != nil {
+		t.Fatalf("nested WriteFile: %v", err)
+	}
+	rc2, err := p.ReadFile(ctx, h, "/workspace/.nowhere/tool-results/x.txt")
+	if err != nil {
+		t.Fatalf("nested ReadFile: %v", err)
+	}
+	nb, _ := io.ReadAll(rc2)
+	rc2.Close()
+	if string(nb) != "spilled" {
+		t.Errorf("nested read %q want spilled", nb)
+	}
+
 	// List.
 	entries, err := p.ListDir(ctx, h, "/workspace")
 	if err != nil {
