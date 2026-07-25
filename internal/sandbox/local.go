@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -211,4 +213,41 @@ func (p *LocalPort) ListDir(_ context.Context, h Handle, path string) ([]string,
 		names = append(names, e.Name())
 	}
 	return names, nil
+}
+
+// Walk lists every file under root recursively, as workspace-relative
+// forward-slash paths (Walker capability). Directories and the .git tree are
+// skipped. root is confined by resolve() like every other path.
+func (p *LocalPort) Walk(_ context.Context, h Handle, root string) ([]string, error) {
+	base, err := p.resolve(h, root)
+	if err != nil {
+		return nil, err
+	}
+	wsRoot, err := p.workspaceDir(h)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	walkErr := filepath.WalkDir(base, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(wsRoot, path)
+		if err != nil {
+			return err
+		}
+		out = append(out, filepath.ToSlash(rel))
+		return nil
+	})
+	if walkErr != nil {
+		return nil, fmt.Errorf("walk %q: %w", root, walkErr)
+	}
+	sort.Strings(out)
+	return out, nil
 }

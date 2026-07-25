@@ -15,16 +15,17 @@ import (
 	"nowhere-agent/internal/toolruntime"
 )
 
-// FileTools returns the built-in file tools bound to a session sandbox:
-// read_file, write_file, list_dir, and edit_file. Paths are workspace-relative;
-// the sandbox backend rejects any escape.
+// FileTools returns the built-in workspace tools bound to a session sandbox:
+// read_file, write_file, list_dir, edit_file, plus the search tools (grep,
+// glob). Paths are workspace-relative; the sandbox backend rejects any escape.
 func FileTools(sb sandbox.Port, h sandbox.Handle) []toolruntime.Tool {
-	return []toolruntime.Tool{
+	tools := []toolruntime.Tool{
 		&fileReadTool{sb: sb, h: h},
 		&fileWriteTool{sb: sb, h: h},
 		&listDirTool{sb: sb, h: h},
 		&editFileTool{sb: sb, h: h},
 	}
+	return append(tools, SearchTools(sb, h)...)
 }
 
 // argString extracts a required string argument, reporting the missing key.

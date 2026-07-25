@@ -135,6 +135,7 @@ func (p *DockerPort) Exec(ctx context.Context, h Handle, cmd []string) (ExecResu
 	start := time.Now()
 	exec, err := p.cli.ContainerExecCreate(ctx, h.ID, container.ExecOptions{
 		Cmd:          cmd,
+		WorkingDir:   p.workMt,
 		AttachStdout: true,
 		AttachStderr: true,
 	})
@@ -226,6 +227,30 @@ func (p *DockerPort) ListDir(ctx context.Context, h Handle, path string) ([]stri
 	for _, line := range strings.Split(res.Stdout, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
 			out = append(out, line)
+		}
+	}
+	return out, nil
+}
+
+// Walk lists every file under root recursively (Walker capability), as
+// workspace-relative forward-slash paths. Exec runs with WorkingDir set to the
+// workspace mount, so a relative root and the returned paths are workspace-
+// relative (the leading "./" that find emits is stripped).
+func (p *DockerPort) Walk(ctx context.Context, h Handle, root string) ([]string, error) {
+	if root == "" {
+		root = "."
+	}
+	res, err := p.Exec(ctx, h, []string{"find", root, "-type", "f"})
+	if err != nil {
+		return nil, err
+	}
+	if res.ExitCode != 0 {
+		return nil, fmt.Errorf("find failed: %s", res.Stderr)
+	}
+	var out []string
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, strings.TrimPrefix(line, "./"))
 		}
 	}
 	return out, nil

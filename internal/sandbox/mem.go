@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -107,4 +108,25 @@ func (p *MemPort) ListDir(_ context.Context, h Handle, _ string) ([]string, erro
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+// Walk lists in-memory file paths under root (Walker capability). Files are
+// keyed by their workspace-relative forward-slash path already, so this filters
+// the flat map by prefix.
+func (p *MemPort) Walk(_ context.Context, h Handle, root string) ([]string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sb, ok := p.sandboxes[h.ID]
+	if !ok {
+		return nil, fmt.Errorf("sandbox %s not found", h.ID)
+	}
+	root = strings.Trim(strings.TrimPrefix(root, "./"), "/")
+	out := make([]string, 0, len(sb.files))
+	for k := range sb.files {
+		if root == "" || root == "." || k == root || strings.HasPrefix(k, root+"/") {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }

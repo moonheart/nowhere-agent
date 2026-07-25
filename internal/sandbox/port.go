@@ -75,3 +75,13 @@ type Port interface {
 	// ListDir lists entries under path in the sandbox.
 	ListDir(ctx context.Context, h Handle, path string) ([]string, error)
 }
+
+// Walker is an optional Port capability: list every file under root recursively,
+// as workspace-relative forward-slash paths. It backs the grep and glob tools,
+// which need a whole-tree view the one-level ListDir cannot give. A Port that
+// does not implement it simply does not offer those tools (they report an
+// is_error result rather than crashing). The three built-in backends (local,
+// docker, mem) all implement it.
+type Walker interface {
+	Walk(ctx context.Context, h Handle, root string) ([]string, error)
+}
