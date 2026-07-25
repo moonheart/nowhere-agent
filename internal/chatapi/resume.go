@@ -85,6 +85,11 @@ func emitStreamEvent(r *http.Request, emitter *sseEmitter, e session.StreamEvent
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.EventKind(e.Kind), m)
 		}
+	case agent.KindUsage:
+		// Token usage stashed for the finish frame; carried as a decoded object.
+		if m, ok := decodeMapPayload(e.Payload); ok {
+			emitter.Emit(r.Context(), agent.KindUsage, m)
+		}
 	case agent.KindSubagent:
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.KindSubagent, m)

@@ -155,6 +155,10 @@ type sseEmitter struct {
 	// subsequent Emits report it and the loop unwinds instead of writing into
 	// the void while the run leaks.
 	writeErr error
+	// usageIn/usageOut hold the run's reported token usage, stashed from a
+	// KindUsage event, so finish() reports real counts instead of zeros.
+	usageIn  int
+	usageOut int
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
@@ -538,6 +542,12 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 		}
 	case agent.KindDone:
 		e.writeRunStatus("done")
+	case agent.KindUsage:
+		// Stash the run's token usage so finish() can report real counts. No frame
+		// is written here; the AI SDK carries usage on the terminal finish frame.
+		if in, out, ok := usageTokens(payload); ok {
+			e.usageIn, e.usageOut = in, out
+		}
 	case agent.KindError:
 		if s, ok := payload.(string); ok {
 			e.write(chunk{"type": "error", "errorText": s})
@@ -581,7 +591,7 @@ func (e *sseEmitter) finish() {
 	e.write(chunk{
 		"type":         "finish",
 		"finishReason": "stop",
-		"usage":        map[string]any{"inputTokens": 0, "outputTokens": 0},
+		"usage":        map[string]any{"inputTokens": e.usageIn, "outputTokens": e.usageOut},
 	})
 	e.writeRaw("data: [DONE]\n\n")
 	e.flusher.Flush()
@@ -599,4 +609,40 @@ func (e *sseEmitter) writeRaw(s string) {
 	if _, err := e.w.Write([]byte(s)); err != nil {
 		e.writeErr = err
 	}
+}
+
+// usageTokens extracts input/output token counts from a KindUsage payload,
+// tolerating both a provider.Usage value (the loop's direct-path emit) and a
+// decoded JSON object (the broker/replay path, where the payload round-trips
+// through storage as snake_case JSON). Returns ok=false when neither shape
+// yields counts, so a bad payload never clobbers a prior value with zeros.
+func usageTokens(payload any) (in, out int, ok bool) {
+	switch v := payload.(type) {
+	case provider.Usage:
+		return v.InputTokens, v.OutputTokens, true
+	case *provider.Usage:
+		if v != nil {
+			return v.InputTokens, v.OutputTokens, true
+		}
+	case map[string]any:
+		vin, iok := intFromAny(v["input_tokens"])
+		vout, ook := intFromAny(v["output_tokens"])
+		return vin, vout, iok || ook
+	}
+	return 0, 0, false
+}
+
+// intFromAny reads an int from a JSON-decoded numeric value (float64 by default,
+// or json.Number when the decoder uses UseNumber).
+func intFromAny(x any) (int, bool) {
+	switch n := x.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case json.Number:
+		i, err := n.Int64()
+		return int(i), err == nil
+	}
+	return 0, false
 }

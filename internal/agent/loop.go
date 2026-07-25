@@ -49,6 +49,10 @@ const (
 	// for the run panel. It is a live-only content event (broker-routed, never
 	// persisted): a UI progress hint, not part of the conversation record.
 	KindSubagent EventKind = "subagent"
+	// KindUsage carries a run's accumulated token usage (payload: provider.Usage)
+	// once, at natural termination. It is persisted and fanned out so the
+	// transport's finish frame can report real token counts instead of zeros.
+	KindUsage EventKind = "usage"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).
@@ -193,6 +197,10 @@ func (l *Loop) toolDefs() []provider.ToolDefinition {
 func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter) ([]provider.Message, error) {
 	var produced []provider.Message
 
+	// total accumulates token usage across the run's provider calls (one per
+	// turn); it is reported once at termination via KindUsage.
+	var total provider.Usage
+
 	for iter := 0; iter < l.config.MaxIterations; iter++ {
 		// Honour cancellation between iterations (e.g. after a tool batch).
 		if err := ctx.Err(); err != nil {
@@ -242,6 +250,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			_ = emit.Emit(ctx, KindError, err.Error())
 			return produced, err
 		}
+		if end.usage != nil {
+			total.InputTokens += end.usage.InputTokens
+			total.OutputTokens += end.usage.OutputTokens
+			total.CacheReadTokens += end.usage.CacheReadTokens
+			total.CacheWriteTokens += end.usage.CacheWriteTokens
+		}
 		produced = append(produced, assistant)
 		// Expose the assembled assistant message for full-block persistence
 		// (persist-raw-messages). Emit failures here don't abort the run — the
@@ -255,9 +269,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		if len(toolCalls) == 0 {
 			if end.stop == provider.StopMaxTokens {
 				truncErr := fmt.Errorf("response truncated: hit the max_tokens limit (%d)", l.config.MaxTokens)
+				emitUsage(ctx, emit, total)
 				_ = emit.Emit(ctx, KindError, truncErr.Error())
 				return produced, truncErr
 			}
+			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", total.InputTokens, "output_tokens", total.OutputTokens)
+			emitUsage(ctx, emit, total)
 			_ = emit.Emit(ctx, KindDone, nil)
 			return produced, nil
 		}
@@ -289,15 +306,27 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	// to failed (registry.execute), but the client sees the stream just end with no
 	// explanation. Emit KindError so a terminal frame always accompanies the failure.
 	err := fmt.Errorf("max iterations (%d) exceeded", l.config.MaxIterations)
+	emitUsage(ctx, emit, total)
 	_ = emit.Emit(ctx, KindError, err.Error())
 	return produced, err
 }
 
+// emitUsage reports the run's accumulated token usage as a terminal KindUsage
+// event so the transport can surface real counts in its finish frame. A zero
+// total (no adapter reported usage) is skipped.
+func emitUsage(ctx context.Context, emit Emitter, total provider.Usage) {
+	if total == (provider.Usage{}) {
+		return
+	}
+	_ = emit.Emit(ctx, KindUsage, total)
+}
+
 // turnEnd carries the terminal metadata of one provider turn: why generation
-// stopped (and, for L2, the reported token usage). It lets Run react to a
-// max_tokens truncation without growing consume's return list.
+// stopped and the reported token usage. It lets Run react to a max_tokens
+// truncation and accumulate usage without growing consume's return list.
 type turnEnd struct {
-	stop provider.StopReason
+	stop  provider.StopReason
+	usage *provider.Usage
 }
 
 // consume reads one provider stream into an assembled assistant message and
@@ -369,9 +398,12 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 			case provider.EventMessageStop:
 				// Terminal metadata. It can arrive across several stop events
 				// (OpenAI reports the finish reason and usage in separate chunks),
-				// so keep the last non-empty stop reason seen.
+				// so keep the last non-empty stop reason and usage seen.
 				if ev.StopReason != provider.StopUnknown {
 					end.stop = ev.StopReason
+				}
+				if ev.Usage != nil {
+					end.usage = ev.Usage
 				}
 			}
 		}

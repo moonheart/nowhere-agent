@@ -12,11 +12,19 @@ import (
 
 // apiRequest is the OpenAI chat.completions request body.
 type apiRequest struct {
-	Model     string       `json:"model"`
-	Messages  []apiMessage `json:"messages"`
-	Tools     []apiTool    `json:"tools,omitempty"`
-	MaxTokens int          `json:"max_tokens,omitempty"`
-	Stream    bool         `json:"stream"`
+	Model         string         `json:"model"`
+	Messages      []apiMessage   `json:"messages"`
+	Tools         []apiTool      `json:"tools,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+// streamOptions requests a final usage chunk in the SSE stream. Without
+// include_usage the gateway omits usage entirely for streamed responses, so the
+// loop would have no token counts to report.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type apiMessage struct {
@@ -49,7 +57,7 @@ type apiTool struct {
 // consecutive blocks of one message are flattened per OpenAI's message model.
 // Pure: no I/O.
 func buildRequest(r provider.Request) (apiRequest, error) {
-	req := apiRequest{Model: r.Model, MaxTokens: r.MaxTokens, Stream: true}
+	req := apiRequest{Model: r.Model, MaxTokens: r.MaxTokens, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}}
 
 	if r.System != "" {
 		req.Messages = append(req.Messages, apiMessage{Role: "system", Content: r.System})

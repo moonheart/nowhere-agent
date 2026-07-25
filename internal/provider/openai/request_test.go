@@ -79,6 +79,22 @@ func TestBuildRequestDropsThinking(t *testing.T) {
 	}
 }
 
+// TestBuildRequestIncludesUsage pins L2: streamed requests must ask for a final
+// usage chunk, else the gateway omits usage entirely and the loop has nothing to
+// report.
+func TestBuildRequestIncludesUsage(t *testing.T) {
+	req, err := buildRequest(provider.Request{
+		Model:    "m",
+		Messages: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.StreamOptions == nil || !req.StreamOptions.IncludeUsage {
+		t.Error("stream_options.include_usage must be set so streamed responses return usage")
+	}
+}
+
 func TestBuildRequestTools(t *testing.T) {
 	req, err := buildRequest(provider.Request{
 		Model: "m",

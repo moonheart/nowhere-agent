@@ -97,12 +97,15 @@ type Request struct {
 	CacheablePrefix bool
 }
 
-// Usage reports token consumption for a completed generation.
+// Usage reports token consumption for a completed generation. The JSON tags
+// give it a stable snake_case wire form: usage is emitted as a loop event
+// (KindUsage) and persisted, then decoded on the transport side to report real
+// token counts in the finish frame.
 type Usage struct {
-	InputTokens      int
-	OutputTokens     int
-	CacheReadTokens  int
-	CacheWriteTokens int
+	InputTokens      int `json:"input_tokens"`
+	OutputTokens     int `json:"output_tokens"`
+	CacheReadTokens  int `json:"cache_read_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 // StopReason is the provider-neutral reason a generation ended. Each adapter

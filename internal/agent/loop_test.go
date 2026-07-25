@@ -498,3 +498,76 @@ func TestLoopEmptyToolResultRoundTrip(t *testing.T) {
 		t.Errorf("tool_result content = %q, want placeholder", blk.ToolContent)
 	}
 }
+
+// usageEmitter captures the payload of the terminal KindUsage event.
+type usageEmitter struct {
+	memEmitter
+	usage *provider.Usage
+}
+
+func (u *usageEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if kind == KindUsage {
+		if got, ok := payload.(provider.Usage); ok {
+			g := got
+			u.usage = &g
+		}
+	}
+	return u.memEmitter.Emit(ctx, kind, payload)
+}
+
+// usageTextResponse is textResponse with explicit token usage on its stop event.
+func usageTextResponse(text string, in, out int) []provider.Event {
+	return []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: text},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: in, OutputTokens: out}},
+	}
+}
+
+// toolUseResponseUsage is toolUseResponse with token usage on its stop event.
+func toolUseResponseUsage(id, name, jsonArgs string, in, out int) []provider.Event {
+	evs := toolUseResponse(id, name, jsonArgs)
+	evs[len(evs)-1].Usage = &provider.Usage{InputTokens: in, OutputTokens: out}
+	return evs
+}
+
+// TestLoopEmitsUsage pins L2: the loop reports token usage as a terminal
+// KindUsage event so the transport can surface real counts (finish() previously
+// hardcoded zeros).
+func TestLoopEmitsUsage(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{usageTextResponse("hi", 12, 5)}}
+	emit := &usageEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	if _, err := loop.Run(context.Background(), nil, emit); err != nil {
+		t.Fatal(err)
+	}
+	if emit.count(KindUsage) != 1 {
+		t.Fatalf("KindUsage count = %d, want 1", emit.count(KindUsage))
+	}
+	if emit.usage == nil || emit.usage.InputTokens != 12 || emit.usage.OutputTokens != 5 {
+		t.Errorf("usage = %+v, want {12 5}", emit.usage)
+	}
+}
+
+// TestLoopAccumulatesUsageAcrossTurns verifies usage sums over every provider
+// call in a run (a tool round-trip is two calls).
+func TestLoopAccumulatesUsageAcrossTurns(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponseUsage("tu1", "echo", `{}`, 5, 3),
+		usageTextResponse("done", 7, 4),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	emit := &usageEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	if _, err := loop.Run(context.Background(), nil, emit); err != nil {
+		t.Fatal(err)
+	}
+	if emit.usage == nil || emit.usage.InputTokens != 12 || emit.usage.OutputTokens != 7 {
+		t.Errorf("accumulated usage = %+v, want {12 7}", emit.usage)
+	}
+}
