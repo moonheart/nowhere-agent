@@ -20,6 +20,7 @@ import (
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/mcp"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/permission"
 	"nowhere-agent/internal/platform/db"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/provider/anthropic"
@@ -152,6 +153,30 @@ func run() error {
 	if adapter := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
 
+		// Execution-permission gate (D10): authorize each tool call by the tool's
+		// risk before dispatch. This server is headless, so an "ask" decision
+		// denies (no interactive approver). Defaults allow read-only/sandbox-write/
+		// network and deny external-write; tighten via PERMISSION_* env.
+		permChecker := permission.NewChecker(permission.Policy{
+			ReadOnly:      permission.Decision(cfg.Permission.ReadOnly),
+			SandboxWrite:  permission.Decision(cfg.Permission.SandboxWrite),
+			Network:       permission.Decision(cfg.Permission.Network),
+			ExternalWrite: permission.Decision(cfg.Permission.ExternalWrite),
+		})
+		permit := func(t toolruntime.Tool) (bool, string) {
+			switch permChecker.Check(t) {
+			case permission.Deny:
+				return true, fmt.Sprintf("%s (risk: %s) is not permitted by policy", t.Name(), t.Risk())
+			case permission.Ask:
+				return true, fmt.Sprintf("%s (risk: %s) requires approval, unavailable on this server", t.Name(), t.Risk())
+			default:
+				return false, ""
+			}
+		}
+		log.Info("execution-permission gate enabled",
+			"read_only", cfg.Permission.ReadOnly, "sandbox_write", cfg.Permission.SandboxWrite,
+			"network", cfg.Permission.Network, "external_write", cfg.Permission.ExternalWrite)
+
 		// MCP integration (mcp capability): connect to the configured SearXNG MCP
 		// server over Streamable HTTP and list its tools once. The client is shared
 		// across runs; the ToolBinder registers its tools into each run's registry
@@ -196,6 +221,7 @@ func run() error {
 				CacheablePrefix: true,
 				ContextWindow:   cfg.LLM.ContextWindow,
 				Compressor:      compressor,
+				Permission:      permit,
 			})
 		}
 
@@ -208,6 +234,7 @@ func run() error {
 				CacheablePrefix: true,
 				ContextWindow:   cfg.LLM.ContextWindow,
 				Compressor:      compressor,
+				Permission:      permit,
 			})
 		}, baseSystem).
 			WithRuntime(sessionRuntime).

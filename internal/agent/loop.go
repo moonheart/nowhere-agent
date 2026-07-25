@@ -68,6 +68,12 @@ type Config struct {
 	// blocks as-is (they degrade to text placeholders downstream).
 	Images provider.ImageResolver
 
+	// Permission, when set, authorizes each tool call before dispatch: it
+	// receives the resolved tool and returns (deny, reason). A denied call is not
+	// executed — it becomes an is_error tool_result carrying the reason, so the
+	// model can adapt. Nil leaves all calls ungated (pre-permission behaviour).
+	Permission func(toolruntime.Tool) (bool, string)
+
 	// ContextWindow is the model's context window in tokens. Combined with
 	// MaxTokens (the reserved reply space) it bounds the working view: the loop
 	// compresses when the view exceeds CompressThreshold of (ContextWindow −
@@ -380,6 +386,17 @@ func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolrun
 		if c.ArgsError != "" {
 			results[i] = toolruntime.Result{Content: "invalid tool arguments: " + c.ArgsError, IsError: true}
 			continue
+		}
+		// Execution-permission gate (D10): authorize the call by the tool's risk
+		// before dispatch. A denied call is not executed; the reason is fed back as
+		// an error result so the model can adapt.
+		if l.config.Permission != nil {
+			if tool, ok := l.tools.Get(c.Name); ok {
+				if deny, reason := l.config.Permission(tool); deny {
+					results[i] = toolruntime.Result{Content: "permission denied: " + reason, IsError: true}
+					continue
+				}
+			}
 		}
 		live = append(live, c)
 		liveIdx = append(liveIdx, i)
