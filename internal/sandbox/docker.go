@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 
@@ -192,8 +192,12 @@ func (p *DockerPort) ReadFile(ctx context.Context, h Handle, path string) (io.Re
 	return io.NopCloser(&buf), nil
 }
 
-// WriteFile writes a file into the container via a tar stream.
-func (p *DockerPort) WriteFile(ctx context.Context, h Handle, path string, r io.Reader) error {
+// WriteFile writes a file into the container via a tar stream. dst is a
+// container path (Linux, forward-slash), so it is split with the `path` package,
+// NOT `path/filepath`: on a Windows host filepath would emit backslashes and the
+// Linux daemon would misplace the file. Rule: container-internal paths always
+// use `path`.
+func (p *DockerPort) WriteFile(ctx context.Context, h Handle, dst string, r io.Reader) error {
 	content, err := io.ReadAll(r)
 	if err != nil {
 		return err
@@ -201,7 +205,7 @@ func (p *DockerPort) WriteFile(ctx context.Context, h Handle, path string, r io.
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	if err := tw.WriteHeader(&tar.Header{
-		Name: filepath.Base(path),
+		Name: path.Base(dst),
 		Mode: 0o644,
 		Size: int64(len(content)),
 	}); err != nil {
@@ -213,7 +217,7 @@ func (p *DockerPort) WriteFile(ctx context.Context, h Handle, path string, r io.
 	if err := tw.Close(); err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
+	dir := path.Dir(dst)
 	if err := p.cli.CopyToContainer(ctx, h.ID, dir, &buf, container.CopyToContainerOptions{}); err != nil {
 		return fmt.Errorf("copy to container: %w", err)
 	}
