@@ -41,18 +41,29 @@ func argString(args map[string]any, key string) (string, error) {
 	return s, nil
 }
 
+// readFilePageBytes bounds a single read_file result. It is both the default
+// and the maximum page size, and is kept equal to the persistence cap
+// (contextmgmt.MaxToolResultChars) so a default page always persists whole — the
+// tool never relies on the persistence-side truncation, and a big file is paged
+// rather than slurped into the context window in one shot (capability-gap T8).
+const readFilePageBytes = 20_000
+
 type fileReadTool struct {
 	sb sandbox.Port
 	h  sandbox.Handle
 }
 
-func (t *fileReadTool) Name() string        { return "read_file" }
-func (t *fileReadTool) Description() string { return "Read a file from the session workspace" }
+func (t *fileReadTool) Name() string { return "read_file" }
+func (t *fileReadTool) Description() string {
+	return "Read a file from the session workspace. Reads up to a page (20000 bytes) at a time; when more remains the result ends with a marker telling you the offset to continue from. Pass offset to page through a large file."
+}
 func (t *fileReadTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string", "description": "workspace-relative path to read"},
+			"path":   map[string]any{"type": "string", "description": "workspace-relative path to read"},
+			"offset": map[string]any{"type": "integer", "description": "byte offset to start reading from (default 0)"},
+			"limit":  map[string]any{"type": "integer", "description": "max bytes to return (default and max 20000)"},
 		},
 		"required": []string{"path"},
 	}
@@ -65,16 +76,64 @@ func (t *fileReadTool) Call(ctx context.Context, args map[string]any) (toolrunti
 	if err != nil {
 		return toolruntime.Result{Content: err.Error(), IsError: true}, nil
 	}
+	offset := optInt(args, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	limit := optInt(args, "limit", readFilePageBytes)
+	if limit <= 0 || limit > readFilePageBytes {
+		limit = readFilePageBytes
+	}
+
 	rc, err := t.sb.ReadFile(ctx, t.h, path)
 	if err != nil {
 		return toolruntime.Result{Content: fmt.Sprintf("read_file failed: %v", err), IsError: true}, nil
 	}
 	defer rc.Close()
-	b, err := io.ReadAll(rc)
+	// Read one byte past the requested window so we can tell whether more remains
+	// without slurping (and OOM-ing on) a huge file. Byte-exact, so CRLF and any
+	// other bytes round-trip untouched.
+	data, err := io.ReadAll(io.LimitReader(rc, int64(offset)+int64(limit)+1))
 	if err != nil {
 		return toolruntime.Result{Content: fmt.Sprintf("read_file failed: %v", err), IsError: true}, nil
 	}
-	return toolruntime.Result{Content: string(b)}, nil
+
+	// offset at or past everything we read: the file is shorter than offset (we
+	// only reach here when we did NOT hit the read cap, so len(data) is the true
+	// size). Report it rather than returning an empty result.
+	if offset >= len(data) {
+		return toolruntime.Result{Content: fmt.Sprintf("(read_file: offset %d is at or past end of file; %d bytes total)", offset, len(data))}, nil
+	}
+
+	end := offset + limit
+	more := len(data) > end // at least one byte beyond the window
+	if !more {
+		end = len(data)
+	}
+	page := string(data[offset:end])
+	if more {
+		page += fmt.Sprintf("\n\n[read_file: returned bytes %d-%d; more remain, call read_file with offset=%d to continue]", offset, end, end)
+	}
+	return toolruntime.Result{Content: page}, nil
+}
+
+// optInt reads an optional integer argument, returning def when absent or of an
+// unexpected type. JSON numbers decode to float64; a Go-constructed int/int64
+// (tests, direct callers) is accepted too.
+func optInt(args map[string]any, key string, def int) int {
+	v, ok := args[key]
+	if !ok {
+		return def
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return def
 }
 
 type fileWriteTool struct {

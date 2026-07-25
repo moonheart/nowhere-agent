@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -144,5 +145,97 @@ func TestToolsRegisteredAndDispatched(t *testing.T) {
 	rd := reg.Call(ctx, "read_file", map[string]any{"path": "f.txt"})
 	if rd.IsError || rd.Content != "data" {
 		t.Errorf("read via registry = %+v", rd)
+	}
+}
+
+// setupRead makes a read_file tool over a MemPort seeded with one file (T8).
+func setupRead(t *testing.T, path, content string) *fileReadTool {
+	t.Helper()
+	sb := sandbox.NewMemPort()
+	h, err := sb.Create(context.Background(), "s1", sandbox.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sb.WriteFile(context.Background(), h, path, strings.NewReader(content)); err != nil {
+		t.Fatal(err)
+	}
+	return &fileReadTool{sb: sb, h: h}
+}
+
+// TestReadPaginatesLargeFile pins T8: a file larger than one page returns the
+// first page plus a continuation marker, and reading from that marker's offset
+// returns the rest with no marker — no bytes lost, none duplicated.
+func TestReadPaginatesLargeFile(t *testing.T) {
+	head := strings.Repeat("A", readFilePageBytes)
+	tail := strings.Repeat("B", 5000)
+	tool := setupRead(t, "big.txt", head+tail)
+
+	res, _ := tool.Call(context.Background(), map[string]any{"path": "big.txt"})
+	if res.IsError {
+		t.Fatalf("first read errored: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, fmt.Sprintf("offset=%d", readFilePageBytes)) {
+		t.Errorf("first page missing continuation marker for offset=%d", readFilePageBytes)
+	}
+	body, _, found := strings.Cut(res.Content, "\n\n[read_file:")
+	if !found {
+		t.Fatal("first page had no marker to cut on")
+	}
+	if body != head {
+		t.Errorf("first page body = %d bytes, want %d", len(body), len(head))
+	}
+
+	res2, _ := tool.Call(context.Background(), map[string]any{"path": "big.txt", "offset": readFilePageBytes})
+	if res2.IsError {
+		t.Fatalf("second read errored: %s", res2.Content)
+	}
+	if res2.Content != tail {
+		t.Errorf("continuation length = %d, want %d (and no marker)", len(res2.Content), len(tail))
+	}
+}
+
+// TestReadHonorsExplicitLimit: a caller-supplied limit bounds the page and the
+// marker points to the byte after it.
+func TestReadHonorsExplicitLimit(t *testing.T) {
+	tool := setupRead(t, "big.txt", strings.Repeat("A", 100))
+	res, _ := tool.Call(context.Background(), map[string]any{"path": "big.txt", "limit": 10})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	body, _, found := strings.Cut(res.Content, "\n\n[read_file:")
+	if !found {
+		t.Fatal("expected a continuation marker for a limited read")
+	}
+	if body != strings.Repeat("A", 10) {
+		t.Errorf("limited page = %d bytes, want 10", len(body))
+	}
+	if !strings.Contains(res.Content, "offset=10") {
+		t.Errorf("want offset=10 marker, got tail %q", res.Content[len(body):])
+	}
+}
+
+// TestReadOffsetPastEndOfFile: an offset past EOF reports the size rather than
+// returning an empty result, and is not an error.
+func TestReadOffsetPastEndOfFile(t *testing.T) {
+	tool := setupRead(t, "s.txt", "short")
+	res, _ := tool.Call(context.Background(), map[string]any{"path": "s.txt", "offset": 100})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "past end of file") || !strings.Contains(res.Content, "5 bytes") {
+		t.Errorf("want past-EOF note with size, got %q", res.Content)
+	}
+}
+
+// TestReadPreservesBytesAndReturnsSmallFileWhole: a sub-page file comes back
+// byte-exact (CRLF intact) with no marker — the pre-T8 behaviour for small reads.
+func TestReadPreservesBytesAndReturnsSmallFileWhole(t *testing.T) {
+	tool := setupRead(t, "c.txt", "a\r\nb\r\nc")
+	res, _ := tool.Call(context.Background(), map[string]any{"path": "c.txt"})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	if res.Content != "a\r\nb\r\nc" {
+		t.Errorf("small file not returned byte-exact: %q", res.Content)
 	}
 }
