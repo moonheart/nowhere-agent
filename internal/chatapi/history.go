@@ -110,17 +110,43 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// active reports whether a run is still in flight. The client sets
-	// unstable_resume only then; resuming a completed run would start a NEW
-	// assistant message after the loaded one (duplicate), because resume is a
-	// continuation of an unfinished run, not a re-read of history.
-	_, active, err := h.runtime.ActiveRun(r.Context(), threadID)
+	// active reports whether a run is genuinely in flight (queued/running). A run
+	// parked in waiting_approval does NOT count: it has no live stream to resume,
+	// so treating it as active would make the client open a resume stream that
+	// never finishes (a blank, stuck assistant bubble). Its content is in the
+	// message store and its interaction is restored via pendingApproval below.
+	_, active, err := h.runtime.RunningRun(r.Context(), threadID)
 	if err != nil {
 		active = false
 	}
 
+	// A run parked in waiting_approval has a durable pending interaction the
+	// transient data-tool-approval frame showed live but a refresh dropped. Echo
+	// it here so the reloading client re-renders the card (approve/deny or the
+	// ask_user questions). Shape matches that frame's payload.
+	var pending map[string]any
+	if h.registry != nil {
+		if ap, ok, err := h.registry.PendingApprovalForSession(r.Context(), threadID); err == nil && ok {
+			var args any
+			if err := json.Unmarshal(ap.ToolInput, &args); err != nil {
+				args = map[string]any{}
+			}
+			kind := ap.Kind
+			if kind == "" {
+				kind = "approval"
+			}
+			pending = map[string]any{
+				"approvalId": ap.ID,
+				"kind":       kind,
+				"toolCallId": ap.ToolCallID,
+				"toolName":   ap.ToolName,
+				"args":       args,
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active})
+	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "pendingApproval": pending})
 }
 
 // isToolResultOnly reports whether a stored message is a user-role message that

@@ -221,7 +221,25 @@ func (s *PGStore) ActiveRun(ctx context.Context, sessionID string) (Run, bool, e
 	return r, true, nil
 }
 
-// FailStrandedRuns marks all non-terminal runs failed (startup reconciliation
+// RunningRun returns the in-flight run for a session (queued/running only), or
+// false. A run parked in waiting_approval is excluded — it has no live stream to
+// resume (see Store.RunningRun).
+func (s *PGStore) RunningRun(ctx context.Context, sessionID string) (Run, bool, error) {
+	var r Run
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, session_id, seq, status, created_at
+		FROM runs
+		WHERE session_id = $1 AND status IN ('queued','running')
+		ORDER BY seq DESC LIMIT 1`, sessionID).
+		Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, false, nil
+	}
+	if err != nil {
+		return Run{}, false, fmt.Errorf("running run: %w", err)
+	}
+	return r, true, nil
+}
 // for runs whose owning process died mid-run). Runs parked in waiting_approval
 // are EXCLUDED: they have no live worker to lose — their state is durable (the
 // approvals row) and they are meant to resume after a restart (capability-gap

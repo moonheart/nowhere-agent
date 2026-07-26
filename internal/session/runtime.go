@@ -48,6 +48,12 @@ type Store interface {
 	UpdateRunStatus(ctx context.Context, runID string, status RunStatus) error
 	// ActiveRun returns the active run in a session, or false.
 	ActiveRun(ctx context.Context, sessionID string) (Run, bool, error)
+	// RunningRun returns the session's genuinely in-flight run (queued/running),
+	// or false. Unlike ActiveRun it EXCLUDES a run parked in waiting_approval: a
+	// parked run has no live worker or stream, so clients resuming history must
+	// not treat it as in-flight (its content is in the message store; its pending
+	// interaction is restored separately).
+	RunningRun(ctx context.Context, sessionID string) (Run, bool, error)
 	// NextRunSeq returns the next sequence number for a session's run.
 	NextRunSeq(ctx context.Context, sessionID string) (int, error)
 	// RunsForSession returns all runs in a session, for history replay.
@@ -330,6 +336,20 @@ func (rt *Runtime) ActiveRun(ctx context.Context, sessionID string) (Run, bool, 
 		return rs.run, true, nil
 	}
 	return rt.store.ActiveRun(ctx, sessionID)
+}
+
+// RunningRun returns the session's genuinely in-flight run (queued/running), or
+// false. It prefers the in-memory lock holder (a running worker) and otherwise
+// asks the store for a queued/running run — a run parked in waiting_approval is
+// deliberately excluded (see Store.RunningRun).
+func (rt *Runtime) RunningRun(ctx context.Context, sessionID string) (Run, bool, error) {
+	rt.mu.Lock()
+	rs, ok := rt.runs[sessionID]
+	rt.mu.Unlock()
+	if ok && (rs.run.Status == RunQueued || rs.run.Status == RunRunning) {
+		return rs.run, true, nil
+	}
+	return rt.store.RunningRun(ctx, sessionID)
 }
 
 // GetSession fetches a session by id (pass-through to the store).

@@ -215,6 +215,39 @@ func TestResumeAfterRestartRebuildsLoop(t *testing.T) {
 	}
 }
 
+// TestPendingApprovalForSession pins the reload-restore lookup: a parked run's
+// pending approval is reachable by session (so /history can echo it to a
+// refreshed client), and disappears once decided.
+func TestPendingApprovalForSession(t *testing.T) {
+	ran := false
+	prov := &approvalScriptProvider{script: [][]provider.Event{
+		toolUseTurn("tu1", "danger", `{"q":"?"}`),
+		textTurn("done"),
+	}}
+	rt, rg, sess, _ := newApprovalRegistry(t, prov, &ran)
+	waitStatus(t, rt, sess.ID, RunWaitingApproval)
+
+	ap, ok, err := rg.PendingApprovalForSession(context.Background(), sess.ID)
+	if err != nil || !ok {
+		t.Fatalf("pending for session: ok=%v err=%v", ok, err)
+	}
+	if ap.ToolCallID != "tu1" || ap.ToolName != "danger" || ap.Status != ApprovalPending {
+		t.Fatalf("approval = %+v", ap)
+	}
+	if len(ap.ToolInput) == 0 {
+		t.Error("pending approval should carry the gated call's input for re-render")
+	}
+
+	// Once decided, the session has no outstanding interaction.
+	if _, err := rg.Resume(context.Background(), ap.ID, true, nil); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	waitStatus(t, rt, sess.ID, RunDone)
+	if _, ok, err := rg.PendingApprovalForSession(context.Background(), sess.ID); err != nil || ok {
+		t.Errorf("after resume: ok=%v err=%v, want none", ok, err)
+	}
+}
+
 func currentRunID(t *testing.T, rt *Runtime, sessionID string) string {
 	t.Helper()
 	runs, _ := rt.RunsForSession(context.Background(), sessionID)

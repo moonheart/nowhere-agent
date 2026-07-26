@@ -409,6 +409,20 @@ func (rg *RunRegistry) ApprovalByID(ctx context.Context, id string) (Approval, e
 	return rg.rt.store.GetApproval(ctx, id)
 }
 
+// PendingApprovalForSession returns the session's outstanding human interaction
+// (a parked permission approval or ask_user question set), or false. A reloading
+// client uses it to re-render the card the transient data-tool-approval frame
+// showed before the refresh. There is at most one pending approval per run and
+// at most one waiting_approval run per session (single-active-run), so the
+// latest parked run's approval is the session's current interaction.
+func (rg *RunRegistry) PendingApprovalForSession(ctx context.Context, sessionID string) (Approval, bool, error) {
+	run, active, err := rg.rt.ActiveRun(ctx, sessionID)
+	if err != nil || !active || run.Status != RunWaitingApproval {
+		return Approval{}, false, err
+	}
+	return rg.rt.store.PendingApprovalForRun(ctx, run.ID)
+}
+
 // append persists an event through the Runtime (which fans it out to subscribers
 // on the bus) so the durable log and live stream stay in one write path.
 func (rg *RunRegistry) append(ctx context.Context, sessionID, runID string, kind agent.EventKind, payload any) {
