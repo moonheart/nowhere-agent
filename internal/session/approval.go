@@ -56,8 +56,8 @@ func (m *MemStore) CreateApproval(_ context.Context, a Approval) (Approval, erro
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, ex := range m.approvals {
-		if ex.RunID == a.RunID && ex.Status == ApprovalPending {
-			return Approval{}, fmt.Errorf("run %s already has a pending approval", a.RunID)
+		if ex.SessionID == a.SessionID && ex.Status == ApprovalPending {
+			return Approval{}, fmt.Errorf("session %s already has a pending approval", a.SessionID)
 		}
 	}
 	if a.ID == "" {
@@ -70,11 +70,11 @@ func (m *MemStore) CreateApproval(_ context.Context, a Approval) (Approval, erro
 	return a, nil
 }
 
-func (m *MemStore) PendingApprovalForRun(_ context.Context, runID string) (Approval, bool, error) {
+func (m *MemStore) PendingApprovalForSession(_ context.Context, sessionID string) (Approval, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, a := range m.approvals {
-		if a.RunID == runID && a.Status == ApprovalPending {
+		if a.SessionID == sessionID && a.Status == ApprovalPending {
 			return *a, true, nil
 		}
 	}
@@ -147,18 +147,18 @@ func (s *PGStore) CreateApproval(ctx context.Context, a Approval) (Approval, err
 	return ap, nil
 }
 
-func (s *PGStore) PendingApprovalForRun(ctx context.Context, runID string) (Approval, bool, error) {
+func (s *PGStore) PendingApprovalForSession(ctx context.Context, sessionID string) (Approval, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT `+approvalCols+`
 		FROM approvals
-		WHERE run_id = $1 AND status = 'pending'
-		ORDER BY created_at DESC LIMIT 1`, runID)
+		WHERE session_id = $1 AND status = 'pending'
+		ORDER BY created_at DESC LIMIT 1`, sessionID)
 	a, err := scanApproval(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Approval{}, false, nil
 	}
 	if err != nil {
-		return Approval{}, false, fmt.Errorf("pending approval for run: %w", err)
+		return Approval{}, false, fmt.Errorf("pending approval for session: %w", err)
 	}
 	return a, true, nil
 }

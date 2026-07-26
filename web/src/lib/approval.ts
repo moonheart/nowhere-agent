@@ -139,29 +139,7 @@ export function registerDecisionFollower(fn: DecisionStreamFollower) {
 
 // followDecisionStream hands a verdict stream to the registered follower.
 export function followDecisionStream(stream: ReadableStream<Uint8Array>) {
-  markFollowingDecision();
   follower?.(stream);
-}
-
-// decisionFollow tracks an in-flight verdict follow. While this client is
-// following the resumed run's stream, the multi-client attach poll must NOT
-// also resumeRun the same run: assistant-ui aborts the prior stream on a new
-// resumeRun, and that abort fires onCancel → POST /cancel → kills the worker
-// (the "one AI message + cancelled" bug). The poll checks isFollowingDecision.
-let followingUntil = 0;
-
-// isFollowingDecision reports whether this client is currently following a
-// verdict's resumed-run stream (so the attach poll should stand down).
-export function isFollowingDecision(): boolean {
-  return Date.now() < followingUntil;
-}
-
-// suppress window: a resumed run is short; cover the follow plus margin.
-const FOLLOW_SUPPRESS_MS = 15_000;
-
-// markFollowingDecision arms the suppression for the follow about to start.
-export function markFollowingDecision() {
-  followingUntil = Date.now() + FOLLOW_SUPPRESS_MS;
 }
 
 // parseQuestions extracts the ask_user question set from a ToolApproval.args

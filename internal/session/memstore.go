@@ -152,19 +152,6 @@ func (m *MemStore) ActiveRun(_ context.Context, sessionID string) (Run, bool, er
 	return Run{}, false, nil
 }
 
-// RunningRun returns the in-flight run (queued/running only), excluding a run
-// parked in waiting_approval (see Store.RunningRun).
-func (m *MemStore) RunningRun(_ context.Context, sessionID string) (Run, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, r := range m.bySess[sessionID] {
-		if r.Status == RunQueued || r.Status == RunRunning {
-			return *r, true, nil
-		}
-	}
-	return Run{}, false, nil
-}
-
 func (m *MemStore) NextRunSeq(_ context.Context, sessionID string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -172,8 +159,8 @@ func (m *MemStore) NextRunSeq(_ context.Context, sessionID string) (int, error) 
 }
 
 // FailStrandedRuns marks every non-terminal run failed (startup reconciliation).
-// Runs parked in waiting_approval are EXCLUDED: they are meant to resume after
-// a restart (capability-gap O2), not to be reaped as orphaned.
+// Runs are stateless and terminal on completion, so any queued/running row
+// belongs to a dead worker.
 func (m *MemStore) FailStrandedRuns(_ context.Context) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

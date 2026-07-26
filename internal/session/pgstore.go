@@ -209,7 +209,7 @@ func (s *PGStore) ActiveRun(ctx context.Context, sessionID string) (Run, bool, e
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, session_id, seq, status, created_at
 		FROM runs
-		WHERE session_id = $1 AND status IN ('queued','running','waiting_approval')
+		WHERE session_id = $1 AND status IN ('queued','running')
 		ORDER BY seq DESC LIMIT 1`, sessionID).
 		Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -221,33 +221,15 @@ func (s *PGStore) ActiveRun(ctx context.Context, sessionID string) (Run, bool, e
 	return r, true, nil
 }
 
-// RunningRun returns the in-flight run for a session (queued/running only), or
-// false. A run parked in waiting_approval is excluded — it has no live stream to
-// resume (see Store.RunningRun).
-func (s *PGStore) RunningRun(ctx context.Context, sessionID string) (Run, bool, error) {
-	var r Run
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, session_id, seq, status, created_at
-		FROM runs
-		WHERE session_id = $1 AND status IN ('queued','running')
-		ORDER BY seq DESC LIMIT 1`, sessionID).
-		Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Run{}, false, nil
-	}
-	if err != nil {
-		return Run{}, false, fmt.Errorf("running run: %w", err)
-	}
-	return r, true, nil
-}
-// for runs whose owning process died mid-run). Runs parked in waiting_approval
-// are EXCLUDED: they have no live worker to lose — their state is durable (the
-// approvals row) and they are meant to resume after a restart (capability-gap
-// O2). Returns the number of runs updated.
+// FailStrandedRuns marks all non-terminal runs failed (startup reconciliation
+// for runs whose owning process died mid-run). Runs are stateless and terminal
+// on completion (capability-gap O2 run-stateless model): any queued/running row
+// at startup belongs to a dead worker, so it is failed. This also clears any
+// pre-refactor waiting_approval rows. Returns the number of runs updated.
 func (s *PGStore) FailStrandedRuns(ctx context.Context) (int, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE runs SET status = 'failed', finished_at = now()
-		WHERE status IN ('queued','running')`)
+		WHERE status IN ('queued','running','waiting_approval')`)
 	if err != nil {
 		return 0, fmt.Errorf("fail stranded runs: %w", err)
 	}

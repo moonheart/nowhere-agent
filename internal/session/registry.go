@@ -14,6 +14,7 @@ import (
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/subagent"
+	"nowhere-agent/internal/toolruntime"
 )
 
 // marshalPayload encodes an event payload for the durable log. The run_events
@@ -59,21 +60,9 @@ type RunRegistry struct {
 	// Nil disables message persistence (tests/dev).
 	msgStore MessageStore
 
-	// loopSource, when set, rebuilds a fresh loop for a session — used by Resume
-	// to continue a parked run AFTER A PROCESS RESTART, where the original loop
-	// (and its tool bindings) is gone (capability-gap O2). Nil confines Resume to
-	// the in-process parked work captured at Submit.
-	loopSource LoopSource
-
 	mu      sync.Mutex
 	workers map[string]*runWorker // sessionID -> active worker
-	parked  map[string]RunWork    // runID -> suspended run's work (in-process resume)
 }
-
-// LoopSource rebuilds a loop for a session (system prompt + tools bound), so a
-// parked run can resume after a restart. The server supplies it from the same
-// factory + tool binder used for fresh runs.
-type LoopSource func(ctx context.Context, sessionID string) (*agent.Loop, error)
 
 // runWorker tracks one in-flight run's execution handle.
 type runWorker struct {
@@ -84,19 +73,12 @@ type runWorker struct {
 
 // NewRunRegistry creates a registry over a Runtime (state) and EventBus (fan-out).
 func NewRunRegistry(rt *Runtime, bus EventBus) *RunRegistry {
-	return &RunRegistry{rt: rt, bus: bus, workers: map[string]*runWorker{}, parked: map[string]RunWork{}}
+	return &RunRegistry{rt: rt, bus: bus, workers: map[string]*runWorker{}}
 }
 
 // WithMessageStore wires full-block message persistence and returns the registry.
 func (rg *RunRegistry) WithMessageStore(ms MessageStore) *RunRegistry {
 	rg.msgStore = ms
-	return rg
-}
-
-// WithLoopSource wires the loop factory Resume uses to rebuild a parked run's
-// loop after a process restart (capability-gap O2), and returns the registry.
-func (rg *RunRegistry) WithLoopSource(ls LoopSource) *RunRegistry {
-	rg.loopSource = ls
 	return rg
 }
 
@@ -206,24 +188,40 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 
 	_, runErr := work.Loop.Run(runCtx, work.History, emit)
 
-	// Human-approval suspension (capability-gap O2): the loop hit a gated tool
-	// call and returned ErrAwaitingApproval WITHOUT executing it. Persist the
-	// durable Approval and park the run (waiting_approval + release the lock);
-	// Resume continues it once the user decides. The run is NOT settled terminal.
-	if errors.Is(runErr, agent.ErrAwaitingApproval) {
-		rg.mu.Lock()
-		rg.parked[run.ID] = work // in-process resume path (pre-restart)
-		rg.mu.Unlock()
-		rg.suspendForApproval(sessionID, run, work.Loop)
-		return
-	}
-
 	// Determine terminal status; cancelled beats failed when the ctx was cancelled.
 	status := RunDone
 	if runErr != nil {
 		status = RunFailed
 		if runCtx.Err() == context.Canceled {
 			status = RunCancelled
+		}
+	}
+
+	// Human-interaction gate (capability-gap O2, run-stateless model): the loop
+	// hit a gated tool call and ended the run WITHOUT executing it, emitting
+	// KindApprovalRequest. The gated tool_use is already persisted (the loop's
+	// KindMessage). Persist the durable Approval (thread state, keyed by session)
+	// so a LATER run can apply the verdict. The run settles done — no suspend.
+	if gate := work.Loop.PendingApproval; gate != nil && status == RunDone {
+		bg := context.Background()
+		input, err := json.Marshal(gate.Input)
+		if err != nil {
+			input = []byte("{}")
+		}
+		kind := gate.Kind
+		if kind == "" {
+			kind = "approval"
+		}
+		ap, err := rg.rt.store.CreateApproval(bg, Approval{
+			RunID: run.ID, SessionID: sessionID,
+			ToolCallID: gate.ToolCallID, ToolName: gate.ToolName,
+			ToolInput: input, Kind: kind,
+		})
+		if err != nil {
+			slog.Error("persist approval failed; failing run", "session", sessionID, "run", run.ID, "err", err)
+			status = RunFailed
+		} else {
+			slog.Info("run ended awaiting human input", "session", sessionID, "run", run.ID, "approval", ap.ID, "kind", kind, "tool", ap.ToolName)
 		}
 	}
 
@@ -246,129 +244,6 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 	_ = rg.rt.CompleteRun(bg, sessionID, status)
 }
 
-// suspendForApproval persists the durable Approval for the loop's gated tool
-// call and parks the run in waiting_approval (releasing the single-active-run
-// lock). It runs on a background context: the run ctx may already be cancelled.
-// The parked run stays Active (waiting_approval) for Resume to continue.
-func (rg *RunRegistry) suspendForApproval(sessionID string, run Run, loop *agent.Loop) {
-	bg := context.Background()
-	gate := loop.PendingApproval
-	if gate == nil {
-		// Defensive: the loop reported suspension without a gate. Settle failed
-		// rather than leave a run parked with no approval to resume from.
-		slog.Error("run suspended with no pending approval", "session", sessionID, "run", run.ID)
-		_ = rg.rt.CompleteRun(bg, sessionID, RunFailed)
-		return
-	}
-	input, err := json.Marshal(gate.Input)
-	if err != nil {
-		input = []byte("{}")
-	}
-	kind := gate.Kind
-	if kind == "" {
-		kind = "approval"
-	}
-	ap, err := rg.rt.store.CreateApproval(bg, Approval{
-		RunID: run.ID, SessionID: sessionID,
-		ToolCallID: gate.ToolCallID, ToolName: gate.ToolName,
-		ToolInput: input, Kind: kind,
-	})
-	if err != nil {
-		slog.Error("persist approval failed; failing run", "session", sessionID, "run", run.ID, "err", err)
-		_ = rg.rt.CompleteRun(bg, sessionID, RunFailed)
-		return
-	}
-	if _, err := rg.rt.SuspendRun(bg, sessionID); err != nil {
-		slog.Error("suspend run failed", "session", sessionID, "run", run.ID, "err", err)
-		_ = rg.rt.CompleteRun(bg, sessionID, RunFailed)
-		return
-	}
-	// Surface the interaction request (now carrying the durable id) so an attached
-	// client renders the right UI — approve/deny for an approval, a question card
-	// for ask_user. Live-only broker content; kind + questions drive the render.
-	rg.append(bg, sessionID, run.ID, agent.KindApprovalRequest, map[string]any{
-		"approvalId": ap.ID,
-		"kind":       kind,
-		"toolCallId": ap.ToolCallID,
-		"toolName":   ap.ToolName,
-		"args":       gate.Input,
-	})
-	slog.Info("run parked awaiting human input", "session", sessionID, "run", run.ID, "approval", ap.ID, "kind", kind, "tool", ap.ToolName)
-}
-
-// Resume continues a run parked in waiting_approval after the user resolved its
-// human interaction. approve/answer carry the verdict: a permission approval uses
-// approve (execute on true, deny on false); an ask_user question set uses answer
-// (the user's structured response) with approve=true, or approve=false to skip.
-// It re-acquires the single-active-run lock, rebuilds history from the durable
-// message store (which may now include interleaved runs), and drives the loop to
-// completion on a fresh worker. The row is decided atomically; a stale/foreign
-// decision errors.
-func (rg *RunRegistry) Resume(ctx context.Context, approvalID string, approve bool, answer json.RawMessage) (Run, error) {
-	ap, err := rg.rt.store.DecideApproval(ctx, approvalID, approve, answer)
-	if err != nil {
-		return Run{}, err // ErrNoPendingApproval for unknown/already-decided
-	}
-	sessionID := ap.SessionID
-
-	// Rebuild the durable conversation so the resumed loop sees the full record —
-	// including any run the user interleaved while this one was parked (the lock
-	// was released at suspend). The approved/denied tool result is NOT yet in the
-	// store; the loop's Config.Approval resolves it as the resumed run's first act.
-	var history []provider.Message
-	if rg.msgStore != nil {
-		stored, err := rg.msgStore.MessagesFor(ctx, sessionID)
-		if err != nil {
-			return Run{}, fmt.Errorf("rebuild history: %w", err)
-		}
-		history = StoredMessagesToProvider(stored)
-	}
-
-	// Resolve the loop to drive. Prefer the in-process parked work (the run
-	// suspended in THIS process, so its loop is still warm); after a restart the
-	// parked map is empty, so rebuild a fresh loop from the durable state via the
-	// loop source — this is what makes Resume survive a process restart.
-	rg.mu.Lock()
-	work, warm := rg.parked[ap.RunID]
-	delete(rg.parked, ap.RunID)
-	rg.mu.Unlock()
-	var loop *agent.Loop
-	if warm {
-		loop = work.Loop
-	} else {
-		if rg.loopSource == nil {
-			return Run{}, errors.New("run parked before restart and no loop source configured")
-		}
-		loop, err = rg.loopSource(ctx, sessionID)
-		if err != nil {
-			return Run{}, fmt.Errorf("rebuild loop: %w", err)
-		}
-	}
-	var input map[string]any
-	_ = json.Unmarshal(ap.ToolInput, &input)
-	var answerMap map[string]any
-	_ = json.Unmarshal(ap.Answer, &answerMap)
-	loop = loop.WithApproval(agent.ResumedApproval{
-		Kind: ap.Kind, ToolCallID: ap.ToolCallID, ToolName: ap.ToolName,
-		Input: input, Approved: approve, Answer: answerMap,
-	})
-
-	run, err := rg.rt.ResumeRun(ctx, sessionID, ap.RunID)
-	if err != nil {
-		return Run{}, err
-	}
-
-	runCtx, cancel := context.WithCancel(context.Background())
-	w := &runWorker{runID: run.ID, cancel: cancel, done: make(chan struct{})}
-	rg.mu.Lock()
-	rg.workers[sessionID] = w
-	rg.mu.Unlock()
-
-	rg.append(runCtx, sessionID, run.ID, agent.KindRunning, nil)
-	go rg.execute(runCtx, sessionID, run, w, RunWork{Loop: loop, History: history})
-	return run, nil
-}
-
 // appendEvent is append but surfaces the persistence error (for the terminal
 // event, where a silent drop means attached clients never see the run end).
 func (rg *RunRegistry) appendEvent(ctx context.Context, sessionID, runID string, kind agent.EventKind, payload any) error {
@@ -378,6 +253,77 @@ func (rg *RunRegistry) appendEvent(ctx context.Context, sessionID, runID string,
 		Kind:      string(kind),
 		Payload:   marshalPayload(payload),
 	})
+}
+
+// Decide applies the human verdict on a pending Approval and returns the
+// history for a FRESH run to continue the conversation (run-stateless model,
+// capability-gap O2). It atomically marks the row decided, rebuilds the durable
+// conversation from the message store, and appends the tool_result the gated
+// tool_use was waiting on:
+//   - permission approval approved → the tool is EXECUTED now (tools registry,
+//     supplied by the caller) and its real result is fed back;
+//   - permission approval rejected → an is_error denial;
+//   - ask_user answered → the user's structured answer;
+//   - ask_user skipped (approve=false) → a "skipped" note.
+//
+// The caller (chat handler) builds a fresh loop and Submits a new run with the
+// returned history; there is no suspended run to resume. tools may be nil only
+// when the verdict cannot require execution (reject / ask_user / skip).
+func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, answer json.RawMessage, tools *toolruntime.Registry) (Approval, []provider.Message, error) {
+	ap, err := rg.rt.store.DecideApproval(ctx, approvalID, approve, answer)
+	if err != nil {
+		return Approval{}, nil, err // ErrNoPendingApproval for unknown/already-decided
+	}
+	sessionID := ap.SessionID
+
+	// Rebuild the durable conversation (full blocks, including the gated tool_use
+	// that ended the prior run). The verdict's tool_result is NOT yet in the
+	// store; it is appended below so the fresh run sees it.
+	var history []provider.Message
+	if rg.msgStore != nil {
+		stored, err := rg.msgStore.MessagesFor(ctx, sessionID)
+		if err != nil {
+			return Approval{}, nil, fmt.Errorf("rebuild history: %w", err)
+		}
+		history = StoredMessagesToProvider(stored)
+	}
+
+	// Resolve the verdict into a tool_result for the gated call.
+	var res toolruntime.Result
+	var input map[string]any
+	_ = json.Unmarshal(ap.ToolInput, &input)
+	isAskUser := ap.Kind == "ask_user" || ap.ToolName == agent.AskUserToolName
+	switch {
+	case isAskUser && !approve:
+		// Skipped: the run continues without the input; the model decides next.
+		res = toolruntime.Result{Content: "the user skipped these questions (no answer given)"}
+	case isAskUser:
+		if data, err := json.Marshal(ap.Answer); err == nil && len(ap.Answer) > 0 {
+			res = toolruntime.Result{Content: string(data)}
+		} else {
+			res = toolruntime.Result{Content: "the user answered (unparseable response)", IsError: true}
+		}
+	case !approve:
+		res = toolruntime.Result{Content: "the user denied permission to run " + ap.ToolName, IsError: true}
+	default:
+		// Approved: execute the gated tool now (the approval is its authorization).
+		if tools == nil {
+			return Approval{}, nil, errors.New("approved call needs a tool registry to execute")
+		}
+		res = tools.CallAll(ctx, []toolruntime.Call{{ID: ap.ToolCallID, Name: ap.ToolName, Args: input}})[0]
+	}
+
+	history = append(history, provider.Message{
+		Role: provider.RoleUser,
+		Content: []provider.Block{{
+			Type:         provider.BlockToolResult,
+			ToolResultID: ap.ToolCallID,
+			ToolContent:  res.Content,
+			IsError:      res.IsError,
+			ToolMessages: res.Nested,
+		}},
+	})
+	return ap, history, nil
 }
 
 // Cancel stops the session's in-flight run: it invokes the worker's cancel func
@@ -410,17 +356,12 @@ func (rg *RunRegistry) ApprovalByID(ctx context.Context, id string) (Approval, e
 }
 
 // PendingApprovalForSession returns the session's outstanding human interaction
-// (a parked permission approval or ask_user question set), or false. A reloading
-// client uses it to re-render the card the transient data-tool-approval frame
-// showed before the refresh. There is at most one pending approval per run and
-// at most one waiting_approval run per session (single-active-run), so the
-// latest parked run's approval is the session's current interaction.
+// (a pending permission approval or ask_user question set), or false. There is
+// at most one pending approval per session (enforced by the partial unique
+// index). A reloading client uses it to re-render the card the transient
+// data-tool-approval frame showed before the refresh.
 func (rg *RunRegistry) PendingApprovalForSession(ctx context.Context, sessionID string) (Approval, bool, error) {
-	run, active, err := rg.rt.ActiveRun(ctx, sessionID)
-	if err != nil || !active || run.Status != RunWaitingApproval {
-		return Approval{}, false, err
-	}
-	return rg.rt.store.PendingApprovalForRun(ctx, run.ID)
+	return rg.rt.store.PendingApprovalForSession(ctx, sessionID)
 }
 
 // append persists an event through the Runtime (which fans it out to subscribers

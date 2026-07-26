@@ -19,3 +19,4 @@ Thumbs.db
 # Raw LLM request/response logs (LLM_RAW_LOG_DIR)
 logs/
 data/
+.playwright-mcp/

@@ -15,9 +15,6 @@ var (
 	ErrNoActiveRun = errors.New("no active run in this session")
 	// ErrSessionEnded is returned when acting on an ended session.
 	ErrSessionEnded = errors.New("session has ended")
-	// ErrRunNotWaiting is returned when resuming a run that is not parked in
-	// waiting_approval (already decided, cancelled, or terminal).
-	ErrRunNotWaiting = errors.New("run is not waiting for approval")
 )
 
 // Store persists sessions, runs, and events. Implemented over Postgres.
@@ -48,12 +45,6 @@ type Store interface {
 	UpdateRunStatus(ctx context.Context, runID string, status RunStatus) error
 	// ActiveRun returns the active run in a session, or false.
 	ActiveRun(ctx context.Context, sessionID string) (Run, bool, error)
-	// RunningRun returns the session's genuinely in-flight run (queued/running),
-	// or false. Unlike ActiveRun it EXCLUDES a run parked in waiting_approval: a
-	// parked run has no live worker or stream, so clients resuming history must
-	// not treat it as in-flight (its content is in the message store; its pending
-	// interaction is restored separately).
-	RunningRun(ctx context.Context, sessionID string) (Run, bool, error)
 	// NextRunSeq returns the next sequence number for a session's run.
 	NextRunSeq(ctx context.Context, sessionID string) (int, error)
 	// RunsForSession returns all runs in a session, for history replay.
@@ -68,11 +59,11 @@ type Store interface {
 	EventsAfter(ctx context.Context, runID string, after int) ([]Event, error)
 
 	// Tool-approval records (capability-gap O2, migration 000010): the durable
-	// store for a suspended run's pending human decision.
-	// CreateApproval persists a new pending approval (one per run).
+	// thread-level store for a pending human decision.
+	// CreateApproval persists a new pending approval (at most one per session).
 	CreateApproval(ctx context.Context, a Approval) (Approval, error)
-	// PendingApprovalForRun returns the run's outstanding approval, or false.
-	PendingApprovalForRun(ctx context.Context, runID string) (Approval, bool, error)
+	// PendingApprovalForSession returns the session's outstanding approval, or false.
+	PendingApprovalForSession(ctx context.Context, sessionID string) (Approval, bool, error)
 	// GetApproval fetches an approval by id (any status).
 	GetApproval(ctx context.Context, id string) (Approval, error)
 	// DecideApproval resolves a pending approval, or ErrNoPendingApproval. answer
@@ -261,72 +252,6 @@ func (rt *Runtime) CompleteRun(ctx context.Context, sessionID string, status Run
 	return rt.store.UpdateRunStatus(ctx, rs.run.ID, status)
 }
 
-// SuspendRun parks the session's active run in waiting_approval and releases
-// the single-active-run lock WITHOUT settling the run terminal (capability-gap
-// O2). The run stays Active (waiting_approval) so the durable state reads as
-// in-progress; ResumeRun re-acquires the lock to continue it. Returns the parked
-// run. The caller (the run worker) has already persisted the durable Approval.
-func (rt *Runtime) SuspendRun(ctx context.Context, sessionID string) (Run, error) {
-	rt.mu.Lock()
-	rs, ok := rt.runs[sessionID]
-	if !ok {
-		rt.mu.Unlock()
-		return Run{}, ErrNoActiveRun
-	}
-	run := rs.run
-	delete(rt.runs, sessionID)
-	rt.mu.Unlock()
-	if err := rt.store.UpdateRunStatus(ctx, run.ID, RunWaitingApproval); err != nil {
-		return Run{}, err
-	}
-	run.Status = RunWaitingApproval
-	return run, nil
-}
-
-// ResumeRun re-acquires the single-active-run lock for a run parked in
-// waiting_approval so its worker can continue it after the approval decision.
-// It reads the run's CURRENT durable status (not the in-memory map, which the
-// suspension cleared): only a run still parked in waiting_approval resumes, and
-// only if no other active run now holds the session.
-func (rt *Runtime) ResumeRun(ctx context.Context, sessionID, runID string) (Run, error) {
-	rt.mu.Lock()
-	if _, active := rt.runs[sessionID]; active {
-		rt.mu.Unlock()
-		return Run{}, ErrRunActive
-	}
-	rt.mu.Unlock()
-
-	// The durable store is authoritative for the parked run's status across
-	// instances: the suspending process may have died, so ResumeRun consults the
-	// run row, not just this process's memory.
-	runs, err := rt.store.RunsForSession(ctx, sessionID)
-	if err != nil {
-		return Run{}, err
-	}
-	var target *Run
-	for i := range runs {
-		if runs[i].ID == runID {
-			target = &runs[i]
-		}
-	}
-	if target == nil || target.Status != RunWaitingApproval {
-		return Run{}, ErrRunNotWaiting
-	}
-
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if _, active := rt.runs[sessionID]; active {
-		return Run{}, ErrRunActive
-	}
-	run := *target
-	if err := rt.store.UpdateRunStatus(ctx, run.ID, RunRunning); err != nil {
-		return Run{}, err
-	}
-	run.Status = RunRunning
-	rt.runs[sessionID] = &runState{run: run}
-	return run, nil
-}
-
 // ActiveRun returns the active run for a session, or false.
 func (rt *Runtime) ActiveRun(ctx context.Context, sessionID string) (Run, bool, error) {
 	rt.mu.Lock()
@@ -336,20 +261,6 @@ func (rt *Runtime) ActiveRun(ctx context.Context, sessionID string) (Run, bool, 
 		return rs.run, true, nil
 	}
 	return rt.store.ActiveRun(ctx, sessionID)
-}
-
-// RunningRun returns the session's genuinely in-flight run (queued/running), or
-// false. It prefers the in-memory lock holder (a running worker) and otherwise
-// asks the store for a queued/running run — a run parked in waiting_approval is
-// deliberately excluded (see Store.RunningRun).
-func (rt *Runtime) RunningRun(ctx context.Context, sessionID string) (Run, bool, error) {
-	rt.mu.Lock()
-	rs, ok := rt.runs[sessionID]
-	rt.mu.Unlock()
-	if ok && (rs.run.Status == RunQueued || rs.run.Status == RunRunning) {
-		return rs.run, true, nil
-	}
-	return rt.store.RunningRun(ctx, sessionID)
 }
 
 // GetSession fetches a session by id (pass-through to the store).

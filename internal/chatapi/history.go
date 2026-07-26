@@ -110,12 +110,10 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// active reports whether a run is genuinely in flight (queued/running). A run
-	// parked in waiting_approval does NOT count: it has no live stream to resume,
-	// so treating it as active would make the client open a resume stream that
-	// never finishes (a blank, stuck assistant bubble). Its content is in the
-	// message store and its interaction is restored via pendingApproval below.
-	_, active, err := h.runtime.RunningRun(r.Context(), threadID)
+	// active reports whether a run is genuinely in flight (queued/running). Runs
+	// are stateless and terminal on completion, so there is no suspended state to
+	// special-case.
+	_, active, err := h.runtime.ActiveRun(r.Context(), threadID)
 	if err != nil {
 		active = false
 	}

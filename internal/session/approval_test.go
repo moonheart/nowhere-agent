@@ -8,7 +8,7 @@ import (
 )
 
 // TestMemStoreApprovalLifecycle covers create → pending lookup → decide, plus
-// the one-pending-per-run invariant and the double-decide error.
+// the one-pending-per-session invariant and the double-decide error.
 func TestMemStoreApprovalLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -28,15 +28,16 @@ func TestMemStoreApprovalLifecycle(t *testing.T) {
 		t.Fatalf("new approval wrong: %+v", a)
 	}
 
-	// Pending lookup by run.
-	got, ok, err := s.PendingApprovalForRun(ctx, run.ID)
+	// Pending lookup by session.
+	got, ok, err := s.PendingApprovalForSession(ctx, sess.ID)
 	if err != nil || !ok || got.ID != a.ID {
-		t.Fatalf("PendingApprovalForRun: ok=%v got=%+v err=%v", ok, got, err)
+		t.Fatalf("PendingApprovalForSession: ok=%v got=%+v err=%v", ok, got, err)
 	}
 
-	// One pending per run.
-	if _, err := s.CreateApproval(ctx, Approval{RunID: run.ID, SessionID: sess.ID, ToolCallID: "tc2", ToolName: "y"}); err == nil {
-		t.Fatal("expected error creating a second pending approval for the same run")
+	// One pending per session (even across runs).
+	run2, _ := s.CreateRun(ctx, sess.ID, 2)
+	if _, err := s.CreateApproval(ctx, Approval{RunID: run2.ID, SessionID: sess.ID, ToolCallID: "tc2", ToolName: "y"}); err == nil {
+		t.Fatal("expected error creating a second pending approval for the same session")
 	}
 
 	// Approve it.
@@ -48,8 +49,8 @@ func TestMemStoreApprovalLifecycle(t *testing.T) {
 		t.Fatalf("decided approval wrong: %+v", dec)
 	}
 
-	// No longer pending for the run; double-decide errors.
-	if _, ok, _ := s.PendingApprovalForRun(ctx, run.ID); ok {
+	// No longer pending for the session; double-decide errors.
+	if _, ok, _ := s.PendingApprovalForSession(ctx, sess.ID); ok {
 		t.Fatal("approval should no longer be pending")
 	}
 	if _, err := s.DecideApproval(ctx, a.ID, true, nil); !errors.Is(err, ErrNoPendingApproval) {
@@ -87,7 +88,7 @@ func TestMemStoreApprovalUnknown(t *testing.T) {
 	if _, err := s.DecideApproval(context.Background(), "nope", true, nil); !errors.Is(err, ErrNoPendingApproval) {
 		t.Fatalf("decide unknown: %v", err)
 	}
-	if _, ok, _ := s.PendingApprovalForRun(context.Background(), "no-run"); ok {
-		t.Fatal("no pending approval expected for unknown run")
+	if _, ok, _ := s.PendingApprovalForSession(context.Background(), "no-session"); ok {
+		t.Fatal("no pending approval expected for unknown session")
 	}
 }

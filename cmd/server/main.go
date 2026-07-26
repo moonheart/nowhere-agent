@@ -351,16 +351,6 @@ func run() error {
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
 		}
-		// Resume loop source (capability-gap O2): rebuild a parked run's loop for
-		// the session (fresh system prompt + this session's tools) so a tool-
-		// approval decision can resume the run even after a process restart.
-		if rg := handler.Registry(); rg != nil {
-			rg.WithLoopSource(func(ctx context.Context, sessionID string) (*agent.Loop, error) {
-				loop := newChatLoop(ctx, baseSystem)
-				bindChatTools(ctx, loop, sessionID)
-				return loop, nil
-			})
-		}
 		// Tool binder: attach session-scoped tools to each run. Runs when the
 		// sandbox (file tools) OR MCP (network tools) is configured; MCP tools need
 		// no sandbox, so they must register even when the sandbox is off.

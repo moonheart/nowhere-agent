@@ -4,8 +4,6 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/google/uuid"
-
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/session"
 )
@@ -30,12 +28,8 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	}
 	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 
-	// Pick the run to resume: the in-flight one (queued/running) if any, else the
-	// latest. A run parked in waiting_approval is NOT resumable here — it has no
-	// live stream (its content is in the message store; its pending interaction is
-	// restored via /history's pendingApproval). RunningRun excludes it, so a
-	// resume request on a parked session falls through to the latest run.
-	run, ok, err := h.runtime.RunningRun(r.Context(), threadID)
+	// Pick the run to resume: the in-flight one if any, else the latest.
+	run, ok, err := h.runtime.ActiveRun(r.Context(), threadID)
 	if err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
@@ -44,18 +38,6 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 		run, ok = h.latestRun(r, threadID)
 		if !ok {
 			http.Error(w, `{"error":"no run to resume"}`, http.StatusNotFound)
-			return
-		}
-		// The latest run is parked in waiting_approval (no in-flight run). There is
-		// no live stream to follow; close cleanly so the client renders history +
-		// the pendingApproval card instead of a stuck bubble.
-		if run.Status == session.RunWaitingApproval {
-			if !writeStreamHeaders(w) {
-				return
-			}
-			emitter := &sseEmitter{w: w, flusher: w.(http.Flusher), msgID: uuid.NewString()}
-			emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
-			emitter.finish()
 			return
 		}
 	}

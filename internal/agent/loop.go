@@ -21,16 +21,11 @@ import (
 // has tripped, so the caller doesn't count it as a fresh failure or a success.
 var errCompressionSkipped = errors.New("compression skipped: circuit breaker tripped")
 
-// ErrAwaitingApproval is returned by Run when a tool call is gated for human
-// approval (capability-gap O2): the loop does NOT execute it and instead
-// suspends the run. The run's worker parks the run (RunWaitingApproval) and
-// resumes it once the user decides. Distinct from a cancel or a failure.
-var ErrAwaitingApproval = errors.New("awaiting tool approval")
-
 // ApprovalReasonPrefix marks a Permission deny-reason as "gated for human
 // approval" rather than a hard deny. The server's permission callback prefixes
 // the reason for calls whose policy verdict is Ask; the loop distinguishes
-// those (suspend + ask the user) from a true deny (feed an error to the model).
+// those (end the run + ask the user) from a true deny (feed an error to the
+// model).
 const ApprovalReasonPrefix = "approval required: "
 
 // IsApprovalReason reports whether a Permission deny-reason is a gate-for-
@@ -39,11 +34,12 @@ func IsApprovalReason(reason string) bool {
 	return strings.HasPrefix(reason, ApprovalReasonPrefix)
 }
 
-// ApprovalRequest describes the single gated tool call that suspended a run.
-// It is the loop's output to the run worker, which persists it (durable
-// interaction) and surfaces it to the client. Kind distinguishes a permission
-// approval (a dangerous call needing a yes/no) from an ask_user question set
-// (the model asking for structured input).
+// ApprovalRequest describes the single gated tool call that ended a run for
+// human input (capability-gap O2). The loop emits it (KindApprovalRequest) and
+// finishes; the run's worker persists it as a durable Approval (thread state)
+// and surfaces it to the client. The run does NOT suspend — a fresh run applies
+// the verdict later. Kind distinguishes a permission approval (a dangerous call
+// needing a yes/no) from an ask_user question set.
 type ApprovalRequest struct {
 	// Kind is "approval" or "ask_user". Empty means approval (the O2 default).
 	Kind       string
@@ -54,25 +50,8 @@ type ApprovalRequest struct {
 
 // AskUserToolName is the built-in tool the model calls to ask the user
 // structured questions (capability O-ask). Like a permission approval, calling
-// it suspends the run until the user answers.
+// it ends the run for human input; the answer arrives via a later run.
 const AskUserToolName = "ask_user"
-
-// ResumedApproval is the human-resolved interaction a resumed run should apply.
-// For a permission approval: Approved=true executes the gated call (the approval
-// is its authorization), false injects a denial. For an ask_user question set:
-// Answer is the user's structured response, fed back as the tool result so the
-// model reads what the user said.
-type ResumedApproval struct {
-	// Kind is "approval" or "ask_user" (empty = approval).
-	Kind       string
-	ToolCallID string
-	ToolName   string
-	Input      map[string]any
-	Approved   bool
-	// Answer carries the ask_user response (e.g. {"answers":{...}}). Unused for
-	// permission approvals.
-	Answer map[string]any
-}
 
 // EventKind classifies loop events persisted by the session runtime.
 type EventKind string
@@ -107,10 +86,10 @@ const (
 	// once, at natural termination. It is persisted and fanned out so the
 	// transport's finish frame can report real token counts instead of zeros.
 	KindUsage EventKind = "usage"
-	// KindApprovalRequest carries the gated tool call that suspended the run
-	// (payload: ApprovalRequest). Live-only content (broker-routed, never
-	// persisted): the run's worker separately persists the durable Approval
-	// record that Resume reads.
+	// KindApprovalRequest carries the gated tool call that ended the run for
+	// human input (payload: ApprovalRequest). Live-only content (broker-routed,
+	// never persisted): the run's worker separately persists the durable Approval
+	// record the decision endpoint reads.
 	KindApprovalRequest EventKind = "approval_request"
 )
 
@@ -136,12 +115,6 @@ type Config struct {
 	// executed — it becomes an is_error tool_result carrying the reason, so the
 	// model can adapt. Nil leaves all calls ungated (pre-permission behaviour).
 	Permission func(toolruntime.Tool) (bool, string)
-
-	// Approval, when non-nil, is the tool call the run is resuming after a human
-	// approved it (capability-gap O2). The loop executes it WITHOUT re-checking
-	// Permission (the approval IS the authorization) and dispatches it ahead of
-	// any further gated calls. Set by the run worker on Resume.
-	Approval *ResumedApproval
 
 	// ContextWindow is the model's context window in tokens. Combined with
 	// MaxTokens (the reserved reply space) it bounds the working view: the loop
@@ -171,9 +144,9 @@ type Loop struct {
 	// compressFailures counts consecutive compression failures in the current
 	// run, for the circuit breaker (design D6).
 	compressFailures int
-	// PendingApproval, when set after Run returns ErrAwaitingApproval, is the
-	// gated tool call that suspended the run. The run worker reads it to persist
-	// the durable Approval.
+	// PendingApproval, when set after Run returns, is the gated tool call that
+	// ended the run for human input. The run worker reads it to persist the
+	// durable Approval.
 	PendingApproval *ApprovalRequest
 }
 
@@ -240,13 +213,11 @@ func (l *Loop) WithTools(reg *toolruntime.Registry) *Loop {
 	return l
 }
 
-// WithApproval marks the loop as resuming a parked run after a human tool-
-// approval decision (capability-gap O2). The next Run resolves the decided call
-// first (execute on approve / inject a denial on reject), then continues the
-// think→tool cycle. Returns the loop for chaining.
-func (l *Loop) WithApproval(ra ResumedApproval) *Loop {
-	l.config.Approval = &ra
-	return l
+// Tools returns the loop's tool registry, so a caller that needs to execute a
+// tool directly (e.g. an approved HITL call, executed by the decision path
+// rather than the loop) can share the same session-bound registry.
+func (l *Loop) Tools() *toolruntime.Registry {
+	return l.tools
 }
 
 // toolDefs converts registered tools to provider tool definitions.
@@ -278,21 +249,6 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	// total accumulates token usage across the run's provider calls (one per
 	// turn); it is reported once at termination via KindUsage.
 	var total provider.Usage
-
-	// A resumed run (capability-gap O2) starts by resolving the human-approved
-	// tool call: execute it (Approved) or feed the denial back (rejected), then
-	// continue the think→tool cycle. This runs ONCE, before the first provider
-	// call of the resumed run.
-	if ra := l.config.Approval; ra != nil {
-		res := l.resolveApproval(ctx, *ra, emit)
-		resultMsg := toolResultMessage(
-			[]toolruntime.Call{{ID: ra.ToolCallID, Name: ra.ToolName, Args: ra.Input}},
-			[]toolruntime.Result{res},
-		)
-		produced = append(produced, resultMsg)
-		_ = emit.Emit(ctx, KindMessage, resultMsg)
-		l.config.Approval = nil
-	}
 
 	for iter := 0; iter < l.config.MaxIterations; iter++ {
 		// Honour cancellation between iterations (e.g. after a tool batch).
@@ -380,12 +336,17 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 
 		// Human-interaction gate (capability-gap O2 + ask_user): if a call needs a
 		// human answer — a permission approval OR an ask_user question set — do NOT
-		// dispatch the batch. Emit the request and suspend the run; the worker
-		// parks it (RunWaitingApproval) and resumes on the user's response.
+		// dispatch it. Emit the request and end the run cleanly: the assistant
+		// message (with the gated tool_use) is already produced/persisted, the run
+		// worker records the durable Approval, and a LATER run applies the verdict.
+		// The run is stateless — it ends here; there is no suspend/resume.
 		if gate := l.interactionGate(toolCalls); gate != nil {
 			l.PendingApproval = gate
 			_ = emit.Emit(ctx, KindApprovalRequest, *gate)
-			return produced, ErrAwaitingApproval
+			slog.Info("agent: run ended awaiting human input", "tool", gate.ToolName, "kind", gate.Kind)
+			emitUsage(ctx, emit, total)
+			_ = emit.Emit(ctx, KindDone, nil)
+			return produced, nil
 		}
 
 		// Dispatch tool calls (concurrently) and append results.
@@ -561,39 +522,6 @@ func (l *Loop) interactionGate(calls []toolruntime.Call) *ApprovalRequest {
 		}
 	}
 	return nil
-}
-
-// resolveApproval produces the result for a human-resolved interaction on
-// resume. ask_user: the user's structured answer becomes the tool result (or a
-// "skipped" note when they cancelled). Permission approval: an approved call
-// executes (the approval is its authorization, so Permission is not re-checked);
-// a rejected one becomes an is_error result so the model learns it was denied.
-// The result is streamed like a normal tool result.
-func (l *Loop) resolveApproval(ctx context.Context, ra ResumedApproval, emit Emitter) toolruntime.Result {
-	var res toolruntime.Result
-	switch {
-	case ra.Kind == "ask_user" || ra.ToolName == AskUserToolName:
-		if !ra.Approved {
-			// Cancelled: the user skipped the questions, but the run continues so
-			// the model can decide how to proceed without the input.
-			res = toolruntime.Result{Content: "the user skipped these questions (no answer given)"}
-		} else if data, err := json.Marshal(ra.Answer); err == nil {
-			res = toolruntime.Result{Content: string(data)}
-		} else {
-			res = toolruntime.Result{Content: "the user answered (unparseable response)", IsError: true}
-		}
-	case !ra.Approved:
-		res = toolruntime.Result{Content: "the user denied permission to run " + ra.ToolName, IsError: true}
-	default:
-		res = l.tools.CallAll(ctx, []toolruntime.Call{{ID: ra.ToolCallID, Name: ra.ToolName, Args: ra.Input}})[0]
-	}
-	_ = emit.Emit(ctx, KindToolResult, map[string]any{
-		"tool_use_id": ra.ToolCallID,
-		"name":        ra.ToolName,
-		"content":     res.Content,
-		"is_error":    res.IsError,
-	})
-	return res
 }
 
 // dispatch runs tool calls concurrently via the registry. A call whose

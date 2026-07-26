@@ -10,7 +10,7 @@ import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
-import { reportApproval, resetApprovals, registerDecisionFollower, isFollowingDecision, type ToolApproval } from "@/lib/approval";
+import { reportApproval, resetApprovals, registerDecisionFollower, type ToolApproval } from "@/lib/approval";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -59,13 +59,18 @@ function Chat({
     onError: (e) => console.error("chat error", e),
   });
 
-  // A decided approval/ask_user returns the resumed run's SSE stream (via the
-  // chat endpoint). Follow it on this runtime so the deciding client watches the
-  // continuation live — appended after the current head (the user's question).
+  // A decided approval/ask_user starts a FRESH run on the backend (run-stateless
+  // model) and returns its SSE stream. Follow it here so the deciding client
+  // watches the continuation live. parentId = the current last message (the
+  // assistant turn that ended on the gated call): the new assistant message
+  // extends the SAME conversation branch, so history (the user's question + the
+  // ask_user card) is preserved — unlike parentId:null, which starts a new root.
   useEffect(() => {
     registerDecisionFollower((stream) => {
+      const msgs = runtime.thread.getState().messages;
+      const parentId = msgs.length > 0 ? msgs[msgs.length - 1].id : null;
       void runtime.thread.resumeRun({
-        parentId: null,
+        parentId,
         stream: () => followBody(stream),
       });
     });
@@ -86,9 +91,6 @@ function Chat({
       const threadId = getSessionId();
       if (!threadId) return;
       if (runtime.thread.getState().isRunning) return;
-      // This client is already following a verdict's resumed run; a second
-      // resumeRun would abort that stream and its onCancel would kill the worker.
-      if (isFollowingDecision()) return;
       let active = false;
       try {
         active = await hasActiveRun();

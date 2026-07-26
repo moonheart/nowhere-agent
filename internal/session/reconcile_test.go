@@ -48,23 +48,3 @@ func TestRecoverStrandedRuns(t *testing.T) {
 		t.Errorf("done run status = %v want left untouched (done)", byID[done.ID])
 	}
 }
-
-// TestRecoverStrandedRunsKeepsWaitingApproval pins O2: a run parked in
-// waiting_approval must survive startup reconciliation (it is resumable, not
-// stranded), while a run left running is still failed.
-func TestRecoverStrandedRunsKeepsWaitingApproval(t *testing.T) {
-	store := NewMemStore()
-	rt := NewRuntime(store)
-	sess, _ := rt.CreateSession(context.Background(), "u", "t")
-
-	parked, _ := store.CreateRun(context.Background(), sess.ID, 1)
-	_ = store.UpdateRunStatus(context.Background(), parked.ID, RunWaitingApproval)
-
-	if _, err := rt.RecoverStrandedRuns(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	runs, _ := store.RunsForSession(context.Background(), sess.ID)
-	if runs[0].Status != RunWaitingApproval {
-		t.Errorf("parked run status = %v want waiting_approval (resumable)", runs[0].Status)
-	}
-}
