@@ -115,11 +115,15 @@ func (m *MemStore) DecideApproval(_ context.Context, id string, approve bool, an
 // included so every read returns the full record).
 const approvalCols = `id, run_id, session_id, tool_call_id, tool_name, tool_input, kind, status, answer, created_at, decided_at`
 
-// scanApproval reads one approvals row.
+// scanApproval reads one approvals row. answer is nullable in the DB, so it
+// scans through a []byte (nil-safe) rather than json.RawMessage, which the
+// driver cannot store a NULL into.
 func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	var a Approval
+	var answer []byte
 	err := row.Scan(&a.ID, &a.RunID, &a.SessionID, &a.ToolCallID, &a.ToolName,
-		&a.ToolInput, &a.Kind, &a.Status, &a.Answer, &a.CreatedAt, &a.DecidedAt)
+		&a.ToolInput, &a.Kind, &a.Status, &answer, &a.CreatedAt, &a.DecidedAt)
+	a.Answer = answer
 	return a, err
 }
 
