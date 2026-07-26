@@ -135,8 +135,8 @@
 
 > 本组与架构评审 §3"能力接线矩阵"高度重叠 —— 那里从"接线完备性"记录,这里从"功能后果 + 实现深度"补充。多租户 scope(user/team/system)**已稳固且有测试**(`identity/service.go:79-90`,`memory/pgport.go` scope 过滤),不在缺口内。
 
-**K1 ◐⭐ 记忆写回 / dreaming 已接线(2 阶段,增量)— 对话进行中持续沉淀记忆**
-在线路径按设计只读;唯一的写路径 dreaming worker 经 scheduler 周期运行(`DREAMING_ENABLED=true`)。**增量水位模型**:每条会话记 `sessions.dreamed_seq`(messages.id 水位,migration `000009`;取代初版 `000008` 的 ended+布尔标记),worker 只抽取水位**之后**的新消息(`MessagesAfter`),处理后推进水位。因此**活跃会话也能边聊边学、且永远可续聊** —— 学习不再要求会话结束(`ended` 回归"软删除"本义)。生产 `EpisodeSource`(`dreaming/source.go`,PG 走 SQL 自连接 eligibility,内存 store 回退逐会话过滤)、provider 排流的 `LLM`(`llm.go`)均落地并单测。**仍是 2 阶段**:extract→reorganize 只写 `KindFact`;compress→reflect 未实现(`KindInsight`/`KindSummary` 不产出)—— 独立增量跟进。
+**K1 ◐⭐ 记忆写回 / dreaming 已接线(4 阶段,增量)— 对话进行中持续沉淀记忆**
+在线路径按设计只读;唯一的写路径 dreaming worker 经 scheduler 周期运行(`DREAMING_ENABLED=true`)。**增量水位模型**:每条会话记 `sessions.dreamed_seq`(messages.id 水位,migration `000009`;取代初版 `000008` 的 ended+布尔标记),worker 只抽取水位**之后**的新消息(`MessagesAfter`),处理后推进水位。因此**活跃会话也能边聊边学、且永远可续聊** —— 学习不再要求会话结束(`ended` 回归"软删除"本义)。生产 `EpisodeSource`(`dreaming/source.go`,PG 走 SQL 自连接 eligibility,内存 store 回退逐会话过滤)、provider 排流的 `LLM`(`llm.go`)均落地并单测。**全 4 阶段已通**:extract→`KindFact`、compress→`KindSummary`(每批小结)、reorganize(矛盾去重)、reflect→`KindInsight`(跨记忆模式 + `deprecate:` 行清理增量重复——正是增量下同一事实反复入库的对策)。reflect/compress 可用 `DREAMING_REFLECT=false` 关掉以省 token(回到 2 阶段 extract→reorganize)。
 
 **K2 ◐⭐ 调度器已启动(驱动 dreaming)— 周期性后台工作打通**
 通用 `Scheduler`(命名 interval job、1s tick、启动 catch-up,`scheduler/scheduler.go`)现已在 `main.go` 实例化并 `go Start(ctx)`,随 root ctx 停,以 `DREAMING_INTERVAL` 周期驱动 dreaming worker。**config 开关**:`DREAMING_ENABLED`(默认关,因花钱且需 provider)/`DREAMING_INTERVAL`/`DREAMING_MAX_TOKENS`。附带:调度器"重启 catch-up"仍只靠内存 `lastRun` map,但 dreaming 幂等靠 `dreamed_at`(migration `000008`),重启不会重复处理;沙箱延迟销毁(`Manager.Sweep`)、配额滚动作为后续 job 仍是一行 wrapper 可挂。
@@ -163,7 +163,7 @@
 | 工具调用人工批准 | ◑ 仅同步拒绝,无挂起-恢复 | O2 |
 | token 用量/成本上报 | ◑ 丢弃 | L2 |
 | 结构化输出 | ○ 无 | L3 |
-| 从记忆学习 | ◐ dreaming 已接(2 阶段+增量);compress/reflect 未做 | K1 |
+| 从记忆学习 | ◐ dreaming 已接(4 阶段+增量) | K1 |
 
 > **叙事**:上表左列基本定义了"一个能自主完成开发任务的 agent"。本仓在**执行面**(T)和**学习/主动性**(K)两块差得最多,而这两块又恰好大半是"接线而非造轮子"。
 
@@ -187,11 +187,11 @@
 
 ### P2 — 激活"死代码"差异化能力(接线为主)
 
-> **状态**:K2 / K1(2 阶段)/ K3a 已落地(分支 `feat/scheduler-dreaming`)。K3b(脚本执行)仍卡在 C17;K1 的 compress/reflect 与 K4/L6 未做。
+> **状态**:K2 / K1(4 阶段)/ K3a 已落地(分支 `feat/scheduler-dreaming`)。K3b(脚本执行)仍卡在 C17;K4/L6 未做。
 - **[K2]** 启动 `Scheduler`(加 config 开关)→ 作为下面两项的驱动。
   ✅ 已在 `main.go` 实例化并 `go Start(ctx)`(随 root ctx 停),驱动 dreaming job;开关 `DREAMING_ENABLED`(默认关)。调度器 `lastRun` 仍内存态,但 dreaming 幂等靠 `dreamed_at`,故可接受。
 - **[K1]** 接线 dreaming(补生产 `EpisodeSource` + `dreamed_at` 列 + compress/reflect 阶段)让记忆真正学习。
-  ✅ **2 阶段 + 增量水位已接线**:migration `000009` 把标记从 `dreamed_at`(布尔,`000008`)升级为 `dreamed_seq`(messages.id 水位);`session.Store` 用 `ListUndreamedSessions`/`DreamedSeq`/`MarkDreamedSeq` + `MessageStore.MessagesAfter` 按水位增量抽取;`dreaming.NewStoreSource`/`NewProviderLLM` 为生产实现;scheduler 周期跑 worker 写 `KindFact` 到 `memory.PGPort`。**活跃会话即可被学习、可续聊**。**compress/reflect 仍缺**(`KindSummary`/`KindInsight` 不产出)—— 独立增量。
+  ✅ **4 阶段 + 增量水位已接线**:migration `000009` 把标记从 `dreamed_at`(布尔,`000008`)升级为 `dreamed_seq`(messages.id 水位);`session.Store` 用 `ListUndreamedSessions`/`DreamedSeq`/`MarkDreamedSeq` + `MessageStore.MessagesAfter` 按水位增量抽取;`dreaming.NewStoreSource`/`NewProviderLLM` 为生产实现;scheduler 周期跑 worker 写记忆到 `memory.PGPort`。**活跃会话即可被学习、可续聊**。**compress/reflect 已补**:compress 写 `KindSummary`(每批小结)、reflect 写 `KindInsight` 并经 `deprecate:` 行清理增量重复;`DREAMING_REFLECT=false` 可关(回到 extract→reorganize)。
 - **[K3]** 给 skill store 加磁盘/DB 加载器 + 注册技能工具(前置:先解决 C17 的 exec 安全)。
   ✅ **K3a(只读)已接线**:`skill.LoadDir` 从 `SKILLS_DIR` seed 系统作用域技能(跳过脚本)→ L0 索引(`context.go:48`)点亮;只读 `load_skill` 工具(`skill/loadtool.go`,`RiskReadOnly`,不执行)已注册进 tool binder。**K3b(脚本执行 ScriptTool)仍卡在 C17**(模型可控 args 未转义进 `sh -c`,local 后端 = 宿主机 RCE),loader 故意不加载脚本。
 - **[K4]** 引入 embedder 点亮向量召回;**[L6]** 接线 routing 做多模型/故障转移。
@@ -230,7 +230,7 @@
 | O4 | ○⭐ | 编排 | 迭代触顶=静默失败,无终帧 | `agent/loop.go:279` |
 | O5 | ◑ | 编排 | `RunQueued` 不是真队列 | `runtime.go:120,150` |
 | O6 | ○ | 编排 | 子代理 fire-and-forget,无协作 | `subagent/tool.go:188`、`collapse.go:19` |
-| K1 | ◐⭐ | 记忆 | dreaming 已接(2 阶段+增量水位,写 KindFact);compress/reflect 未做 | `main.go`(scheduler 驱动)、`dreaming/source.go`、`llm.go` |
+| K1 | ◐⭐ | 记忆 | dreaming 已接(4 阶段+增量水位,写 KindFact/KindSummary/KindInsight) | `main.go`(scheduler 驱动)、`dreaming/source.go`、`llm.go`、`worker.go` |
 | K2 | ◐⭐ | 主动性 | 调度器已 Start(驱动 dreaming;开关 DREAMING_ENABLED) | `main.go`、`scheduler/scheduler.go` |
 | K3 | ◐⭐ | 技能 | K3a 已接(seed + L0 + 只读 load_skill);K3b 脚本执行卡 C17 | `skill/loader.go`、`loadtool.go`、`main.go` |
 | K4 | ◐ | 记忆 | 无 embedder,向量召回退化为关键词 | `memory/pgport.go:53,86` |

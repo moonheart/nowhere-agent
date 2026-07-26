@@ -67,6 +67,20 @@ func TestDreamingDefaults(t *testing.T) {
 	if cfg.Dreaming.MaxTokens != 100000 {
 		t.Errorf("got dreaming max tokens %d, want 100000", cfg.Dreaming.MaxTokens)
 	}
+	if !cfg.Dreaming.Reflect {
+		t.Error("dreaming reflect should default to true (compress+reflect stages on)")
+	}
+}
+
+func TestDreamingReflectFromEnv(t *testing.T) {
+	t.Setenv("DREAMING_REFLECT", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Dreaming.Reflect {
+		t.Error("DREAMING_REFLECT=false should disable the compress+reflect stages")
+	}
 }
 
 func TestDreamingFromEnv(t *testing.T) {

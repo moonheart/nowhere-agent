@@ -69,6 +69,10 @@ type Dreaming struct {
 	Enabled   bool          `envconfig:"DREAMING_ENABLED" default:"false"`
 	Interval  time.Duration `envconfig:"DREAMING_INTERVAL" default:"1h"`
 	MaxTokens int           `envconfig:"DREAMING_MAX_TOKENS" default:"100000"`
+	// Reflect enables the compress + reflect stages (KindSummary/KindInsight),
+	// which each cost extra LLM calls per session batch. On by default; set
+	// DREAMING_REFLECT=false to run the cheaper extract→reorganize pipeline only.
+	Reflect bool `envconfig:"DREAMING_REFLECT" default:"true"`
 }
 
 // Skills configures the skill runtime (capability-gap K3a). Dir points at a
