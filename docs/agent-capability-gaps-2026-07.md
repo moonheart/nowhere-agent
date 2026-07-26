@@ -46,7 +46,7 @@
 
 ### T. 工具执行面(最影响"能不能真干活")⭐
 
-> **状态更新**:T1–T5 已在分支 `feat/exec-surface-tools` 落地(`edit_file` / `grep` / `glob` / `run_command`,后者跨平台走统一 POSIX/bash 契约,Windows 用 Git Bash),T2 随 `run_command` 自然可用。T6/T7/T8 仍未做。
+> **状态更新**:T1–T5 已在分支 `feat/exec-surface-tools` 落地(`edit_file` / `grep` / `glob` / `run_command`,后者跨平台走统一 POSIX/bash 契约,Windows 用 Git Bash),T2 随 `run_command` 自然可用。**T8 已在分支 `feat/output-pagination-spill` 落地**(`read_file` 加字节 `offset/limit` 分页;`run_command` 超限输出把完整内容溢出到工作区 `.nowhere/tool-results/`、经分页 `read_file` 回取)。T6/T7 仍未做。
 
 **T1 ◐⭐ 无"执行命令(shell)"工具 —— 但后端已实现,只差包一层**
 模型跑不了 `git`、编译器、包管理器、任何二进制。`sandbox.Port` 早已定义并实现了 `Exec`:Docker 走 `ContainerExecCreate/Attach`(`sandbox/docker.go:134-167`)、local 走 `exec.CommandContext`(`sandbox/local.go:137-165`)。**唯一的问题是没有任何注册的工具去调它** —— 全树唯一调用方是 `skill.ScriptTool`,而它只在测试里被构造。这是整个报告里 ROI 最高的一项:一个 `run_command` 工具就能把 agent 从"只读"变"能动手"。(接线前须先处理架构评审 **C15**(容器资源限制/降权,已修)与 **C17**(local 后端宿主机 RCE,未修)—— 即 `run_command` 应只允许走加固后的容器后端。)
@@ -69,8 +69,8 @@
 **T7 ○ 无文件系统变更原语(move/copy/delete/mkdir)**
 `Port` 层根本没有 rename/remove/mkdir 动词,也没有工具暴露。`read`+`write`+`list` 三件套删不掉、挪不动文件。做重构/清理类任务直接卡死。
 
-**T8 ○ 大输出无分页 / 截断即永久丢失**
-唯一的大小闸是持久化时 `MaxToolResultChars = 20_000` 硬截断(`contextmgmt/truncate.go:14`),且**剩余部分不落盘、永久丢弃**(注释 `truncate.go:11-13`:"full payload is not retained … deferred")。工具无 `offset/limit/max_bytes` 参数,`read_file` 整文件 slurp(`files.go:71`)。读一个大文件后无法翻页、无法回取被截断的尾部。
+**T8 ✅ 大输出无分页 / 截断即永久丢失 —— 已解决(分支 `feat/output-pagination-spill`)**
+~~唯一的大小闸是持久化时 `MaxToolResultChars = 20_000` 硬截断(`contextmgmt/truncate.go:14`),且**剩余部分不落盘、永久丢弃**;工具无 `offset/limit/max_bytes`,`read_file` 整文件 slurp。~~ 现:`read_file` 加字节 `offset/limit` 分页(默认&上限一页 20k,续读标记给出下一 `offset`,`io.LimitReader` 免大文件 OOM);`run_command` 超限输出经 `capAndSpill`(`builtin/spill.go`)把**完整**内容按内容 hash 落盘到 `.nowhere/tool-results/<hash>.txt`,只回 head + 指回 `read_file(path,offset=)` 的标记,分页回取;顺带补齐 docker `WriteFile` 建父目录契约,grep/glob 隐藏该脚手架命名空间。持久化闸退化为**极少触发的兜底**。
 
 > **T 组小结**:这一层是"agent 能真正动手"和"只能读+描述"的分水岭,且 **T1 大半是接线、T3/T4 是补两个标准原语**,投入产出比最高。
 
@@ -179,7 +179,7 @@
 
 ### P1 — 修掉"静默错误"与观测盲区
 
-> **状态**:L1 / O4 / L2 已落地(分支 `fix/loop-observability`);T8 待做。
+> **状态**:L1 / O4 / L2 已落地(分支 `fix/loop-observability`);T8 已落地(分支 `feat/output-pagination-spill`)。
 - **[L1]** 把 stop/finish reason 建进中立 `Event`,loop 感知 `max_tokens` 截断(别当正常结束)。
 - **[O4]** 迭代触顶时优雅收尾:发 `KindError`/合成最终答复 + 终帧,别静默 `failed`。
 - **[L2 / D22]** loop 记录 usage、`finish()` 上报真实 token;OpenAI 请求带 `include_usage`。
@@ -216,7 +216,7 @@
 | T5 | ○ | 工具 | 无 glob/递归 find/目录树 | `builtin/files.go:120`、`docker.go:218` |
 | T6 | ○ | 工具 | 无抓取 URL/HTTP/浏览器(仅搜索) | `mcp/tool.go`、`sandbox/port.go:13` |
 | T7 | ○ | 工具 | 无 move/copy/delete/mkdir | `sandbox/port.go` |
-| T8 | ○ | 工具 | 大输出无分页,截断即永久丢失 | `contextmgmt/truncate.go:11` |
+| T8 | ✅ | 工具 | read_file 分页 + run_command 溢出落盘可回取 | `builtin/files.go`、`builtin/spill.go` |
 | L1 | ○⭐ | 模型 | stop/finish 未建模,截断当正常结束 | `provider/adapter.go:19`、`agent/loop.go:252` |
 | L2 | ◑⭐ | 模型 | token 用量被丢弃(=D22) | `agent/loop.go:347` |
 | L3 | ✅ | 模型 | 结构化输出已接(强制 tool_call; dreaming 首个消费方) | `provider/types.go`、`provider/{anthropic,openai}/request.go`、`dreaming/llm.go` |

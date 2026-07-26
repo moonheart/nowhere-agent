@@ -129,6 +129,30 @@ func TestGlobMatches(t *testing.T) {
 	}
 }
 
+// TestSearchHidesScratchDir pins T8: spilled tool-result files under the reserved
+// scratch namespace must not surface as grep or glob hits (they stay readable
+// with read_file, just hidden from search).
+func TestSearchHidesScratchDir(t *testing.T) {
+	sb, h := setupSearch(t, map[string]string{
+		"real.txt":                        "Foo\n",
+		".nowhere/tool-results/spill.txt": "Foo\n",
+	})
+	g, _ := (&grepTool{sb: sb, h: h}).Call(context.Background(), map[string]any{"pattern": "Foo"})
+	if strings.Contains(g.Content, ".nowhere") {
+		t.Errorf("grep surfaced a scratch file: %q", g.Content)
+	}
+	if !strings.Contains(g.Content, "real.txt") {
+		t.Errorf("grep dropped the real match: %q", g.Content)
+	}
+	gl, _ := (&globTool{sb: sb, h: h}).Call(context.Background(), map[string]any{"pattern": "**/*.txt"})
+	if strings.Contains(gl.Content, ".nowhere") {
+		t.Errorf("glob surfaced a scratch file: %q", gl.Content)
+	}
+	if !strings.Contains(gl.Content, "real.txt") {
+		t.Errorf("glob dropped the real file: %q", gl.Content)
+	}
+}
+
 func TestSearchToolsUnsupportedBackend(t *testing.T) {
 	// noWalkPort embeds the Port interface, so it inherits Create/ReadFile/... but
 	// NOT Walk — exercising the tools' graceful "not supported" path.

@@ -9,8 +9,11 @@ import (
 // MaxToolResultChars bounds a single persisted tool_result block's text.
 // Oversized results are truncated before persistence (persist-raw-messages D6)
 // so a huge file read or command output cannot blow up a messages.content
-// JSONB row. The full payload is not retained in this change; spilling it to
-// durable storage is deferred to the workspace capability.
+// JSONB row. This is now a last-resort backstop: the tool layer keeps its own
+// results under this cap — read_file pages large files and run_command spills
+// oversized output to the workspace, retrievable with read_file (builtin's
+// capAndSpill, capability-gap T8) — so a tail is truncated here only for a tool
+// that does neither.
 const MaxToolResultChars = 20_000
 
 // TruncationMarker is appended to truncated tool_result content so the model

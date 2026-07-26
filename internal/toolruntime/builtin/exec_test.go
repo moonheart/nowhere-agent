@@ -92,13 +92,66 @@ func TestFormatExec(t *testing.T) {
 	}
 }
 
-func TestFormatExecTruncates(t *testing.T) {
-	big := strings.Repeat("x", runCommandMaxOutput+100)
-	got := formatExec(sandbox.ExecResult{Stdout: big})
-	if !strings.Contains(got, "truncated at") {
-		t.Error("expected a truncation note")
+func TestFormatExecReturnsFullOutput(t *testing.T) {
+	// formatExec no longer caps — capAndSpill (in Call) bounds the result now, so
+	// the formatter returns the full output verbatim.
+	big := strings.Repeat("x", spillCap+100)
+	if got := formatExec(sandbox.ExecResult{Stdout: big}); got != big {
+		t.Errorf("formatExec should return the full output uncapped; len=%d want %d", len(got), len(big))
 	}
-	if len(got) > runCommandMaxOutput+80 {
-		t.Errorf("output not capped: len=%d", len(got))
+}
+
+// bigExecPort embeds a real MemPort (for ShellArgv + workspace storage) but
+// overrides Exec to return a canned oversized result, so run_command's spill
+// path can be exercised end to end.
+type bigExecPort struct {
+	*sandbox.MemPort
+	out string
+}
+
+func (p *bigExecPort) Exec(_ context.Context, _ sandbox.Handle, _ []string) (sandbox.ExecResult, error) {
+	return sandbox.ExecResult{Stdout: p.out, ExitCode: 0}, nil
+}
+
+// TestRunCommandSpillsAndRetrievesOversizedOutput pins T8 end to end: an
+// oversized command output is truncated with a marker, its full payload spilled
+// to the workspace, and the exact continuation the marker points to is
+// retrievable through read_file.
+func TestRunCommandSpillsAndRetrievesOversizedOutput(t *testing.T) {
+	ctx := context.Background()
+	sb := sandbox.NewMemPort()
+	h, _ := sb.Create(ctx, "s", sandbox.Options{})
+	big := strings.Repeat("x", spillKeepHead+5000)
+	bp := &bigExecPort{MemPort: sb, out: big}
+
+	res, err := NewRunCommand(bp, h).Call(ctx, map[string]any{"command": "emit"})
+	if err != nil || res.IsError {
+		t.Fatalf("unexpected: %+v err=%v", res, err)
+	}
+	if !strings.Contains(res.Content, spillDir+"/") || !strings.Contains(res.Content, "read_file") {
+		t.Errorf("no spill marker in result tail: %q", res.Content[spillKeepHead:])
+	}
+	if len(res.Content) >= len(big) {
+		t.Errorf("result not shrunk below the full output: len=%d", len(res.Content))
+	}
+
+	// Locate the spilled file and page its tail back through read_file — the exact
+	// continuation the marker instructs the model to fetch.
+	var found string
+	files, _ := sb.Walk(ctx, h, ".")
+	for _, f := range files {
+		if strings.HasPrefix(f, spillDir+"/") {
+			found = f
+		}
+	}
+	if found == "" {
+		t.Fatal("run_command did not spill the full output")
+	}
+	if stored := readFile(t, sb, h, found); stored != big {
+		t.Errorf("spill file len=%d, want the full %d bytes", len(stored), len(big))
+	}
+	rd, _ := (&fileReadTool{sb: sb, h: h}).Call(ctx, map[string]any{"path": found, "offset": spillKeepHead})
+	if rd.Content != big[spillKeepHead:] {
+		t.Errorf("read_file continuation len=%d, want %d", len(rd.Content), len(big)-spillKeepHead)
 	}
 }

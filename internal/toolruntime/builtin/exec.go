@@ -10,8 +10,6 @@ import (
 	"nowhere-agent/internal/toolruntime"
 )
 
-const runCommandMaxOutput = 20_000
-
 // NewRunCommand returns the run_command tool bound to a session sandbox. It runs
 // a POSIX/bash script inside the sandbox via the Port's Sheller + Exec, capturing
 // stdout, stderr, and the exit code. The command contract is uniform bash across
@@ -64,13 +62,16 @@ func (t *runCommandTool) Call(ctx context.Context, args map[string]any) (toolrun
 	if err != nil {
 		return toolruntime.Result{Content: fmt.Sprintf("run_command failed: %v", err), IsError: true}, nil
 	}
-	return toolruntime.Result{Content: formatExec(res)}, nil
+	// Oversized output is spilled to the workspace and paged back with read_file
+	// rather than dropped on the floor (capability-gap T8).
+	out := capAndSpill(ctx, t.sb, t.h, "run_command", formatExec(res))
+	return toolruntime.Result{Content: out}, nil
 }
 
 // formatExec renders an ExecResult for the model: stdout, then stderr (labelled)
 // if any, then the exit code when non-zero. A non-zero exit is normal output —
-// the model wants to see the failure — not an is_error. Output is capped so a
-// runaway command cannot blow the context window.
+// the model wants to see the failure — not an is_error. The full output is
+// returned; capAndSpill (in Call) bounds it for the context window.
 func formatExec(res sandbox.ExecResult) string {
 	var b strings.Builder
 	if stdout := strings.TrimRight(res.Stdout, "\n"); stdout != "" {
@@ -92,9 +93,6 @@ func formatExec(res sandbox.ExecResult) string {
 	out := b.String()
 	if out == "" {
 		return "(no output)"
-	}
-	if len(out) > runCommandMaxOutput {
-		out = out[:runCommandMaxOutput] + fmt.Sprintf("\n… [output truncated at %d bytes]", runCommandMaxOutput)
 	}
 	return out
 }

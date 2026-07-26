@@ -218,6 +218,16 @@ func (p *DockerPort) WriteFile(ctx context.Context, h Handle, dst string, r io.R
 		return err
 	}
 	dir := path.Dir(dst)
+	// CopyToContainer requires the destination directory to already exist, unlike
+	// the local backend's WriteFile (which MkdirAll's it). Create it first so
+	// WriteFile honours the same "creates parent directories" contract on every
+	// backend — e.g. the tool-result spill writes nested .nowhere/tool-results/
+	// paths that would otherwise fail here.
+	if res, err := p.Exec(ctx, h, []string{"mkdir", "-p", dir}); err != nil {
+		return fmt.Errorf("prepare parent dir: %w", err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("prepare parent dir %q: %s", dir, strings.TrimSpace(res.Stderr))
+	}
 	if err := p.cli.CopyToContainer(ctx, h.ID, dir, &buf, container.CopyToContainerOptions{}); err != nil {
 		return fmt.Errorf("copy to container: %w", err)
 	}

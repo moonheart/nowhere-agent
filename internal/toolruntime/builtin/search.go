@@ -93,6 +93,7 @@ func (t *grepTool) Call(ctx context.Context, args map[string]any) (toolruntime.R
 	if err != nil {
 		return toolruntime.Result{Content: fmt.Sprintf("grep failed: %v", err), IsError: true}, nil
 	}
+	files = dropScratch(files)
 
 	var lines []string
 	truncated := false
@@ -199,6 +200,7 @@ func (t *globTool) Call(ctx context.Context, args map[string]any) (toolruntime.R
 	if err != nil {
 		return toolruntime.Result{Content: fmt.Sprintf("glob failed: %v", err), IsError: true}, nil
 	}
+	files = dropScratch(files)
 	var out []string
 	for _, f := range files {
 		if re.MatchString(f) {
@@ -219,6 +221,21 @@ func optString(args map[string]any, key, def string) string {
 		}
 	}
 	return def
+}
+
+// dropScratch removes paths under the reserved scratch namespace (spillDir) from
+// a walk result, so spilled tool-result files are not surfaced as grep/glob
+// hits. The files stay readable with read_file — this only hides them from
+// search, where they would otherwise be noise.
+func dropScratch(files []string) []string {
+	var out []string
+	for _, f := range files {
+		if f == spillDir || strings.HasPrefix(f, spillDir+"/") {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // globToRegexp compiles a path glob into an anchored RE2 regexp. "*" matches
