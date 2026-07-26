@@ -88,8 +88,8 @@
 **L2 ◑⭐ token 用量被丢弃 —— 零成本/用量可观测**(= 架构评审 **D22**)
 适配器其实解析了 usage(Anthropic `message_delta`,`anthropic/stream.go:139-146`),但 loop 在 `EventMessageStop` 处**直接扔掉**,只留一句注释 `// usage could be recorded here`(`agent/loop.go:347-348`);`handler` 的 `finish()` 硬编码 `usage:{0,0}`。OpenAI 更是从没在请求里带 `stream_options:{include_usage:true}`(`openai/request.go:14-20`),流式下 usage 永远是 nil。**整个系统没有成本计量、没有 token 可观测**,`provider.Usage` 结构形同虚设。
 
-**L3 ○ 无结构化输出 / JSON mode / response_format**
-中立 `Request` 没有该字段,两个适配器的请求体都不带 `response_format`/`json_schema`(grep 全仓无)。需要模型稳定吐 JSON 的场景(工具编排、数据抽取)只能靠 prompt 硬凑,不可靠。
+**L3 ✅ 结构化输出已落地(强制 tool_call 形式)**
+中立 `Request` 新增 `JSONResponse *JSONResponseSpec`(`provider/types.go`);两个适配器把合成的"响应工具/函数"追加进 `tools` 并用 `tool_choice` 强制调用(Anthropic `type:"tool"` / OpenAI `type:"function"`),模型必须吐一个符合 schema 的 JSON 对象。实现为**强制 tool_call** 而非各家的 `response_format`/`json_schema` 原生字段 —— 好处是两适配器走同一条已验证的 tool 路径,且答案作为 tool_use 的 JSON input 到达,**结构上把推理/旁白排除在载荷之外**。首个消费方是 dreaming 的 extract/compress/reflect(`ProviderLLM.CompleteJSON` + 类型化 schema)—— 根治了"reasoning 模型把思维链当正文、被逐行解析成 memory"的真 bug(曾在一个会话灌入 77 条、真实账号 1600+ 条垃圾)。**注**:这是"强制工具调用"式的结构化输出,未实现 OpenAI `response_format: json_schema` 原生字段(某些网关对该字段支持更好;需要时可再加一个并行开关)。
 
 **L4 ◑ extended thinking 只能"解析"不能"开启"**
 响应侧的思考链路是通的(Anthropic thinking+signature 往返 `anthropic/stream.go:108-137`;OpenAI `reasoning_content`→thinking `openai/stream.go:80-94`),但**请求侧无法启用**:Anthropic 请求体没有 `thinking`/`budget_tokens`(`anthropic/request.go:11-18`),OpenAI 没有 `reasoning_effort`。即:只有 provider 主动吐 reasoning 才看得到,客户端无法主动要更深的思考。
@@ -162,7 +162,7 @@
 | 计划/TODO 可视化 | ○ 无 | O1 |
 | 工具调用人工批准 | ◑ 仅同步拒绝,无挂起-恢复 | O2 |
 | token 用量/成本上报 | ◑ 丢弃 | L2 |
-| 结构化输出 | ○ 无 | L3 |
+| 结构化输出 | ✅ 强制 tool_call 式(见 L3) | L3 |
 | 从记忆学习 | ◐ dreaming 已接(4 阶段+增量) | K1 |
 
 > **叙事**:上表左列基本定义了"一个能自主完成开发任务的 agent"。本仓在**执行面**(T)和**学习/主动性**(K)两块差得最多,而这两块又恰好大半是"接线而非造轮子"。
@@ -199,7 +199,7 @@
 ### P3 — 交互与产品化
 - **[O2]** 补异步审批状态机(挂起-推送-裁决-从 `waiting_approval` 恢复)。
 - **[O1]** 计划/TODO 工具 + 可视化;**[O3]** run 断点续跑;**[O6]** 子代理协作原语。
-- **[L3]** 结构化输出;**[L4]** 可开启 extended thinking;**[L5]** OpenAI 视觉直通;**[L7/D20]** 工具前缀缓存。
+- **[L3]** ~~结构化输出~~ ✅ 已落地(强制 tool_call 式,见 §L.L3);**[L4]** 可开启 extended thinking;**[L5]** OpenAI 视觉直通;**[L7/D20]** 工具前缀缓存。
 
 ---
 
@@ -219,7 +219,7 @@
 | T8 | ○ | 工具 | 大输出无分页,截断即永久丢失 | `contextmgmt/truncate.go:11` |
 | L1 | ○⭐ | 模型 | stop/finish 未建模,截断当正常结束 | `provider/adapter.go:19`、`agent/loop.go:252` |
 | L2 | ◑⭐ | 模型 | token 用量被丢弃(=D22) | `agent/loop.go:347` |
-| L3 | ○ | 模型 | 无结构化输出/JSON mode | `provider/types.go:88` |
+| L3 | ✅ | 模型 | 结构化输出已接(强制 tool_call; dreaming 首个消费方) | `provider/types.go`、`provider/{anthropic,openai}/request.go`、`dreaming/llm.go` |
 | L4 | ◑ | 模型 | extended thinking 只能解析不能开启 | `anthropic/request.go:11` |
 | L5 | ◑ | 模型 | 视觉输入仅 Anthropic,OpenAI 降级 | `openai/request.go:107` |
 | L6 | ◐ | 模型 | 多模型路由/降级未接线 | `routing/router.go`、`main.go:335` |
