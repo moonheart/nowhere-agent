@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS approvals (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Idempotent for databases where an earlier 000010 already created the table
+-- without these columns (a forward-fix within the same migration version).
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'approval';
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS answer JSONB;
+
 -- One pending approval per run: a second Ask while one is outstanding is a bug.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_one_pending_per_run
     ON approvals (run_id)
