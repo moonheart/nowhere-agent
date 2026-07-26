@@ -86,6 +86,11 @@ func (h *Handler) WithRegistry(rg *session.RunRegistry) *Handler {
 	return h
 }
 
+// Registry returns the handler's run-execution registry (nil until WithRuntime/
+// WithRegistry). The server uses it to wire cross-cutting run behaviour (e.g.
+// the approval Resume loop source) that must live on the shared registry.
+func (h *Handler) Registry() *session.RunRegistry { return h.registry }
+
 // WithMessageStore wires full-block message persistence into the run-execution
 // registry and authoritative history rebuild (persist-raw-messages). Call after
 // WithRuntime/WithRegistry.
@@ -124,6 +129,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/chat/history", h.serveHistory)
 	mux.HandleFunc("POST /api/chat/resume", h.serveResume)
 	mux.HandleFunc("POST /api/chat/cancel", h.serveCancel)
+	mux.HandleFunc("POST /api/chat/approval", h.serveApproval)
 	mux.HandleFunc("GET /api/chat/sessions", h.serveSessions)
 	mux.HandleFunc("DELETE /api/chat/sessions/{id}", h.serveDeleteSession)
 	mux.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
@@ -136,6 +142,7 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	mux.Handle("GET /api/chat/history", auth(http.HandlerFunc(h.serveHistory)))
 	mux.Handle("POST /api/chat/resume", auth(http.HandlerFunc(h.serveResume)))
 	mux.Handle("POST /api/chat/cancel", auth(http.HandlerFunc(h.serveCancel)))
+	mux.Handle("POST /api/chat/approval", auth(http.HandlerFunc(h.serveApproval)))
 	mux.Handle("GET /api/chat/sessions", auth(http.HandlerFunc(h.serveSessions)))
 	mux.Handle("DELETE /api/chat/sessions/{id}", auth(http.HandlerFunc(h.serveDeleteSession)))
 	mux.Handle("GET /api/chat/sessions/{id}/files/{path...}", auth(http.HandlerFunc(h.serveFile)))
@@ -539,6 +546,13 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 		// panel (via onData), never added to the message content.
 		if m, ok := payload.(map[string]any); ok {
 			e.write(chunk{"type": "data-subagent", "data": m, "transient": true})
+		}
+	case agent.KindApprovalRequest:
+		// Tool-approval prompt (capability-gap O2): a data frame carrying the
+		// approval id + tool call so the client renders approve/deny. Transient —
+		// it drives UI, not the message record.
+		if m, ok := payload.(map[string]any); ok {
+			e.write(chunk{"type": "data-tool-approval", "data": m, "transient": true})
 		}
 	case agent.KindDone:
 		e.writeRunStatus("done")

@@ -94,6 +94,10 @@ func emitStreamEvent(r *http.Request, emitter *sseEmitter, e session.StreamEvent
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.KindSubagent, m)
 		}
+	case agent.KindApprovalRequest:
+		if m, ok := decodeMapPayload(e.Payload); ok {
+			emitter.Emit(r.Context(), agent.KindApprovalRequest, m)
+		}
 	}
 }
 

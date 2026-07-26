@@ -193,7 +193,10 @@ func run() error {
 			case permission.Deny:
 				return true, fmt.Sprintf("%s (risk: %s) is not permitted by policy", t.Name(), t.Risk())
 			case permission.Ask:
-				return true, fmt.Sprintf("%s (risk: %s) requires approval, unavailable on this server", t.Name(), t.Risk())
+				// Gate for human approval (capability-gap O2): the marker tells the
+				// loop to SUSPEND the run and prompt the user, not feed an error to
+				// the model. The decision endpoint resumes the run.
+				return true, agent.ApprovalReasonPrefix + fmt.Sprintf("%s (risk: %s)", t.Name(), t.Risk())
 			default:
 				return false, ""
 			}
@@ -274,7 +277,9 @@ func run() error {
 			})
 		}
 
-		handler := chatapi.NewHandler(func(ctx context.Context, system string) *agent.Loop {
+		// Loop factory + session tool binder, named so the approval Resume path
+		// can rebuild a parked run's loop after a restart (capability-gap O2).
+		newChatLoop := func(ctx context.Context, system string) *agent.Loop {
 			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           model,
 				System:          system,
@@ -285,64 +290,76 @@ func run() error {
 				Compressor:      compressor,
 				Permission:      permit,
 			})
-		}, baseSystem).
+		}
+		bindChatTools := func(ctx context.Context, loop *agent.Loop, sessionID string) {
+			reg := toolruntime.NewRegistry()
+			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
+			// instructions / resource files. Registered whenever any skill is
+			// present (independent of the sandbox); scopes mirror the context
+			// builder (caller user + teams + system). It executes nothing — skill
+			// script execution is K3b, gated on C17.
+			if len(skillEngine.LoadL0(ctx, nil)) > 0 {
+				scopes := []identity.ScopeRef{identity.SystemScope()}
+				if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
+					if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
+						scopes = sc
+					}
+				}
+				reg.Register(skill.NewLoadTool(skillEngine, scopes))
+			}
+			if sandboxMgr != nil {
+				h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
+					Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(cfg.Sandbox.Network)},
+				})
+				if err != nil {
+					log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
+				} else {
+					for _, t := range builtin.FileTools(sandboxPort, h) {
+						reg.Register(t)
+					}
+					if execEnabled {
+						reg.Register(builtin.NewRunCommand(sandboxPort, h))
+					}
+				}
+			}
+			// MCP tools (network): registered into the same run registry so
+			// children scoped from it inherit them.
+			if mcpClient != nil {
+				for _, t := range mcpClient.Tools() {
+					reg.Register(t)
+				}
+			}
+			// Subagent spawn tool: children draw from a scoped view of this run's
+			// registry, so nested loops share the session's tools. Registered last.
+			if cfg.Subagent.Enabled {
+				reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, cfg.Subagent.MaxDepth).
+					WithBudget(cfg.Subagent.MaxTotal, cfg.Subagent.MaxConcurrent))
+			}
+			loop.WithTools(reg)
+		}
+
+		handler := chatapi.NewHandler(newChatLoop, baseSystem).
 			WithRuntime(sessionRuntime).
 			WithMessageStore(messageStore).
 			WithContextBuilder(ctxBuilder)
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
 		}
+		// Resume loop source (capability-gap O2): rebuild a parked run's loop for
+		// the session (fresh system prompt + this session's tools) so a tool-
+		// approval decision can resume the run even after a process restart.
+		if rg := handler.Registry(); rg != nil {
+			rg.WithLoopSource(func(ctx context.Context, sessionID string) (*agent.Loop, error) {
+				loop := newChatLoop(ctx, baseSystem)
+				bindChatTools(ctx, loop, sessionID)
+				return loop, nil
+			})
+		}
 		// Tool binder: attach session-scoped tools to each run. Runs when the
 		// sandbox (file tools) OR MCP (network tools) is configured; MCP tools need
 		// no sandbox, so they must register even when the sandbox is off.
 		if sandboxMgr != nil || mcpClient != nil {
-			handler = handler.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string) {
-				reg := toolruntime.NewRegistry()
-				// Read-only load_skill (capability-gap K3a): the agent loads a
-				// skill's instructions / resource files. Registered whenever any
-				// skill is present (independent of the sandbox); scopes mirror the
-				// context builder (caller user + teams + system). It executes
-				// nothing — skill script execution is K3b, gated on C17.
-				if len(skillEngine.LoadL0(ctx, nil)) > 0 {
-					scopes := []identity.ScopeRef{identity.SystemScope()}
-					if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
-						if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
-							scopes = sc
-						}
-					}
-					reg.Register(skill.NewLoadTool(skillEngine, scopes))
-				}
-				if sandboxMgr != nil {
-					h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
-						Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(cfg.Sandbox.Network)},
-					})
-					if err != nil {
-						log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
-					} else {
-						for _, t := range builtin.FileTools(sandboxPort, h) {
-							reg.Register(t)
-						}
-						if execEnabled {
-							reg.Register(builtin.NewRunCommand(sandboxPort, h))
-						}
-					}
-				}
-				// MCP tools (network): registered into the same run registry so
-				// children scoped from it inherit them.
-				if mcpClient != nil {
-					for _, t := range mcpClient.Tools() {
-						reg.Register(t)
-					}
-				}
-				// Subagent spawn tool: children draw from a scoped view of this
-				// run's registry, so nested loops share the session's tools.
-				// Registered last so it can see them.
-				if cfg.Subagent.Enabled {
-					reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, cfg.Subagent.MaxDepth).
-						WithBudget(cfg.Subagent.MaxTotal, cfg.Subagent.MaxConcurrent))
-				}
-				loop.WithTools(reg)
-			})
+			handler = handler.WithToolBinder(bindChatTools)
 			if sandboxMgr != nil {
 				log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob)")
 			}

@@ -392,6 +392,12 @@ func (rg *RunRegistry) ActiveWorker(sessionID string) bool {
 	return ok
 }
 
+// ApprovalByID fetches an approval record (any status) so the decision endpoint
+// can resolve its session for an ownership check before Resume.
+func (rg *RunRegistry) ApprovalByID(ctx context.Context, id string) (Approval, error) {
+	return rg.rt.store.GetApproval(ctx, id)
+}
+
 // append persists an event through the Runtime (which fans it out to subscribers
 // on the bus) so the durable log and live stream stay in one write path.
 func (rg *RunRegistry) append(ctx context.Context, sessionID, runID string, kind agent.EventKind, payload any) {
