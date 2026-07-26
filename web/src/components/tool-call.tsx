@@ -7,6 +7,7 @@ import {
   respondToApproval,
   respondToAskUser,
   clearApproval,
+  followDecisionStream,
   parseQuestions,
   type ToolApproval,
 } from "@/lib/approval";
@@ -256,9 +257,10 @@ const ApprovalGate: FC<{ approval: { approvalId: string; toolCallId: string; too
   const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
   const decide = async (approved: boolean) => {
     setBusy(approved ? "approve" : "deny");
-    const ok = await respondToApproval(approval.approvalId, approved);
-    if (ok) {
+    const stream = await respondToApproval(approval.approvalId, approved);
+    if (stream) {
       clearApproval(approval.toolCallId);
+      followDecisionStream(stream); // watch the resumed run continue live
     } else {
       setBusy(null); // backend rejected (already decided / not waiting) — keep the prompt
     }
@@ -340,16 +342,24 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
       else if (sel.length === 1) out[q.question] = sel[0];
       else if (sel.length > 1) out[q.question] = sel;
     });
-    const ok = await respondToAskUser(approval.approvalId, out);
-    if (ok) clearApproval(approval.toolCallId);
-    else setBusy(false);
+    const stream = await respondToAskUser(approval.approvalId, out);
+    if (stream) {
+      clearApproval(approval.toolCallId);
+      followDecisionStream(stream);
+    } else {
+      setBusy(false);
+    }
   };
 
   const skip = async () => {
     setBusy(true);
-    const ok = await respondToAskUser(approval.approvalId, null);
-    if (ok) clearApproval(approval.toolCallId);
-    else setBusy(false);
+    const stream = await respondToAskUser(approval.approvalId, null);
+    if (stream) {
+      clearApproval(approval.toolCallId);
+      followDecisionStream(stream);
+    } else {
+      setBusy(false);
+    }
   };
 
   if (questions.length === 0) return null;

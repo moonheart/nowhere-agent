@@ -129,7 +129,6 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/chat/history", h.serveHistory)
 	mux.HandleFunc("POST /api/chat/resume", h.serveResume)
 	mux.HandleFunc("POST /api/chat/cancel", h.serveCancel)
-	mux.HandleFunc("POST /api/chat/approval", h.serveApproval)
 	mux.HandleFunc("GET /api/chat/sessions", h.serveSessions)
 	mux.HandleFunc("DELETE /api/chat/sessions/{id}", h.serveDeleteSession)
 	mux.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
@@ -142,7 +141,6 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	mux.Handle("GET /api/chat/history", auth(http.HandlerFunc(h.serveHistory)))
 	mux.Handle("POST /api/chat/resume", auth(http.HandlerFunc(h.serveResume)))
 	mux.Handle("POST /api/chat/cancel", auth(http.HandlerFunc(h.serveCancel)))
-	mux.Handle("POST /api/chat/approval", auth(http.HandlerFunc(h.serveApproval)))
 	mux.Handle("GET /api/chat/sessions", auth(http.HandlerFunc(h.serveSessions)))
 	mux.Handle("DELETE /api/chat/sessions/{id}", auth(http.HandlerFunc(h.serveDeleteSession)))
 	mux.Handle("GET /api/chat/sessions/{id}/files/{path...}", auth(http.HandlerFunc(h.serveFile)))
@@ -176,6 +174,15 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	history := toHistory(req)
+
+	// A verdict on a parked run reuses this endpoint (and its SSE attach path)
+	// rather than a separate response: resume the run, then stream its
+	// continuation exactly as a freshly-submitted run would.
+	if req.Approval != nil {
+		h.serveChatResume(w, r, req.Approval)
+		return
+	}
+
 	loop := h.newLoop(r.Context(), h.systemPromptFor(r, req))
 
 	// No runtime wired (tests/dev): stream the loop directly with no persistence,
@@ -261,6 +268,58 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 
 	// Attach to the run from the start; the worker is already executing.
 	h.attach(w, r, sessID, run, 0, pre)
+}
+
+// serveChatResume handles POST /api/chat with an `approval` verdict: it resumes
+// the parked run and streams the continuation over the same ui-message-stream
+// response a normal chat turn uses (the shared attach path, D3). This replaces a
+// separate decision endpoint, so the deciding client follows the resumed run
+// live with no polling and no second connection.
+func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *approvalRequest) {
+	if h.runtime == nil || h.registry == nil {
+		http.Error(w, `{"error":"approval unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if av.ApprovalID == "" {
+		http.Error(w, `{"error":"approvalId required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Resolve the approval to find its session, then enforce ownership before
+	// acting (the decision must not reach another user's parked run).
+	ap, err := h.registry.ApprovalByID(r.Context(), av.ApprovalID)
+	if err != nil {
+		if errors.Is(err, session.ErrNoPendingApproval) {
+			http.Error(w, `{"error":"approval not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		return
+	}
+	if _, ok := h.authorizeSession(w, r, ap.SessionID); !ok {
+		return
+	}
+
+	run, err := h.registry.Resume(r.Context(), av.ApprovalID, av.Approved, av.Answer)
+	if err != nil {
+		switch {
+		case errors.Is(err, session.ErrNoPendingApproval):
+			http.Error(w, `{"error":"approval already decided"}`, http.StatusConflict)
+		case errors.Is(err, session.ErrRunNotWaiting):
+			http.Error(w, `{"error":"run is not waiting for approval"}`, http.StatusConflict)
+		case errors.Is(err, session.ErrRunActive):
+			http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
+		default:
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if !writeStreamHeaders(w) {
+		return
+	}
+	pre := []chunk{{"type": "data-session", "data": map[string]any{"id": ap.SessionID}, "transient": true}}
+	h.attach(w, r, ap.SessionID, run, 0, pre)
 }
 
 // serveChatDirect streams a loop's output with no run persistence (no runtime

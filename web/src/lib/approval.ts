@@ -7,6 +7,7 @@
 
 import { useSyncExternalStore } from "react";
 import { getToken } from "@/lib/auth";
+import { getSessionId } from "@/lib/thread";
 
 export type AskOption = {
   label: string;
@@ -84,8 +85,12 @@ export function useApproval(toolCallId: string | undefined): ToolApproval | unde
   return all.find((a) => a.toolCallId === toolCallId);
 }
 
-// respondToApproval POSTs a permission-approval verdict (approve/deny).
-export async function respondToApproval(approvalId: string, approved: boolean): Promise<boolean> {
+// respondToApproval POSTs a permission-approval verdict (approve/deny). Returns
+// the resumed run's ui-message-stream body for the caller to follow live.
+export async function respondToApproval(
+  approvalId: string,
+  approved: boolean,
+): Promise<ReadableStream<Uint8Array> | null> {
   return postDecision(approvalId, { approved });
 }
 
@@ -94,44 +99,47 @@ export async function respondToApproval(approvalId: string, approved: boolean): 
 export async function respondToAskUser(
   approvalId: string,
   answers: Record<string, string | string[]> | null,
-): Promise<boolean> {
+): Promise<ReadableStream<Uint8Array> | null> {
   if (answers === null) {
     return postDecision(approvalId, { approved: false });
   }
   return postDecision(approvalId, { approved: true, answer: { answers } });
 }
 
-async function postDecision(approvalId: string, body: Record<string, unknown>): Promise<boolean> {
+// postDecision sends the verdict through the chat endpoint (an `approval` field
+// turns POST /api/chat into a resume instead of a new turn) and returns the SSE
+// body streaming the run's continuation — the same attach path a normal turn
+// uses, so no separate decision endpoint or polling is needed.
+async function postDecision(
+  approvalId: string,
+  verdict: Record<string, unknown>,
+): Promise<ReadableStream<Uint8Array> | null> {
   const token = getToken();
-  if (!token) return false;
-  const res = await fetch("/api/chat/approval", {
+  if (!token) return null;
+  const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ approvalId, ...body }),
+    body: JSON.stringify({ threadId: getSessionId(), approval: { approvalId, ...verdict } }),
   }).catch(() => null);
-  if (res !== null && res.ok) {
-    noteDecision();
-    return true;
-  }
-  return false;
+  if (res === null || !res.ok || !res.body) return null;
+  return res.body;
 }
 
-// lastDecisionAt marks when THIS client last posted a verdict. The resumed run
-// belongs to this same session, so the multi-client attach poll (which live-
-// follows runs started elsewhere) must not also attach to it — that would start
-// a second, divergent copy of the reply. recentDecision() lets the poll skip
-// attaching right after a decision.
-let lastDecisionAt = 0;
-const DECISION_ATTACH_SUPPRESS_MS = 10_000;
+// A DecisionStreamFollower attaches a verdict's returned SSE stream to the chat
+// runtime so the deciding client watches the resumed run live. App registers it
+// (it owns the runtime); the tool-call gates call it after a successful decide.
+export type DecisionStreamFollower = (stream: ReadableStream<Uint8Array>) => void;
 
-function noteDecision() {
-  lastDecisionAt = Date.now();
+let follower: DecisionStreamFollower | null = null;
+
+// registerDecisionFollower wires the runtime's follow fn. Called once by App.
+export function registerDecisionFollower(fn: DecisionStreamFollower) {
+  follower = fn;
 }
 
-// recentDecision reports whether this client decided an interaction moments ago
-// (so its run is resuming and the attach poll should leave it alone).
-export function recentDecision(): boolean {
-  return Date.now() - lastDecisionAt < DECISION_ATTACH_SUPPRESS_MS;
+// followDecisionStream hands a verdict stream to the registered follower.
+export function followDecisionStream(stream: ReadableStream<Uint8Array>) {
+  follower?.(stream);
 }
 
 // parseQuestions extracts the ask_user question set from a ToolApproval.args

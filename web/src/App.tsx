@@ -8,9 +8,9 @@ import { SessionList } from "@/components/SessionList";
 import { RightPanel } from "@/components/right-panel";
 import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
-import { threadHistory, attachStream, hasActiveRun } from "@/lib/history";
+import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
-import { reportApproval, resetApprovals, recentDecision, type ToolApproval } from "@/lib/approval";
+import { reportApproval, resetApprovals, registerDecisionFollower, type ToolApproval } from "@/lib/approval";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -59,6 +59,18 @@ function Chat({
     onError: (e) => console.error("chat error", e),
   });
 
+  // A decided approval/ask_user returns the resumed run's SSE stream (via the
+  // chat endpoint). Follow it on this runtime so the deciding client watches the
+  // continuation live — appended after the current head (the user's question).
+  useEffect(() => {
+    registerDecisionFollower((stream) => {
+      void runtime.thread.resumeRun({
+        parentId: null,
+        stream: () => followBody(stream),
+      });
+    });
+  }, [runtime]);
+
   // Multi-client attach (design D13): while this client is idle, poll the
   // session to notice a run started on another tab/device and live-follow it
   // via resumeRun. The follow re-streams the whole run and renders ONE new
@@ -74,10 +86,6 @@ function Chat({
       const threadId = getSessionId();
       if (!threadId) return;
       if (runtime.thread.getState().isRunning) return;
-      // This client just decided an approval/ask_user: the run resuming is OURS,
-      // not one started elsewhere. Attaching would start a second, divergent copy
-      // of the reply (parentId:null appends a new assistant message), so skip.
-      if (recentDecision()) return;
       let active = false;
       try {
         active = await hasActiveRun();

@@ -15,6 +15,18 @@ type dataStreamRequest struct {
 	Messages []incomingMessage  `json:"messages"`
 	Tools    map[string]any     `json:"tools"`
 	ThreadID string             `json:"threadId"`
+	// Approval, when set, turns this POST into a verdict on a parked run rather
+	// than a new turn: the handler resumes the run and streams its continuation
+	// over the same ui-message-stream response (reusing the chat attach path).
+	Approval *approvalRequest `json:"approval,omitempty"`
+}
+
+// approvalRequest carries the human verdict for a parked tool-approval /
+// ask_user interaction (capability-gap O2).
+type approvalRequest struct {
+	ApprovalID string          `json:"approvalId"`
+	Approved   bool            `json:"approved"`
+	Answer     json.RawMessage `json:"answer,omitempty"` // ask_user: the structured response
 }
 
 type incomingMessage struct {

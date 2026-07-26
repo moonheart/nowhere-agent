@@ -115,7 +115,7 @@
 纯 think→tool→think,跨轮唯一状态是原始消息日志 `produced []Message`(`loop.go:193-280`),`Config` 无 plan 字段。没有模型可维护的计划/任务清单工具(业界 agent 的 `update_plan`/`todo` 这里没有),也没有把计划注入 system prompt 或持久化。做多步复杂任务时容易"跑偏"且用户无法看到 agent 的计划。
 
 **O2 ◑⭐ 人在环审批(HITL)已落地(持久化挂起-恢复)**
-原状:`RunWaitingApproval` 有定义、被 SQL 索引引用,却从不被写入、也无恢复路径;服务端把 `"ask"` 直接映射成 deny。**现已实现完整"危险工具调用→挂起→推给用户→裁决→续跑"**:① loop 检测 `Ask`(经 `agent.ApprovalReasonPrefix` 标记)→ 不执行、emit `KindApprovalRequest`、返回 `ErrAwaitingApproval`;② registry 持久化 `approvals` 行(migration `000010`,一 pending/run 唯一约束)→ `SuspendRun` 置 `waiting_approval` 并**释放单活跃锁**(挂起放锁,用户可先发别的消息);③ 前端经 transient `data-tool-approval` 帧渲染批准/否决 → `POST /api/chat/approval`;④ `Resume` 裁决后**另起 worker 从 `MessageStore` 重建 history 续跑**(批准=执行该工具,拒绝=注入 `is_error`),并经注入的 `LoopSource` 重建 loop,故**跨进程重启仍可恢复**(启动对账保留 `waiting_approval`,不当 stranded fail)。仅 `*-once` 授权,`allow/reject-always` 持久规则留扩展。
+原状:`RunWaitingApproval` 有定义、被 SQL 索引引用,却从不被写入、也无恢复路径;服务端把 `"ask"` 直接映射成 deny。**现已实现完整"危险工具调用→挂起→推给用户→裁决→续跑"**:① loop 检测 `Ask`(经 `agent.ApprovalReasonPrefix` 标记)→ 不执行、emit `KindApprovalRequest`、返回 `ErrAwaitingApproval`;② registry 持久化 `approvals` 行(migration `000010`,一 pending/run 唯一约束)→ `SuspendRun` 置 `waiting_approval` 并**释放单活跃锁**(挂起放锁,用户可先发别的消息);③ 前端经 transient `data-tool-approval` 帧渲染批准/否决 → **复用 `POST /api/chat`(body 带 `approval`)裁决**,续跑内容经同一 SSE attach 路径流回(无独立端点、无轮询);④ `Resume` 裁决后**另起 worker 从 `MessageStore` 重建 history 续跑**(批准=执行该工具,拒绝=注入 `is_error`),并经注入的 `LoopSource` 重建 loop,故**跨进程重启仍可恢复**(启动对账保留 `waiting_approval`,不当 stranded fail)。刷新页面时 `GET /history` 回 `pendingApproval` 重建卡片;parked run 不计入 `RunningRun`,刷新不再误开续跑流。仅 `*-once` 授权,`allow/reject-always` 持久规则留扩展。
 
 **O-ask ✅ ask_user 结构化提问工具(复用 O2 挂起-恢复)**
 模型可调用内置 `ask_user` 工具向用户提 1~4 个结构化问题(每题单选/多选、2~4 个选项、可标推荐默认项、用户可自定义回答或"跳过")。**机制与 O2 完全同源**:`approvals` 表加 `kind`(`approval`/`ask_user`)+ `answer`(jsonb)列;loop 的 interaction gate 识别 `ask_user` 调用即挂起(`ErrAwaitingApproval`,无需 permission 标记,工具 `RiskReadOnly`);挂起-放锁-跨重启续跑全部复用。用户提交 → 答案作为该工具的 `tool_result` 续跑;"跳过"(取消语义)→ 注入非 error 的"用户跳过"提示,run 继续由模型自行决定。前端按帧的 `kind` 分发:approval 渲染批准/否决,ask_user 渲染多问题卡片(violet)。新增 `builtin.NewAskUser()` 注册进 tool binder(沙箱无关,总注册)。
@@ -228,7 +228,7 @@
 | L6 | ◐ | 模型 | 多模型路由/降级未接线 | `routing/router.go`、`main.go:335` |
 | L7 | 🟡 | 模型 | Anthropic 工具前缀缓存未实现(=D20) | `anthropic/request.go:88` |
 | O1 | ○⭐ | 编排 | 无 planning/TODO 跟踪 | `agent/loop.go:193,59` |
-| O2 | ✅ | 编排 | HITL 已接(挂起-恢复 + 跨重启;approvals 表 + Resume + 前端裁决) | `session/registry.go`、`agent/loop.go`、`chatapi/approval.go`、`migrations/000010` |
+| O2 | ✅ | 编排 | HITL 已接(挂起-恢复 + 跨重启;approvals 表 + Resume + 复用 chat 端点裁决) | `session/registry.go`、`agent/loop.go`、`chatapi/handler.go`、`migrations/000010` |
 | O-ask | ✅ | 编排 | ask_user 结构化提问(1~4 题单/多选+默认+自定义+跳过;复用 O2 机制) | `toolruntime/builtin/askuser.go`、`agent/loop.go`、`web/src/components/tool-call.tsx` |
 | O3 | ◑ | 编排 | 无 run 续跑/断点恢复 | `session/runtime.go:276` |
 | O4 | ○⭐ | 编排 | 迭代触顶=静默失败,无终帧 | `agent/loop.go:279` |

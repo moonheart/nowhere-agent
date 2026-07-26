@@ -159,6 +159,24 @@ export function attachStream(): ReturnType<typeof resumeStream> {
   return resumeStream(0);
 }
 
+// followBody decodes an already-open ui-message-stream body (e.g. the response
+// to an approval verdict, which streams the resumed run's continuation) into
+// the accumulated-message snapshots the runtime consumes. Same pipeline as
+// resumeStream; only the source (an open body vs. a fresh fetch) differs.
+export async function* followBody(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<ChatModelRunResult, void, unknown> {
+  const accumulated = body
+    .pipeThrough(new UIMessageStreamDecoder())
+    .pipeThrough(new AssistantMessageAccumulator());
+  for await (const message of asAsyncIterableStream(accumulated)) {
+    yield {
+      content: message.parts as unknown as ThreadAssistantMessagePart[],
+      status: message.status,
+    };
+  }
+}
+
 // hasActiveRun reports whether the session's run is still in flight. Used by
 // the idle-poll that lets a second client notice a run started elsewhere. It
 // reads only the `active` flag, skipping loadHistory()'s message rebuild and
