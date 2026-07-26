@@ -10,6 +10,7 @@ import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
+import { reportApproval, resetApprovals, type ToolApproval } from "@/lib/approval";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -42,6 +43,10 @@ function Chat({
         // Live subagent progress (from a spawn_agent tool call) — feed the
         // right panel's Runs tab; transient, never part of the message.
         reportSubagentActivity(d.data as SubagentSignal);
+      } else if (d.name === "tool-approval") {
+        // A dangerous tool call is parked awaiting a human verdict (O2): show
+        // approve/deny on the matching tool card. Transient, not the message.
+        reportApproval(d.data as ToolApproval);
       }
     },
     // The Stop button only aborts the local fetch; also tell the backend to
@@ -114,6 +119,7 @@ export default function App() {
     clearSessionId();
     setActiveSessionId(null);
     resetActivity();
+    resetApprovals();
     setConversationKey((k) => k + 1);
   };
 
@@ -128,6 +134,7 @@ export default function App() {
     setSessionId(id);
     setActiveSessionId(id);
     resetActivity();
+    resetApprovals();
     setConversationKey((k) => k + 1);
   };
 

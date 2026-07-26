@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FC } from "react";
 import type { ThreadMessage, ToolCallMessagePartProps } from "@assistant-ui/react";
-import { Bot } from "lucide-react";
+import { Bot, ShieldAlert } from "lucide-react";
 import { reportToolCall, useActivity, type SubPart } from "@/lib/activity";
+import { useApproval, respondToApproval, clearApproval } from "@/lib/approval";
 import { Reasoning } from "@/components/reasoning";
 import { MarkdownText } from "@/components/markdown-text";
 
@@ -186,10 +187,13 @@ const Dispatch = dispatch;
 /* ---------- regular tool call ---------- */
 
 const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
-  const { toolName, argsText, result, isError, status } = props;
+  const { toolName, argsText, result, isError, status, toolCallId } = props;
   const running = status?.type === "running";
   const [open, setOpen] = useState(false);
   const expanded = running || open;
+  // A parked approval for this call (O2): the backend is holding the run until
+  // the user approves/denies. Sourced from the transient data-tool-approval frame.
+  const approval = useApproval(toolCallId);
 
   useReport(props, running);
 
@@ -198,7 +202,7 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
   return (
     <div
       className={`mb-2 rounded-xl border text-sm ${
-        isError ? "border-red-200 bg-red-50" : "border-neutral-200 bg-neutral-50"
+        isError ? "border-red-200 bg-red-50" : approval ? "border-amber-300 bg-amber-50/60" : "border-neutral-200 bg-neutral-50"
       }`}
     >
       <Header
@@ -208,6 +212,7 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
         expanded={expanded}
         onToggle={() => setOpen((o) => !o)}
       />
+      {approval && <ApprovalGate approval={approval} argsText={argsText} />}
       {expanded && (
         <div className="space-y-2 border-t border-neutral-200 px-3 py-2 font-mono text-xs leading-relaxed">
           {argsText && (
@@ -226,6 +231,60 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
           )}
         </div>
       )}
+    </div>
+  );
+};
+
+// ApprovalGate renders the approve/deny prompt for a parked tool call. Deciding
+// POSTs the verdict to the backend (which resumes the run); the card clears the
+// prompt and the resumed stream drives the rest of the render.
+const ApprovalGate: FC<{ approval: { approvalId: string; toolCallId: string; toolName: string; args?: unknown }; argsText?: string }> = ({
+  approval,
+  argsText,
+}) => {
+  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
+  const decide = async (approved: boolean) => {
+    setBusy(approved ? "approve" : "deny");
+    const ok = await respondToApproval(approval.approvalId, approved);
+    if (ok) {
+      clearApproval(approval.toolCallId);
+    } else {
+      setBusy(null); // backend rejected (already decided / not waiting) — keep the prompt
+    }
+  };
+  return (
+    <div className="border-t border-amber-200 px-3 py-2.5">
+      <div className="flex items-start gap-2">
+        <ShieldAlert size={15} className="mt-0.5 shrink-0 text-amber-500" />
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium text-amber-800">
+            Approve running <span className="font-mono">{approval.toolName}</span>?
+          </p>
+          {argsText && (
+            <pre className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-all rounded bg-amber-100/60 p-1.5 font-mono text-[11px] text-amber-900">
+              {argsText}
+            </pre>
+          )}
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void decide(true)}
+              className="rounded-lg bg-amber-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
+            >
+              {busy === "approve" ? "Approving…" : "Approve"}
+            </button>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void decide(false)}
+              className="rounded-lg border border-amber-300 bg-white px-3 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50"
+            >
+              {busy === "deny" ? "Denying…" : "Deny"}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
