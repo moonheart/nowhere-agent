@@ -3,6 +3,7 @@ package dreaming
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"nowhere-agent/internal/provider"
@@ -145,6 +146,22 @@ func TestProviderLLMCompleteJSONErrors(t *testing.T) {
 	}}
 	if _, err := NewProviderLLM(b, "m").CompleteJSON(context.Background(), "p", extractSchema, &res); err == nil {
 		t.Error("expected decode error for malformed JSON")
+	}
+}
+
+// TestProviderLLMCompleteJSONTruncation: a stream that ends on max_tokens with
+// a partial JSON payload reports a clear truncation error, not a raw decode
+// failure.
+func TestProviderLLMCompleteJSONTruncation(t *testing.T) {
+	a := &scriptedAdapter{events: []provider.Event{
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: `{"insights":["a long insight that got cut`},
+		{Type: provider.EventMessageStop, StopReason: provider.StopMaxTokens, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 4096}},
+	}}
+	var res reflectResult
+	_, err := NewProviderLLM(a, "m").CompleteJSON(context.Background(), "p", reflectSchema, &res)
+	if err == nil || !strings.Contains(err.Error(), "truncated at max_tokens") {
+		t.Errorf("err = %v, want a max_tokens truncation error", err)
 	}
 }
 

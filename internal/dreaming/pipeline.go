@@ -139,8 +139,8 @@ NEW EPISODE SUMMARY:
 
 Derive higher-level insights (patterns spanning multiple memories or following
 from the new summary) and list the exact existing-memory texts that are now
-duplicated or superseded. Keep insights few and genuinely non-obvious; do not
-restate existing facts.
+duplicated or superseded. Keep insights few (at most 3), SHORT (one sentence
+each), and genuinely non-obvious; do not restate existing facts.
 
 You MUST respond ONLY by calling the record_reflection function with the
 insights and deprecate arrays (empty if none). Do not write any normal text

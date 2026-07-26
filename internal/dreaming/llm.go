@@ -22,9 +22,13 @@ type ProviderLLM struct {
 	MaxTokens int
 }
 
-// NewProviderLLM creates an LLM over the given adapter and model.
+// NewProviderLLM creates an LLM over the given adapter and model. MaxTokens
+// bounds a single completion; it must be generous because (a) reasoning models
+// burn reasoning_tokens that count toward the cap and (b) a reflect/compress
+// JSON payload can be long — a too-small cap truncates the JSON mid-stream and
+// fails the decode.
 func NewProviderLLM(adapter provider.Adapter, model string) *ProviderLLM {
-	return &ProviderLLM{adapter: adapter, model: model, MaxTokens: 1024}
+	return &ProviderLLM{adapter: adapter, model: model, MaxTokens: 4096}
 }
 
 // Complete runs one no-tools generation and returns its text plus the tokens it
@@ -97,6 +101,7 @@ func (l *ProviderLLM) CompleteJSON(ctx context.Context, prompt string, spec *pro
 	var jsonBuf strings.Builder
 	tokens := 0
 	toolIdx := map[int]bool{}
+	truncated := false
 	for ev := range events {
 		switch ev.Type {
 		case provider.EventBlockStart:
@@ -111,6 +116,9 @@ func (l *ProviderLLM) CompleteJSON(ctx context.Context, prompt string, spec *pro
 			if ev.Usage != nil {
 				tokens = ev.Usage.InputTokens + ev.Usage.OutputTokens
 			}
+			if ev.StopReason == provider.StopMaxTokens {
+				truncated = true
+			}
 		case provider.EventError:
 			return tokens, ev.Err
 		}
@@ -119,8 +127,19 @@ func (l *ProviderLLM) CompleteJSON(ctx context.Context, prompt string, spec *pro
 	if raw == "" {
 		return tokens, fmt.Errorf("structured output: model produced no tool_use payload")
 	}
+	if truncated {
+		return tokens, fmt.Errorf("structured output: truncated at max_tokens (%d), JSON incomplete: %s", l.MaxTokens, truncate(raw, 120))
+	}
 	if err := json.Unmarshal([]byte(raw), out); err != nil {
-		return tokens, fmt.Errorf("structured output: decode %q: %w", raw, err)
+		return tokens, fmt.Errorf("structured output: decode %q: %w", truncate(raw, 200), err)
 	}
 	return tokens, nil
+}
+
+// truncate shortens s for error messages.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
