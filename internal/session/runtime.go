@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -56,6 +57,18 @@ type Store interface {
 	AppendEvent(ctx context.Context, e Event) error
 	// EventsAfter returns events for a run with offset > after, ordered.
 	EventsAfter(ctx context.Context, runID string, after int) ([]Event, error)
+
+	// Tool-approval records (capability-gap O2, migration 000010): the durable
+	// thread-level store for a pending human decision.
+	// CreateApproval persists a new pending approval (at most one per session).
+	CreateApproval(ctx context.Context, a Approval) (Approval, error)
+	// PendingApprovalForSession returns the session's outstanding approval, or false.
+	PendingApprovalForSession(ctx context.Context, sessionID string) (Approval, bool, error)
+	// GetApproval fetches an approval by id (any status).
+	GetApproval(ctx context.Context, id string) (Approval, error)
+	// DecideApproval resolves a pending approval, or ErrNoPendingApproval. answer
+	// is the user's structured response for ask_user (nil for a permission approval).
+	DecideApproval(ctx context.Context, id string, approve bool, answer json.RawMessage) (Approval, error)
 }
 
 // Runtime coordinates run lifecycle, the single-active-run lock, and event
@@ -213,7 +226,7 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 // (running/done/error/cancelled/user) are persisted to run_events.
 func isContentKind(kind string) bool {
 	switch kind {
-	case "text", "thinking", "tool_use", "tool_result", "subagent":
+	case "text", "thinking", "tool_use", "tool_result", "subagent", "approval_request":
 		return true
 	default:
 		return false

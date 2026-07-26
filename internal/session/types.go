@@ -10,18 +10,17 @@ import "time"
 type RunStatus string
 
 const (
-	RunQueued           RunStatus = "queued"
-	RunRunning          RunStatus = "running"
-	RunWaitingApproval  RunStatus = "waiting_approval"
-	RunDone             RunStatus = "done"
-	RunFailed           RunStatus = "failed"
-	RunCancelled        RunStatus = "cancelled"
+	RunQueued    RunStatus = "queued"
+	RunRunning   RunStatus = "running"
+	RunDone      RunStatus = "done"
+	RunFailed    RunStatus = "failed"
+	RunCancelled RunStatus = "cancelled"
 )
 
 // Valid reports whether s is a known run status.
 func (s RunStatus) Valid() bool {
 	switch s {
-	case RunQueued, RunRunning, RunWaitingApproval, RunDone, RunFailed, RunCancelled:
+	case RunQueued, RunRunning, RunDone, RunFailed, RunCancelled:
 		return true
 	}
 	return false
@@ -39,7 +38,7 @@ func (s RunStatus) Terminal() bool {
 // Active reports whether the run is in progress (blocking new runs).
 func (s RunStatus) Active() bool {
 	switch s {
-	case RunQueued, RunRunning, RunWaitingApproval:
+	case RunQueued, RunRunning:
 		return true
 	}
 	return false

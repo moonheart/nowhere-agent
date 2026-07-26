@@ -20,6 +20,9 @@ type MemStore struct {
 	// dreamedSeq is each session's dreaming watermark (the in-memory analogue of
 	// sessions.dreamed_seq, migration 000009): the messages.id consolidated up to.
 	dreamedSeq map[string]int64
+	// approvals is the in-memory analogue of the approvals table (migration
+	// 000010): approvalID -> pending/decided tool-approval record.
+	approvals map[string]*Approval
 }
 
 // NewMemStore creates an empty in-memory Store.
@@ -30,6 +33,7 @@ func NewMemStore() *MemStore {
 		bySess:     map[string][]*Run{},
 		events:     map[string][]Event{},
 		dreamedSeq: map[string]int64{},
+		approvals:  map[string]*Approval{},
 	}
 }
 
@@ -155,12 +159,14 @@ func (m *MemStore) NextRunSeq(_ context.Context, sessionID string) (int, error) 
 }
 
 // FailStrandedRuns marks every non-terminal run failed (startup reconciliation).
+// Runs are stateless and terminal on completion, so any queued/running row
+// belongs to a dead worker.
 func (m *MemStore) FailStrandedRuns(_ context.Context) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
 	for _, r := range m.runs {
-		if r.Status.Active() {
+		if r.Status == RunQueued || r.Status == RunRunning {
 			r.Status = RunFailed
 			n++
 		}

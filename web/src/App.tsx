@@ -8,8 +8,9 @@ import { SessionList } from "@/components/SessionList";
 import { RightPanel } from "@/components/right-panel";
 import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
-import { threadHistory, attachStream, hasActiveRun } from "@/lib/history";
+import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
+import { reportApproval, resetApprovals, registerDecisionFollower, type ToolApproval } from "@/lib/approval";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -42,6 +43,10 @@ function Chat({
         // Live subagent progress (from a spawn_agent tool call) — feed the
         // right panel's Runs tab; transient, never part of the message.
         reportSubagentActivity(d.data as SubagentSignal);
+      } else if (d.name === "tool-approval") {
+        // A dangerous tool call is parked awaiting a human verdict (O2): show
+        // approve/deny on the matching tool card. Transient, not the message.
+        reportApproval(d.data as ToolApproval);
       }
     },
     // The Stop button only aborts the local fetch; also tell the backend to
@@ -53,6 +58,23 @@ function Chat({
     adapters: { history: threadHistory },
     onError: (e) => console.error("chat error", e),
   });
+
+  // A decided approval/ask_user starts a FRESH run on the backend (run-stateless
+  // model) and returns its SSE stream. Follow it here so the deciding client
+  // watches the continuation live. parentId = the current last message (the
+  // assistant turn that ended on the gated call): the new assistant message
+  // extends the SAME conversation branch, so history (the user's question + the
+  // ask_user card) is preserved — unlike parentId:null, which starts a new root.
+  useEffect(() => {
+    registerDecisionFollower((stream) => {
+      const msgs = runtime.thread.getState().messages;
+      const parentId = msgs.length > 0 ? msgs[msgs.length - 1].id : null;
+      void runtime.thread.resumeRun({
+        parentId,
+        stream: () => followBody(stream),
+      });
+    });
+  }, [runtime]);
 
   // Multi-client attach (design D13): while this client is idle, poll the
   // session to notice a run started on another tab/device and live-follow it
@@ -114,6 +136,7 @@ export default function App() {
     clearSessionId();
     setActiveSessionId(null);
     resetActivity();
+    resetApprovals();
     setConversationKey((k) => k + 1);
   };
 
@@ -128,6 +151,7 @@ export default function App() {
     setSessionId(id);
     setActiveSessionId(id);
     resetActivity();
+    resetApprovals();
     setConversationKey((k) => k + 1);
   };
 

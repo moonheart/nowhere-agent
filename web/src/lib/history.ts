@@ -24,6 +24,7 @@ import { asAsyncIterableStream } from "assistant-stream/utils";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
+import { reportApproval, type ToolApproval } from "@/lib/approval";
 
 type HistoryPart =
   | { type: "text" | "reasoning"; text: string }
@@ -91,6 +92,7 @@ async function loadHistory(): Promise<{
   messages: ThreadMessageLike[];
   active: boolean;
   after: number;
+  pendingApproval?: ToolApproval | null;
 }> {
   const threadId = getSessionId();
   if (!threadId) return { messages: [], active: false, after: 0 };
@@ -103,12 +105,14 @@ async function loadHistory(): Promise<{
     messages?: HistoryMessage[];
     active?: boolean;
     after?: number;
+    pendingApproval?: ToolApproval | null;
   };
   const messages = (data.messages ?? []).map(mapMessage);
   return {
     messages,
     active: data.active === true,
     after: typeof data.after === "number" ? data.after : 0,
+    pendingApproval: data.pendingApproval ?? null,
   };
 }
 
@@ -134,7 +138,13 @@ async function* resumeStream(
   if (!res.ok || !res.body) return;
 
   const accumulated = res.body
-    .pipeThrough(new UIMessageStreamDecoder())
+    .pipeThrough(
+      new UIMessageStreamDecoder({
+        onData: (d) => {
+          if (d.name === "tool-approval") reportApproval(d.data as ToolApproval);
+        },
+      }),
+    )
     .pipeThrough(new AssistantMessageAccumulator());
   // The accumulator's `parts` is the full accumulated content at each chunk
   // (text deltas extend the trailing part in place), so we yield every
@@ -153,6 +163,33 @@ async function* resumeStream(
 // prior stream for us, so overlapping attaches dedup themselves.
 export function attachStream(): ReturnType<typeof resumeStream> {
   return resumeStream(0);
+}
+
+// followBody decodes an already-open ui-message-stream body (e.g. the response
+// to an approval verdict, which streams the resumed run's continuation) into
+// the accumulated-message snapshots the runtime consumes. Same pipeline as
+// resumeStream; only the source (an open body vs. a fresh fetch) differs.
+export async function* followBody(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<ChatModelRunResult, void, unknown> {
+  const accumulated = body
+    .pipeThrough(
+      // A verdict run can itself end on a new gate (the model asks a follow-up
+      // question): surface that card live, since this follow path bypasses the
+      // runtime's own onData. Mirrors App.tsx's onData → reportApproval.
+      new UIMessageStreamDecoder({
+        onData: (d) => {
+          if (d.name === "tool-approval") reportApproval(d.data as ToolApproval);
+        },
+      }),
+    )
+    .pipeThrough(new AssistantMessageAccumulator());
+  for await (const message of asAsyncIterableStream(accumulated)) {
+    yield {
+      content: message.parts as unknown as ThreadAssistantMessagePart[],
+      status: message.status,
+    };
+  }
 }
 
 // hasActiveRun reports whether the session's run is still in flight. Used by
@@ -177,8 +214,12 @@ export async function hasActiveRun(): Promise<boolean> {
 
 export const threadHistory: ThreadHistoryAdapter = {
   async load() {
-    const { messages, active, after } = await loadHistory();
+    const { messages, active, after, pendingApproval } = await loadHistory();
     lastLoadedAfter = after;
+    // Re-show a parked interaction (permission approve/deny, or an ask_user
+    // card) the transient frame dropped on refresh; the durable row is the
+    // source of truth, echoed by /history as pendingApproval.
+    if (pendingApproval) reportApproval(pendingApproval);
     // When a run is in flight, drop the trailing partial assistant message from
     // the snapshot. The follow (resume) re-streams the whole run and renders
     // that message itself; importing a partial assistant message AND following

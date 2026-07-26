@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
+
+	"github.com/google/uuid"
 
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
@@ -19,6 +22,44 @@ import (
 // errCompressionSkipped is returned by maybeCompress when the circuit breaker
 // has tripped, so the caller doesn't count it as a fresh failure or a success.
 var errCompressionSkipped = errors.New("compression skipped: circuit breaker tripped")
+
+// ApprovalReasonPrefix marks a Permission deny-reason as "gated for human
+// approval" rather than a hard deny. The server's permission callback prefixes
+// the reason for calls whose policy verdict is Ask; the loop distinguishes
+// those (end the run + ask the user) from a true deny (feed an error to the
+// model).
+const ApprovalReasonPrefix = "approval required: "
+
+// IsApprovalReason reports whether a Permission deny-reason is a gate-for-
+// approval marker (vs a hard deny).
+func IsApprovalReason(reason string) bool {
+	return strings.HasPrefix(reason, ApprovalReasonPrefix)
+}
+
+// ApprovalRequest describes the single gated tool call that ended a run for
+// human input (capability-gap O2). The loop emits it (KindApprovalRequest) and
+// finishes; the run's worker persists it as a durable Approval (thread state)
+// and surfaces it to the client. The run does NOT suspend — a fresh run applies
+// the verdict later. Kind distinguishes a permission approval (a dangerous call
+// needing a yes/no) from an ask_user question set.
+type ApprovalRequest struct {
+	// ID is the durable approval's id, generated the moment the gate is detected
+	// (LangGraph-style: the interrupt's id is known before it is surfaced). The
+	// loop emits it on the KindApprovalRequest frame and the run worker persists
+	// the Approval row with the SAME id, so the client's card can POST its verdict
+	// without a refresh or a store lookup.
+	ID string
+	// Kind is "approval" or "ask_user". Empty means approval (the O2 default).
+	Kind       string
+	ToolCallID string
+	ToolName   string
+	Input      map[string]any
+}
+
+// AskUserToolName is the built-in tool the model calls to ask the user
+// structured questions (capability O-ask). Like a permission approval, calling
+// it ends the run for human input; the answer arrives via a later run.
+const AskUserToolName = "ask_user"
 
 // EventKind classifies loop events persisted by the session runtime.
 type EventKind string
@@ -53,6 +94,11 @@ const (
 	// once, at natural termination. It is persisted and fanned out so the
 	// transport's finish frame can report real token counts instead of zeros.
 	KindUsage EventKind = "usage"
+	// KindApprovalRequest carries the gated tool call that ended the run for
+	// human input (payload: ApprovalRequest). Live-only content (broker-routed,
+	// never persisted): the run's worker separately persists the durable Approval
+	// record the decision endpoint reads.
+	KindApprovalRequest EventKind = "approval_request"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).
@@ -106,6 +152,10 @@ type Loop struct {
 	// compressFailures counts consecutive compression failures in the current
 	// run, for the circuit breaker (design D6).
 	compressFailures int
+	// PendingApproval, when set after Run returns, is the gated tool call that
+	// ended the run for human input. The run worker reads it to persist the
+	// durable Approval.
+	PendingApproval *ApprovalRequest
 }
 
 // New creates a Loop.
@@ -169,6 +219,13 @@ func (l *Loop) WithTools(reg *toolruntime.Registry) *Loop {
 		l.tools = reg
 	}
 	return l
+}
+
+// Tools returns the loop's tool registry, so a caller that needs to execute a
+// tool directly (e.g. an approved HITL call, executed by the decision path
+// rather than the loop) can share the same session-bound registry.
+func (l *Loop) Tools() *toolruntime.Registry {
+	return l.tools
 }
 
 // toolDefs converts registered tools to provider tool definitions.
@@ -283,6 +340,21 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		if err := ctx.Err(); err != nil {
 			_ = emit.Emit(ctx, KindCancelled, nil)
 			return produced, err
+		}
+
+		// Human-interaction gate (capability-gap O2 + ask_user): if a call needs a
+		// human answer — a permission approval OR an ask_user question set — do NOT
+		// dispatch it. Emit the request and end the run cleanly: the assistant
+		// message (with the gated tool_use) is already produced/persisted, the run
+		// worker records the durable Approval, and a LATER run applies the verdict.
+		// The run is stateless — it ends here; there is no suspend/resume.
+		if gate := l.interactionGate(toolCalls); gate != nil {
+			l.PendingApproval = gate
+			_ = emit.Emit(ctx, KindApprovalRequest, *gate)
+			slog.Info("agent: run ended awaiting human input", "tool", gate.ToolName, "kind", gate.Kind)
+			emitUsage(ctx, emit, total)
+			_ = emit.Emit(ctx, KindDone, nil)
+			return produced, nil
 		}
 
 		// Dispatch tool calls (concurrently) and append results.
@@ -431,6 +503,33 @@ func (l *Loop) appendFinalized(ctx context.Context, acc *accumulator, assistant 
 	_ = emit.Emit(ctx, KindToolUse, map[string]any{
 		"id": blk.ToolUseID, "name": blk.ToolName, "input": blk.ToolInput,
 	})
+}
+
+// interactionGate scans the batch for a call that needs a human answer before
+// the run can continue. Two kinds: (1) a permission approval — a tool whose
+// Permission callback denies with the ApprovalReasonPrefix marker; (2) an
+// ask_user question set — the model calling the built-in ask_user tool. Only
+// the first such call is returned — the run suspends on it. Returns nil when
+// nothing needs a human.
+func (l *Loop) interactionGate(calls []toolruntime.Call) *ApprovalRequest {
+	for _, c := range calls {
+		if c.ArgsError != "" {
+			continue
+		}
+		// ask_user: the model is explicitly asking the user for structured input.
+		if c.Name == AskUserToolName {
+			return &ApprovalRequest{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+		}
+		// Permission approval: a dangerous call the policy gates for a yes/no.
+		if l.config.Permission != nil {
+			if tool, ok := l.tools.Get(c.Name); ok {
+				if deny, reason := l.config.Permission(tool); deny && IsApprovalReason(reason) {
+					return &ApprovalRequest{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // dispatch runs tool calls concurrently via the registry. A call whose

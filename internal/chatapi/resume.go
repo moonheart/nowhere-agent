@@ -28,7 +28,7 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	}
 	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
 
-	// Pick the run to resume: the active one if any, else the latest.
+	// Pick the run to resume: the in-flight one if any, else the latest.
 	run, ok, err := h.runtime.ActiveRun(r.Context(), threadID)
 	if err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
@@ -93,6 +93,10 @@ func emitStreamEvent(r *http.Request, emitter *sseEmitter, e session.StreamEvent
 	case agent.KindSubagent:
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.KindSubagent, m)
+		}
+	case agent.KindApprovalRequest:
+		if m, ok := decodeMapPayload(e.Payload); ok {
+			emitter.Emit(r.Context(), agent.KindApprovalRequest, m)
 		}
 	}
 }

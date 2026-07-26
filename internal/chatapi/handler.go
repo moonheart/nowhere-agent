@@ -86,6 +86,11 @@ func (h *Handler) WithRegistry(rg *session.RunRegistry) *Handler {
 	return h
 }
 
+// Registry returns the handler's run-execution registry (nil until WithRuntime/
+// WithRegistry). The server uses it to wire cross-cutting run behaviour (e.g.
+// the approval Resume loop source) that must live on the shared registry.
+func (h *Handler) Registry() *session.RunRegistry { return h.registry }
+
 // WithMessageStore wires full-block message persistence into the run-execution
 // registry and authoritative history rebuild (persist-raw-messages). Call after
 // WithRuntime/WithRegistry.
@@ -169,6 +174,15 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	history := toHistory(req)
+
+	// A verdict on a parked run reuses this endpoint (and its SSE attach path)
+	// rather than a separate response: resume the run, then stream its
+	// continuation exactly as a freshly-submitted run would.
+	if req.Approval != nil {
+		h.serveChatResume(w, r, req.Approval)
+		return
+	}
+
 	loop := h.newLoop(r.Context(), h.systemPromptFor(r, req))
 
 	// No runtime wired (tests/dev): stream the loop directly with no persistence,
@@ -253,6 +267,78 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	pre := []chunk{{"type": "data-session", "data": map[string]any{"id": sessID}, "transient": true}}
 
 	// Attach to the run from the start; the worker is already executing.
+	h.attach(w, r, sessID, run, 0, pre)
+}
+
+// serveChatResume handles POST /api/chat with an `approval` verdict: it applies
+// the decision and starts a FRESH run to continue the conversation (run-stateless
+// model, capability-gap O2), streaming the new run over the same ui-message-stream
+// a normal chat turn uses. There is no suspended run to resume — the prior run
+// ended when it surfaced the gated call; the verdict's tool_result is folded into
+// the new run's history by the registry.
+func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *approvalRequest) {
+	if h.runtime == nil || h.registry == nil {
+		http.Error(w, `{"error":"approval unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if av.ApprovalID == "" {
+		http.Error(w, `{"error":"approvalId required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Resolve the approval to find its session, then enforce ownership before
+	// acting (the decision must not reach another user's interaction).
+	ap, err := h.registry.ApprovalByID(r.Context(), av.ApprovalID)
+	if err != nil {
+		if errors.Is(err, session.ErrNoPendingApproval) {
+			http.Error(w, `{"error":"approval not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		return
+	}
+	if _, ok := h.authorizeSession(w, r, ap.SessionID); !ok {
+		return
+	}
+	sessID := ap.SessionID
+
+	// Build the fresh run's loop and bind this session's tools BEFORE deciding:
+	// an approved permission call executes through this same registry.
+	loop := h.newLoop(r.Context(), h.system)
+	if h.images != nil {
+		loop.WithImages(h.images.ResolverFor(sessID))
+	}
+	if h.bindTools != nil {
+		h.bindTools(r.Context(), loop, sessID)
+	}
+
+	_, history, err := h.registry.Decide(r.Context(), av.ApprovalID, av.Approved, av.Answer, loop.Tools())
+	if err != nil {
+		switch {
+		case errors.Is(err, session.ErrNoPendingApproval):
+			http.Error(w, `{"error":"approval already decided"}`, http.StatusConflict)
+		default:
+			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		}
+		return
+	}
+
+	// A verdict continues the conversation with no new user turn: the tool_result
+	// the gated call was waiting on is already in history. Submit a fresh run.
+	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history})
+	if err != nil {
+		if errors.Is(err, session.ErrRunActive) {
+			http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
+			return
+		}
+		writeSSEError(w, err.Error())
+		return
+	}
+
+	if !writeStreamHeaders(w) {
+		return
+	}
+	pre := []chunk{{"type": "data-session", "data": map[string]any{"id": sessID}, "transient": true}}
 	h.attach(w, r, sessID, run, 0, pre)
 }
 
@@ -540,6 +626,33 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 		if m, ok := payload.(map[string]any); ok {
 			e.write(chunk{"type": "data-subagent", "data": m, "transient": true})
 		}
+	case agent.KindApprovalRequest:
+		// Tool-approval prompt (capability-gap O2): stream the gated call to the
+		// client as the camelCase card /history also produces. The loop generated
+		// the approval's ID when it detected the gate (LangGraph-style), so the
+		// frame carries it — the card POSTs its verdict with no refresh or lookup.
+		// Transient: it drives UI, not the message record.
+		m, ok := payload.(map[string]any)
+		if !ok {
+			break
+		}
+		kind, _ := m["Kind"].(string)
+		if kind == "" {
+			kind = "approval"
+		}
+		toolCallID, _ := m["ToolCallID"].(string)
+		toolName, _ := m["ToolName"].(string)
+		args := m["Input"]
+		if args == nil {
+			args = map[string]any{}
+		}
+		e.write(chunk{"type": "data-tool-approval", "data": map[string]any{
+			"approvalId": m["ID"],
+			"kind":       kind,
+			"toolCallId": toolCallID,
+			"toolName":   toolName,
+			"args":       args,
+		}, "transient": true})
 	case agent.KindDone:
 		e.writeRunStatus("done")
 	case agent.KindUsage:

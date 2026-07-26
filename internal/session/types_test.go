@@ -3,7 +3,7 @@ package session
 import "testing"
 
 func TestRunStatusValid(t *testing.T) {
-	valid := []RunStatus{RunQueued, RunRunning, RunWaitingApproval, RunDone, RunFailed, RunCancelled}
+	valid := []RunStatus{RunQueued, RunRunning, RunDone, RunFailed, RunCancelled}
 	for _, s := range valid {
 		if !s.Valid() {
 			t.Errorf("%q should be valid", s)
@@ -27,7 +27,7 @@ func TestRunStatusTerminal(t *testing.T) {
 }
 
 func TestRunStatusActive(t *testing.T) {
-	active := []RunStatus{RunQueued, RunRunning, RunWaitingApproval}
+	active := []RunStatus{RunQueued, RunRunning}
 	for _, s := range active {
 		if !s.Active() {
 			t.Errorf("%q should be active", s)

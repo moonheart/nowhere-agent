@@ -110,17 +110,41 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// active reports whether a run is still in flight. The client sets
-	// unstable_resume only then; resuming a completed run would start a NEW
-	// assistant message after the loaded one (duplicate), because resume is a
-	// continuation of an unfinished run, not a re-read of history.
+	// active reports whether a run is genuinely in flight (queued/running). Runs
+	// are stateless and terminal on completion, so there is no suspended state to
+	// special-case.
 	_, active, err := h.runtime.ActiveRun(r.Context(), threadID)
 	if err != nil {
 		active = false
 	}
 
+	// A run parked in waiting_approval has a durable pending interaction the
+	// transient data-tool-approval frame showed live but a refresh dropped. Echo
+	// it here so the reloading client re-renders the card (approve/deny or the
+	// ask_user questions). Shape matches that frame's payload.
+	var pending map[string]any
+	if h.registry != nil {
+		if ap, ok, err := h.registry.PendingApprovalForSession(r.Context(), threadID); err == nil && ok {
+			var args any
+			if err := json.Unmarshal(ap.ToolInput, &args); err != nil {
+				args = map[string]any{}
+			}
+			kind := ap.Kind
+			if kind == "" {
+				kind = "approval"
+			}
+			pending = map[string]any{
+				"approvalId": ap.ID,
+				"kind":       kind,
+				"toolCallId": ap.ToolCallID,
+				"toolName":   ap.ToolName,
+				"args":       args,
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active})
+	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "pendingApproval": pending})
 }
 
 // isToolResultOnly reports whether a stored message is a user-role message that
@@ -145,6 +169,12 @@ func isToolResultOnly(m session.StoredMessage) bool {
 // live stream) instead of one bubble per round. Tool calls are rendered as
 // tool-call parts: a tool_use block starts a call and the matching tool_result
 // block (keyed by id) fills in its result.
+//
+// The exception is a HITL gate: an ask_user / permission tool_use whose
+// tool_result arrives via a SEPARATE verdict run (capability-gap O2), not inline
+// in the same run. That gate ENDS the turn — the live client shows the gated
+// message and the verdict's reply as two bubbles — so buildHistory flushes the
+// turn at a gated (unanswered) tool_use instead of folding the reply in.
 func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMessage, error) {
 	if h.msgStore == nil {
 		return nil, nil
@@ -165,7 +195,7 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 		}
 		cur = nil
 	}
-	for _, m := range stored {
+	for i, m := range stored {
 		switch {
 		case m.Role == provider.RoleAssistant:
 			if cur == nil {
@@ -193,8 +223,18 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 					calls[b.ToolUseID] = &cur.Content[len(cur.Content)-1]
 				}
 			}
+			// A HITL gate (ask_user / permission approval) ends its run on a bare
+			// tool_use: no further assistant round follows IN THE SAME RUN, and the
+			// verdict's reply arrives via a separate verdict run. Close the turn so
+			// that reply becomes a fresh bubble — unlike a normal tool loop, whose
+			// same-run continuation rounds fold into this one.
+			if endsOnGatedCall(m) && isLastAssistantOfRun(stored, i) {
+				flush()
+			}
 		case isToolResultOnly(m):
 			// Tool feedback merges into the open assistant turn's tool-call parts.
+			// A gated call's result comes from a later verdict run whose turn was
+			// already flushed; it still resolves the parked call's part via `calls`.
 			for _, b := range m.Content {
 				if call, ok := calls[b.ToolResultID]; ok {
 					call.Result = b.ToolContent
@@ -221,6 +261,33 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 	}
 	flush()
 	return msgs, nil
+}
+
+// endsOnGatedCall reports whether an assistant message's last block is a bare
+// tool_use — i.e. the model emitted a call and produced no trailing text. Both
+// a HITL gate and a normal mid-loop tool round look like this; the run boundary
+// (isLastAssistantOfRun) tells them apart.
+func endsOnGatedCall(m session.StoredMessage) bool {
+	if len(m.Content) == 0 {
+		return false
+	}
+	return m.Content[len(m.Content)-1].Type == provider.BlockToolUse
+}
+
+// isLastAssistantOfRun reports whether stored[i] is the final assistant message
+// of the contiguous run-segment it belongs to — i.e. no LATER assistant message
+// shares its RunID. A HITL gate is the last assistant of its (ended) run; a
+// normal tool loop's mid round is followed by more assistant messages in the
+// same run. Messages are appended in run order, so a later same-run assistant
+// can only appear after i.
+func isLastAssistantOfRun(stored []session.StoredMessage, i int) bool {
+	runID := stored[i].RunID
+	for j := i + 1; j < len(stored); j++ {
+		if stored[j].Role == provider.RoleAssistant && stored[j].RunID == runID {
+			return false
+		}
+	}
+	return true
 }
 
 // appendPartText appends text to the message's trailing part of the same type,

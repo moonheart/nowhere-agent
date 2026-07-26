@@ -244,3 +244,69 @@ func roles(msgs []historyMessage) []string {
 	}
 	return out
 }
+
+// TestBuildHistorySplitsOnHITLGate pins the gate boundary: a run that ends on
+// an ask_user/permission tool_use (no trailing text) folds its OWN rounds, but
+// the verdict run's reply (a different RunID) must become a SEPARATE bubble —
+// matching the live client, which shows the gated message and the verdict reply
+// as two bubbles. Regression: they used to merge into one on reload.
+func TestBuildHistorySplitsOnHITLGate(t *testing.T) {
+	ms := session.NewMemMessageStore()
+	sess := "sess-1"
+	append := func(runID string, role provider.Role, blocks ...provider.Block) {
+		if _, err := ms.AppendMessage(context.Background(), session.StoredMessage{
+			SessionID: sess, RunID: runID, Role: role, Content: blocks,
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	append("run-user", provider.RoleUser, provider.Block{Type: provider.BlockText, Text: "测试 ask_user"})
+	// Run 1 ends on the ask_user gate (bare tool_use, no trailing text).
+	append("run-1", provider.RoleAssistant,
+		provider.Block{Type: provider.BlockThinking, Thinking: "ask a question"},
+		provider.Block{Type: provider.BlockText, Text: "让我问你一个问题。"},
+		provider.Block{Type: provider.BlockToolUse, ToolUseID: "q1", ToolName: "ask_user", ToolInput: map[string]any{"questions": []any{}}},
+	)
+	// The verdict run injects the answer as a tool_result (user-role), then replies.
+	append("run-2", provider.RoleUser,
+		provider.Block{Type: provider.BlockToolResult, ToolResultID: "q1", ToolContent: `{"answers":{"q":"JavaScript"}}`},
+	)
+	append("run-2", provider.RoleAssistant,
+		provider.Block{Type: provider.BlockThinking, Thinking: "they answered"},
+		provider.Block{Type: provider.BlockText, Text: "你选择了 JavaScript。"},
+	)
+
+	h := NewHandler(newTestLoop, "sys").WithMessageStore(ms)
+	req := httptest.NewRequest("GET", "/api/chat/history?threadId="+sess, nil)
+	msgs, err := h.buildHistory(req, sess)
+	if err != nil {
+		t.Fatalf("buildHistory: %v", err)
+	}
+
+	// Expect 3 messages: user, gated assistant (run-1), verdict reply (run-2).
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages (user + gated + verdict reply), got %d: %v", len(msgs), roles(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[1].Role != "assistant" || msgs[2].Role != "assistant" {
+		t.Fatalf("roles = %v, want [user assistant assistant]", roles(msgs))
+	}
+	// The gated bubble carries the ask_user call; the verdict bubble is the reply.
+	var sawAsk bool
+	for _, p := range msgs[1].Content {
+		if p.Type == "tool-call" && p.ToolName == "ask_user" {
+			sawAsk = true
+		}
+	}
+	if !sawAsk {
+		t.Errorf("gated bubble missing ask_user call: %+v", msgs[1].Content)
+	}
+	var replyText string
+	for _, p := range msgs[2].Content {
+		if p.Type == "text" {
+			replyText += p.Text
+		}
+	}
+	if !strings.Contains(replyText, "JavaScript") {
+		t.Errorf("verdict reply text = %q, want the answer", replyText)
+	}
+}

@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState, type FC } from "react";
 import type { ThreadMessage, ToolCallMessagePartProps } from "@assistant-ui/react";
-import { Bot } from "lucide-react";
+import { Bot, HelpCircle, ShieldAlert } from "lucide-react";
 import { reportToolCall, useActivity, type SubPart } from "@/lib/activity";
+import {
+  useApproval,
+  respondToApproval,
+  respondToAskUser,
+  clearApproval,
+  followDecisionStream,
+  parseQuestions,
+  type ToolApproval,
+} from "@/lib/approval";
 import { Reasoning } from "@/components/reasoning";
 import { MarkdownText } from "@/components/markdown-text";
 
@@ -186,10 +195,13 @@ const Dispatch = dispatch;
 /* ---------- regular tool call ---------- */
 
 const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
-  const { toolName, argsText, result, isError, status } = props;
+  const { toolName, argsText, result, isError, status, toolCallId } = props;
   const running = status?.type === "running";
   const [open, setOpen] = useState(false);
   const expanded = running || open;
+  // A parked approval for this call (O2): the backend is holding the run until
+  // the user approves/denies. Sourced from the transient data-tool-approval frame.
+  const approval = useApproval(toolCallId);
 
   useReport(props, running);
 
@@ -198,7 +210,7 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
   return (
     <div
       className={`mb-2 rounded-xl border text-sm ${
-        isError ? "border-red-200 bg-red-50" : "border-neutral-200 bg-neutral-50"
+        isError ? "border-red-200 bg-red-50" : approval ? "border-amber-300 bg-amber-50/60" : "border-neutral-200 bg-neutral-50"
       }`}
     >
       <Header
@@ -208,6 +220,11 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
         expanded={expanded}
         onToggle={() => setOpen((o) => !o)}
       />
+      {approval && approval.kind === "ask_user" ? (
+        <AskUserGate approval={approval} />
+      ) : approval ? (
+        <ApprovalGate approval={approval} argsText={argsText} />
+      ) : null}
       {expanded && (
         <div className="space-y-2 border-t border-neutral-200 px-3 py-2 font-mono text-xs leading-relaxed">
           {argsText && (
@@ -226,6 +243,199 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
           )}
         </div>
       )}
+    </div>
+  );
+};
+
+// ApprovalGate renders the approve/deny prompt for a parked tool call. Deciding
+// POSTs the verdict to the backend (which resumes the run); the card clears the
+// prompt and the resumed stream drives the rest of the render.
+const ApprovalGate: FC<{ approval: { approvalId: string; toolCallId: string; toolName: string; args?: unknown }; argsText?: string }> = ({
+  approval,
+  argsText,
+}) => {
+  const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
+  const decide = async (approved: boolean) => {
+    setBusy(approved ? "approve" : "deny");
+    const stream = await respondToApproval(approval.approvalId, approved);
+    if (stream) {
+      clearApproval(approval.toolCallId);
+      followDecisionStream(stream); // watch the resumed run continue live
+    } else {
+      setBusy(null); // backend rejected (already decided / not waiting) — keep the prompt
+    }
+  };
+  return (
+    <div className="border-t border-amber-200 px-3 py-2.5">
+      <div className="flex items-start gap-2">
+        <ShieldAlert size={15} className="mt-0.5 shrink-0 text-amber-500" />
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium text-amber-800">
+            Approve running <span className="font-mono">{approval.toolName}</span>?
+          </p>
+          {argsText && (
+            <pre className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-all rounded bg-amber-100/60 p-1.5 font-mono text-[11px] text-amber-900">
+              {argsText}
+            </pre>
+          )}
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void decide(true)}
+              className="rounded-lg bg-amber-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
+            >
+              {busy === "approve" ? "Approving…" : "Approve"}
+            </button>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void decide(false)}
+              className="rounded-lg border border-amber-300 bg-white px-3 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50"
+            >
+              {busy === "deny" ? "Denying…" : "Deny"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// AskUserGate renders the model's ask_user questions as one card: each question
+// is a single- or multi-select over its options (recommended option
+// pre-highlighted), with a per-question custom-answer box, a Submit that posts
+// all answers, and a Skip that lets the model proceed without input (cancel =
+// skip, the run continues). Capability O-ask.
+const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
+  const questions = parseQuestions(approval);
+  // answers[q] = the chosen label(s) or custom text for that question.
+  const [answers, setAnswers] = useState<Record<number, string[]>>({});
+  const [custom, setCustom] = useState<Record<number, string>>({});
+  const [busy, setBusy] = useState(false);
+
+  const toggle = (qi: number, label: string, multi: boolean) => {
+    setAnswers((prev) => {
+      const cur = prev[qi] ?? [];
+      const next = multi
+        ? cur.includes(label)
+          ? cur.filter((l) => l !== label)
+          : [...cur, label]
+        : [label];
+      return { ...prev, [qi]: next };
+    });
+    setCustom((prev) => ({ ...prev, [qi]: "" })); // picking an option clears custom
+  };
+
+  const setCustomAnswer = (qi: number, text: string) => {
+    setCustom((prev) => ({ ...prev, [qi]: text }));
+    if (text) setAnswers((prev) => ({ ...prev, [qi]: [] })); // typing custom clears options
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    const out: Record<string, string | string[]> = {};
+    questions.forEach((q, qi) => {
+      const c = (custom[qi] ?? "").trim();
+      const sel = answers[qi] ?? [];
+      if (c) out[q.question] = c;
+      else if (sel.length === 1) out[q.question] = sel[0];
+      else if (sel.length > 1) out[q.question] = sel;
+    });
+    const stream = await respondToAskUser(approval.approvalId, out);
+    if (stream) {
+      clearApproval(approval.toolCallId);
+      followDecisionStream(stream);
+    } else {
+      setBusy(false);
+    }
+  };
+
+  const skip = async () => {
+    setBusy(true);
+    const stream = await respondToAskUser(approval.approvalId, null);
+    if (stream) {
+      clearApproval(approval.toolCallId);
+      followDecisionStream(stream);
+    } else {
+      setBusy(false);
+    }
+  };
+
+  if (questions.length === 0) return null;
+  return (
+    <div className="border-t border-violet-200 bg-violet-50/50 px-3 py-2.5">
+      <div className="flex items-start gap-2">
+        <HelpCircle size={15} className="mt-0.5 shrink-0 text-violet-500" />
+        <div className="min-w-0 flex-1 space-y-3">
+          {questions.map((q, qi) => {
+            const chosen = answers[qi] ?? [];
+            const customText = custom[qi] ?? "";
+            return (
+              <div key={qi}>
+                <p className="text-[13px] font-medium text-violet-900">
+                  {q.header && (
+                    <span className="mr-1.5 rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-600">
+                      {q.header}
+                    </span>
+                  )}
+                  {q.question}
+                </p>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {q.options.map((opt) => {
+                    const active = chosen.includes(opt.label);
+                    return (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        disabled={busy}
+                        title={opt.description}
+                        onClick={() => toggle(qi, opt.label, !!q.multiselect)}
+                        className={`rounded-lg border px-2.5 py-1 text-xs transition-colors ${
+                          active
+                            ? "border-violet-500 bg-violet-600 text-white"
+                            : opt.recommended
+                              ? "border-violet-300 bg-white text-violet-700 hover:bg-violet-100"
+                              : "border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-100"
+                        }`}
+                      >
+                        {opt.label}
+                        {opt.recommended && !active && <span className="ml-1 text-[9px] text-violet-400">★</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+                <input
+                  type="text"
+                  value={customText}
+                  disabled={busy}
+                  onChange={(e) => setCustomAnswer(qi, e.target.value)}
+                  placeholder="Or type your own answer…"
+                  className="mt-1.5 w-full rounded-lg border border-neutral-300 bg-white px-2.5 py-1 text-xs text-neutral-700 outline-none placeholder:text-neutral-400 focus:border-violet-400"
+                />
+              </div>
+            );
+          })}
+          <div className="flex gap-2 pt-1">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void submit()}
+              className="rounded-lg bg-violet-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
+            >
+              {busy ? "Sending…" : "Submit"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void skip()}
+              className="rounded-lg border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-100 disabled:opacity-50"
+            >
+              Skip
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };
