@@ -137,6 +137,31 @@ func (s *PGStore) MarkDreamedSeq(ctx context.Context, id string, seq int64) erro
 	return nil
 }
 
+// MemoryInjectedAt returns a session's memory-injection watermark. The zero
+// time (NULL) means nothing injected yet.
+func (s *PGStore) MemoryInjectedAt(ctx context.Context, id string) (time.Time, error) {
+	var at sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		SELECT memory_injected_at FROM sessions WHERE id = $1`, id).Scan(&at)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("get memory_injected_at: %w", err)
+	}
+	return at.Time, nil
+}
+
+// MarkMemoryInjectedAt advances the watermark, but never backwards (GREATEST
+// over COALESCE treats NULL as -infinity so the first mark always lands).
+// Idempotent.
+func (s *PGStore) MarkMemoryInjectedAt(ctx context.Context, id string, at time.Time) error {
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE sessions
+		SET memory_injected_at = GREATEST(COALESCE(memory_injected_at, '-infinity'::timestamptz), $2)
+		WHERE id = $1`, id, at); err != nil {
+		return fmt.Errorf("mark memory_injected_at: %w", err)
+	}
+	return nil
+}
+
 // ListSessionsByUser returns a user's active (non-deleted) sessions,
 // most-recently-active first. Ended sessions are hidden from the sidebar.
 func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {

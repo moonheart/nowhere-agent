@@ -20,6 +20,9 @@ type MemStore struct {
 	// dreamedSeq is each session's dreaming watermark (the in-memory analogue of
 	// sessions.dreamed_seq, migration 000009): the messages.id consolidated up to.
 	dreamedSeq map[string]int64
+	// memoryInjectedAt is each session's memory-injection watermark (the
+	// in-memory analogue of sessions.memory_injected_at, migration 000012).
+	memoryInjectedAt map[string]time.Time
 	// approvals is the in-memory analogue of the approvals table (migration
 	// 000010): approvalID -> pending/decided tool-approval record.
 	approvals map[string]*Approval
@@ -28,12 +31,13 @@ type MemStore struct {
 // NewMemStore creates an empty in-memory Store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		sessions:   map[string]*Session{},
-		runs:       map[string]*Run{},
-		bySess:     map[string][]*Run{},
-		events:     map[string][]Event{},
-		dreamedSeq: map[string]int64{},
-		approvals:  map[string]*Approval{},
+		sessions:         map[string]*Session{},
+		runs:             map[string]*Run{},
+		bySess:           map[string][]*Run{},
+		events:           map[string][]Event{},
+		dreamedSeq:       map[string]int64{},
+		memoryInjectedAt: map[string]time.Time{},
+		approvals:        map[string]*Approval{},
 	}
 }
 
@@ -95,6 +99,21 @@ func (m *MemStore) MarkDreamedSeq(_ context.Context, id string, seq int64) error
 	defer m.mu.Unlock()
 	if seq > m.dreamedSeq[id] {
 		m.dreamedSeq[id] = seq
+	}
+	return nil
+}
+
+func (m *MemStore) MemoryInjectedAt(_ context.Context, id string) (time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.memoryInjectedAt[id], nil
+}
+
+func (m *MemStore) MarkMemoryInjectedAt(_ context.Context, id string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if at.After(m.memoryInjectedAt[id]) {
+		m.memoryInjectedAt[id] = at
 	}
 	return nil
 }

@@ -17,11 +17,14 @@ func (s staticScopes) AccessibleScopes(context.Context, string) ([]identity.Scop
 	return s.scopes, nil
 }
 
-func TestContextBuilderComposesSkillsAndMemory(t *testing.T) {
+// TestContextBuilderComposesSkillsNotMemory pins the slimmed system prompt: it
+// carries base + skills (L0) but NOT recalled memories — those are injected
+// incrementally into the message view (capability K / context-mgmt), so the
+// system prompt stays byte-stable for prompt caching.
+func TestContextBuilderComposesSkillsNotMemory(t *testing.T) {
 	user := identity.User{ID: "u1"}
 	scopes := staticScopes{scopes: []identity.ScopeRef{identity.UserScope("u1"), identity.SystemScope()}}
 
-	// Seed a skill and a memory.
 	skillStore := skill.NewStore()
 	skills := skill.NewEngine(skillStore)
 	if _, err := skillStore.Put(context.Background(), skill.Skill{
@@ -43,12 +46,35 @@ func TestContextBuilderComposesSkillsAndMemory(t *testing.T) {
 		"You are nowhere-agent.",
 		"Available skills:",
 		"deploy: deploy the app",
-		"Relevant memories",
-		"prefers dark mode",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("system prompt missing %q\n---\n%s", want, out)
 		}
+	}
+	// Memory must NOT be in the system prompt (it's injected into the view).
+	if strings.Contains(out, "prefers dark mode") || strings.Contains(out, "Relevant memories") {
+		t.Errorf("memory must not be in the system prompt, got\n---\n%s", out)
+	}
+}
+
+// TestContextBuilderSystemStableAcrossQueries: with memory excluded, the system
+// prompt no longer depends on the query — two different queries yield the same
+// byte-stable prefix (the caching invariant this change exists for).
+func TestContextBuilderSystemStableAcrossQueries(t *testing.T) {
+	user := identity.User{ID: "u1"}
+	scopes := staticScopes{scopes: []identity.ScopeRef{identity.UserScope("u1")}}
+	mem := memory.NewMemPort()
+	mem.Store(context.Background(), memory.Memory{Scope: identity.UserScope("u1"), Kind: memory.KindFact, Content: "fact one"})
+	mem.Store(context.Background(), memory.Memory{Scope: identity.UserScope("u1"), Kind: memory.KindFact, Content: "fact two"})
+
+	cb := NewContextBuilder("base", scopes, mem, nil)
+	a := cb.SystemPrompt(context.Background(), user, "first query")
+	b := cb.SystemPrompt(context.Background(), user, "a totally different query")
+	if a != b {
+		t.Errorf("system prompt must be byte-stable across queries, got %q vs %q", a, b)
+	}
+	if a != "base" {
+		t.Errorf("expected only base prompt, got %q", a)
 	}
 }
 
@@ -63,22 +89,11 @@ func TestContextBuilderOmitsEmptySections(t *testing.T) {
 	}
 }
 
-func TestContextBuilderSkipsRecallOnEmptyQuery(t *testing.T) {
-	user := identity.User{ID: "u1"}
-	scopes := staticScopes{scopes: []identity.ScopeRef{identity.UserScope("u1")}}
-	mem := memory.NewMemPort()
-	mem.Store(context.Background(), memory.Memory{Scope: identity.UserScope("u1"), Kind: memory.KindFact, Content: "fact"})
-
-	cb := NewContextBuilder("base", scopes, mem, nil)
-	out := cb.SystemPrompt(context.Background(), user, "")
-	if strings.Contains(out, "Relevant memories") {
-		t.Errorf("recall should be skipped for empty query, got %q", out)
-	}
-}
-
 func TestContextBuilderScopeIsolation(t *testing.T) {
 	user := identity.User{ID: "u1"}
-	// Only u1's scope is accessible; a memory owned by u2 must not leak.
+	// Only u1's scope is accessible; a memory owned by u2 must not leak. (Memory
+	// no longer enters the system prompt at all, but the scope resolver must
+	// still be consulted only with the caller's scopes.)
 	scopes := staticScopes{scopes: []identity.ScopeRef{identity.UserScope("u1")}}
 	mem := memory.NewMemPort()
 	mem.Store(context.Background(), memory.Memory{Scope: identity.UserScope("u2"), Kind: memory.KindFact, Content: "u2 secret"})

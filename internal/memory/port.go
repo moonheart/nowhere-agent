@@ -47,6 +47,14 @@ type Port interface {
 	// Recall returns memories relevant to the query within the given scopes.
 	Recall(ctx context.Context, query string, scopes []identity.ScopeRef, limit int) ([]Memory, error)
 
+	// RecallSince returns non-deprecated memories in scope created after `since`,
+	// optionally restricted to `kinds` (empty = all kinds), ranked by relevance to
+	// `query` (empty query = most recent first). It is the incremental-injection
+	// read: `since` is the session's memory_injected_at watermark; the zero time
+	// means no lower bound (first-turn full recall). The recall_memory tool also
+	// uses it with a zero `since` for full relevance recall of chosen kinds.
+	RecallSince(ctx context.Context, since time.Time, query string, scopes []identity.ScopeRef, kinds []Kind, limit int) ([]Memory, error)
+
 	// ---- write side (offline, called ONLY by the dreaming worker) ----
 
 	// Store persists a new memory.

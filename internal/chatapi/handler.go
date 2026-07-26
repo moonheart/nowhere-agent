@@ -62,6 +62,10 @@ type Handler struct {
 	// bindTools, when set, attaches session-scoped tools (file tools bound to
 	// the session's sandbox) to each loop after the session is resolved.
 	bindTools ToolBinder
+	// memInjectorFactory, when set, builds a per-request incremental memory
+	// injector for the run's loop (surfaces new memories into the outgoing view,
+	// never the durable history). Nil disables injection (tests).
+	memInjectorFactory MemoryInjectorFactory
 }
 
 // NewHandler creates a chat Handler.
@@ -217,6 +221,16 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		h.bindTools(r.Context(), loop, sessID)
 	}
 
+	// Incremental memory injection: surface new memories into the outgoing view
+	// (never the durable history). query = the user's latest text for relevance.
+	if h.memInjectorFactory != nil {
+		if user, ok := identity.UserFromContext(r.Context()); ok {
+			if inj := h.memInjectorFactory(r.Context(), user, lastUserText(req)); inj != nil {
+				loop.WithMemoryInjector(inj, sessID)
+			}
+		}
+	}
+
 	// Build the user turn's message so the run worker can persist it (full-block
 	// conversation record) in addition to the replay event below.
 	var userMsg *provider.Message
@@ -310,6 +324,15 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	}
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
+	}
+	// A verdict continues the conversation with no new user text: surface any
+	// memories created since the last injection (empty query → recency order).
+	if h.memInjectorFactory != nil {
+		if user, ok := identity.UserFromContext(r.Context()); ok {
+			if inj := h.memInjectorFactory(r.Context(), user, ""); inj != nil {
+				loop.WithMemoryInjector(inj, sessID)
+			}
+		}
 	}
 
 	_, history, err := h.registry.Decide(r.Context(), av.ApprovalID, av.Approved, av.Answer, loop.Tools())

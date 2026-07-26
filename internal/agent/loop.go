@@ -156,6 +156,11 @@ type Loop struct {
 	// ended the run for human input. The run worker reads it to persist the
 	// durable Approval.
 	PendingApproval *ApprovalRequest
+	// memInjector, when set, surfaces newly-created memories into the outgoing
+	// view at send time (never persisted). memSessionID identifies the session
+	// whose injection watermark the injector advances.
+	memInjector  MemoryInjector
+	memSessionID string
 }
 
 // New creates a Loop.
@@ -182,6 +187,18 @@ func (l *Loop) maxOverflowRetries() int { return l.config.MaxOverflowRetries }
 // provider error verbatim (no KindError emit) so the caller can distinguish a
 // retriable context-overflow from a fatal failure.
 func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (provider.Message, []toolruntime.Call, turnEnd, error) {
+	// Incremental memory injection (capability K / context-mgmt): append newly-
+	// surfaced memories to the tail of the OUTGOING view only. The local `view`
+	// is a per-attempt copy; the appended message never enters `produced`, so it
+	// is never persisted and the durable history stays append-only (byte-stable
+	// prefix for caching). A nil injector or an empty result leaves the view as-is.
+	if l.memInjector != nil {
+		if extra, err := l.memInjector.Inject(ctx, l.memSessionID, view); err != nil {
+			slog.Warn("agent: memory injection failed; continuing without it", "err", err)
+		} else if len(extra) > 0 {
+			view = append(append([]provider.Message{}, view...), extra...)
+		}
+	}
 	req := provider.Request{
 		Model:           l.config.Model,
 		System:          l.config.System,
@@ -208,6 +225,15 @@ func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitte
 // when the session (and thus the confined resolver) is known.
 func (l *Loop) WithImages(res provider.ImageResolver) *Loop {
 	l.config.Images = res
+	return l
+}
+
+// WithMemoryInjector sets the incremental memory injector + the session whose
+// watermark it advances. Called once per run, when the session is known. A nil
+// injector disables injection (unauthenticated/direct paths).
+func (l *Loop) WithMemoryInjector(inj MemoryInjector, sessionID string) *Loop {
+	l.memInjector = inj
+	l.memSessionID = sessionID
 	return l
 }
 

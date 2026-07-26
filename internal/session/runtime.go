@@ -41,6 +41,15 @@ type Store interface {
 	// resumes after it next pass. Idempotent.
 	MarkDreamedSeq(ctx context.Context, id string, seq int64) error
 
+	// MemoryInjectedAt returns the session's memory-injection watermark (the
+	// moment memories were last surfaced into the conversation). The zero time
+	// means nothing injected yet — the first turn injects the full relevant set
+	// (incremental injection, capability K / context-mgmt).
+	MemoryInjectedAt(ctx context.Context, id string) (time.Time, error)
+	// MarkMemoryInjectedAt advances the watermark (never backwards), so the next
+	// injection surfaces only memories created after it. Idempotent.
+	MarkMemoryInjectedAt(ctx context.Context, id string, at time.Time) error
+
 	CreateRun(ctx context.Context, sessionID string, seq int) (Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status RunStatus) error
 	// ActiveRun returns the active run in a session, or false.
@@ -266,6 +275,18 @@ func (rt *Runtime) ActiveRun(ctx context.Context, sessionID string) (Run, bool, 
 // GetSession fetches a session by id (pass-through to the store).
 func (rt *Runtime) GetSession(ctx context.Context, id string) (Session, error) {
 	return rt.store.GetSession(ctx, id)
+}
+
+// MemoryInjectedAt returns the session's memory-injection watermark
+// (pass-through to the store).
+func (rt *Runtime) MemoryInjectedAt(ctx context.Context, id string) (time.Time, error) {
+	return rt.store.MemoryInjectedAt(ctx, id)
+}
+
+// MarkMemoryInjectedAt advances the session's memory-injection watermark
+// (pass-through to the store; never backwards).
+func (rt *Runtime) MarkMemoryInjectedAt(ctx context.Context, id string, at time.Time) error {
+	return rt.store.MarkMemoryInjectedAt(ctx, id, at)
 }
 
 // CreateSession creates a session for a user (pass-through to the store).
