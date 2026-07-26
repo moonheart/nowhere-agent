@@ -10,7 +10,7 @@ import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
-import { reportApproval, resetApprovals, registerDecisionFollower, type ToolApproval } from "@/lib/approval";
+import { reportApproval, resetApprovals, registerDecisionFollower, isFollowingDecision, type ToolApproval } from "@/lib/approval";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -86,6 +86,9 @@ function Chat({
       const threadId = getSessionId();
       if (!threadId) return;
       if (runtime.thread.getState().isRunning) return;
+      // This client is already following a verdict's resumed run; a second
+      // resumeRun would abort that stream and its onCancel would kill the worker.
+      if (isFollowingDecision()) return;
       let active = false;
       try {
         active = await hasActiveRun();
