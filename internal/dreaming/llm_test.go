@@ -125,17 +125,17 @@ func TestProviderLLMCompleteJSON(t *testing.T) {
 	}
 }
 
-// TestProviderLLMCompleteJSONErrors: no tool payload or malformed JSON is an error.
+// TestProviderLLMCompleteJSONErrors: no usable payload or malformed JSON is an error.
 func TestProviderLLMCompleteJSONErrors(t *testing.T) {
-	// No tool_use block at all.
+	// Neither a tool_use block nor any text JSON.
 	a := &scriptedAdapter{events: []provider.Event{
-		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
-		{Type: provider.EventBlockDelta, Index: 0, Delta: "just prose"},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockThinking}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "only reasoning, no answer"},
 		{Type: provider.EventMessageStop},
 	}}
 	var res extractResult
 	if _, err := NewProviderLLM(a, "m").CompleteJSON(context.Background(), "p", extractSchema, &res); err == nil {
-		t.Error("expected error when model produces no tool_use payload")
+		t.Error("expected error when model produces neither tool_use nor JSON text")
 	}
 
 	// Malformed JSON in the tool payload.
@@ -146,6 +146,32 @@ func TestProviderLLMCompleteJSONErrors(t *testing.T) {
 	}}
 	if _, err := NewProviderLLM(b, "m").CompleteJSON(context.Background(), "p", extractSchema, &res); err == nil {
 		t.Error("expected decode error for malformed JSON")
+	}
+}
+
+// TestProviderLLMCompleteJSONTextFallback: when the (soft-forced) model answers
+// with prose JSON instead of a tool call, CompleteJSON extracts the object from
+// the text block — and still ignores the reasoning block.
+func TestProviderLLMCompleteJSONTextFallback(t *testing.T) {
+	a := &scriptedAdapter{events: []provider.Event{
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockThinking}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "the user has a cat, so facts are..."},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventBlockStart, Index: 1, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 1, Delta: "```json\n{\"facts\":[\"user has a cat named 豆豆\", \"user speaks chinese\"]}\n```"},
+		{Type: provider.EventBlockStop, Index: 1},
+		{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: 10, OutputTokens: 20}},
+	}}
+	var res extractResult
+	tokens, err := NewProviderLLM(a, "m").CompleteJSON(context.Background(), "p", extractSchema, &res)
+	if err != nil {
+		t.Fatalf("CompleteJSON text fallback: %v", err)
+	}
+	if tokens != 30 {
+		t.Errorf("tokens = %d want 30", tokens)
+	}
+	if len(res.Facts) != 2 || res.Facts[0] != "user has a cat named 豆豆" {
+		t.Errorf("facts = %+v, want the 2 facts from the text JSON", res.Facts)
 	}
 }
 

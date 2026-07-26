@@ -77,16 +77,19 @@ func (l *ProviderLLM) Complete(ctx context.Context, prompt string) (string, int,
 	return sb.String(), tokens, nil
 }
 
-// CompleteJSON runs one STRUCTURED generation (capability L3): it forces the
-// model to emit a single JSON object conforming to spec.Schema via a forced
-// tool call, and returns that object unmarshalled into out (a pointer). The
-// forced tool call structurally excludes reasoning/commentary — the answer is a
-// tool_use block's JSON input, not free text — so this is immune to the
-// chain-of-thought-leaks-into-facts bug that plain text parsing suffered.
+// CompleteJSON runs one STRUCTURED generation (capability L3): it asks the
+// model to emit a single JSON object conforming to spec.Schema, and returns
+// that object unmarshalled into out (a pointer).
 //
-// The tool_use input streams as JSON deltas on the tool block; CompleteJSON
-// accumulates those deltas (tracked by the block index whose BlockStart carried
-// a tool_use) and unmarshals them at stream end. Returns the tokens consumed.
+// The preferred path is a (soft-forced) tool call: the answer arrives as a
+// tool_use block's JSON input, structurally separated from any reasoning prose.
+// But the OpenAI-compatible gateway rejects a forced tool_choice, so we only
+// INSTRUCT the model to call the tool — and a reasoning model occasionally
+// answers with prose instead. So CompleteJSON also captures the text block and,
+// when there is no tool payload, falls back to extracting the JSON object from
+// the text (which, per the prompt, is the only thing the text should contain).
+// Reasoning/thinking blocks are always ignored either way, so the
+// chain-of-thought can never be parsed as data.
 func (l *ProviderLLM) CompleteJSON(ctx context.Context, prompt string, spec *provider.JSONResponseSpec, out any) (int, error) {
 	req := provider.Request{
 		Model:        l.model,
@@ -98,19 +101,27 @@ func (l *ProviderLLM) CompleteJSON(ctx context.Context, prompt string, spec *pro
 	if err != nil {
 		return 0, err
 	}
-	var jsonBuf strings.Builder
+	var jsonBuf, textBuf strings.Builder
 	tokens := 0
 	toolIdx := map[int]bool{}
+	textIdx := map[int]bool{}
 	truncated := false
 	for ev := range events {
 		switch ev.Type {
 		case provider.EventBlockStart:
-			if ev.Block != nil && ev.Block.Type == provider.BlockToolUse {
-				toolIdx[ev.Index] = true
+			if ev.Block != nil {
+				switch ev.Block.Type {
+				case provider.BlockToolUse:
+					toolIdx[ev.Index] = true
+				case provider.BlockText:
+					textIdx[ev.Index] = true
+				}
 			}
 		case provider.EventBlockDelta:
 			if toolIdx[ev.Index] {
 				jsonBuf.WriteString(ev.Delta)
+			} else if textIdx[ev.Index] {
+				textBuf.WriteString(ev.Delta)
 			}
 		case provider.EventMessageStop:
 			if ev.Usage != nil {
@@ -123,9 +134,15 @@ func (l *ProviderLLM) CompleteJSON(ctx context.Context, prompt string, spec *pro
 			return tokens, ev.Err
 		}
 	}
+
 	raw := strings.TrimSpace(jsonBuf.String())
 	if raw == "" {
-		return tokens, fmt.Errorf("structured output: model produced no tool_use payload")
+		// Soft-forcing fell through to prose: extract the JSON object from the
+		// text block (the prompt told the model to put only the JSON there).
+		raw = extractJSONObject(textBuf.String())
+	}
+	if raw == "" {
+		return tokens, fmt.Errorf("structured output: model produced neither a tool_use payload nor JSON text")
 	}
 	if truncated {
 		return tokens, fmt.Errorf("structured output: truncated at max_tokens (%d), JSON incomplete: %s", l.MaxTokens, truncate(raw, 120))
@@ -134,6 +151,47 @@ func (l *ProviderLLM) CompleteJSON(ctx context.Context, prompt string, spec *pro
 		return tokens, fmt.Errorf("structured output: decode %q: %w", truncate(raw, 200), err)
 	}
 	return tokens, nil
+}
+
+// extractJSONObject pulls the first balanced {...} object out of s, tolerating
+// markdown code fences and surrounding prose. Returns "" if none is found.
+func extractJSONObject(s string) string {
+	s = strings.TrimSpace(s)
+	// Strip a leading code fence (```json ... ```) if present.
+	s = strings.TrimPrefix(s, "```json")
+	s = strings.TrimPrefix(s, "```")
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	inStr := false
+	esc := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return "" // unbalanced — likely truncated
 }
 
 // truncate shortens s for error messages.
