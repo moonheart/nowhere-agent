@@ -79,6 +79,22 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 		at.Function.Parameters = t.InputSchema
 		req.Tools = append(req.Tools, at)
 	}
+
+	// Structured output (L3): append the synthetic response function. We do NOT
+	// send tool_choice: the OpenAI-compatible gateway in use rejects the
+	// object form of tool_choice (400 invalid_request_error), though it accepts
+	// tools and the string form "auto". Instead the prompt instructs the model
+	// to call the function (soft-forcing); reasoning models reliably do, and
+	// the answer still arrives as a tool_call's JSON arguments — isolated from
+	// any prose. The reader tolerates a missing tool call as an error.
+	if jr := r.JSONResponse; jr != nil {
+		var at apiTool
+		at.Type = "function"
+		at.Function.Name = jr.Name
+		at.Function.Description = jr.Description
+		at.Function.Parameters = jr.Schema
+		req.Tools = append(req.Tools, at)
+	}
 	return req, nil
 }
 

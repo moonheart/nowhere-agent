@@ -1,6 +1,8 @@
 package openai
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"nowhere-agent/internal/provider"
@@ -105,5 +107,33 @@ func TestBuildRequestTools(t *testing.T) {
 	}
 	if len(req.Tools) != 1 || req.Tools[0].Function.Name != "read" {
 		t.Fatalf("tools wrong: %+v", req.Tools)
+	}
+}
+
+// TestBuildRequestJSONResponseToolNoForce pins L3 on the OpenAI-compatible
+// gateway: the synthetic response function is appended, but tool_choice is NOT
+// sent (the gateway rejects the object form of tool_choice with a 400). The
+// model is soft-forced via the prompt instead.
+func TestBuildRequestJSONResponseToolNoForce(t *testing.T) {
+	req, err := buildRequest(provider.Request{
+		Model:    "m",
+		Messages: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")},
+		JSONResponse: &provider.JSONResponseSpec{
+			Name:        "record_facts",
+			Description: "d",
+			Schema:      map[string]any{"type": "object"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	last := req.Tools[len(req.Tools)-1]
+	if last.Function.Name != "record_facts" || last.Function.Parameters["type"] != "object" {
+		t.Errorf("response tool wrong: %+v", last)
+	}
+	// Marshal to confirm no tool_choice key is emitted.
+	b, _ := json.Marshal(req)
+	if strings.Contains(string(b), "tool_choice") {
+		t.Errorf("tool_choice must not be sent (gateway 400s on it): %s", b)
 	}
 }

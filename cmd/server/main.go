@@ -16,6 +16,7 @@ import (
 	"nowhere-agent/internal/chatapi"
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/contextmgmt"
+	"nowhere-agent/internal/dreaming"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/mcp"
@@ -26,6 +27,7 @@ import (
 	"nowhere-agent/internal/provider/anthropic"
 	"nowhere-agent/internal/provider/openai"
 	"nowhere-agent/internal/sandbox"
+	"nowhere-agent/internal/scheduler"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/subagent"
@@ -72,7 +74,8 @@ func run() error {
 
 	// Durable session runtime over Postgres: chat requests persist as runs,
 	// and the run log doubles as the episodes for dreaming.
-	sessionRuntime := session.NewRuntime(session.NewPGStore(pool))
+	sessionStore := session.NewPGStore(pool)
+	sessionRuntime := session.NewRuntime(sessionStore)
 
 	// Reconcile runs stranded non-terminal by a previous process (their in-memory
 	// workers died with it): mark them failed at startup so they don't read as
@@ -155,7 +158,19 @@ func run() error {
 	// Memory (PG+vector) and skill engine feed the loop's system prompt:
 	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
 	memPort := memory.NewPGPort(pool)
-	skillEngine := skill.NewEngine(skill.NewStore())
+	skillStore := skill.NewStore()
+	// Seed the skill store from disk (capability-gap K3a): each SKILL.md under
+	// SKILLS_DIR becomes a system-scope skill, lighting up the L0 index in the
+	// system prompt. Empty SKILLS_DIR leaves the runtime dormant. The loader
+	// never loads scripts — skill execution is K3b, gated on C17.
+	if cfg.Skills.Dir != "" {
+		n, err := skill.LoadDir(ctx, skillStore, cfg.Skills.Dir)
+		if err != nil {
+			return fmt.Errorf("load skills from %s: %w", cfg.Skills.Dir, err)
+		}
+		log.Info("skills seeded from disk", "dir", cfg.Skills.Dir, "count", n)
+	}
+	skillEngine := skill.NewEngine(skillStore)
 	baseSystem := "You are nowhere-agent, a helpful AI assistant."
 	ctxBuilder := chatapi.NewContextBuilder(baseSystem, identitySvc, memPort, skillEngine)
 
@@ -206,6 +221,30 @@ func run() error {
 		var compressor contextmgmt.Compressor
 		if cfg.LLM.ContextWindow > 0 {
 			compressor = contextmgmt.NewLLMCompressor(adapter, model)
+		}
+
+		// Dreaming worker + the scheduler that drives it (capability-gaps K1+K2).
+		// The worker consolidates ended sessions' episodes into long-term memory;
+		// the scheduler fires it every DREAMING_INTERVAL. Idempotency rests on the
+		// sessions.dreamed_at marker (migration 000008), not the scheduler's
+		// in-memory last-run map, so the catch-up run at every boot only processes
+		// sessions not already dreamed over. The scheduler runs in a goroutine like
+		// the HTTP server and stops when the root context is cancelled.
+		if cfg.Dreaming.Enabled {
+			source := dreaming.NewStoreSource(sessionStore, messageStore)
+			llm := dreaming.NewProviderLLM(adapter, model)
+			worker := dreaming.NewWorker(source, memPort, llm, dreaming.Budget{MaxTokens: cfg.Dreaming.MaxTokens})
+			worker.SetReflect(cfg.Dreaming.Reflect)
+			sched := scheduler.New(log, scheduler.Job{
+				Name:     "dreaming",
+				Interval: cfg.Dreaming.Interval,
+				Run: func(ctx context.Context) error {
+					_, err := worker.Run(ctx)
+					return err
+				},
+			})
+			go sched.Start(ctx)
+			log.Info("dreaming worker enabled", "interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens, "reflect", cfg.Dreaming.Reflect)
 		}
 
 		// Subagent factory (subagent capability): builds a child loop for a
@@ -259,6 +298,20 @@ func run() error {
 		if sandboxMgr != nil || mcpClient != nil {
 			handler = handler.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string) {
 				reg := toolruntime.NewRegistry()
+				// Read-only load_skill (capability-gap K3a): the agent loads a
+				// skill's instructions / resource files. Registered whenever any
+				// skill is present (independent of the sandbox); scopes mirror the
+				// context builder (caller user + teams + system). It executes
+				// nothing — skill script execution is K3b, gated on C17.
+				if len(skillEngine.LoadL0(ctx, nil)) > 0 {
+					scopes := []identity.ScopeRef{identity.SystemScope()}
+					if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
+						if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
+							scopes = sc
+						}
+					}
+					reg.Register(skill.NewLoadTool(skillEngine, scopes))
+				}
 				if sandboxMgr != nil {
 					h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
 						Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(cfg.Sandbox.Network)},

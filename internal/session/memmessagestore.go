@@ -42,4 +42,17 @@ func (m *MemMessageStore) MessagesFor(_ context.Context, sessionID string) ([]St
 	return out, nil
 }
 
+// MessagesAfter returns the session's messages with id > afterID, in seq order.
+func (m *MemMessageStore) MessagesAfter(_ context.Context, sessionID string, afterID int64) ([]StoredMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []StoredMessage
+	for _, msg := range m.bySess[sessionID] {
+		if msg.ID > afterID {
+			out = append(out, msg)
+		}
+	}
+	return out, nil
+}
+
 var _ MessageStore = (*MemMessageStore)(nil)

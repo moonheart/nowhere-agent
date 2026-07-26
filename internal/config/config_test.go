@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -49,6 +50,56 @@ func TestMCPFromEnv(t *testing.T) {
 	}
 	if cfg.MCP.SearxngURL != "http://localhost:9999/mcp" {
 		t.Errorf("got searxng url %q, want override", cfg.MCP.SearxngURL)
+	}
+}
+
+func TestDreamingDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Dreaming.Enabled {
+		t.Error("dreaming should be disabled by default (it spends LLM tokens)")
+	}
+	if cfg.Dreaming.Interval != time.Hour {
+		t.Errorf("got dreaming interval %v, want 1h", cfg.Dreaming.Interval)
+	}
+	if cfg.Dreaming.MaxTokens != 100000 {
+		t.Errorf("got dreaming max tokens %d, want 100000", cfg.Dreaming.MaxTokens)
+	}
+	if !cfg.Dreaming.Reflect {
+		t.Error("dreaming reflect should default to true (compress+reflect stages on)")
+	}
+}
+
+func TestDreamingReflectFromEnv(t *testing.T) {
+	t.Setenv("DREAMING_REFLECT", "false")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Dreaming.Reflect {
+		t.Error("DREAMING_REFLECT=false should disable the compress+reflect stages")
+	}
+}
+
+func TestDreamingFromEnv(t *testing.T) {
+	t.Setenv("DREAMING_ENABLED", "true")
+	t.Setenv("DREAMING_INTERVAL", "5m")
+	t.Setenv("DREAMING_MAX_TOKENS", "50000")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Dreaming.Enabled {
+		t.Error("dreaming should be enabled from DREAMING_ENABLED=true")
+	}
+	if cfg.Dreaming.Interval != 5*time.Minute {
+		t.Errorf("got dreaming interval %v, want 5m", cfg.Dreaming.Interval)
+	}
+	if cfg.Dreaming.MaxTokens != 50000 {
+		t.Errorf("got dreaming max tokens %d, want 50000", cfg.Dreaming.MaxTokens)
 	}
 }
 

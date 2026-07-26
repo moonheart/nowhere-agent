@@ -14,18 +14,22 @@ import (
 type MemStore struct {
 	mu       sync.Mutex
 	sessions map[string]*Session
-	runs     map[string]*Run   // runID
-	bySess   map[string][]*Run // sessionID -> runs
+	runs     map[string]*Run    // runID
+	bySess   map[string][]*Run  // sessionID -> runs
 	events   map[string][]Event // runID -> events
+	// dreamedSeq is each session's dreaming watermark (the in-memory analogue of
+	// sessions.dreamed_seq, migration 000009): the messages.id consolidated up to.
+	dreamedSeq map[string]int64
 }
 
 // NewMemStore creates an empty in-memory Store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		sessions: map[string]*Session{},
-		runs:     map[string]*Run{},
-		bySess:   map[string][]*Run{},
-		events:   map[string][]Event{},
+		sessions:   map[string]*Session{},
+		runs:       map[string]*Run{},
+		bySess:     map[string][]*Run{},
+		events:     map[string][]Event{},
+		dreamedSeq: map[string]int64{},
 	}
 }
 
@@ -66,6 +70,29 @@ func (m *MemStore) ListIdleSessions(_ context.Context, before time.Time) ([]Sess
 		}
 	}
 	return out, nil
+}
+
+// ListUndreamedSessions is not supported by MemStore: eligibility needs a join
+// against the message store (messages beyond the watermark), which the session
+// MemStore cannot see. The production store (PGStore) answers it in SQL; tests
+// drive dreaming with a fake EpisodeSource instead.
+func (m *MemStore) ListUndreamedSessions(_ context.Context) ([]Session, error) {
+	return nil, errors.New("MemStore.ListUndreamedSessions: not supported (needs the messages join; use PGStore)")
+}
+
+func (m *MemStore) DreamedSeq(_ context.Context, id string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.dreamedSeq[id], nil
+}
+
+func (m *MemStore) MarkDreamedSeq(_ context.Context, id string, seq int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if seq > m.dreamedSeq[id] {
+		m.dreamedSeq[id] = seq
+	}
+	return nil
 }
 
 func (m *MemStore) ListSessionsByUser(_ context.Context, userID string) ([]Session, error) {

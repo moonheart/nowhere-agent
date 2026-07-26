@@ -30,6 +30,11 @@ type Config struct {
 	MCP MCP
 	// Permission configures the execution-permission gate over tool risks.
 	Permission Permission
+	// Dreaming configures the offline dreaming worker and the scheduler that
+	// drives it (capability-gaps K1+K2).
+	Dreaming Dreaming
+	// Skills configures the skill runtime (capability-gap K3a).
+	Skills Skills
 }
 
 // Permission maps each tool risk class to a decision for the execution-permission
@@ -52,6 +57,32 @@ type Permission struct {
 type MCP struct {
 	Enabled    bool   `envconfig:"MCP_ENABLED" default:"false"`
 	SearxngURL string `envconfig:"MCP_SEARXNG_URL" default:"https://searxng-mcp.moonheart.dev/mcp"`
+}
+
+// Dreaming configures the offline dreaming worker (capability-gap K1) and the
+// scheduler that drives it (K2). Disabled by default: each pass spends LLM
+// tokens and requires a configured provider, so it is an explicit opt-in. When
+// enabled, the server starts a scheduler that runs the worker every Interval,
+// consolidating ended sessions' episodes into long-term memory, bounded by
+// MaxTokens per pass.
+type Dreaming struct {
+	Enabled   bool          `envconfig:"DREAMING_ENABLED" default:"false"`
+	Interval  time.Duration `envconfig:"DREAMING_INTERVAL" default:"1h"`
+	MaxTokens int           `envconfig:"DREAMING_MAX_TOKENS" default:"100000"`
+	// Reflect enables the compress + reflect stages (KindSummary/KindInsight),
+	// which each cost extra LLM calls per session batch. On by default; set
+	// DREAMING_REFLECT=false to run the cheaper extract→reorganize pipeline only.
+	Reflect bool `envconfig:"DREAMING_REFLECT" default:"true"`
+}
+
+// Skills configures the skill runtime (capability-gap K3a). Dir points at a
+// directory of skills (one subdirectory each, holding a SKILL.md); when set,
+// the server seeds the skill store from it at startup at system scope, which
+// lights up the L0 skill index in the system prompt and the read-only load_skill
+// tool. Empty leaves the runtime dormant (no skills). Skill script execution is
+// NOT enabled by this loader — that is K3b, gated on the C17 exec-safety fix.
+type Skills struct {
+	Dir string `envconfig:"SKILLS_DIR" default:""`
 }
 
 // Subagent configures the spawn_agent tool. It is only wired when a sandbox

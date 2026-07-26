@@ -84,6 +84,59 @@ func (s *PGStore) ListIdleSessions(ctx context.Context, idleSinceEventBefore tim
 	return out, rows.Err()
 }
 
+// ListUndreamedSessions returns sessions that have messages beyond their
+// dreamed watermark — the dreaming worker's eligibility scan (incremental
+// model, capability-gap K1). A session qualifies regardless of status (open
+// conversations are learnable) while it still has unconsolidated messages.
+// Ordered by last activity; the LIMIT bounds a single scan.
+func (s *PGStore) ListUndreamedSessions(ctx context.Context) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.user_id, s.title, s.status, s.created_at, s.updated_at
+		FROM sessions s
+		WHERE EXISTS (
+			SELECT 1 FROM messages m
+			WHERE m.session_id = s.id AND m.id > s.dreamed_seq
+		)
+		ORDER BY s.updated_at
+		LIMIT 100`)
+	if err != nil {
+		return nil, fmt.Errorf("list undreamed sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Session
+	for rows.Next() {
+		var sess Session
+		if err := rows.Scan(&sess.ID, &sess.UserID, &sess.Title, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan undreamed session: %w", err)
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// DreamedSeq returns a session's dreamed watermark (the messages.id the worker
+// has consolidated up to). 0 means nothing consolidated yet.
+func (s *PGStore) DreamedSeq(ctx context.Context, id string) (int64, error) {
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT dreamed_seq FROM sessions WHERE id = $1`, id).Scan(&seq)
+	if err != nil {
+		return 0, fmt.Errorf("get dreamed_seq: %w", err)
+	}
+	return seq, nil
+}
+
+// MarkDreamedSeq advances a session's dreamed watermark, but never backwards
+// (GREATEST guards against a stale pass clobbering a newer one). Idempotent.
+func (s *PGStore) MarkDreamedSeq(ctx context.Context, id string, seq int64) error {
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE sessions SET dreamed_seq = GREATEST(dreamed_seq, $2) WHERE id = $1`, id, seq); err != nil {
+		return fmt.Errorf("mark dreamed_seq: %w", err)
+	}
+	return nil
+}
+
 // ListSessionsByUser returns a user's active (non-deleted) sessions,
 // most-recently-active first. Ended sessions are hidden from the sidebar.
 func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {

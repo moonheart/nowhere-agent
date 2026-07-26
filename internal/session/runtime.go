@@ -29,6 +29,16 @@ type Store interface {
 	// ListIdleSessions returns active sessions with no event activity since
 	// the given time (candidates for idle-end by the scheduler).
 	ListIdleSessions(ctx context.Context, idleSinceEventBefore time.Time) ([]Session, error)
+	// ListUndreamedSessions returns sessions with messages beyond their dreamed
+	// watermark (any status — open conversations are learnable). This is the
+	// dreaming worker's eligibility scan (incremental model, capability-gap K1).
+	ListUndreamedSessions(ctx context.Context) ([]Session, error)
+	// DreamedSeq returns a session's dreaming watermark (messages.id consolidated
+	// up to); 0 means nothing consolidated yet.
+	DreamedSeq(ctx context.Context, id string) (int64, error)
+	// MarkDreamedSeq advances the watermark (never backwards), so the worker
+	// resumes after it next pass. Idempotent.
+	MarkDreamedSeq(ctx context.Context, id string, seq int64) error
 
 	CreateRun(ctx context.Context, sessionID string, seq int) (Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status RunStatus) error
