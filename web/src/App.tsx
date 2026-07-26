@@ -10,7 +10,7 @@ import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
-import { reportApproval, resetApprovals, type ToolApproval } from "@/lib/approval";
+import { reportApproval, resetApprovals, recentDecision, type ToolApproval } from "@/lib/approval";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -74,6 +74,10 @@ function Chat({
       const threadId = getSessionId();
       if (!threadId) return;
       if (runtime.thread.getState().isRunning) return;
+      // This client just decided an approval/ask_user: the run resuming is OURS,
+      // not one started elsewhere. Attaching would start a second, divergent copy
+      // of the reply (parentId:null appends a new assistant message), so skip.
+      if (recentDecision()) return;
       let active = false;
       try {
         active = await hasActiveRun();

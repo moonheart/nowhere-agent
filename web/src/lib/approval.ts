@@ -109,7 +109,29 @@ async function postDecision(approvalId: string, body: Record<string, unknown>): 
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ approvalId, ...body }),
   }).catch(() => null);
-  return res !== null && res.ok;
+  if (res !== null && res.ok) {
+    noteDecision();
+    return true;
+  }
+  return false;
+}
+
+// lastDecisionAt marks when THIS client last posted a verdict. The resumed run
+// belongs to this same session, so the multi-client attach poll (which live-
+// follows runs started elsewhere) must not also attach to it — that would start
+// a second, divergent copy of the reply. recentDecision() lets the poll skip
+// attaching right after a decision.
+let lastDecisionAt = 0;
+const DECISION_ATTACH_SUPPRESS_MS = 10_000;
+
+function noteDecision() {
+  lastDecisionAt = Date.now();
+}
+
+// recentDecision reports whether this client decided an interaction moments ago
+// (so its run is resuming and the attach poll should leave it alone).
+export function recentDecision(): boolean {
+  return Date.now() - lastDecisionAt < DECISION_ATTACH_SUPPRESS_MS;
 }
 
 // parseQuestions extracts the ask_user question set from a ToolApproval.args
