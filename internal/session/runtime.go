@@ -14,6 +14,9 @@ var (
 	ErrNoActiveRun = errors.New("no active run in this session")
 	// ErrSessionEnded is returned when acting on an ended session.
 	ErrSessionEnded = errors.New("session has ended")
+	// ErrRunNotWaiting is returned when resuming a run that is not parked in
+	// waiting_approval (already decided, cancelled, or terminal).
+	ErrRunNotWaiting = errors.New("run is not waiting for approval")
 )
 
 // Store persists sessions, runs, and events. Implemented over Postgres.
@@ -248,6 +251,72 @@ func (rt *Runtime) CompleteRun(ctx context.Context, sessionID string, status Run
 	// scheduled for cleanup (durable content is already in the message store).
 	_ = rt.broker.Settle(ctx, sessionID)
 	return rt.store.UpdateRunStatus(ctx, rs.run.ID, status)
+}
+
+// SuspendRun parks the session's active run in waiting_approval and releases
+// the single-active-run lock WITHOUT settling the run terminal (capability-gap
+// O2). The run stays Active (waiting_approval) so the durable state reads as
+// in-progress; ResumeRun re-acquires the lock to continue it. Returns the parked
+// run. The caller (the run worker) has already persisted the durable Approval.
+func (rt *Runtime) SuspendRun(ctx context.Context, sessionID string) (Run, error) {
+	rt.mu.Lock()
+	rs, ok := rt.runs[sessionID]
+	if !ok {
+		rt.mu.Unlock()
+		return Run{}, ErrNoActiveRun
+	}
+	run := rs.run
+	delete(rt.runs, sessionID)
+	rt.mu.Unlock()
+	if err := rt.store.UpdateRunStatus(ctx, run.ID, RunWaitingApproval); err != nil {
+		return Run{}, err
+	}
+	run.Status = RunWaitingApproval
+	return run, nil
+}
+
+// ResumeRun re-acquires the single-active-run lock for a run parked in
+// waiting_approval so its worker can continue it after the approval decision.
+// It reads the run's CURRENT durable status (not the in-memory map, which the
+// suspension cleared): only a run still parked in waiting_approval resumes, and
+// only if no other active run now holds the session.
+func (rt *Runtime) ResumeRun(ctx context.Context, sessionID, runID string) (Run, error) {
+	rt.mu.Lock()
+	if _, active := rt.runs[sessionID]; active {
+		rt.mu.Unlock()
+		return Run{}, ErrRunActive
+	}
+	rt.mu.Unlock()
+
+	// The durable store is authoritative for the parked run's status across
+	// instances: the suspending process may have died, so ResumeRun consults the
+	// run row, not just this process's memory.
+	runs, err := rt.store.RunsForSession(ctx, sessionID)
+	if err != nil {
+		return Run{}, err
+	}
+	var target *Run
+	for i := range runs {
+		if runs[i].ID == runID {
+			target = &runs[i]
+		}
+	}
+	if target == nil || target.Status != RunWaitingApproval {
+		return Run{}, ErrRunNotWaiting
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if _, active := rt.runs[sessionID]; active {
+		return Run{}, ErrRunActive
+	}
+	run := *target
+	if err := rt.store.UpdateRunStatus(ctx, run.ID, RunRunning); err != nil {
+		return Run{}, err
+	}
+	run.Status = RunRunning
+	rt.runs[sessionID] = &runState{run: run}
+	return run, nil
 }
 
 // ActiveRun returns the active run for a session, or false.

@@ -224,6 +224,15 @@ func (l *Loop) WithTools(reg *toolruntime.Registry) *Loop {
 	return l
 }
 
+// WithApproval marks the loop as resuming a parked run after a human tool-
+// approval decision (capability-gap O2). The next Run resolves the decided call
+// first (execute on approve / inject a denial on reject), then continues the
+// think→tool cycle. Returns the loop for chaining.
+func (l *Loop) WithApproval(ra ResumedApproval) *Loop {
+	l.config.Approval = &ra
+	return l
+}
+
 // toolDefs converts registered tools to provider tool definitions.
 func (l *Loop) toolDefs() []provider.ToolDefinition {
 	all := l.tools.All()

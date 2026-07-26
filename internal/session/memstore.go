@@ -159,12 +159,14 @@ func (m *MemStore) NextRunSeq(_ context.Context, sessionID string) (int, error) 
 }
 
 // FailStrandedRuns marks every non-terminal run failed (startup reconciliation).
+// Runs parked in waiting_approval are EXCLUDED: they are meant to resume after
+// a restart (capability-gap O2), not to be reaped as orphaned.
 func (m *MemStore) FailStrandedRuns(_ context.Context) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
 	for _, r := range m.runs {
-		if r.Status.Active() {
+		if r.Status == RunQueued || r.Status == RunRunning {
 			r.Status = RunFailed
 			n++
 		}

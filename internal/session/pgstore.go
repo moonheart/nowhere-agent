@@ -222,11 +222,14 @@ func (s *PGStore) ActiveRun(ctx context.Context, sessionID string) (Run, bool, e
 }
 
 // FailStrandedRuns marks all non-terminal runs failed (startup reconciliation
-// for runs whose owning process died mid-run). Returns the number updated.
+// for runs whose owning process died mid-run). Runs parked in waiting_approval
+// are EXCLUDED: they have no live worker to lose — their state is durable (the
+// approvals row) and they are meant to resume after a restart (capability-gap
+// O2). Returns the number of runs updated.
 func (s *PGStore) FailStrandedRuns(ctx context.Context) (int, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE runs SET status = 'failed', finished_at = now()
-		WHERE status IN ('queued','running','waiting_approval')`)
+		WHERE status IN ('queued','running')`)
 	if err != nil {
 		return 0, fmt.Errorf("fail stranded runs: %w", err)
 	}

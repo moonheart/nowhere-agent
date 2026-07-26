@@ -42,3 +42,16 @@ type MessageStore interface {
 	// the messages it has not yet consolidated (incremental model).
 	MessagesAfter(ctx context.Context, sessionID string, afterID int64) ([]StoredMessage, error)
 }
+
+// StoredMessagesToProvider converts durable StoredMessages back into canonical
+// provider messages for the loop, preserving full blocks (thinking+signature,
+// tool_use, tool_result). The run registry uses it to rebuild a parked run's
+// history on resume (capability-gap O2), where the transport's converter is
+// out of reach (session must not depend on chatapi).
+func StoredMessagesToProvider(stored []StoredMessage) []provider.Message {
+	out := make([]provider.Message, 0, len(stored))
+	for _, m := range stored {
+		out = append(out, provider.Message{Role: m.Role, Content: m.Content})
+	}
+	return out
+}
