@@ -56,6 +56,17 @@ type Store interface {
 	AppendEvent(ctx context.Context, e Event) error
 	// EventsAfter returns events for a run with offset > after, ordered.
 	EventsAfter(ctx context.Context, runID string, after int) ([]Event, error)
+
+	// Tool-approval records (capability-gap O2, migration 000010): the durable
+	// store for a suspended run's pending human decision.
+	// CreateApproval persists a new pending approval (one per run).
+	CreateApproval(ctx context.Context, a Approval) (Approval, error)
+	// PendingApprovalForRun returns the run's outstanding approval, or false.
+	PendingApprovalForRun(ctx context.Context, runID string) (Approval, bool, error)
+	// GetApproval fetches an approval by id (any status).
+	GetApproval(ctx context.Context, id string) (Approval, error)
+	// DecideApproval resolves a pending approval, or ErrNoPendingApproval.
+	DecideApproval(ctx context.Context, id string, approve bool) (Approval, error)
 }
 
 // Runtime coordinates run lifecycle, the single-active-run lock, and event
