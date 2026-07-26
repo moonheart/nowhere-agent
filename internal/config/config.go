@@ -73,6 +73,11 @@ type Dreaming struct {
 	// which each cost extra LLM calls per session batch. On by default; set
 	// DREAMING_REFLECT=false to run the cheaper extract→reorganize pipeline only.
 	Reflect bool `envconfig:"DREAMING_REFLECT" default:"true"`
+	// Revise upgrades REORGANIZE from a string heuristic to an LLM pass that
+	// detects contradictions AND time-stale memories (随时间保鲜). It costs one
+	// LLM call per extracted fact. On by default; set DREAMING_REVISE=false to
+	// fall back to the cheap string-negation heuristic.
+	Revise bool `envconfig:"DREAMING_REVISE" default:"true"`
 }
 
 // Skills configures the skill runtime (capability-gap K3a). Dir points at a

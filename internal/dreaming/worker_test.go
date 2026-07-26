@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
@@ -15,7 +17,8 @@ import (
 // fakeLLM returns canned output and records token usage. The worker now uses
 // structured output (CompleteJSON); jsonResults queues one value per call and
 // is marshalled into the out pointer. outputs/output drive the legacy Complete
-// (unused by the worker now, kept for the interface).
+// (unused by the worker now, kept for the interface). prompts records each
+// CompleteJSON prompt so tests can assert time/context injection.
 type fakeLLM struct {
 	jsonResults []any
 	output      string
@@ -23,6 +26,7 @@ type fakeLLM struct {
 	tokens      int
 	calls       int
 	err         error
+	prompts     []string
 }
 
 func (f *fakeLLM) Complete(_ context.Context, _ string) (string, int, error) {
@@ -34,7 +38,8 @@ func (f *fakeLLM) Complete(_ context.Context, _ string) (string, int, error) {
 	return out, f.tokens, f.err
 }
 
-func (f *fakeLLM) CompleteJSON(_ context.Context, _ string, _ *provider.JSONResponseSpec, out any) (int, error) {
+func (f *fakeLLM) CompleteJSON(_ context.Context, prompt string, _ *provider.JSONResponseSpec, out any) (int, error) {
+	f.prompts = append(f.prompts, prompt)
 	if f.calls < len(f.jsonResults) {
 		res := f.jsonResults[f.calls]
 		if err := remarshal(res, out); err != nil {
@@ -98,10 +103,12 @@ func TestWorkerExtractsAndStoresFacts(t *testing.T) {
 		},
 	}
 	mem := memory.NewMemPort()
-	// extract → 2 facts; compress → a summary; reflect → nothing.
+	// extract → 2 facts; compress → a summary; revise ×2 (one per fact); reflect → nothing.
 	llm := &fakeLLM{jsonResults: []any{
 		extractResult{Facts: []string{"user likes go", "prefers dark mode"}},
 		summaryResult{Summary: "talked about go"},
+		reviseResult{},
+		reviseResult{},
 		reflectResult{},
 	}, tokens: 50}
 	w := NewWorker(src, mem, llm, Budget{MaxTokens: 1000})
@@ -110,14 +117,14 @@ func TestWorkerExtractsAndStoresFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.TokensUsed != 150 {
-		t.Errorf("tokens = %d want 150 (3 calls x 50)", res.TokensUsed)
+	if res.TokensUsed != 250 {
+		t.Errorf("tokens = %d want 250 (5 calls x 50)", res.TokensUsed)
 	}
 	if res.EpisodesProcessed != 1 {
 		t.Errorf("episodes = %d", res.EpisodesProcessed)
 	}
-	if llm.calls != 3 {
-		t.Errorf("llm calls = %d want 3 (extract+compress+reflect)", llm.calls)
+	if llm.calls != 5 {
+		t.Errorf("llm calls = %d want 5 (extract+compress+2 revise+reflect)", llm.calls)
 	}
 
 	// Facts + summary stored under the user's scope.
@@ -151,10 +158,15 @@ func TestWorkerBudgetStopsProcessing(t *testing.T) {
 			"s2": {textMsg("b")},
 		},
 	}
-	llm := &fakeLLM{output: "fact", tokens: 100}
-	// Budget allows exactly one full session: 3 calls (extract+compress+reflect)
-	// at 100 tokens each = 300, then the budget check stops session s2.
-	w := NewWorker(src, memory.NewMemPort(), llm, Budget{MaxTokens: 300})
+	llm := &fakeLLM{jsonResults: []any{
+		extractResult{Facts: []string{"a fact"}},
+		summaryResult{Summary: "s"},
+		reviseResult{},
+		reflectResult{},
+	}, tokens: 100}
+	// Budget allows exactly one full session: 4 calls (extract+compress+revise+
+	// reflect) at 100 tokens each = 400, then the budget check stops session s2.
+	w := NewWorker(src, memory.NewMemPort(), llm, Budget{MaxTokens: 400})
 
 	res, err := w.Run(context.Background())
 	if err != nil {
@@ -163,8 +175,8 @@ func TestWorkerBudgetStopsProcessing(t *testing.T) {
 	if !res.BudgetExhausted {
 		t.Error("expected budget exhausted")
 	}
-	if llm.calls != 3 {
-		t.Errorf("llm calls = %d want 3 (one full session, then budget)", llm.calls)
+	if llm.calls != 4 {
+		t.Errorf("llm calls = %d want 4 (one full session, then budget)", llm.calls)
 	}
 }
 
@@ -178,9 +190,11 @@ func TestWorkerReorganizeDeprecatesContradicted(t *testing.T) {
 		sessions: []PendingSession{pending("s1", "u1")},
 		episodes: map[string][]session.StoredMessage{"s1": {textMsg("x")}},
 	}
+	// extract → 1 fact; compress; revise flags the old vim memory as contradicted.
 	llm := &fakeLLM{jsonResults: []any{
 		extractResult{Facts: []string{"user no longer uses vim"}},
 		summaryResult{Summary: "editor preferences discussed"},
+		reviseResult{Deprecate: []string{"user uses vim"}},
 		reflectResult{},
 	}, tokens: 10}
 	w := NewWorker(src, mem, llm, Budget{MaxTokens: 100})
@@ -191,7 +205,7 @@ func TestWorkerReorganizeDeprecatesContradicted(t *testing.T) {
 
 	stored, _ := mem.ListByScope(ctx, identity.UserScope("u1"))
 	// Only the pre-existing "user uses vim" fact is deprecated (by reorganize's
-	// contradiction heuristic); the summary and the new fact stay live.
+	// LLM revise); the summary and the new fact stay live.
 	var deprecatedFacts int
 	for _, m := range stored {
 		if m.Deprecated && m.Kind == memory.KindFact {
@@ -272,6 +286,7 @@ func TestWorkerReflectWritesInsightAndDedupes(t *testing.T) {
 	llm := &fakeLLM{jsonResults: []any{
 		extractResult{Facts: []string{"user likes go"}},
 		summaryResult{Summary: "user codes in go daily"},
+		reviseResult{},
 		reflectResult{Insights: []string{"user is an active gopher"}, Deprecate: []string{"user likes go"}},
 	}, tokens: 10}
 	w := NewWorker(src, mem, llm, Budget{MaxTokens: 1000})
@@ -316,5 +331,137 @@ func TestContradicts(t *testing.T) {
 	}
 	if !contradicts("uses vim", "no longer uses vim") {
 		t.Error("negation should contradict")
+	}
+}
+
+// fixedClock returns a clock pinned to a date, for time-injection assertions.
+func fixedClock() func() time.Time {
+	return func() time.Time { return time.Date(2026, 7, 26, 12, 0, 0, 0, time.UTC) }
+}
+
+// TestWorkerInjectsTodayIntoPrompts: the extract + reflect prompts carry the
+// worker's clock date so the model can anchor time (随时间保鲜).
+func TestWorkerInjectsTodayIntoPrompts(t *testing.T) {
+	src := &fakeEpisodeSource{
+		sessions: []PendingSession{pending("s1", "u1")},
+		episodes: map[string][]session.StoredMessage{"s1": {textMsg("user likes go")}},
+	}
+	llm := &fakeLLM{jsonResults: []any{
+		extractResult{Facts: []string{"user likes go"}},
+		summaryResult{Summary: "s"},
+		reviseResult{},
+		reflectResult{},
+	}, tokens: 10}
+	w := NewWorker(src, memory.NewMemPort(), llm, Budget{MaxTokens: 1000})
+	w.SetClock(fixedClock())
+
+	if _, err := w.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// extract / revise / reflect prompts carry the date; the compress summary
+	// prompt does not (it's a pure condensation of the timestamped transcript).
+	if len(llm.prompts) != 4 {
+		t.Fatalf("prompts = %d want 4 (extract+compress+revise+reflect)", len(llm.prompts))
+	}
+	for _, i := range []int{0, 2, 3} {
+		if !strings.Contains(llm.prompts[i], "2026-07-26") {
+			t.Errorf("prompt %d missing today's date: %q", i, llm.prompts[i][:min(120, len(llm.prompts[i]))])
+		}
+	}
+}
+
+// TestEpisodeTextRendersMessageTime: each transcript line carries the message's
+// persisted timestamp so the model can anchor relative time.
+func TestEpisodeTextRendersMessageTime(t *testing.T) {
+	m := textMsg("hello")
+	m.CreatedAt = time.Date(2026, 7, 20, 8, 30, 0, 0, time.UTC)
+	out := episodeText([]session.StoredMessage{m})
+	if !strings.Contains(out, "[2026-07-20 08:30]") {
+		t.Errorf("episode text missing message timestamp: %q", out)
+	}
+}
+
+// TestReorganizeLLMRevisesStaleMemory: the revise stage deprecates the memory
+// the LLM flags as time-stale and stores the fact's rewritten (time-corrected)
+// form instead of the raw fact.
+func TestReorganizeLLMRevisesStaleMemory(t *testing.T) {
+	mem := memory.NewMemPort()
+	ctx := context.Background()
+	mem.Store(ctx, memory.Memory{Scope: identity.UserScope("u1"), Kind: memory.KindFact, Content: "planning a party for next Saturday"})
+
+	src := &fakeEpisodeSource{
+		sessions: []PendingSession{pending("s1", "u1")},
+		episodes: map[string][]session.StoredMessage{"s1": {textMsg("the party was great")}},
+	}
+	llm := &fakeLLM{jsonResults: []any{
+		extractResult{Facts: []string{"the party happened last Saturday"}},
+		summaryResult{Summary: "party recap"},
+		reviseResult{
+			Deprecate: []string{"planning a party for next Saturday"},
+			Rewrite:   "went to the birthday party on 2026-07-25",
+		},
+		reflectResult{},
+	}, tokens: 10}
+	w := NewWorker(src, mem, llm, Budget{MaxTokens: 1000})
+	w.SetClock(fixedClock())
+
+	if _, err := w.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, _ := mem.ListByScope(ctx, identity.UserScope("u1"))
+	var sawDeprecated, sawRewrite bool
+	for _, m := range stored {
+		if m.Deprecated && strings.Contains(m.Content, "planning a party") {
+			sawDeprecated = true
+		}
+		if !m.Deprecated && m.Kind == memory.KindFact && m.Content == "went to the birthday party on 2026-07-25" {
+			sawRewrite = true
+		}
+	}
+	if !sawDeprecated {
+		t.Errorf("stale memory not deprecated: stored = %+v", stored)
+	}
+	if !sawRewrite {
+		t.Errorf("rewritten fact not stored: stored = %+v", stored)
+	}
+}
+
+// TestReorganizeReviseDisabledFallsBack: with revise off, reorganize uses the
+// string-negation heuristic (no LLM revise call) — an explicit "no longer"
+// deprecates, with no extra LLM call beyond extract/compress/reflect.
+func TestReorganizeReviseDisabledFallsBack(t *testing.T) {
+	mem := memory.NewMemPort()
+	ctx := context.Background()
+	mem.Store(ctx, memory.Memory{Scope: identity.UserScope("u1"), Kind: memory.KindFact, Content: "user uses vim"})
+
+	src := &fakeEpisodeSource{
+		sessions: []PendingSession{pending("s1", "u1")},
+		episodes: map[string][]session.StoredMessage{"s1": {textMsg("x")}},
+	}
+	llm := &fakeLLM{jsonResults: []any{
+		extractResult{Facts: []string{"user no longer uses vim"}},
+		summaryResult{Summary: "s"},
+		reflectResult{},
+	}, tokens: 10}
+	w := NewWorker(src, mem, llm, Budget{MaxTokens: 100})
+	w.SetRevise(false)
+
+	if _, err := w.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// 3 calls only (extract+compress+reflect): no revise LLM call.
+	if llm.calls != 3 {
+		t.Errorf("llm calls = %d want 3 (revise disabled)", llm.calls)
+	}
+	stored, _ := mem.ListByScope(ctx, identity.UserScope("u1"))
+	var deprecated bool
+	for _, m := range stored {
+		if m.Deprecated && m.Content == "user uses vim" {
+			deprecated = true
+		}
+	}
+	if !deprecated {
+		t.Error("string-heuristic fallback did not deprecate the negated memory")
 	}
 }

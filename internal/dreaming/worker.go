@@ -16,6 +16,7 @@ package dreaming
 import (
 	"context"
 	"strings"
+	"time"
 
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
@@ -83,6 +84,13 @@ type Worker struct {
 	// enableReflect turns on the compress + reflect stages (KindSummary/
 	// KindInsight). Off runs the cheaper extract → reorganize pipeline only.
 	enableReflect bool
+	// enableRevise upgrades REORGANIZE from a string heuristic to an LLM pass
+	// that detects contradictions AND time-stale memories (config DREAMING_REVISE).
+	enableRevise bool
+	// now supplies the current time for time-aware prompts (extract/reflect/
+	// revise) — the "随时间保鲜" capability needs a clock to judge staleness.
+	// Defaults to time.Now.
+	now func() time.Time
 }
 
 // NewWorker creates a Worker.
@@ -90,11 +98,22 @@ func NewWorker(episodes EpisodeSource, mem memory.Port, llm LLM, budget Budget) 
 	if budget.MaxTokens <= 0 {
 		budget.MaxTokens = 100_000
 	}
-	return &Worker{episodes: episodes, memory: mem, llm: llm, budget: budget, enableReflect: true}
+	return &Worker{episodes: episodes, memory: mem, llm: llm, budget: budget, enableReflect: true, enableRevise: true, now: time.Now}
 }
 
 // SetReflect toggles the compress + reflect stages (config DREAMING_REFLECT).
 func (w *Worker) SetReflect(on bool) { w.enableReflect = on }
+
+// SetRevise toggles the LLM time-aware REORGANIZE (config DREAMING_REVISE). Off
+// falls back to the string-negation heuristic.
+func (w *Worker) SetRevise(on bool) { w.enableRevise = on }
+
+// SetClock overrides the worker's clock (tests; production uses time.Now).
+func (w *Worker) SetClock(now func() time.Time) {
+	if now != nil {
+		w.now = now
+	}
+}
 
 // Run performs one dreaming pass over eligible sessions.
 func (w *Worker) Run(ctx context.Context) (Result, error) {
@@ -175,9 +194,12 @@ func (w *Worker) processSession(ctx context.Context, sess session.Session, eps [
 		}
 	}
 
-	// 3. REORGANIZE: store new facts, deprecating contradicted memories.
+	// 3. REORGANIZE: store new facts, revising memories they contradict or make
+	// time-stale (each is an LLM call when revise is enabled).
 	for _, f := range facts {
-		if err := w.reorganize(ctx, scope, f); err != nil {
+		tk, err := w.reorganize(ctx, scope, f, remainingBudget-tokens)
+		tokens += tk
+		if err != nil {
 			return written, tokens, err
 		}
 		written++
@@ -230,7 +252,7 @@ func (w *Worker) reflect(ctx context.Context, scope identity.ScopeRef, summary s
 		}
 	}
 	var res reflectResult
-	tokens, err := w.llm.CompleteJSON(ctx, reflectPrompt(summary, lines), reflectSchema, &res)
+	tokens, err := w.llm.CompleteJSON(ctx, reflectPrompt(summary, lines, w.today()), reflectSchema, &res)
 	if err != nil {
 		return 0, tokens, err
 	}
@@ -270,7 +292,7 @@ func (w *Worker) deprecateMatching(ctx context.Context, existing []memory.Memory
 // structured output (L3) so reasoning prose can never be parsed as a fact.
 func (w *Worker) extract(ctx context.Context, eps []session.StoredMessage, budget int) ([]string, int, error) {
 	var res extractResult
-	tokens, err := w.llm.CompleteJSON(ctx, extractPrompt(episodeText(eps)), extractSchema, &res)
+	tokens, err := w.llm.CompleteJSON(ctx, extractPrompt(episodeText(eps), w.today()), extractSchema, &res)
 	if err != nil {
 		return nil, tokens, err
 	}
@@ -289,45 +311,80 @@ func cleanLines(in []string) []string {
 }
 
 // episodeText renders a batch of episodes into the transcript both the extract
-// and compress prompts consume. Text and thinking carry the prose;
-// tool_use/tool_result name the action and its outcome, so the model sees what
-// the agent did as well as what it said.
+// and compress prompts consume. Each message carries its persisted timestamp so
+// the model can anchor relative time ("next Saturday", "recently") to an
+// absolute date when extracting durable facts (随时间保鲜). Text and thinking
+// carry the prose; tool_use/tool_result name the action and its outcome.
 func episodeText(eps []session.StoredMessage) string {
 	var b strings.Builder
 	for _, m := range eps {
+		ts := m.CreatedAt.Format("[2006-01-02 15:04] ")
 		for _, blk := range m.Content {
 			switch blk.Type {
 			case provider.BlockText:
-				b.WriteString(string(m.Role) + ": " + blk.Text + "\n")
+				b.WriteString(ts + string(m.Role) + ": " + blk.Text + "\n")
 			case provider.BlockThinking:
-				b.WriteString(string(m.Role) + " (thinking): " + blk.Thinking + "\n")
+				b.WriteString(ts + string(m.Role) + " (thinking): " + blk.Thinking + "\n")
 			case provider.BlockToolUse:
-				b.WriteString("tool_use: " + blk.ToolName + "\n")
+				b.WriteString(ts + "tool_use: " + blk.ToolName + "\n")
 			case provider.BlockToolResult:
-				b.WriteString("tool_result: " + blk.ToolContent + "\n")
+				b.WriteString(ts + "tool_result: " + blk.ToolContent + "\n")
 			}
 		}
 	}
 	return b.String()
 }
 
-// reorganize stores a fact, deprecating any existing memory it contradicts.
-func (w *Worker) reorganize(ctx context.Context, scope identity.ScopeRef, fact string) error {
+// reorganize stores a fact, revising existing memories it contradicts or makes
+// time-stale. When revise is enabled it asks the LLM (with today's date) which
+// memories to deprecate and whether the fact needs time-correcting; otherwise
+// it falls back to the string-negation heuristic.
+func (w *Worker) reorganize(ctx context.Context, scope identity.ScopeRef, fact string, budget int) (int, error) {
 	existing, err := w.memory.ListByScope(ctx, scope)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	for _, m := range existing {
-		if !m.Deprecated && contradicts(m.Content, fact) {
-			if err := w.memory.Deprecate(ctx, m.ID); err != nil {
-				return err
+	tokens := 0
+	content := fact
+
+	if w.enableRevise {
+		var live []string
+		for _, m := range existing {
+			if !m.Deprecated {
+				live = append(live, m.Content)
+			}
+		}
+		var res reviseResult
+		tk, err := w.llm.CompleteJSON(ctx, revisePrompt(fact, live, w.today()), reviseSchema, &res)
+		tokens += tk
+		if err != nil {
+			return tokens, err
+		}
+		for _, d := range cleanLines(res.Deprecate) {
+			w.deprecateMatching(ctx, existing, d)
+		}
+		if rw := strings.TrimSpace(res.Rewrite); rw != "" {
+			content = rw
+		}
+	} else {
+		for _, m := range existing {
+			if !m.Deprecated && contradicts(m.Content, fact) {
+				if err := w.memory.Deprecate(ctx, m.ID); err != nil {
+					return tokens, err
+				}
 			}
 		}
 	}
+
 	_, err = w.memory.Store(ctx, memory.Memory{
 		Scope:   scope,
 		Kind:    memory.KindFact,
-		Content: fact,
+		Content: content,
 	})
-	return err
+	return tokens, err
+}
+
+// today returns the current date (YYYY-MM-DD) for time-aware prompts.
+func (w *Worker) today() string {
+	return w.now().Format("2006-01-02")
 }

@@ -238,6 +238,7 @@ func run() error {
 			llm := dreaming.NewProviderLLM(adapter, model)
 			worker := dreaming.NewWorker(source, memPort, llm, dreaming.Budget{MaxTokens: cfg.Dreaming.MaxTokens})
 			worker.SetReflect(cfg.Dreaming.Reflect)
+			worker.SetRevise(cfg.Dreaming.Revise)
 			sched := scheduler.New(log, scheduler.Job{
 				Name:     "dreaming",
 				Interval: cfg.Dreaming.Interval,
@@ -247,7 +248,7 @@ func run() error {
 				},
 			})
 			go sched.Start(ctx)
-			log.Info("dreaming worker enabled", "interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens, "reflect", cfg.Dreaming.Reflect)
+			log.Info("dreaming worker enabled", "interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens, "reflect", cfg.Dreaming.Reflect, "revise", cfg.Dreaming.Revise)
 		}
 
 		// Subagent factory (subagent capability): builds a child loop for a
