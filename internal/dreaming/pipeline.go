@@ -87,12 +87,17 @@ var reflectSchema = &provider.JSONResponseSpec{
 }
 
 // extractPrompt builds the prompt for fact/preference extraction. The response
-// is constrained by extractSchema, so the prompt only states the task.
+// is constrained by extractSchema; the prompt states the task and instructs the
+// model to answer ONLY via the record_facts function (the gateway rejects a
+// forced tool_choice, so we soft-force by instruction).
 func extractPrompt(episodeText string) string {
 	return `Extract durable facts and preferences worth remembering long-term about
 the USER from this conversation transcript. Facts are about the user (who they
 are, what they prefer, own, or are working on), NOT about this conversation or
 your task. Skip transient detail, small talk, and task narration.
+
+You MUST respond ONLY by calling the record_facts function with the facts array
+(empty if nothing is durable). Do not write any normal text answer.
 
 TRANSCRIPT:
 ` + episodeText
@@ -105,6 +110,9 @@ TRANSCRIPT:
 func summaryPrompt(episodeText string) string {
 	return `Summarize this slice of a conversation. Capture outcomes, decisions,
 and anything worth recalling later; drop filler and transient detail.
+
+You MUST respond ONLY by calling the record_summary function with the summary.
+Do not write any normal text answer.
 
 TRANSCRIPT:
 ` + episodeText
@@ -132,7 +140,11 @@ NEW EPISODE SUMMARY:
 Derive higher-level insights (patterns spanning multiple memories or following
 from the new summary) and list the exact existing-memory texts that are now
 duplicated or superseded. Keep insights few and genuinely non-obvious; do not
-restate existing facts.`)
+restate existing facts.
+
+You MUST respond ONLY by calling the record_reflection function with the
+insights and deprecate arrays (empty if none). Do not write any normal text
+answer.`)
 	return b.String()
 }
 

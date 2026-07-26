@@ -15,19 +15,9 @@ type apiRequest struct {
 	Model         string         `json:"model"`
 	Messages      []apiMessage   `json:"messages"`
 	Tools         []apiTool      `json:"tools,omitempty"`
-	// ToolChoice forces a named function when set (used for structured output).
-	ToolChoice    *apiToolChoice `json:"tool_choice,omitempty"`
 	MaxTokens     int            `json:"max_tokens,omitempty"`
 	Stream        bool           `json:"stream"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
-}
-
-// apiToolChoice forces the model to call one named function.
-type apiToolChoice struct {
-	Type     string `json:"type"` // "function"
-	Function struct {
-		Name string `json:"name"`
-	} `json:"function"`
 }
 
 // streamOptions requests a final usage chunk in the SSE stream. Without
@@ -90,7 +80,13 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 		req.Tools = append(req.Tools, at)
 	}
 
-	// Structured output (L3): append the synthetic response function and force it.
+	// Structured output (L3): append the synthetic response function. We do NOT
+	// send tool_choice: the OpenAI-compatible gateway in use rejects the
+	// object form of tool_choice (400 invalid_request_error), though it accepts
+	// tools and the string form "auto". Instead the prompt instructs the model
+	// to call the function (soft-forcing); reasoning models reliably do, and
+	// the answer still arrives as a tool_call's JSON arguments — isolated from
+	// any prose. The reader tolerates a missing tool call as an error.
 	if jr := r.JSONResponse; jr != nil {
 		var at apiTool
 		at.Type = "function"
@@ -98,9 +94,6 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 		at.Function.Description = jr.Description
 		at.Function.Parameters = jr.Schema
 		req.Tools = append(req.Tools, at)
-		tc := &apiToolChoice{Type: "function"}
-		tc.Function.Name = jr.Name
-		req.ToolChoice = tc
 	}
 	return req, nil
 }
