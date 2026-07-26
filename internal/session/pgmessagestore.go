@@ -30,13 +30,23 @@ func (s *PGMessageStore) AppendMessage(ctx context.Context, msg StoredMessage) (
 		content = []byte("[]")
 	}
 
+	// Usage cols stay NULL for messages with no reported usage (user/tool_result).
+	var ui, uo, ucr, ucw sql.NullInt64
+	if msg.Usage != nil {
+		ui = sql.NullInt64{Int64: int64(msg.Usage.InputTokens), Valid: true}
+		uo = sql.NullInt64{Int64: int64(msg.Usage.OutputTokens), Valid: true}
+		ucr = sql.NullInt64{Int64: int64(msg.Usage.CacheReadTokens), Valid: true}
+		ucw = sql.NullInt64{Int64: int64(msg.Usage.CacheWriteTokens), Valid: true}
+	}
+
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO messages (session_id, run_id, seq, role, content)
+		INSERT INTO messages (session_id, run_id, seq, role, content,
+			usage_input, usage_output, usage_cache_read, usage_cache_write)
 		VALUES ($1, $2,
 			(SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = $1),
-			$3, $4)
+			$3, $4, $5, $6, $7, $8)
 		RETURNING id, seq, created_at`,
-		msg.SessionID, msg.RunID, string(msg.Role), content,
+		msg.SessionID, msg.RunID, string(msg.Role), content, ui, uo, ucr, ucw,
 	).Scan(&msg.ID, &msg.Seq, &msg.CreatedAt)
 	if err != nil {
 		return StoredMessage{}, fmt.Errorf("append message: %w", err)
@@ -47,7 +57,8 @@ func (s *PGMessageStore) AppendMessage(ctx context.Context, msg StoredMessage) (
 // MessagesFor returns a session's messages ordered by seq (full conversation).
 func (s *PGMessageStore) MessagesFor(ctx context.Context, sessionID string) ([]StoredMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, run_id, seq, role, content, created_at
+		SELECT id, session_id, run_id, seq, role, content, created_at,
+			usage_input, usage_output, usage_cache_read, usage_cache_write
 		FROM messages
 		WHERE session_id = $1
 		ORDER BY seq`, sessionID)
@@ -61,7 +72,8 @@ func (s *PGMessageStore) MessagesFor(ctx context.Context, sessionID string) ([]S
 // MessagesAfter returns a session's messages with id > afterID, ordered by seq.
 func (s *PGMessageStore) MessagesAfter(ctx context.Context, sessionID string, afterID int64) ([]StoredMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, run_id, seq, role, content, created_at
+		SELECT id, session_id, run_id, seq, role, content, created_at,
+			usage_input, usage_output, usage_cache_read, usage_cache_write
 		FROM messages
 		WHERE session_id = $1 AND id > $2
 		ORDER BY seq`, sessionID, afterID)
@@ -73,19 +85,29 @@ func (s *PGMessageStore) MessagesAfter(ctx context.Context, sessionID string, af
 }
 
 // scanMessages reads message rows (id, session_id, run_id, seq, role, content,
-// created_at) into StoredMessages.
+// created_at, usage cols) into StoredMessages. Usage is rebuilt when the row
+// recorded it (usage_input non-NULL); otherwise it stays nil.
 func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 	var out []StoredMessage
 	for rows.Next() {
 		var m StoredMessage
 		var role string
 		var content []byte
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.RunID, &m.Seq, &role, &content, &m.CreatedAt); err != nil {
+		var ui, uo, ucr, ucw sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.RunID, &m.Seq, &role, &content, &m.CreatedAt, &ui, &uo, &ucr, &ucw); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		m.Role = provider.Role(role)
 		if err := json.Unmarshal(content, &m.Content); err != nil {
 			return nil, fmt.Errorf("unmarshal content: %w", err)
+		}
+		if ui.Valid {
+			m.Usage = &provider.Usage{
+				InputTokens:      int(ui.Int64),
+				OutputTokens:     int(uo.Int64),
+				CacheReadTokens:  int(ucr.Int64),
+				CacheWriteTokens: int(ucw.Int64),
+			}
 		}
 		out = append(out, m)
 	}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"nowhere-agent/internal/provider"
 )
 
 var (
@@ -52,6 +54,9 @@ type Store interface {
 
 	CreateRun(ctx context.Context, sessionID string, seq int) (Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status RunStatus) error
+	// SetRunUsage records the run's aggregate token usage (across all its LLM
+	// calls) once the run reports it. u is nil-safe (a no-op).
+	SetRunUsage(ctx context.Context, runID string, u *provider.Usage) error
 	// ActiveRun returns the active run in a session, or false.
 	ActiveRun(ctx context.Context, sessionID string) (Run, bool, error)
 	// NextRunSeq returns the next sequence number for a session's run.

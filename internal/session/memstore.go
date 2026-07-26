@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"nowhere-agent/internal/provider"
 )
 
 // MemStore is an in-memory Store for tests and early development.
@@ -156,6 +158,20 @@ func (m *MemStore) UpdateRunStatus(_ context.Context, runID string, status RunSt
 	defer m.mu.Unlock()
 	if r, ok := m.runs[runID]; ok {
 		r.Status = status
+	}
+	return nil
+}
+
+// SetRunUsage records the run's aggregate token usage. u is nil-safe (a no-op).
+func (m *MemStore) SetRunUsage(_ context.Context, runID string, u *provider.Usage) error {
+	if u == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r, ok := m.runs[runID]; ok {
+		cp := *u
+		r.Usage = &cp
 	}
 	return nil
 }

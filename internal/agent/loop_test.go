@@ -571,3 +571,81 @@ func TestLoopAccumulatesUsageAcrossTurns(t *testing.T) {
 		t.Errorf("accumulated usage = %+v, want {12 7}", emit.usage)
 	}
 }
+
+// TestCacheHitPctDeepSeek pins the DeepSeek/OpenAI semantics: input_tokens
+// already includes the cached prefix, so 3584/3604 ≈ 99% (not the ~50% the
+// double-counting formula gives).
+func TestCacheHitPctDeepSeek(t *testing.T) {
+	if got := cacheHitPct(provider.Usage{InputTokens: 3604, CacheReadTokens: 3584}); got != 99 {
+		t.Errorf("cacheHitPct = %d want 99", got)
+	}
+	if got := cacheHitPct(provider.Usage{InputTokens: 0, CacheReadTokens: 0}); got != 0 {
+		t.Errorf("empty = %d want 0", got)
+	}
+	// Anthropic-style (cache not in input) clamps to 100 rather than nonsense.
+	if got := cacheHitPct(provider.Usage{InputTokens: 100, CacheReadTokens: 3456}); got != 100 {
+		t.Errorf("clamp = %d want 100", got)
+	}
+}
+
+// TestMergeUsageKeepsMostInformative pins that a later placeholder usage chunk
+// (a proxy-injected one with shrunken counts and cache cleared to 0) never
+// clobbers the real model's usage, including the cache-hit count.
+func TestMergeUsageKeepsMostInformative(t *testing.T) {
+	real := &provider.Usage{InputTokens: 3535, OutputTokens: 44, CacheReadTokens: 3456}
+	placeholder := &provider.Usage{InputTokens: 3060, OutputTokens: 42, CacheReadTokens: 0}
+
+	got := mergeUsage(real, placeholder)
+	if got.InputTokens != 3535 || got.CacheReadTokens != 3456 {
+		t.Errorf("placeholder clobbered real usage: %+v", got)
+	}
+	// Order independence: placeholder first, real later still yields the real max.
+	got = mergeUsage(placeholder, real)
+	if got.InputTokens != 3535 || got.CacheReadTokens != 3456 {
+		t.Errorf("order-dependent merge: %+v", got)
+	}
+	// Nil handling.
+	if mergeUsage(nil, real) != real || mergeUsage(real, nil) != real {
+		t.Error("nil merge should pass through the non-nil side")
+	}
+}
+
+// payloadEmitter captures every payload, for asserting on KindMessage contents.
+type payloadEmitter struct {
+	memEmitter
+	payloads []any
+}
+
+func (p *payloadEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	p.payloads = append(p.payloads, payload)
+	return p.memEmitter.Emit(ctx, kind, payload)
+}
+
+// TestLoopEmitsAssistantUsageWithMessage verifies each assistant KindMessage
+// carries the usage of the single LLM call that produced it (MessageWithUsage),
+// so the persistence path can record per-call usage on that row.
+func TestLoopEmitsAssistantUsageWithMessage(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{usageTextResponse("hi", 12, 5)}}
+	emit := &payloadEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	if _, err := loop.Run(context.Background(), nil, emit); err != nil {
+		t.Fatal(err)
+	}
+	var got *MessageWithUsage
+	for _, pl := range emit.payloads {
+		if mwu, ok := pl.(MessageWithUsage); ok {
+			mwu := mwu
+			got = &mwu
+		}
+	}
+	if got == nil {
+		t.Fatal("no MessageWithUsage payload emitted for the assistant message")
+	}
+	if got.Usage == nil || got.Usage.InputTokens != 12 || got.Usage.OutputTokens != 5 {
+		t.Errorf("assistant message usage = %+v, want {12 5}", got.Usage)
+	}
+	if len(got.Message.Content) == 0 {
+		t.Error("MessageWithUsage lost the assistant content")
+	}
+}

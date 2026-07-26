@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"nowhere-agent/internal/provider"
 )
 
 // Store persists sessions, runs, and events in Postgres. The durable run
@@ -228,6 +230,25 @@ func (s *PGStore) UpdateRunStatus(ctx context.Context, runID string, status RunS
 	return nil
 }
 
+// SetRunUsage records the run's aggregate token usage. u is nil-safe (a no-op).
+func (s *PGStore) SetRunUsage(ctx context.Context, runID string, u *provider.Usage) error {
+	if u == nil {
+		return nil
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE runs SET usage_input = $2, usage_output = $3,
+			usage_cache_read = $4, usage_cache_write = $5
+		WHERE id = $1`,
+		runID, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens)
+	if err != nil {
+		return fmt.Errorf("set run usage: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run not found: %s", runID)
+	}
+	return nil
+}
+
 // ActiveRun returns the in-progress run for a session, or false.
 func (s *PGStore) ActiveRun(ctx context.Context, sessionID string) (Run, bool, error) {
 	var r Run
@@ -276,7 +297,8 @@ func (s *PGStore) NextRunSeq(ctx context.Context, sessionID string) (int, error)
 // RunsForSession returns all runs in a session ordered by seq, for history replay.
 func (s *PGStore) RunsForSession(ctx context.Context, sessionID string) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, seq, status, created_at
+		SELECT id, session_id, seq, status, created_at,
+			usage_input, usage_output, usage_cache_read, usage_cache_write
 		FROM runs
 		WHERE session_id = $1
 		ORDER BY seq`, sessionID)
@@ -287,13 +309,32 @@ func (s *PGStore) RunsForSession(ctx context.Context, sessionID string) ([]Run, 
 
 	var out []Run
 	for rows.Next() {
-		var r Run
-		if err := rows.Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan run: %w", err)
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// scanRun reads one run row including its usage cols, rebuilding Run.Usage when
+// usage was recorded (usage_input non-NULL).
+func scanRun(rows *sql.Rows) (Run, error) {
+	var r Run
+	var in, out, cr, cw sql.NullInt64
+	if err := rows.Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt, &in, &out, &cr, &cw); err != nil {
+		return Run{}, fmt.Errorf("scan run: %w", err)
+	}
+	if in.Valid {
+		r.Usage = &provider.Usage{
+			InputTokens:      int(in.Int64),
+			OutputTokens:     int(out.Int64),
+			CacheReadTokens:  int(cr.Int64),
+			CacheWriteTokens: int(cw.Int64),
+		}
+	}
+	return r, nil
 }
 
 // AppendEvent persists one run event (flushing an iteration to the DB).

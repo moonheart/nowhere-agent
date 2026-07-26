@@ -15,6 +15,21 @@ type historyMessage struct {
 	ID      string        `json:"id"`
 	Role    string        `json:"role"`
 	Content []historyPart `json:"content"`
+	// Metadata carries the run's token usage as an unstable_data entry, so a
+	// reloaded client renders it exactly like the live data-usage frame did.
+	// Nil for messages with no usage (user turns).
+	Metadata *historyMetadata `json:"metadata,omitempty"`
+}
+
+// historyMetadata is the subset of ThreadMessageLike.metadata we populate.
+type historyMetadata struct {
+	UnstableData []historyUsageData `json:"unstable_data,omitempty"`
+}
+
+// historyUsageData is one unstable_data entry: {name:"usage", data:{...}}.
+type historyUsageData struct {
+	Name string         `json:"name"`
+	Data map[string]int `json:"data"`
 }
 
 type historyPart struct {
@@ -189,17 +204,42 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 	// so a tool_result can be merged back onto its call.
 	calls := map[string]*historyPart{}
 	var cur *historyMessage // the open assistant turn being accumulated
+	var curUsage provider.Usage
+	var curHasUsage bool
 	flush := func() {
 		if cur != nil && len(cur.Content) > 0 {
+			// Attach the turn's accumulated LLM usage as an unstable_data entry
+			// so the client renders it like the live data-usage frame.
+			if curHasUsage {
+				cur.Metadata = &historyMetadata{UnstableData: []historyUsageData{{
+					Name: "usage",
+					Data: map[string]int{
+						"inputTokens":      curUsage.InputTokens,
+						"outputTokens":     curUsage.OutputTokens,
+						"cacheReadTokens":  curUsage.CacheReadTokens,
+						"cacheWriteTokens": curUsage.CacheWriteTokens,
+					},
+				}}}
+			}
 			msgs = append(msgs, *cur)
 		}
 		cur = nil
+		curUsage = provider.Usage{}
+		curHasUsage = false
 	}
 	for i, m := range stored {
 		switch {
 		case m.Role == provider.RoleAssistant:
 			if cur == nil {
 				cur = &historyMessage{ID: fmt.Sprintf("msg-%d", m.ID), Role: "assistant"}
+			}
+			// Accumulate each assistant round's LLM-call usage into the turn total.
+			if m.Usage != nil {
+				curUsage.InputTokens += m.Usage.InputTokens
+				curUsage.OutputTokens += m.Usage.OutputTokens
+				curUsage.CacheReadTokens += m.Usage.CacheReadTokens
+				curUsage.CacheWriteTokens += m.Usage.CacheWriteTokens
+				curHasUsage = true
 			}
 			for _, b := range m.Content {
 				switch b.Type {

@@ -4,7 +4,11 @@
 // with multi-client state sync, and session lifecycle (idle-end detection).
 package session
 
-import "time"
+import (
+	"time"
+
+	"nowhere-agent/internal/provider"
+)
 
 // RunStatus is the run lifecycle state.
 type RunStatus string
@@ -69,6 +73,10 @@ type Run struct {
 	Seq       int
 	Status    RunStatus
 	CreatedAt time.Time
+	// Usage aggregates the run's token consumption across all its LLM calls
+	// (redundant with SUM of its messages' usage, kept for cheap queries). Nil
+	// until the run reports usage. Persisted as the runs.usage_* cols.
+	Usage *provider.Usage
 }
 
 // Event is one persisted run event (an episode record / replay unit).

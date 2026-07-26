@@ -91,6 +91,41 @@ func TestDecoderUsage(t *testing.T) {
 	}
 }
 
+// TestDecoderUsageCacheReadDeepSeek pins that DeepSeek's prompt_cache_hit_tokens
+// surfaces as CacheReadTokens (the prefix-cache hit count).
+func TestDecoderUsageCacheReadDeepSeek(t *testing.T) {
+	d := newStreamDecoder()
+	events := d.feed([]byte(`{"id":"x","model":"deepseek","choices":[],"usage":{"prompt_tokens":3535,"completion_tokens":44,"prompt_cache_hit_tokens":3456,"prompt_cache_miss_tokens":79}}`))
+	var usage *provider.Usage
+	for _, e := range events {
+		if e.Usage != nil {
+			usage = e.Usage
+		}
+	}
+	if usage == nil || usage.CacheReadTokens != 3456 {
+		t.Fatalf("cache read wrong: %+v", usage)
+	}
+	if usage.CacheWriteTokens != 0 {
+		t.Errorf("cache write should stay 0 for OpenAI/DeepSeek: %+v", usage)
+	}
+}
+
+// TestDecoderUsageCacheReadOpenAI falls back to OpenAI's official
+// prompt_tokens_details.cached_tokens when prompt_cache_hit_tokens is absent.
+func TestDecoderUsageCacheReadOpenAI(t *testing.T) {
+	d := newStreamDecoder()
+	events := d.feed([]byte(`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":80}}}`))
+	var usage *provider.Usage
+	for _, e := range events {
+		if e.Usage != nil {
+			usage = e.Usage
+		}
+	}
+	if usage == nil || usage.CacheReadTokens != 80 {
+		t.Fatalf("cache read fallback wrong: %+v", usage)
+	}
+}
+
 // TestDecoderFinishReasonLength verifies OpenAI's finish_reason "length" (a
 // max_tokens truncation) surfaces as StopMaxTokens on an EventMessageStop, so
 // the loop can tell it apart from a natural stop.
