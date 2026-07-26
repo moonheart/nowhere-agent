@@ -107,7 +107,7 @@
 
 ### O. 编排 / Agent 循环 / 人审
 
-> **状态更新**:O4 已在分支 `fix/loop-observability` 落地 —— 迭代触顶时补发 `KindError` 终帧(不再静默 failed)。O1/O2/O3/O5/O6 仍未做。
+> **状态更新**:O4 已在分支 `fix/loop-observability` 落地 —— 迭代触顶时补发 `KindError` 终帧(不再静默 failed)。**O2(HITL)+ O-ask(ask_user)已在分支 `feat/hitl-approval` 落地**(共享挂起-恢复机制,见下)。O1/O3/O5/O6 仍未做。
 
 > ✅ 已通:**运行取消全链路**(`chatapi/cancel.go` → `registry.Cancel` → ctx 取消 → 终帧,loop 在 `loop.go:295` 观察);**子代理并行扇出 + 深度/总量/并发三重预算**(架构评审 **C16** 已修,`subagent/tool.go` 的 `WithBudget`);**provider 瞬时错误重试**(架构评审 **A2** 已修,`provider/retry.go`)。以下是缺口。
 
@@ -116,6 +116,9 @@
 
 **O2 ◑⭐ 人在环审批(HITL)已落地(持久化挂起-恢复)**
 原状:`RunWaitingApproval` 有定义、被 SQL 索引引用,却从不被写入、也无恢复路径;服务端把 `"ask"` 直接映射成 deny。**现已实现完整"危险工具调用→挂起→推给用户→裁决→续跑"**:① loop 检测 `Ask`(经 `agent.ApprovalReasonPrefix` 标记)→ 不执行、emit `KindApprovalRequest`、返回 `ErrAwaitingApproval`;② registry 持久化 `approvals` 行(migration `000010`,一 pending/run 唯一约束)→ `SuspendRun` 置 `waiting_approval` 并**释放单活跃锁**(挂起放锁,用户可先发别的消息);③ 前端经 transient `data-tool-approval` 帧渲染批准/否决 → `POST /api/chat/approval`;④ `Resume` 裁决后**另起 worker 从 `MessageStore` 重建 history 续跑**(批准=执行该工具,拒绝=注入 `is_error`),并经注入的 `LoopSource` 重建 loop,故**跨进程重启仍可恢复**(启动对账保留 `waiting_approval`,不当 stranded fail)。仅 `*-once` 授权,`allow/reject-always` 持久规则留扩展。
+
+**O-ask ✅ ask_user 结构化提问工具(复用 O2 挂起-恢复)**
+模型可调用内置 `ask_user` 工具向用户提 1~4 个结构化问题(每题单选/多选、2~4 个选项、可标推荐默认项、用户可自定义回答或"跳过")。**机制与 O2 完全同源**:`approvals` 表加 `kind`(`approval`/`ask_user`)+ `answer`(jsonb)列;loop 的 interaction gate 识别 `ask_user` 调用即挂起(`ErrAwaitingApproval`,无需 permission 标记,工具 `RiskReadOnly`);挂起-放锁-跨重启续跑全部复用。用户提交 → 答案作为该工具的 `tool_result` 续跑;"跳过"(取消语义)→ 注入非 error 的"用户跳过"提示,run 继续由模型自行决定。前端按帧的 `kind` 分发:approval 渲染批准/否决,ask_user 渲染多问题卡片(violet)。新增 `builtin.NewAskUser()` 注册进 tool binder(沙箱无关,总注册)。
 
 **O3 ◑ 无 run 续跑 / 断点恢复**
 被打断的 run 无法续跑:启动对账把所有非终态 run 直接标 `failed`(`RecoverStrandedRuns`→`FailStrandedRuns`,架构评审 A3 的取舍)。provider 瞬时**连接**错误现在会重试(A2),但一旦**流中途**断掉或整 run 失败,只能从头开一个新 run —— 没有从最后一条持久化消息续接的能力。
@@ -226,6 +229,7 @@
 | L7 | 🟡 | 模型 | Anthropic 工具前缀缓存未实现(=D20) | `anthropic/request.go:88` |
 | O1 | ○⭐ | 编排 | 无 planning/TODO 跟踪 | `agent/loop.go:193,59` |
 | O2 | ✅ | 编排 | HITL 已接(挂起-恢复 + 跨重启;approvals 表 + Resume + 前端裁决) | `session/registry.go`、`agent/loop.go`、`chatapi/approval.go`、`migrations/000010` |
+| O-ask | ✅ | 编排 | ask_user 结构化提问(1~4 题单/多选+默认+自定义+跳过;复用 O2 机制) | `toolruntime/builtin/askuser.go`、`agent/loop.go`、`web/src/components/tool-call.tsx` |
 | O3 | ◑ | 编排 | 无 run 续跑/断点恢复 | `session/runtime.go:276` |
 | O4 | ○⭐ | 编排 | 迭代触顶=静默失败,无终帧 | `agent/loop.go:279` |
 | O5 | ◑ | 编排 | `RunQueued` 不是真队列 | `runtime.go:120,150` |
