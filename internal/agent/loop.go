@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
@@ -19,6 +20,43 @@ import (
 // errCompressionSkipped is returned by maybeCompress when the circuit breaker
 // has tripped, so the caller doesn't count it as a fresh failure or a success.
 var errCompressionSkipped = errors.New("compression skipped: circuit breaker tripped")
+
+// ErrAwaitingApproval is returned by Run when a tool call is gated for human
+// approval (capability-gap O2): the loop does NOT execute it and instead
+// suspends the run. The run's worker parks the run (RunWaitingApproval) and
+// resumes it once the user decides. Distinct from a cancel or a failure.
+var ErrAwaitingApproval = errors.New("awaiting tool approval")
+
+// ApprovalReasonPrefix marks a Permission deny-reason as "gated for human
+// approval" rather than a hard deny. The server's permission callback prefixes
+// the reason for calls whose policy verdict is Ask; the loop distinguishes
+// those (suspend + ask the user) from a true deny (feed an error to the model).
+const ApprovalReasonPrefix = "approval required: "
+
+// IsApprovalReason reports whether a Permission deny-reason is a gate-for-
+// approval marker (vs a hard deny).
+func IsApprovalReason(reason string) bool {
+	return strings.HasPrefix(reason, ApprovalReasonPrefix)
+}
+
+// ApprovalRequest describes the single gated tool call that suspended a run.
+// It is the loop's output to the run worker, which persists it (durable
+// Approval) and surfaces it to the client.
+type ApprovalRequest struct {
+	ToolCallID string
+	ToolName   string
+	Input      map[string]any
+}
+
+// ResumedApproval is the human-approved tool call a resumed run should execute.
+// Approved=false means the user rejected it: the loop feeds an is_error result
+// back so the model learns the call was denied, rather than executing it.
+type ResumedApproval struct {
+	ToolCallID string
+	ToolName   string
+	Input      map[string]any
+	Approved   bool
+}
 
 // EventKind classifies loop events persisted by the session runtime.
 type EventKind string
@@ -53,6 +91,11 @@ const (
 	// once, at natural termination. It is persisted and fanned out so the
 	// transport's finish frame can report real token counts instead of zeros.
 	KindUsage EventKind = "usage"
+	// KindApprovalRequest carries the gated tool call that suspended the run
+	// (payload: ApprovalRequest). Live-only content (broker-routed, never
+	// persisted): the run's worker separately persists the durable Approval
+	// record that Resume reads.
+	KindApprovalRequest EventKind = "approval_request"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).
@@ -77,6 +120,12 @@ type Config struct {
 	// executed — it becomes an is_error tool_result carrying the reason, so the
 	// model can adapt. Nil leaves all calls ungated (pre-permission behaviour).
 	Permission func(toolruntime.Tool) (bool, string)
+
+	// Approval, when non-nil, is the tool call the run is resuming after a human
+	// approved it (capability-gap O2). The loop executes it WITHOUT re-checking
+	// Permission (the approval IS the authorization) and dispatches it ahead of
+	// any further gated calls. Set by the run worker on Resume.
+	Approval *ResumedApproval
 
 	// ContextWindow is the model's context window in tokens. Combined with
 	// MaxTokens (the reserved reply space) it bounds the working view: the loop
@@ -106,6 +155,10 @@ type Loop struct {
 	// compressFailures counts consecutive compression failures in the current
 	// run, for the circuit breaker (design D6).
 	compressFailures int
+	// PendingApproval, when set after Run returns ErrAwaitingApproval, is the
+	// gated tool call that suspended the run. The run worker reads it to persist
+	// the durable Approval.
+	PendingApproval *ApprovalRequest
 }
 
 // New creates a Loop.
@@ -201,6 +254,21 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	// turn); it is reported once at termination via KindUsage.
 	var total provider.Usage
 
+	// A resumed run (capability-gap O2) starts by resolving the human-approved
+	// tool call: execute it (Approved) or feed the denial back (rejected), then
+	// continue the think→tool cycle. This runs ONCE, before the first provider
+	// call of the resumed run.
+	if ra := l.config.Approval; ra != nil {
+		res := l.resolveApproval(ctx, *ra, emit)
+		resultMsg := toolResultMessage(
+			[]toolruntime.Call{{ID: ra.ToolCallID, Name: ra.ToolName, Args: ra.Input}},
+			[]toolruntime.Result{res},
+		)
+		produced = append(produced, resultMsg)
+		_ = emit.Emit(ctx, KindMessage, resultMsg)
+		l.config.Approval = nil
+	}
+
 	for iter := 0; iter < l.config.MaxIterations; iter++ {
 		// Honour cancellation between iterations (e.g. after a tool batch).
 		if err := ctx.Err(); err != nil {
@@ -283,6 +351,15 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		if err := ctx.Err(); err != nil {
 			_ = emit.Emit(ctx, KindCancelled, nil)
 			return produced, err
+		}
+
+		// Human-approval gate (capability-gap O2): if a call needs approval, do
+		// NOT dispatch the batch. Emit the approval request and suspend the run;
+		// the worker parks it (RunWaitingApproval) and resumes on decision.
+		if gate := l.approvalGate(toolCalls); gate != nil {
+			l.PendingApproval = gate
+			_ = emit.Emit(ctx, KindApprovalRequest, *gate)
+			return produced, ErrAwaitingApproval
 		}
 
 		// Dispatch tool calls (concurrently) and append results.
@@ -431,6 +508,50 @@ func (l *Loop) appendFinalized(ctx context.Context, acc *accumulator, assistant 
 	_ = emit.Emit(ctx, KindToolUse, map[string]any{
 		"id": blk.ToolUseID, "name": blk.ToolName, "input": blk.ToolInput,
 	})
+}
+
+// approvalGate scans the batch for a call that requires human approval. Such a
+// call is one whose tool exists AND Permission denies it with the
+// ApprovalReason marker (the server marks gated calls "requires approval"
+// rather than a hard deny). Only the first such call is returned — the run
+// suspends on it. Returns nil when nothing needs approval.
+func (l *Loop) approvalGate(calls []toolruntime.Call) *ApprovalRequest {
+	if l.config.Permission == nil {
+		return nil
+	}
+	for _, c := range calls {
+		if c.ArgsError != "" {
+			continue
+		}
+		tool, ok := l.tools.Get(c.Name)
+		if !ok {
+			continue
+		}
+		if deny, reason := l.config.Permission(tool); deny && IsApprovalReason(reason) {
+			return &ApprovalRequest{ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+		}
+	}
+	return nil
+}
+
+// resolveApproval produces the result for a human-decided tool call on resume.
+// An approved call executes (the approval is its authorization, so Permission
+// is not re-checked); a rejected one becomes an is_error result so the model
+// learns the call was denied. The result is streamed like a normal tool result.
+func (l *Loop) resolveApproval(ctx context.Context, ra ResumedApproval, emit Emitter) toolruntime.Result {
+	var res toolruntime.Result
+	if !ra.Approved {
+		res = toolruntime.Result{Content: "the user denied permission to run " + ra.ToolName, IsError: true}
+	} else {
+		res = l.tools.CallAll(ctx, []toolruntime.Call{{ID: ra.ToolCallID, Name: ra.ToolName, Args: ra.Input}})[0]
+	}
+	_ = emit.Emit(ctx, KindToolResult, map[string]any{
+		"tool_use_id": ra.ToolCallID,
+		"name":        ra.ToolName,
+		"content":     res.Content,
+		"is_error":    res.IsError,
+	})
+	return res
 }
 
 // dispatch runs tool calls concurrently via the registry. A call whose
