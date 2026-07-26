@@ -138,7 +138,13 @@ async function* resumeStream(
   if (!res.ok || !res.body) return;
 
   const accumulated = res.body
-    .pipeThrough(new UIMessageStreamDecoder())
+    .pipeThrough(
+      new UIMessageStreamDecoder({
+        onData: (d) => {
+          if (d.name === "tool-approval") reportApproval(d.data as ToolApproval);
+        },
+      }),
+    )
     .pipeThrough(new AssistantMessageAccumulator());
   // The accumulator's `parts` is the full accumulated content at each chunk
   // (text deltas extend the trailing part in place), so we yield every
@@ -167,7 +173,16 @@ export async function* followBody(
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<ChatModelRunResult, void, unknown> {
   const accumulated = body
-    .pipeThrough(new UIMessageStreamDecoder())
+    .pipeThrough(
+      // A verdict run can itself end on a new gate (the model asks a follow-up
+      // question): surface that card live, since this follow path bypasses the
+      // runtime's own onData. Mirrors App.tsx's onData → reportApproval.
+      new UIMessageStreamDecoder({
+        onData: (d) => {
+          if (d.name === "tool-approval") reportApproval(d.data as ToolApproval);
+        },
+      }),
+    )
     .pipeThrough(new AssistantMessageAccumulator());
   for await (const message of asAsyncIterableStream(accumulated)) {
     yield {

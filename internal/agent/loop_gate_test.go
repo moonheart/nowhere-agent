@@ -39,6 +39,9 @@ func TestLoopEndsOnApprovalGate(t *testing.T) {
 	if loop.PendingApproval == nil {
 		t.Fatal("PendingApproval not set after gate")
 	}
+	if loop.PendingApproval.ID == "" {
+		t.Error("PendingApproval.ID not generated; the frame must carry the approval id")
+	}
 	if loop.PendingApproval.ToolCallID != "tu1" || loop.PendingApproval.ToolName != "danger" || loop.PendingApproval.Kind != "approval" {
 		t.Errorf("PendingApproval = %+v", loop.PendingApproval)
 	}
@@ -67,6 +70,9 @@ func TestLoopEndsOnAskUser(t *testing.T) {
 	}
 	if loop.PendingApproval == nil || loop.PendingApproval.Kind != "ask_user" {
 		t.Fatalf("PendingApproval = %+v, want ask_user", loop.PendingApproval)
+	}
+	if loop.PendingApproval.ID == "" {
+		t.Error("PendingApproval.ID not generated for ask_user")
 	}
 	if len(produced) != 1 || produced[0].Content[0].Type != provider.BlockToolUse {
 		t.Fatalf("produced = %+v", produced)

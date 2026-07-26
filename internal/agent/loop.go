@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/toolruntime"
@@ -41,6 +43,12 @@ func IsApprovalReason(reason string) bool {
 // the verdict later. Kind distinguishes a permission approval (a dangerous call
 // needing a yes/no) from an ask_user question set.
 type ApprovalRequest struct {
+	// ID is the durable approval's id, generated the moment the gate is detected
+	// (LangGraph-style: the interrupt's id is known before it is surfaced). The
+	// loop emits it on the KindApprovalRequest frame and the run worker persists
+	// the Approval row with the SAME id, so the client's card can POST its verdict
+	// without a refresh or a store lookup.
+	ID string
 	// Kind is "approval" or "ask_user". Empty means approval (the O2 default).
 	Kind       string
 	ToolCallID string
@@ -510,13 +518,13 @@ func (l *Loop) interactionGate(calls []toolruntime.Call) *ApprovalRequest {
 		}
 		// ask_user: the model is explicitly asking the user for structured input.
 		if c.Name == AskUserToolName {
-			return &ApprovalRequest{Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+			return &ApprovalRequest{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 		}
 		// Permission approval: a dangerous call the policy gates for a yes/no.
 		if l.config.Permission != nil {
 			if tool, ok := l.tools.Get(c.Name); ok {
 				if deny, reason := l.config.Permission(tool); deny && IsApprovalReason(reason) {
-					return &ApprovalRequest{Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+					return &ApprovalRequest{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 				}
 			}
 		}

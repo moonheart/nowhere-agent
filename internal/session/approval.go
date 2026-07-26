@@ -131,15 +131,18 @@ func (s *PGStore) CreateApproval(ctx context.Context, a Approval) (Approval, err
 	if len(a.ToolInput) == 0 {
 		a.ToolInput = json.RawMessage("{}")
 	}
+	if a.ID == "" {
+		a.ID = uuid.NewString()
+	}
 	kind := a.Kind
 	if kind == "" {
 		kind = "approval"
 	}
 	row := s.db.QueryRowContext(ctx, `
-		INSERT INTO approvals (run_id, session_id, tool_call_id, tool_name, tool_input, kind)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO approvals (id, run_id, session_id, tool_call_id, tool_name, tool_input, kind)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING `+approvalCols,
-		a.RunID, a.SessionID, a.ToolCallID, a.ToolName, a.ToolInput, kind)
+		a.ID, a.RunID, a.SessionID, a.ToolCallID, a.ToolName, a.ToolInput, kind)
 	ap, err := scanApproval(row)
 	if err != nil {
 		return Approval{}, fmt.Errorf("create approval: %w", err)

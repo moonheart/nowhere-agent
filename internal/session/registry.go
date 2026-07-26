@@ -213,7 +213,7 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 			kind = "approval"
 		}
 		ap, err := rg.rt.store.CreateApproval(bg, Approval{
-			RunID: run.ID, SessionID: sessionID,
+			ID: gate.ID, RunID: run.ID, SessionID: sessionID,
 			ToolCallID: gate.ToolCallID, ToolName: gate.ToolName,
 			ToolInput: input, Kind: kind,
 		})

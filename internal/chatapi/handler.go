@@ -627,12 +627,32 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 			e.write(chunk{"type": "data-subagent", "data": m, "transient": true})
 		}
 	case agent.KindApprovalRequest:
-		// Tool-approval prompt (capability-gap O2): a data frame carrying the
-		// approval id + tool call so the client renders approve/deny. Transient —
-		// it drives UI, not the message record.
-		if m, ok := payload.(map[string]any); ok {
-			e.write(chunk{"type": "data-tool-approval", "data": m, "transient": true})
+		// Tool-approval prompt (capability-gap O2): stream the gated call to the
+		// client as the camelCase card /history also produces. The loop generated
+		// the approval's ID when it detected the gate (LangGraph-style), so the
+		// frame carries it — the card POSTs its verdict with no refresh or lookup.
+		// Transient: it drives UI, not the message record.
+		m, ok := payload.(map[string]any)
+		if !ok {
+			break
 		}
+		kind, _ := m["Kind"].(string)
+		if kind == "" {
+			kind = "approval"
+		}
+		toolCallID, _ := m["ToolCallID"].(string)
+		toolName, _ := m["ToolName"].(string)
+		args := m["Input"]
+		if args == nil {
+			args = map[string]any{}
+		}
+		e.write(chunk{"type": "data-tool-approval", "data": map[string]any{
+			"approvalId": m["ID"],
+			"kind":       kind,
+			"toolCallId": toolCallID,
+			"toolName":   toolName,
+			"args":       args,
+		}, "transient": true})
 	case agent.KindDone:
 		e.writeRunStatus("done")
 	case agent.KindUsage:
