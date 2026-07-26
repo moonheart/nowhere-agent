@@ -264,10 +264,14 @@ func (rg *RunRegistry) suspendForApproval(sessionID string, run Run, loop *agent
 	if err != nil {
 		input = []byte("{}")
 	}
+	kind := gate.Kind
+	if kind == "" {
+		kind = "approval"
+	}
 	ap, err := rg.rt.store.CreateApproval(bg, Approval{
 		RunID: run.ID, SessionID: sessionID,
 		ToolCallID: gate.ToolCallID, ToolName: gate.ToolName,
-		ToolInput: input,
+		ToolInput: input, Kind: kind,
 	})
 	if err != nil {
 		slog.Error("persist approval failed; failing run", "session", sessionID, "run", run.ID, "err", err)
@@ -279,25 +283,29 @@ func (rg *RunRegistry) suspendForApproval(sessionID string, run Run, loop *agent
 		_ = rg.rt.CompleteRun(bg, sessionID, RunFailed)
 		return
 	}
-	// Surface the approval request (now carrying the durable approval id) so an
-	// attached client can render the approve/deny UI. Live-only broker content.
+	// Surface the interaction request (now carrying the durable id) so an attached
+	// client renders the right UI — approve/deny for an approval, a question card
+	// for ask_user. Live-only broker content; kind + questions drive the render.
 	rg.append(bg, sessionID, run.ID, agent.KindApprovalRequest, map[string]any{
-		"approvalId":  ap.ID,
-		"toolCallId":  ap.ToolCallID,
-		"toolName":    ap.ToolName,
-		"args":        gate.Input,
+		"approvalId": ap.ID,
+		"kind":       kind,
+		"toolCallId": ap.ToolCallID,
+		"toolName":   ap.ToolName,
+		"args":       gate.Input,
 	})
-	slog.Info("run parked awaiting tool approval", "session", sessionID, "run", run.ID, "approval", ap.ID, "tool", ap.ToolName)
+	slog.Info("run parked awaiting human input", "session", sessionID, "run", run.ID, "approval", ap.ID, "kind", kind, "tool", ap.ToolName)
 }
 
-// Resume continues a run parked in waiting_approval after the user decided the
-// tool approval. It re-acquires the single-active-run lock, resolves the
-// approval (execute on approve / inject a denial on reject), rebuilds history
-// from the durable message store (which may now include interleaved runs), and
-// drives the loop to completion on a fresh worker. The approval row is decided
-// atomically; a stale/foreign decision errors.
-func (rg *RunRegistry) Resume(ctx context.Context, approvalID string, approve bool) (Run, error) {
-	ap, err := rg.rt.store.DecideApproval(ctx, approvalID, approve)
+// Resume continues a run parked in waiting_approval after the user resolved its
+// human interaction. approve/answer carry the verdict: a permission approval uses
+// approve (execute on true, deny on false); an ask_user question set uses answer
+// (the user's structured response) with approve=true, or approve=false to skip.
+// It re-acquires the single-active-run lock, rebuilds history from the durable
+// message store (which may now include interleaved runs), and drives the loop to
+// completion on a fresh worker. The row is decided atomically; a stale/foreign
+// decision errors.
+func (rg *RunRegistry) Resume(ctx context.Context, approvalID string, approve bool, answer json.RawMessage) (Run, error) {
+	ap, err := rg.rt.store.DecideApproval(ctx, approvalID, approve, answer)
 	if err != nil {
 		return Run{}, err // ErrNoPendingApproval for unknown/already-decided
 	}
@@ -338,8 +346,11 @@ func (rg *RunRegistry) Resume(ctx context.Context, approvalID string, approve bo
 	}
 	var input map[string]any
 	_ = json.Unmarshal(ap.ToolInput, &input)
+	var answerMap map[string]any
+	_ = json.Unmarshal(ap.Answer, &answerMap)
 	loop = loop.WithApproval(agent.ResumedApproval{
-		ToolCallID: ap.ToolCallID, ToolName: ap.ToolName, Input: input, Approved: approve,
+		Kind: ap.Kind, ToolCallID: ap.ToolCallID, ToolName: ap.ToolName,
+		Input: input, Approved: approve, Answer: answerMap,
 	})
 
 	run, err := rg.rt.ResumeRun(ctx, sessionID, ap.RunID)

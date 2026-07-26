@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -68,8 +69,9 @@ type Store interface {
 	PendingApprovalForRun(ctx context.Context, runID string) (Approval, bool, error)
 	// GetApproval fetches an approval by id (any status).
 	GetApproval(ctx context.Context, id string) (Approval, error)
-	// DecideApproval resolves a pending approval, or ErrNoPendingApproval.
-	DecideApproval(ctx context.Context, id string, approve bool) (Approval, error)
+	// DecideApproval resolves a pending approval, or ErrNoPendingApproval. answer
+	// is the user's structured response for ask_user (nil for a permission approval).
+	DecideApproval(ctx context.Context, id string, approve bool, answer json.RawMessage) (Approval, error)
 }
 
 // Runtime coordinates run lifecycle, the single-active-run lock, and event

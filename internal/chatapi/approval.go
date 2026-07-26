@@ -19,8 +19,9 @@ func (h *Handler) serveApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ApprovalID string `json:"approvalId"`
-		Approved   bool   `json:"approved"`
+		ApprovalID string          `json:"approvalId"`
+		Approved   bool            `json:"approved"`
+		Answer     json.RawMessage `json:"answer"` // ask_user: the structured response
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ApprovalID == "" {
 		http.Error(w, `{"error":"approvalId required"}`, http.StatusBadRequest)
@@ -43,7 +44,7 @@ func (h *Handler) serveApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := h.registry.Resume(r.Context(), body.ApprovalID, body.Approved)
+	run, err := h.registry.Resume(r.Context(), body.ApprovalID, body.Approved, body.Answer)
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrNoPendingApproval):

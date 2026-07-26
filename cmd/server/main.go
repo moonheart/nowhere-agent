@@ -293,6 +293,12 @@ func run() error {
 		}
 		bindChatTools := func(ctx context.Context, loop *agent.Loop, sessionID string) {
 			reg := toolruntime.NewRegistry()
+			// Structured user questions (capability O-ask): the model asks 1–4
+			// questions; the loop suspends the run on this tool and the user's
+			// answer arrives as its result on resume. Always available (sandbox-
+			// independent), RiskReadOnly so the permission gate leaves it to the
+			// interaction gate.
+			reg.Register(builtin.NewAskUser())
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
 			// present (independent of the sandbox); scopes mirror the context

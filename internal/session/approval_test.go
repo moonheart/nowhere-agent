@@ -40,7 +40,7 @@ func TestMemStoreApprovalLifecycle(t *testing.T) {
 	}
 
 	// Approve it.
-	dec, err := s.DecideApproval(ctx, a.ID, true)
+	dec, err := s.DecideApproval(ctx, a.ID, true, nil)
 	if err != nil {
 		t.Fatalf("DecideApproval: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestMemStoreApprovalLifecycle(t *testing.T) {
 	if _, ok, _ := s.PendingApprovalForRun(ctx, run.ID); ok {
 		t.Fatal("approval should no longer be pending")
 	}
-	if _, err := s.DecideApproval(ctx, a.ID, true); !errors.Is(err, ErrNoPendingApproval) {
+	if _, err := s.DecideApproval(ctx, a.ID, true, nil); !errors.Is(err, ErrNoPendingApproval) {
 		t.Fatalf("double decide should error, got %v", err)
 	}
 
@@ -70,7 +70,7 @@ func TestMemStoreApprovalReject(t *testing.T) {
 	run, _ := s.CreateRun(ctx, sess.ID, 1)
 	a, _ := s.CreateApproval(ctx, Approval{RunID: run.ID, SessionID: sess.ID, ToolCallID: "tc", ToolName: "n"})
 
-	dec, err := s.DecideApproval(ctx, a.ID, false)
+	dec, err := s.DecideApproval(ctx, a.ID, false, nil)
 	if err != nil {
 		t.Fatalf("DecideApproval: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestMemStoreApprovalUnknown(t *testing.T) {
 	if _, err := s.GetApproval(context.Background(), "nope"); !errors.Is(err, ErrNoPendingApproval) {
 		t.Fatalf("unknown approval: %v", err)
 	}
-	if _, err := s.DecideApproval(context.Background(), "nope", true); !errors.Is(err, ErrNoPendingApproval) {
+	if _, err := s.DecideApproval(context.Background(), "nope", true, nil); !errors.Is(err, ErrNoPendingApproval) {
 		t.Fatalf("decide unknown: %v", err)
 	}
 	if _, ok, _ := s.PendingApprovalForRun(context.Background(), "no-run"); ok {

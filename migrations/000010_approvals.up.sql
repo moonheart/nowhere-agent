@@ -17,7 +17,14 @@ CREATE TABLE IF NOT EXISTS approvals (
     tool_call_id TEXT NOT NULL,
     tool_name    TEXT NOT NULL,
     tool_input   JSONB NOT NULL DEFAULT '{}',
+    -- kind: 'approval' (a dangerous call needing yes/no) or 'ask_user' (the
+    -- model asking structured questions). The suspended run + resume path is
+    -- shared; kind only changes what the user is shown and what resume feeds back.
+    kind         TEXT NOT NULL DEFAULT 'approval',
     status       TEXT NOT NULL DEFAULT 'pending',
+    -- answer: the user's structured response (ask_user) e.g. {"answers":{...}}.
+    -- NULL for a permission approval (the verdict is in status).
+    answer       JSONB,
     decided_at   TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );

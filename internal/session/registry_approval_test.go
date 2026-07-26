@@ -142,7 +142,7 @@ func TestRunSuspendsThenResumeApproved(t *testing.T) {
 		t.Fatalf("approval = %+v", ap)
 	}
 
-	if _, err := rg.Resume(context.Background(), ap.ID, true); err != nil {
+	if _, err := rg.Resume(context.Background(), ap.ID, true, nil); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	waitStatus(t, rt, sess.ID, RunDone)
@@ -163,7 +163,7 @@ func TestResumeRejectedSkipsExecution(t *testing.T) {
 	waitStatus(t, rt, sess.ID, RunWaitingApproval)
 
 	ap, _, _ := rt.store.PendingApprovalForRun(context.Background(), currentRunID(t, rt, sess.ID))
-	if _, err := rg.Resume(context.Background(), ap.ID, false); err != nil {
+	if _, err := rg.Resume(context.Background(), ap.ID, false, nil); err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
 	waitStatus(t, rt, sess.ID, RunDone)
@@ -176,7 +176,7 @@ func TestResumeRejectedSkipsExecution(t *testing.T) {
 func TestResumeUnknownApproval(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	rg := NewRunRegistry(rt, rt.Bus())
-	if _, err := rg.Resume(context.Background(), "no-such-id", true); !errors.Is(err, ErrNoPendingApproval) {
+	if _, err := rg.Resume(context.Background(), "no-such-id", true, nil); !errors.Is(err, ErrNoPendingApproval) {
 		t.Fatalf("Resume unknown: %v", err)
 	}
 }
@@ -206,7 +206,7 @@ func TestResumeAfterRestartRebuildsLoop(t *testing.T) {
 	})
 
 	ap, _, _ := rt.store.PendingApprovalForRun(context.Background(), currentRunID(t, rt, sess.ID))
-	if _, err := rg2.Resume(context.Background(), ap.ID, true); err != nil {
+	if _, err := rg2.Resume(context.Background(), ap.ID, true, nil); err != nil {
 		t.Fatalf("Resume after restart: %v", err)
 	}
 	waitStatus(t, rt, sess.ID, RunDone)

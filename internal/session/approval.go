@@ -21,23 +21,29 @@ const (
 	ApprovalExpired  ApprovalStatus = "expired"
 )
 
-// Approval is the durable record of one dangerous tool call awaiting a human
-// verdict (capability-gap O2, migration 000010). When the loop hits an Ask
-// permission verdict it does NOT execute the call; it persists an Approval and
-// suspends the run (RunWaitingApproval). The decision endpoint resolves the row
-// and resumes the run, so the pause survives process restarts.
+// Approval is the durable record of one human interaction a run is parked on
+// (capability-gap O2 + ask_user, migration 000010). Two kinds: a permission
+// approval (a dangerous call needing yes/no) and an ask_user question set (the
+// model asking structured input). Both suspend the run (RunWaitingApproval);
+// the decision endpoint resolves the row and resumes, so the pause survives
+// process restarts.
 type Approval struct {
 	ID         string
 	RunID      string
 	SessionID  string
 	ToolCallID string
 	ToolName   string
-	// ToolInput is the model-supplied arguments, kept so Resume can execute the
-	// approved call exactly as requested (or show the user what was asked).
-	ToolInput  json.RawMessage
-	Status     ApprovalStatus
-	CreatedAt  time.Time
-	DecidedAt  *time.Time
+	// ToolInput is the model-supplied arguments: for an approval, the gated
+	// call's args (re-executed on approve); for ask_user, the question set shown
+	// to the user.
+	ToolInput json.RawMessage
+	// Kind is "approval" or "ask_user" (empty = approval).
+	Kind   string
+	Status ApprovalStatus
+	// Answer is the user's structured response for ask_user (e.g. {"answers":{...}}).
+	Answer    json.RawMessage
+	CreatedAt time.Time
+	DecidedAt *time.Time
 }
 
 // ErrNoPendingApproval is returned when resolving/fetching an approval that is
@@ -85,7 +91,7 @@ func (m *MemStore) GetApproval(_ context.Context, id string) (Approval, error) {
 	return *a, nil
 }
 
-func (m *MemStore) DecideApproval(_ context.Context, id string, approve bool) (Approval, error) {
+func (m *MemStore) DecideApproval(_ context.Context, id string, approve bool, answer json.RawMessage) (Approval, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a, ok := m.approvals[id]
@@ -94,6 +100,7 @@ func (m *MemStore) DecideApproval(_ context.Context, id string, approve bool) (A
 	}
 	now := time.Now()
 	a.DecidedAt = &now
+	a.Answer = answer
 	if approve {
 		a.Status = ApprovalApproved
 	} else {
@@ -104,11 +111,15 @@ func (m *MemStore) DecideApproval(_ context.Context, id string, approve bool) (A
 
 // --- PGStore (Postgres, production) ---
 
+// approvalCols is the shared column list for approvals scans (kind + answer
+// included so every read returns the full record).
+const approvalCols = `id, run_id, session_id, tool_call_id, tool_name, tool_input, kind, status, answer, created_at, decided_at`
+
 // scanApproval reads one approvals row.
 func scanApproval(row interface{ Scan(...any) error }) (Approval, error) {
 	var a Approval
 	err := row.Scan(&a.ID, &a.RunID, &a.SessionID, &a.ToolCallID, &a.ToolName,
-		&a.ToolInput, &a.Status, &a.CreatedAt, &a.DecidedAt)
+		&a.ToolInput, &a.Kind, &a.Status, &a.Answer, &a.CreatedAt, &a.DecidedAt)
 	return a, err
 }
 
@@ -116,11 +127,15 @@ func (s *PGStore) CreateApproval(ctx context.Context, a Approval) (Approval, err
 	if len(a.ToolInput) == 0 {
 		a.ToolInput = json.RawMessage("{}")
 	}
+	kind := a.Kind
+	if kind == "" {
+		kind = "approval"
+	}
 	row := s.db.QueryRowContext(ctx, `
-		INSERT INTO approvals (run_id, session_id, tool_call_id, tool_name, tool_input)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, run_id, session_id, tool_call_id, tool_name, tool_input, status, created_at, decided_at`,
-		a.RunID, a.SessionID, a.ToolCallID, a.ToolName, a.ToolInput)
+		INSERT INTO approvals (run_id, session_id, tool_call_id, tool_name, tool_input, kind)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING `+approvalCols,
+		a.RunID, a.SessionID, a.ToolCallID, a.ToolName, a.ToolInput, kind)
 	ap, err := scanApproval(row)
 	if err != nil {
 		return Approval{}, fmt.Errorf("create approval: %w", err)
@@ -130,7 +145,7 @@ func (s *PGStore) CreateApproval(ctx context.Context, a Approval) (Approval, err
 
 func (s *PGStore) PendingApprovalForRun(ctx context.Context, runID string) (Approval, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, run_id, session_id, tool_call_id, tool_name, tool_input, status, created_at, decided_at
+		SELECT `+approvalCols+`
 		FROM approvals
 		WHERE run_id = $1 AND status = 'pending'
 		ORDER BY created_at DESC LIMIT 1`, runID)
@@ -146,7 +161,7 @@ func (s *PGStore) PendingApprovalForRun(ctx context.Context, runID string) (Appr
 
 func (s *PGStore) GetApproval(ctx context.Context, id string) (Approval, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, run_id, session_id, tool_call_id, tool_name, tool_input, status, created_at, decided_at
+		SELECT `+approvalCols+`
 		FROM approvals WHERE id = $1`, id)
 	a, err := scanApproval(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -160,16 +175,17 @@ func (s *PGStore) GetApproval(ctx context.Context, id string) (Approval, error) 
 
 // DecideApproval atomically resolves a pending approval (optimistic: the
 // status='pending' predicate makes a concurrent double-decide a no-op → error).
-func (s *PGStore) DecideApproval(ctx context.Context, id string, approve bool) (Approval, error) {
+// answer is the user's structured response for ask_user (nil for approvals).
+func (s *PGStore) DecideApproval(ctx context.Context, id string, approve bool, answer json.RawMessage) (Approval, error) {
 	status := string(ApprovalRejected)
 	if approve {
 		status = string(ApprovalApproved)
 	}
 	row := s.db.QueryRowContext(ctx, `
-		UPDATE approvals SET status = $2, decided_at = now()
+		UPDATE approvals SET status = $2, answer = $3, decided_at = now()
 		WHERE id = $1 AND status = 'pending'
-		RETURNING id, run_id, session_id, tool_call_id, tool_name, tool_input, status, created_at, decided_at`,
-		id, status)
+		RETURNING `+approvalCols,
+		id, status, nullableJSON(answer))
 	a, err := scanApproval(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Approval{}, ErrNoPendingApproval
@@ -178,4 +194,12 @@ func (s *PGStore) DecideApproval(ctx context.Context, id string, approve bool) (
 		return Approval{}, fmt.Errorf("decide approval: %w", err)
 	}
 	return a, nil
+}
+
+// nullableJSON maps an empty answer to SQL NULL (the answer column is nullable).
+func nullableJSON(j json.RawMessage) any {
+	if len(j) == 0 {
+		return nil
+	}
+	return j
 }

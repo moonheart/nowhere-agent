@@ -139,3 +139,87 @@ func TestIsApprovalReason(t *testing.T) {
 		t.Error("plain deny should not be an approval gate")
 	}
 }
+
+// TestLoopSuspendsOnAskUser pins O-ask: an ask_user tool call suspends the run
+// (Kind=ask_user) without executing, exactly like a permission approval — but
+// with NO permission callback needed.
+func TestLoopSuspendsOnAskUser(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "ask_user", `{"questions":[{"question":"Which DB?","options":[{"label":"Postgres"},{"label":"SQLite"}]}]}`),
+	}}
+	reg := toolruntime.NewRegistry()
+	emit := &memEmitter{}
+	// No Permission callback at all — ask_user suspends regardless.
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	_, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "set things up")}, emit)
+	if !errors.Is(err, ErrAwaitingApproval) {
+		t.Fatalf("err = %v, want ErrAwaitingApproval", err)
+	}
+	if loop.PendingApproval == nil || loop.PendingApproval.Kind != "ask_user" {
+		t.Fatalf("PendingApproval = %+v, want kind ask_user", loop.PendingApproval)
+	}
+	if emit.count(KindApprovalRequest) != 1 {
+		t.Errorf("expected approval_request event, got %d", emit.count(KindApprovalRequest))
+	}
+}
+
+// TestLoopResumeAskUserAnswer: a resumed ask_user feeds the user's structured
+// answer back as the tool result so the model reads it.
+func TestLoopResumeAskUserAnswer(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		textResponse("Using Postgres then"),
+	}}
+	reg := toolruntime.NewRegistry()
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{
+		Model: "m", MaxTokens: 100,
+		Approval: &ResumedApproval{
+			Kind: "ask_user", ToolCallID: "tu1", ToolName: "ask_user",
+			Approved: true,
+			Answer:   map[string]any{"answers": map[string]any{"Which DB?": "Postgres"}},
+		},
+	})
+
+	produced, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "set things up")}, emit)
+	if err != nil {
+		t.Fatalf("resumed run: %v", err)
+	}
+	if len(produced) != 2 || produced[0].Content[0].Type != provider.BlockToolResult {
+		t.Fatalf("expected answer tool_result + final, got %+v", produced)
+	}
+	content := produced[0].Content[0].ToolContent
+	if content == "" || produced[0].Content[0].IsError {
+		t.Errorf("answer result should be non-error content, got %+v", produced[0].Content[0])
+	}
+	if emit.count(KindDone) != 1 {
+		t.Error("expected run to complete after answer")
+	}
+}
+
+// TestLoopResumeAskUserSkipped: a cancelled ask_user (user skipped) feeds a
+// non-error "skipped" note so the model proceeds without the input.
+func TestLoopResumeAskUserSkipped(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		textResponse("I'll pick a sensible default"),
+	}}
+	reg := toolruntime.NewRegistry()
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{
+		Model: "m", MaxTokens: 100,
+		Approval: &ResumedApproval{
+			Kind: "ask_user", ToolCallID: "tu1", ToolName: "ask_user", Approved: false,
+		},
+	})
+
+	produced, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "set things up")}, emit)
+	if err != nil {
+		t.Fatalf("resumed run: %v", err)
+	}
+	if len(produced) != 2 || produced[0].Content[0].Type != provider.BlockToolResult {
+		t.Fatalf("expected skipped tool_result + final, got %+v", produced)
+	}
+	if produced[0].Content[0].IsError {
+		t.Error("a skipped question should NOT be an error result")
+	}
+}

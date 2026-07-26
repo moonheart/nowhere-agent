@@ -41,21 +41,37 @@ func IsApprovalReason(reason string) bool {
 
 // ApprovalRequest describes the single gated tool call that suspended a run.
 // It is the loop's output to the run worker, which persists it (durable
-// Approval) and surfaces it to the client.
+// interaction) and surfaces it to the client. Kind distinguishes a permission
+// approval (a dangerous call needing a yes/no) from an ask_user question set
+// (the model asking for structured input).
 type ApprovalRequest struct {
+	// Kind is "approval" or "ask_user". Empty means approval (the O2 default).
+	Kind       string
 	ToolCallID string
 	ToolName   string
 	Input      map[string]any
 }
 
-// ResumedApproval is the human-approved tool call a resumed run should execute.
-// Approved=false means the user rejected it: the loop feeds an is_error result
-// back so the model learns the call was denied, rather than executing it.
+// AskUserToolName is the built-in tool the model calls to ask the user
+// structured questions (capability O-ask). Like a permission approval, calling
+// it suspends the run until the user answers.
+const AskUserToolName = "ask_user"
+
+// ResumedApproval is the human-resolved interaction a resumed run should apply.
+// For a permission approval: Approved=true executes the gated call (the approval
+// is its authorization), false injects a denial. For an ask_user question set:
+// Answer is the user's structured response, fed back as the tool result so the
+// model reads what the user said.
 type ResumedApproval struct {
+	// Kind is "approval" or "ask_user" (empty = approval).
+	Kind       string
 	ToolCallID string
 	ToolName   string
 	Input      map[string]any
 	Approved   bool
+	// Answer carries the ask_user response (e.g. {"answers":{...}}). Unused for
+	// permission approvals.
+	Answer map[string]any
 }
 
 // EventKind classifies loop events persisted by the session runtime.
@@ -362,10 +378,11 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			return produced, err
 		}
 
-		// Human-approval gate (capability-gap O2): if a call needs approval, do
-		// NOT dispatch the batch. Emit the approval request and suspend the run;
-		// the worker parks it (RunWaitingApproval) and resumes on decision.
-		if gate := l.approvalGate(toolCalls); gate != nil {
+		// Human-interaction gate (capability-gap O2 + ask_user): if a call needs a
+		// human answer — a permission approval OR an ask_user question set — do NOT
+		// dispatch the batch. Emit the request and suspend the run; the worker
+		// parks it (RunWaitingApproval) and resumes on the user's response.
+		if gate := l.interactionGate(toolCalls); gate != nil {
 			l.PendingApproval = gate
 			_ = emit.Emit(ctx, KindApprovalRequest, *gate)
 			return produced, ErrAwaitingApproval
@@ -519,39 +536,55 @@ func (l *Loop) appendFinalized(ctx context.Context, acc *accumulator, assistant 
 	})
 }
 
-// approvalGate scans the batch for a call that requires human approval. Such a
-// call is one whose tool exists AND Permission denies it with the
-// ApprovalReason marker (the server marks gated calls "requires approval"
-// rather than a hard deny). Only the first such call is returned — the run
-// suspends on it. Returns nil when nothing needs approval.
-func (l *Loop) approvalGate(calls []toolruntime.Call) *ApprovalRequest {
-	if l.config.Permission == nil {
-		return nil
-	}
+// interactionGate scans the batch for a call that needs a human answer before
+// the run can continue. Two kinds: (1) a permission approval — a tool whose
+// Permission callback denies with the ApprovalReasonPrefix marker; (2) an
+// ask_user question set — the model calling the built-in ask_user tool. Only
+// the first such call is returned — the run suspends on it. Returns nil when
+// nothing needs a human.
+func (l *Loop) interactionGate(calls []toolruntime.Call) *ApprovalRequest {
 	for _, c := range calls {
 		if c.ArgsError != "" {
 			continue
 		}
-		tool, ok := l.tools.Get(c.Name)
-		if !ok {
-			continue
+		// ask_user: the model is explicitly asking the user for structured input.
+		if c.Name == AskUserToolName {
+			return &ApprovalRequest{Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 		}
-		if deny, reason := l.config.Permission(tool); deny && IsApprovalReason(reason) {
-			return &ApprovalRequest{ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+		// Permission approval: a dangerous call the policy gates for a yes/no.
+		if l.config.Permission != nil {
+			if tool, ok := l.tools.Get(c.Name); ok {
+				if deny, reason := l.config.Permission(tool); deny && IsApprovalReason(reason) {
+					return &ApprovalRequest{Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+				}
+			}
 		}
 	}
 	return nil
 }
 
-// resolveApproval produces the result for a human-decided tool call on resume.
-// An approved call executes (the approval is its authorization, so Permission
-// is not re-checked); a rejected one becomes an is_error result so the model
-// learns the call was denied. The result is streamed like a normal tool result.
+// resolveApproval produces the result for a human-resolved interaction on
+// resume. ask_user: the user's structured answer becomes the tool result (or a
+// "skipped" note when they cancelled). Permission approval: an approved call
+// executes (the approval is its authorization, so Permission is not re-checked);
+// a rejected one becomes an is_error result so the model learns it was denied.
+// The result is streamed like a normal tool result.
 func (l *Loop) resolveApproval(ctx context.Context, ra ResumedApproval, emit Emitter) toolruntime.Result {
 	var res toolruntime.Result
-	if !ra.Approved {
+	switch {
+	case ra.Kind == "ask_user" || ra.ToolName == AskUserToolName:
+		if !ra.Approved {
+			// Cancelled: the user skipped the questions, but the run continues so
+			// the model can decide how to proceed without the input.
+			res = toolruntime.Result{Content: "the user skipped these questions (no answer given)"}
+		} else if data, err := json.Marshal(ra.Answer); err == nil {
+			res = toolruntime.Result{Content: string(data)}
+		} else {
+			res = toolruntime.Result{Content: "the user answered (unparseable response)", IsError: true}
+		}
+	case !ra.Approved:
 		res = toolruntime.Result{Content: "the user denied permission to run " + ra.ToolName, IsError: true}
-	} else {
+	default:
 		res = l.tools.CallAll(ctx, []toolruntime.Call{{ID: ra.ToolCallID, Name: ra.ToolName, Args: ra.Input}})[0]
 	}
 	_ = emit.Emit(ctx, KindToolResult, map[string]any{
