@@ -24,11 +24,11 @@ type ProviderLLM struct {
 
 // NewProviderLLM creates an LLM over the given adapter and model. MaxTokens
 // bounds a single completion; it must be generous because (a) reasoning models
-// burn reasoning_tokens that count toward the cap and (b) a reflect/compress
-// JSON payload can be long — a too-small cap truncates the JSON mid-stream and
-// fails the decode.
+// burn reasoning_tokens that count toward the cap and can run to many thousands
+// on a long transcript, and (b) a reflect/compress JSON payload can be long —
+// a too-small cap truncates the JSON mid-stream and fails the decode.
 func NewProviderLLM(adapter provider.Adapter, model string) *ProviderLLM {
-	return &ProviderLLM{adapter: adapter, model: model, MaxTokens: 4096}
+	return &ProviderLLM{adapter: adapter, model: model, MaxTokens: 16000}
 }
 
 // Complete runs one no-tools generation and returns its text plus the tokens it
