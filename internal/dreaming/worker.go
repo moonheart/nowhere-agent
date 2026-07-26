@@ -24,9 +24,15 @@ import (
 )
 
 // LLM is the model the worker calls for extraction/summarization/reflection.
-// Each call returns text and the tokens consumed (for budget accounting).
+// Complete is a free-text completion; CompleteJSON is a structured completion
+// (capability L3) that forces a JSON object conforming to spec.Schema into out
+// (a pointer). Both return the tokens consumed (for budget accounting).
 type LLM interface {
 	Complete(ctx context.Context, prompt string) (string, int, error)
+	// CompleteJSON forces structured output: out is a pointer the JSON object is
+	// unmarshalled into. Implementations without structured support may fall
+	// back to parsing Complete's text.
+	CompleteJSON(ctx context.Context, prompt string, spec *provider.JSONResponseSpec, out any) (int, error)
 }
 
 // Budget caps the LLM tokens a single run may spend.
@@ -198,11 +204,12 @@ func (w *Worker) store(ctx context.Context, scope identity.ScopeRef, kind memory
 // compress uses the LLM to condense a batch of episodes into one running
 // summary (the COMPRESS stage → memory.KindSummary).
 func (w *Worker) compress(ctx context.Context, eps []session.StoredMessage, budget int) (string, int, error) {
-	out, tokens, err := w.llm.Complete(ctx, summaryPrompt(episodeText(eps)))
+	var res summaryResult
+	tokens, err := w.llm.CompleteJSON(ctx, summaryPrompt(episodeText(eps)), summarySchema, &res)
 	if err != nil {
 		return "", tokens, err
 	}
-	return strings.TrimSpace(out), tokens, nil
+	return strings.TrimSpace(res.Summary), tokens, nil
 }
 
 // reflect derives cross-memory insights from the new batch summary plus the
@@ -222,28 +229,21 @@ func (w *Worker) reflect(ctx context.Context, scope identity.ScopeRef, summary s
 			lines = append(lines, m.Content)
 		}
 	}
-	out, tokens, err := w.llm.Complete(ctx, reflectPrompt(summary, lines))
+	var res reflectResult
+	tokens, err := w.llm.CompleteJSON(ctx, reflectPrompt(summary, lines), reflectSchema, &res)
 	if err != nil {
 		return 0, tokens, err
 	}
 
 	written := 0
-	for _, line := range splitLines(out) {
-		rest := strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(rest, "insight:"):
-			content := strings.TrimSpace(strings.TrimPrefix(rest, "insight:"))
-			if content == "" {
-				continue
-			}
-			if err := w.store(ctx, scope, memory.KindInsight, content); err != nil {
-				return written, tokens, err
-			}
-			written++
-		case strings.HasPrefix(rest, "deprecate:"):
-			content := strings.TrimSpace(strings.TrimPrefix(rest, "deprecate:"))
-			w.deprecateMatching(ctx, existing, content)
+	for _, content := range cleanLines(res.Insights) {
+		if err := w.store(ctx, scope, memory.KindInsight, content); err != nil {
+			return written, tokens, err
 		}
+		written++
+	}
+	for _, content := range cleanLines(res.Deprecate) {
+		w.deprecateMatching(ctx, existing, content)
 	}
 	return written, tokens, nil
 }
@@ -266,13 +266,26 @@ func (w *Worker) deprecateMatching(ctx context.Context, existing []memory.Memory
 	}
 }
 
-// extract uses the LLM to pull durable facts/preferences from episodes.
+// extract uses the LLM to pull durable facts/preferences from episodes. It uses
+// structured output (L3) so reasoning prose can never be parsed as a fact.
 func (w *Worker) extract(ctx context.Context, eps []session.StoredMessage, budget int) ([]string, int, error) {
-	out, tokens, err := w.llm.Complete(ctx, extractPrompt(episodeText(eps)))
+	var res extractResult
+	tokens, err := w.llm.CompleteJSON(ctx, extractPrompt(episodeText(eps)), extractSchema, &res)
 	if err != nil {
 		return nil, tokens, err
 	}
-	return splitLines(out), tokens, nil
+	return cleanLines(res.Facts), tokens, nil
+}
+
+// cleanLines trims and drops blank entries from a structured string list.
+func cleanLines(in []string) []string {
+	var out []string
+	for _, s := range in {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // episodeText renders a batch of episodes into the transcript both the extract

@@ -97,7 +97,11 @@ func TestWorkerIncrementalOverStores(t *testing.T) {
 
 	mem := memory.NewMemPort()
 	// extract → 1 fact; compress → a summary; reflect → nothing new.
-	llm := &fakeLLM{outputs: []string{"- user likes go", "likes go", ""}, tokens: 40}
+	llm := &fakeLLM{jsonResults: []any{
+		extractResult{Facts: []string{"user likes go"}},
+		summaryResult{Summary: "likes go"},
+		reflectResult{},
+	}, tokens: 40}
 	w := NewWorker(src, mem, llm, Budget{MaxTokens: 1000})
 
 	res, err := w.Run(ctx)

@@ -15,9 +15,19 @@ type apiRequest struct {
 	Model         string         `json:"model"`
 	Messages      []apiMessage   `json:"messages"`
 	Tools         []apiTool      `json:"tools,omitempty"`
+	// ToolChoice forces a named function when set (used for structured output).
+	ToolChoice    *apiToolChoice `json:"tool_choice,omitempty"`
 	MaxTokens     int            `json:"max_tokens,omitempty"`
 	Stream        bool           `json:"stream"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+}
+
+// apiToolChoice forces the model to call one named function.
+type apiToolChoice struct {
+	Type     string `json:"type"` // "function"
+	Function struct {
+		Name string `json:"name"`
+	} `json:"function"`
 }
 
 // streamOptions requests a final usage chunk in the SSE stream. Without
@@ -78,6 +88,19 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 		at.Function.Description = t.Description
 		at.Function.Parameters = t.InputSchema
 		req.Tools = append(req.Tools, at)
+	}
+
+	// Structured output (L3): append the synthetic response function and force it.
+	if jr := r.JSONResponse; jr != nil {
+		var at apiTool
+		at.Type = "function"
+		at.Function.Name = jr.Name
+		at.Function.Description = jr.Description
+		at.Function.Parameters = jr.Schema
+		req.Tools = append(req.Tools, at)
+		tc := &apiToolChoice{Type: "function"}
+		tc.Function.Name = jr.Name
+		req.ToolChoice = tc
 	}
 	return req, nil
 }

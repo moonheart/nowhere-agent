@@ -69,6 +69,85 @@ func TestProviderLLMErrorSurfaces(t *testing.T) {
 	}
 }
 
+// TestProviderLLMDropsThinking: reasoning models stream chain-of-thought on a
+// thinking block (index 0) and the answer on a text block (index 1). Complete
+// must return only the answer text — the chain-of-thought is not a fact and
+// must never reach the memory store.
+func TestProviderLLMDropsThinking(t *testing.T) {
+	a := &scriptedAdapter{events: []provider.Event{
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockThinking}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "Let me analyze. "},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "Nothing durable here."},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventBlockStart, Index: 1, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 1, Delta: "user likes go"},
+		{Type: provider.EventBlockStop, Index: 1},
+		{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: 10, OutputTokens: 5}},
+	}}
+	text, _, err := NewProviderLLM(a, "m").Complete(context.Background(), "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "user likes go" {
+		t.Errorf("text = %q, want only the answer text (thinking dropped)", text)
+	}
+}
+
+// TestProviderLLMCompleteJSON: a forced structured-output call accumulates the
+// tool_use block's JSON deltas (ignoring any thinking/text prose) and
+// unmarshals them into out. This is the L3 path that keeps chain-of-thought
+// out of the memory store.
+func TestProviderLLMCompleteJSON(t *testing.T) {
+	a := &scriptedAdapter{events: []provider.Event{
+		// Reasoning on the thinking block — must be ignored.
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockThinking}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "analyzing the transcript..."},
+		{Type: provider.EventBlockStop, Index: 0},
+		// The forced tool call carries the JSON payload.
+		{Type: provider.EventBlockStart, Index: 1, Block: &provider.Block{Type: provider.BlockToolUse, ToolName: "record_facts"}},
+		{Type: provider.EventBlockDelta, Index: 1, Delta: `{"facts":["user `},
+		{Type: provider.EventBlockDelta, Index: 1, Delta: `likes go"]}`},
+		{Type: provider.EventBlockStop, Index: 1},
+		{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: 20, OutputTokens: 8}},
+	}}
+	llm := NewProviderLLM(a, "m")
+	var res extractResult
+	tokens, err := llm.CompleteJSON(context.Background(), "p", extractSchema, &res)
+	if err != nil {
+		t.Fatalf("CompleteJSON: %v", err)
+	}
+	if tokens != 28 {
+		t.Errorf("tokens = %d want 28", tokens)
+	}
+	if len(res.Facts) != 1 || res.Facts[0] != "user likes go" {
+		t.Errorf("facts = %+v, want [user likes go] (thinking excluded)", res.Facts)
+	}
+}
+
+// TestProviderLLMCompleteJSONErrors: no tool payload or malformed JSON is an error.
+func TestProviderLLMCompleteJSONErrors(t *testing.T) {
+	// No tool_use block at all.
+	a := &scriptedAdapter{events: []provider.Event{
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "just prose"},
+		{Type: provider.EventMessageStop},
+	}}
+	var res extractResult
+	if _, err := NewProviderLLM(a, "m").CompleteJSON(context.Background(), "p", extractSchema, &res); err == nil {
+		t.Error("expected error when model produces no tool_use payload")
+	}
+
+	// Malformed JSON in the tool payload.
+	b := &scriptedAdapter{events: []provider.Event{
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: `{not json`},
+		{Type: provider.EventMessageStop},
+	}}
+	if _, err := NewProviderLLM(b, "m").CompleteJSON(context.Background(), "p", extractSchema, &res); err == nil {
+		t.Error("expected decode error for malformed JSON")
+	}
+}
+
 // TestProviderLLMNoUsageDegradesToZero: a missing usage report degrades to 0
 // tokens rather than failing the pass.
 func TestProviderLLMNoUsageDegradesToZero(t *testing.T) {

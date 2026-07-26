@@ -95,6 +95,25 @@ type Request struct {
 	// CacheablePrefix, when true, asks the adapter to place a cache point on
 	// the stable system/tool prefix to enable prompt caching where supported.
 	CacheablePrefix bool
+
+	// JSONResponse, when non-nil, forces a STRUCTURED output (capability L3):
+	// the model must produce a single JSON object conforming to Schema, with no
+	// surrounding prose. It is implemented as a forced tool call (both Anthropic
+	// tool_choice and OpenAI tool_choice support forcing a named function), which
+	// structurally excludes reasoning/commentary from the payload — the answer
+	// arrives as a BlockToolUse whose ToolInput is the JSON object. Name is the
+	// synthetic tool's name; the caller reads the object back from the block.
+	JSONResponse *JSONResponseSpec
+}
+
+// JSONResponseSpec describes a forced structured-output call.
+type JSONResponseSpec struct {
+	// Name is the synthetic tool/function name the model is forced to "call".
+	Name string
+	// Description steers the model on what to put in the object.
+	Description string
+	// Schema is the JSON Schema the response object must satisfy.
+	Schema map[string]any
 }
 
 // Usage reports token consumption for a completed generation. The JSON tags

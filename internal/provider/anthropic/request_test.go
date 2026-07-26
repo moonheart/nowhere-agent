@@ -111,3 +111,25 @@ func TestConvertBlocksImageUnmaterialized(t *testing.T) {
 		t.Errorf("placeholder wrong: %+v", out[0])
 	}
 }
+
+// TestBuildRequestJSONResponseForced pins L3: a JSONResponse request appends
+// the synthetic tool and forces it via tool_choice, so the model must emit the
+// object as a tool call.
+func TestBuildRequestJSONResponseForced(t *testing.T) {
+	req := buildRequest(provider.Request{
+		Model:    "m",
+		Messages: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")},
+		JSONResponse: &provider.JSONResponseSpec{
+			Name:        "record_facts",
+			Description: "d",
+			Schema:      map[string]any{"type": "object"},
+		},
+	})
+	if req.ToolChoice == nil || req.ToolChoice.Type != "tool" || req.ToolChoice.Name != "record_facts" {
+		t.Fatalf("tool_choice wrong: %+v", req.ToolChoice)
+	}
+	last := req.Tools[len(req.Tools)-1]
+	if last.Name != "record_facts" || last.InputSchema["type"] != "object" {
+		t.Errorf("response tool wrong: %+v", last)
+	}
+}

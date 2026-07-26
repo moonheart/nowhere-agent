@@ -14,7 +14,15 @@ type apiRequest struct {
 	System    any           `json:"system,omitempty"`
 	Messages  []apiMessage  `json:"messages"`
 	Tools     []apiTool     `json:"tools,omitempty"`
+	// ToolChoice forces a specific tool when set (used for structured output).
+	ToolChoice *apiToolChoice `json:"tool_choice,omitempty"`
 	Stream    bool          `json:"stream"`
+}
+
+// apiToolChoice forces the model to call one named tool (type "tool").
+type apiToolChoice struct {
+	Type string `json:"type"` // "tool"
+	Name string `json:"name"`
 }
 
 type systemBlock struct {
@@ -91,6 +99,12 @@ func buildRequest(r provider.Request) apiRequest {
 		for i, t := range r.Tools {
 			req.Tools[i] = apiTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}
 		}
+	}
+
+	// Structured output (L3): append the synthetic response tool and force it.
+	if jr := r.JSONResponse; jr != nil {
+		req.Tools = append(req.Tools, apiTool{Name: jr.Name, Description: jr.Description, InputSchema: jr.Schema})
+		req.ToolChoice = &apiToolChoice{Type: "tool", Name: jr.Name}
 	}
 
 	// Messages.
