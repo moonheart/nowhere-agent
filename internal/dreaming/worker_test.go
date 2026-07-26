@@ -11,17 +11,25 @@ import (
 	"nowhere-agent/internal/session"
 )
 
-// fakeLLM returns canned output and records token usage.
+// fakeLLM returns canned output and records token usage. When per-call output
+// is needed (the worker now makes multiple calls per batch: extract, compress,
+// reflect), set outputs to queue one response per call; otherwise output is
+// returned for every call.
 type fakeLLM struct {
-	output string
-	tokens int
-	calls  int
-	err    error
+	output  string
+	outputs []string
+	tokens  int
+	calls   int
+	err     error
 }
 
 func (f *fakeLLM) Complete(_ context.Context, _ string) (string, int, error) {
+	out := f.output
+	if f.calls < len(f.outputs) {
+		out = f.outputs[f.calls]
+	}
 	f.calls++
-	return f.output, f.tokens, f.err
+	return out, f.tokens, f.err
 }
 
 // fakeEpisodeSource serves canned pending sessions + episodes (watermark model).
@@ -68,27 +76,40 @@ func TestWorkerExtractsAndStoresFacts(t *testing.T) {
 		},
 	}
 	mem := memory.NewMemPort()
-	llm := &fakeLLM{output: "- user likes go\n- prefers dark mode", tokens: 50}
+	// extract → 2 facts; compress → a summary; reflect → nothing.
+	llm := &fakeLLM{outputs: []string{"- user likes go\n- prefers dark mode", "talked about go", ""}, tokens: 50}
 	w := NewWorker(src, mem, llm, Budget{MaxTokens: 1000})
 
 	res, err := w.Run(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.MemoriesWritten != 2 {
-		t.Errorf("memories written = %d want 2", res.MemoriesWritten)
-	}
-	if res.TokensUsed != 50 {
-		t.Errorf("tokens = %d want 50", res.TokensUsed)
+	if res.TokensUsed != 150 {
+		t.Errorf("tokens = %d want 150 (3 calls x 50)", res.TokensUsed)
 	}
 	if res.EpisodesProcessed != 1 {
 		t.Errorf("episodes = %d", res.EpisodesProcessed)
 	}
+	if llm.calls != 3 {
+		t.Errorf("llm calls = %d want 3 (extract+compress+reflect)", llm.calls)
+	}
 
-	// Facts stored under the user's scope.
+	// Facts + summary stored under the user's scope.
 	stored, _ := mem.ListByScope(context.Background(), identity.UserScope("user1"))
-	if len(stored) != 2 {
-		t.Errorf("stored memories = %d want 2", len(stored))
+	var facts, summaries int
+	for _, m := range stored {
+		switch m.Kind {
+		case memory.KindFact:
+			facts++
+		case memory.KindSummary:
+			summaries++
+		}
+	}
+	if facts != 2 {
+		t.Errorf("facts = %d want 2", facts)
+	}
+	if summaries != 1 {
+		t.Errorf("summaries = %d want 1", summaries)
 	}
 	// Session marked processed.
 	if len(src.processed) != 1 || src.processed[0] != "s1" {
@@ -105,8 +126,9 @@ func TestWorkerBudgetStopsProcessing(t *testing.T) {
 		},
 	}
 	llm := &fakeLLM{output: "fact", tokens: 100}
-	// Budget only allows one session's worth.
-	w := NewWorker(src, memory.NewMemPort(), llm, Budget{MaxTokens: 100})
+	// Budget allows exactly one full session: 3 calls (extract+compress+reflect)
+	// at 100 tokens each = 300, then the budget check stops session s2.
+	w := NewWorker(src, memory.NewMemPort(), llm, Budget{MaxTokens: 300})
 
 	res, err := w.Run(context.Background())
 	if err != nil {
@@ -115,8 +137,8 @@ func TestWorkerBudgetStopsProcessing(t *testing.T) {
 	if !res.BudgetExhausted {
 		t.Error("expected budget exhausted")
 	}
-	if llm.calls != 1 {
-		t.Errorf("llm calls = %d want 1 (budget)", llm.calls)
+	if llm.calls != 3 {
+		t.Errorf("llm calls = %d want 3 (one full session, then budget)", llm.calls)
 	}
 }
 
@@ -198,6 +220,54 @@ func TestWorkerAdvancesWatermarkToNewestEpisode(t *testing.T) {
 	}
 	if src.lastSeq["s1"] != 20 {
 		t.Errorf("watermark = %d want 20 (newest episode id)", src.lastSeq["s1"])
+	}
+}
+
+// TestWorkerReflectWritesInsightAndDedupes: the reflect stage derives a
+// KindInsight from the batch summary + existing memories, and deprecates an
+// existing memory it flags as duplicated — this is what dedupes facts the
+// incremental extractor re-derives across batches.
+func TestWorkerReflectWritesInsightAndDedupes(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewMemPort()
+	// Pre-existing duplicate fact the reflection should deprecate.
+	mem.Store(ctx, memory.Memory{Scope: identity.UserScope("u1"), Kind: memory.KindFact, Content: "user likes go"})
+
+	src := &fakeEpisodeSource{
+		sessions: []PendingSession{pending("s1", "u1")},
+		episodes: map[string][]session.StoredMessage{"s1": {textMsg("user likes go and uses it daily")}},
+	}
+	llm := &fakeLLM{outputs: []string{
+		"user likes go",          // extract
+		"user codes in go daily", // compress
+		"insight: user is an active gopher\ndeprecate: user likes go", // reflect
+	}, tokens: 10}
+	w := NewWorker(src, mem, llm, Budget{MaxTokens: 1000})
+
+	res, err := w.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stored, _ := mem.ListByScope(ctx, identity.UserScope("u1"))
+	var insights, deprecated int
+	for _, m := range stored {
+		if m.Kind == memory.KindInsight {
+			insights++
+		}
+		if m.Deprecated {
+			deprecated++
+		}
+	}
+	if insights != 1 {
+		t.Errorf("insights = %d want 1, stored = %+v", insights, stored)
+	}
+	if deprecated != 1 {
+		t.Errorf("deprecated = %d want 1 (the duplicate fact), stored = %+v", deprecated, stored)
+	}
+	// 1 summary + 1 fact + 1 insight written.
+	if res.MemoriesWritten != 3 {
+		t.Errorf("memories written = %d want 3", res.MemoriesWritten)
 	}
 }
 

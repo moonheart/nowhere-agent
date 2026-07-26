@@ -2,7 +2,9 @@
 // offline worker that is the ONLY writer to long-term memory. It reads
 // persisted run episodes for sessions with unconsolidated messages and
 // consolidates them into user/team-scoped long-term memories via an extract →
-// compress → reorganize → reflect pipeline, bounded by an LLM budget.
+// compress → reorganize → reflect pipeline, bounded by an LLM budget. The four
+// stages write facts, per-batch summaries, and cross-memory insights
+// (KindFact/KindSummary/KindInsight).
 //
 // Dreaming is INCREMENTAL (capability-gap K1, watermark model): each session
 // carries a high-water mark (the messages.id consolidated up to), and the worker
@@ -72,6 +74,9 @@ type Worker struct {
 	memory   memory.Port
 	llm      LLM
 	budget   Budget
+	// enableReflect turns on the compress + reflect stages (KindSummary/
+	// KindInsight). Off runs the cheaper extract → reorganize pipeline only.
+	enableReflect bool
 }
 
 // NewWorker creates a Worker.
@@ -79,8 +84,11 @@ func NewWorker(episodes EpisodeSource, mem memory.Port, llm LLM, budget Budget) 
 	if budget.MaxTokens <= 0 {
 		budget.MaxTokens = 100_000
 	}
-	return &Worker{episodes: episodes, memory: mem, llm: llm, budget: budget}
+	return &Worker{episodes: episodes, memory: mem, llm: llm, budget: budget, enableReflect: true}
 }
+
+// SetReflect toggles the compress + reflect stages (config DREAMING_REFLECT).
+func (w *Worker) SetReflect(on bool) { w.enableReflect = on }
 
 // Run performs one dreaming pass over eligible sessions.
 func (w *Worker) Run(ctx context.Context) (Result, error) {
@@ -127,31 +135,151 @@ func (w *Worker) Run(ctx context.Context) (Result, error) {
 // processSession runs the pipeline for one batch of a session's episodes,
 // staying within the remaining token budget. Returns memories written and
 // tokens used.
+//
+// Stages (design D6): EXTRACT facts → COMPRESS the batch to a summary →
+// REORGANIZE facts in (deprecating contradictions) → REFLECT over the summary
+// plus existing memories to derive cross-memory insights and dedupe. The two
+// LLM stages (extract/compress) run first so reflection can read the summary.
 func (w *Worker) processSession(ctx context.Context, sess session.Session, eps []session.StoredMessage, remainingBudget int) (int, int, error) {
+	scope := identity.UserScope(sess.UserID)
+	tokens := 0
+	written := 0
+
 	// 1. EXTRACT: episodes → facts/preferences.
-	facts, tokens, err := w.extract(ctx, eps, remainingBudget)
+	facts, tk, err := w.extract(ctx, eps, remainingBudget)
+	tokens += tk
 	if err != nil {
 		return 0, tokens, err
 	}
 
-	scope := identity.UserScope(sess.UserID)
-	written := 0
+	var summary string
+	if w.enableReflect {
+		// 2. COMPRESS: episodes → one summary memory of this batch.
+		var tk2 int
+		summary, tk2, err = w.compress(ctx, eps, remainingBudget-tokens)
+		tokens += tk2
+		if err != nil {
+			return written, tokens, err
+		}
+		if summary != "" {
+			if err := w.store(ctx, scope, memory.KindSummary, summary); err != nil {
+				return written, tokens, err
+			}
+			written++
+		}
+	}
 
-	// 2. REORGANIZE: store new facts, deprecating contradicted memories.
+	// 3. REORGANIZE: store new facts, deprecating contradicted memories.
 	for _, f := range facts {
 		if err := w.reorganize(ctx, scope, f); err != nil {
 			return written, tokens, err
 		}
 		written++
 	}
+
+	if w.enableReflect {
+		// 4. REFLECT: summary + existing memories → insights + dedupe/deprecations.
+		n, tk3, err := w.reflect(ctx, scope, summary, remainingBudget-tokens)
+		tokens += tk3
+		written += n
+		if err != nil {
+			return written, tokens, err
+		}
+	}
 	return written, tokens, nil
+}
+
+// store persists one memory of the given kind in the scope.
+func (w *Worker) store(ctx context.Context, scope identity.ScopeRef, kind memory.Kind, content string) error {
+	_, err := w.memory.Store(ctx, memory.Memory{Scope: scope, Kind: kind, Content: content})
+	return err
+}
+
+// compress uses the LLM to condense a batch of episodes into one running
+// summary (the COMPRESS stage → memory.KindSummary).
+func (w *Worker) compress(ctx context.Context, eps []session.StoredMessage, budget int) (string, int, error) {
+	out, tokens, err := w.llm.Complete(ctx, summaryPrompt(episodeText(eps)))
+	if err != nil {
+		return "", tokens, err
+	}
+	return strings.TrimSpace(out), tokens, nil
+}
+
+// reflect derives cross-memory insights from the new batch summary plus the
+// scope's existing memories, and deprecates memories the reflection flags as
+// duplicated/superseded (the REFLECT stage → memory.KindInsight). Returns the
+// number of insight memories written and the tokens used.
+func (w *Worker) reflect(ctx context.Context, scope identity.ScopeRef, summary string, budget int) (int, int, error) {
+	existing, err := w.memory.ListByScope(ctx, scope)
+	if err != nil {
+		return 0, 0, err
+	}
+	// Only reflect over live memories; skip when there's nothing but the summary
+	// we just wrote and no new information to generalize from.
+	var lines []string
+	for _, m := range existing {
+		if !m.Deprecated {
+			lines = append(lines, m.Content)
+		}
+	}
+	out, tokens, err := w.llm.Complete(ctx, reflectPrompt(summary, lines))
+	if err != nil {
+		return 0, tokens, err
+	}
+
+	written := 0
+	for _, line := range splitLines(out) {
+		rest := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(rest, "insight:"):
+			content := strings.TrimSpace(strings.TrimPrefix(rest, "insight:"))
+			if content == "" {
+				continue
+			}
+			if err := w.store(ctx, scope, memory.KindInsight, content); err != nil {
+				return written, tokens, err
+			}
+			written++
+		case strings.HasPrefix(rest, "deprecate:"):
+			content := strings.TrimSpace(strings.TrimPrefix(rest, "deprecate:"))
+			w.deprecateMatching(ctx, existing, content)
+		}
+	}
+	return written, tokens, nil
+}
+
+// deprecateMatching deprecates the first live memory whose content matches the
+// reflected line (case-insensitive, after trimming). Reflection returns the
+// memory's exact text, so an exact match is the norm; a substring match is a
+// fallback for minor LLM paraphrase.
+func (w *Worker) deprecateMatching(ctx context.Context, existing []memory.Memory, content string) {
+	norm := strings.ToLower(strings.TrimSpace(content))
+	for _, m := range existing {
+		if m.Deprecated {
+			continue
+		}
+		c := strings.ToLower(strings.TrimSpace(m.Content))
+		if c == norm || strings.Contains(c, norm) {
+			_ = w.memory.Deprecate(ctx, m.ID) // best-effort; a miss only skips dedupe
+			return
+		}
+	}
 }
 
 // extract uses the LLM to pull durable facts/preferences from episodes.
 func (w *Worker) extract(ctx context.Context, eps []session.StoredMessage, budget int) ([]string, int, error) {
-	// Build the extraction prompt from the conversation's message blocks. Text
-	// and thinking carry the prose; tool_use/tool_result name the action and its
-	// outcome, so the extractor sees what the agent did as well as what it said.
+	out, tokens, err := w.llm.Complete(ctx, extractPrompt(episodeText(eps)))
+	if err != nil {
+		return nil, tokens, err
+	}
+	return splitLines(out), tokens, nil
+}
+
+// episodeText renders a batch of episodes into the transcript both the extract
+// and compress prompts consume. Text and thinking carry the prose;
+// tool_use/tool_result name the action and its outcome, so the model sees what
+// the agent did as well as what it said.
+func episodeText(eps []session.StoredMessage) string {
 	var b strings.Builder
 	for _, m := range eps {
 		for _, blk := range m.Content {
@@ -167,11 +295,7 @@ func (w *Worker) extract(ctx context.Context, eps []session.StoredMessage, budge
 			}
 		}
 	}
-	out, tokens, err := w.llm.Complete(ctx, extractPrompt(b.String()))
-	if err != nil {
-		return nil, tokens, err
-	}
-	return splitLines(out), tokens, nil
+	return b.String()
 }
 
 // reorganize stores a fact, deprecating any existing memory it contradicts.
