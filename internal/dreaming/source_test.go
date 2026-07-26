@@ -96,10 +96,11 @@ func TestWorkerIncrementalOverStores(t *testing.T) {
 	appendMsg(t, messages, sess.ID, "user likes go")
 
 	mem := memory.NewMemPort()
-	// extract → 1 fact; compress → a summary; reflect → nothing new.
+	// extract → 1 fact; compress → a summary; revise; reflect → nothing new.
 	llm := &fakeLLM{jsonResults: []any{
 		extractResult{Facts: []string{"user likes go"}},
 		summaryResult{Summary: "likes go"},
+		reviseResult{},
 		reflectResult{},
 	}, tokens: 40}
 	w := NewWorker(src, mem, llm, Budget{MaxTokens: 1000})
@@ -120,8 +121,8 @@ func TestWorkerIncrementalOverStores(t *testing.T) {
 	if res2.EpisodesProcessed != 0 || res2.MemoriesWritten != 0 {
 		t.Errorf("second pass should be a no-op, got %+v", res2)
 	}
-	if llm.calls != 3 {
-		t.Errorf("llm calls = %d want 3 (extract+compress+reflect; no work on the no-op pass)", llm.calls)
+	if llm.calls != 4 {
+		t.Errorf("llm calls = %d want 4 (extract+compress+revise+reflect; no work on the no-op pass)", llm.calls)
 	}
 
 	// A later message is picked up on the next pass.

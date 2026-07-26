@@ -74,3 +74,29 @@ func TestScopedDoesNotMutateParent(t *testing.T) {
 		t.Fatalf("parent registry mutated: %v", names(r))
 	}
 }
+
+// TestAllSortedAndStable: All() must return tools in a deterministic (sorted)
+// order across calls, because its serialization order lands in the LLM request
+// ahead of the messages — a nondeterministic order breaks the prompt-prefix
+// cache even when the tool set is identical.
+func TestAllSortedAndStable(t *testing.T) {
+	r := newTestRegistry("write_file", "read_file", "glob", "grep", "ask_user", "list_dir")
+	first := r.All()
+	for i := 1; i < len(first); i++ {
+		if first[i-1].Name() > first[i].Name() {
+			t.Fatalf("All() not sorted by name: %v", names(r))
+		}
+	}
+	// Repeat calls must be byte-identical in order.
+	for call := 0; call < 20; call++ {
+		got := r.All()
+		if len(got) != len(first) {
+			t.Fatalf("call %d: len %d want %d", call, len(got), len(first))
+		}
+		for i := range got {
+			if got[i].Name() != first[i].Name() {
+				t.Fatalf("call %d: order differs at %d: %q vs %q", call, i, got[i].Name(), first[i].Name())
+			}
+		}
+	}
+}

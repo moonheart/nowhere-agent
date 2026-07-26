@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -59,6 +60,51 @@ func (p *PGPort) Recall(ctx context.Context, query string, scopes []identity.Sco
 	where, args := scopeWhere(scopes)
 	if where == "" {
 		return nil, nil
+	}
+
+	var orderBy string
+	if strings.TrimSpace(query) != "" {
+		args = append(args, query)
+		orderBy = fmt.Sprintf("ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $%d)) DESC", len(args))
+	} else {
+		orderBy = "created_at DESC"
+	}
+
+	args = append(args, limit)
+	q := fmt.Sprintf(`
+		SELECT id, scope, user_id, team_id, kind, content, embedding, deprecated, created_at, updated_at
+		FROM memories
+		WHERE NOT deprecated AND (%s)
+		ORDER BY %s
+		LIMIT $%d`, where, orderBy, len(args))
+
+	return p.query(ctx, q, args...)
+}
+
+// RecallSince returns non-deprecated in-scope memories created after `since`,
+// optionally filtered to `kinds`, ranked by relevance (or recency when the
+// query is empty). A zero `since` disables the time lower bound. Kind filters
+// expand inline (the project uses pgx stdlib, not lib/pq, so no array param).
+func (p *PGPort) RecallSince(ctx context.Context, since time.Time, query string, scopes []identity.ScopeRef, kinds []Kind, limit int) ([]Memory, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	where, args := scopeWhere(scopes)
+	if where == "" {
+		return nil, nil
+	}
+
+	if len(kinds) > 0 {
+		ph := make([]string, 0, len(kinds))
+		for _, k := range kinds {
+			args = append(args, string(k))
+			ph = append(ph, fmt.Sprintf("$%d", len(args)))
+		}
+		where = fmt.Sprintf("(%s) AND kind IN (%s)", where, strings.Join(ph, ","))
+	}
+	if !since.IsZero() {
+		args = append(args, since)
+		where = fmt.Sprintf("%s AND created_at > $%d", where, len(args))
 	}
 
 	var orderBy string

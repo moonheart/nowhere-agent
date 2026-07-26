@@ -27,10 +27,31 @@ type chunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage"`
+	Usage *usage `json:"usage"`
+}
+
+// usage is the OpenAI streaming usage payload. PromptCacheHitTokens is
+// DeepSeek's automatic prefix-cache hit count; PromptTokensDetails carries
+// OpenAI's official cached-token count. Either may be absent.
+type usage struct {
+	PromptTokens         int `json:"prompt_tokens"`
+	CompletionTokens     int `json:"completion_tokens"`
+	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+	PromptTokensDetails  *struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+// cacheRead picks the cache-hit count: DeepSeek's prompt_cache_hit_tokens,
+// falling back to OpenAI's prompt_tokens_details.cached_tokens.
+func (u *usage) cacheRead() int {
+	if u.PromptCacheHitTokens != 0 {
+		return u.PromptCacheHitTokens
+	}
+	if u.PromptTokensDetails != nil {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	return 0
 }
 
 // streamDecoder converts OpenAI's cumulative chunk stream into the canonical
@@ -148,6 +169,9 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 			Usage: &provider.Usage{
 				InputTokens:  c.Usage.PromptTokens,
 				OutputTokens: c.Usage.CompletionTokens,
+				// There is no explicit cache-write on OpenAI/DeepSeek (the prefix
+				// cache is automatic), so CacheWriteTokens stays 0.
+				CacheReadTokens: c.Usage.cacheRead(),
 			},
 		})
 	}

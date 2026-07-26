@@ -39,6 +39,17 @@ func (p *MemPort) Store(_ context.Context, m Memory) (Memory, error) {
 	return m, nil
 }
 
+// Backdate sets a stored memory's CreatedAt (test helper): incremental-recall
+// tests use it to order memories against a watermark deterministically, since
+// Store would otherwise stamp now and tie the watermark's clock tick.
+func (p *MemPort) Backdate(id string, at time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if m, ok := p.memories[id]; ok {
+		m.CreatedAt = at
+	}
+}
+
 // Recall returns non-deprecated memories in scope, ranked by relevance.
 func (p *MemPort) Recall(_ context.Context, query string, scopes []identity.ScopeRef, limit int) ([]Memory, error) {
 	p.mu.Lock()
@@ -67,6 +78,59 @@ func (p *MemPort) Recall(_ context.Context, query string, scopes []identity.Scop
 		out = append(out, r.m)
 	}
 	return out, nil
+}
+
+// RecallSince returns non-deprecated in-scope memories created after `since`,
+// optionally filtered to `kinds`, ranked by relevance (or recency when the
+// query is empty). A zero `since` disables the time lower bound.
+func (p *MemPort) RecallSince(_ context.Context, since time.Time, query string, scopes []identity.ScopeRef, kinds []Kind, limit int) ([]Memory, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if limit <= 0 {
+		limit = 10
+	}
+	type scored struct {
+		m     Memory
+		score float64
+	}
+	var results []scored
+	for _, m := range p.memories {
+		if m.Deprecated || !scopeIn(m.Scope, scopes) {
+			continue
+		}
+		if !since.IsZero() && !m.CreatedAt.After(since) {
+			continue
+		}
+		if len(kinds) > 0 && !kindIn(m.Kind, kinds) {
+			continue
+		}
+		results = append(results, scored{m: *m, score: relevance(query, *m)})
+	}
+	// With a query: relevance, ties broken by recency. Without: pure recency.
+	sort.Slice(results, func(i, j int) bool {
+		if query == "" || results[i].score == results[j].score {
+			return results[i].m.CreatedAt.After(results[j].m.CreatedAt)
+		}
+		return results[i].score > results[j].score
+	})
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	out := make([]Memory, 0, len(results))
+	for _, r := range results {
+		out = append(out, r.m)
+	}
+	return out, nil
+}
+
+// kindIn reports whether k is among the allowed kinds.
+func kindIn(k Kind, allowed []Kind) bool {
+	for _, a := range allowed {
+		if k == a {
+			return true
+		}
+	}
+	return false
 }
 
 // Deprecate marks a memory superseded.

@@ -1,6 +1,8 @@
 package toolruntime
 
-// Names returns the names of all registered tools (unordered).
+import "sort"
+
+// Names returns the names of all registered tools, sorted.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -8,6 +10,7 @@ func (r *Registry) Names() []string {
 	for n := range r.tools {
 		out = append(out, n)
 	}
+	sort.Strings(out)
 	return out
 }
 

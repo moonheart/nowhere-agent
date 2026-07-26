@@ -126,7 +126,7 @@ func (s *Store) AddMember(ctx context.Context, teamID, userID string, role Role)
 // TeamIDsForUser returns the ids of teams the user belongs to.
 func (s *Store) TeamIDsForUser(ctx context.Context, userID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT team_id FROM team_memberships WHERE user_id = $1`, userID)
+		SELECT team_id FROM team_memberships WHERE user_id = $1 ORDER BY team_id`, userID)
 	if err != nil {
 		return nil, err
 	}

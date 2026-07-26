@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 )
@@ -37,7 +38,10 @@ func (r *Registry) Get(name string) (Tool, bool) {
 	return t, ok
 }
 
-// All returns all registered tools.
+// All returns all registered tools, sorted by name. A stable order keeps the
+// serialized tool definitions byte-identical across requests, so the LLM's
+// prompt-prefix cache (which requires a byte-identical prefix and reads the
+// tools array ahead of the messages) can actually hit.
 func (r *Registry) All() []Tool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -45,6 +49,7 @@ func (r *Registry) All() []Tool {
 	for _, t := range r.tools {
 		out = append(out, t)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
 	return out
 }
 

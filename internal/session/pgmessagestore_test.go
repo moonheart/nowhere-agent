@@ -69,6 +69,84 @@ func TestPGMessageStoreAppendAndOrder(t *testing.T) {
 	}
 }
 
+// TestPGMessageStoreUsageRoundTrip verifies per-LLM-call usage persists on the
+// assistant row (and stays NULL/absent on rows with no usage).
+func TestPGMessageStoreUsageRoundTrip(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ms := NewPGMessageStore(db)
+	ctx := context.Background()
+	sessID, runID := setupMessageSession(t, ctx, db, store)
+
+	withUsage := StoredMessage{
+		SessionID: sessID,
+		RunID:     runID,
+		Role:      provider.RoleAssistant,
+		Content:   []provider.Block{{Type: provider.BlockText, Text: "answer"}},
+		Usage:     &provider.Usage{InputTokens: 3535, OutputTokens: 44, CacheReadTokens: 3456},
+	}
+	noUsage := StoredMessage{
+		SessionID: sessID,
+		RunID:     runID,
+		Role:      provider.RoleUser,
+		Content:   []provider.Block{{Type: provider.BlockToolResult, ToolResultID: "tu1", ToolContent: "x"}},
+	}
+	if _, err := ms.AppendMessage(ctx, withUsage); err != nil {
+		t.Fatalf("append with usage: %v", err)
+	}
+	if _, err := ms.AppendMessage(ctx, noUsage); err != nil {
+		t.Fatalf("append without usage: %v", err)
+	}
+
+	msgs, err := ms.MessagesFor(ctx, sessID)
+	if err != nil {
+		t.Fatalf("MessagesFor: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d messages, want 2", len(msgs))
+	}
+	u := msgs[0].Usage
+	if u == nil || u.InputTokens != 3535 || u.OutputTokens != 44 || u.CacheReadTokens != 3456 || u.CacheWriteTokens != 0 {
+		t.Errorf("assistant usage wrong: %+v", u)
+	}
+	if msgs[1].Usage != nil {
+		t.Errorf("tool_result row should have no usage: %+v", msgs[1].Usage)
+	}
+}
+
+// TestPGStoreSetRunUsage verifies the run's aggregate usage round-trips and is
+// readable via RunsForSession; a nil update is a no-op (does not clobber).
+func TestPGStoreSetRunUsage(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ctx := context.Background()
+	sessID, runID := setupMessageSession(t, ctx, db, store)
+
+	if err := store.SetRunUsage(ctx, runID, &provider.Usage{InputTokens: 300, OutputTokens: 30, CacheReadTokens: 230}); err != nil {
+		t.Fatalf("SetRunUsage: %v", err)
+	}
+
+	runs, err := store.RunsForSession(ctx, sessID)
+	if err != nil {
+		t.Fatalf("RunsForSession: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d want 1", len(runs))
+	}
+	u := runs[0].Usage
+	if u == nil || u.InputTokens != 300 || u.OutputTokens != 30 || u.CacheReadTokens != 230 {
+		t.Errorf("run usage = %+v, want {300 30 230}", u)
+	}
+
+	if err := store.SetRunUsage(ctx, runID, nil); err != nil {
+		t.Fatalf("SetRunUsage(nil): %v", err)
+	}
+	runs, _ = store.RunsForSession(ctx, sessID)
+	if runs[0].Usage == nil || runs[0].Usage.InputTokens != 300 {
+		t.Errorf("SetRunUsage(nil) should not clobber: %+v", runs[0].Usage)
+	}
+}
+
 func TestPGMessageStoreFullBlockRoundTrip(t *testing.T) {
 	db := pgTestDB(t)
 	store := NewPGStore(db)

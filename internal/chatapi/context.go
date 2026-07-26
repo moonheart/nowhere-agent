@@ -16,9 +16,11 @@ type ScopeResolver interface {
 }
 
 // contextBuilder is the default ContextBuilder: it renders the L0 skill index
-// and recalls long-term memories relevant to the query, composing them with
-// the base system prompt. Recall is read-side only; memory is written solely
-// by the dreaming worker (design D5).
+// and composes it with the base system prompt. Memory recall is NOT part of the
+// system prompt anymore — memories are surfaced incrementally into the outgoing
+// message view (never the durable history) by the sessionMemoryInjector, so the
+// system prompt stays byte-stable across requests and the LLM prompt prefix can
+// be cached. (design D5; injection is capability K / context-mgmt)
 type contextBuilder struct {
 	base     string
 	scopes   ScopeResolver
@@ -33,7 +35,9 @@ func NewContextBuilder(base string, scopes ScopeResolver, mem memory.Port, skill
 	return &contextBuilder{base: base, scopes: scopes, memory: mem, skills: skills, recallLimit: 8}
 }
 
-// SystemPrompt builds: base + available skills (L0) + relevant memories.
+// SystemPrompt builds: base + available skills (L0). Memory is deliberately
+// excluded (see contextBuilder doc); the `query` param is accepted for interface
+// compatibility but unused here.
 func (c *contextBuilder) SystemPrompt(ctx context.Context, user identity.User, query string) string {
 	scopes, err := c.scopes.AccessibleScopes(ctx, user.ID)
 	if err != nil {
@@ -49,26 +53,5 @@ func (c *contextBuilder) SystemPrompt(ctx context.Context, user identity.User, q
 			sections = append(sections, s)
 		}
 	}
-	if c.memory != nil && strings.TrimSpace(query) != "" {
-		if s := c.recallSection(ctx, query, scopes); s != "" {
-			sections = append(sections, s)
-		}
-	}
 	return strings.Join(sections, "\n\n")
-}
-
-// recallSection formats recalled memories as a system-prompt section.
-func (c *contextBuilder) recallSection(ctx context.Context, query string, scopes []identity.ScopeRef) string {
-	mems, err := c.memory.Recall(ctx, query, scopes, c.recallLimit)
-	if err != nil || len(mems) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("Relevant memories about the user/team:\n")
-	for _, m := range mems {
-		b.WriteString("- ")
-		b.WriteString(m.Content)
-		b.WriteString("\n")
-	}
-	return b.String()
 }

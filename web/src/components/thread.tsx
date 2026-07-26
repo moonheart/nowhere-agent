@@ -9,6 +9,7 @@ import { Reasoning } from "@/components/reasoning";
 import { StopButton } from "@/components/stop-button";
 import { ToolCall } from "@/components/tool-call";
 import { MarkdownText } from "@/components/markdown-text";
+import { UsageFooter } from "@/components/usage-footer";
 
 export const Thread: FC = () => {
   return (
@@ -65,6 +66,7 @@ const AssistantMessage: FC = () => (
           tools: { Fallback: ToolCall },
         }}
       />
+      <UsageFooter />
     </div>
   </MessagePrimitive.Root>
 );

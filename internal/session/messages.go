@@ -21,6 +21,10 @@ type StoredMessage struct {
 	Role      provider.Role
 	Content   []provider.Block
 	CreatedAt time.Time
+	// Usage is the token usage of the single LLM call that produced this
+	// message (one assistant message == one LLM call). Nil on user/tool_result
+	// rows, which are not LLM responses. Persisted as the messages.usage_* cols.
+	Usage *provider.Usage
 }
 
 // MessageStore persists conversation messages in original block form and reads

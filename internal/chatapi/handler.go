@@ -62,6 +62,10 @@ type Handler struct {
 	// bindTools, when set, attaches session-scoped tools (file tools bound to
 	// the session's sandbox) to each loop after the session is resolved.
 	bindTools ToolBinder
+	// memInjectorFactory, when set, builds a per-request incremental memory
+	// injector for the run's loop (surfaces new memories into the outgoing view,
+	// never the durable history). Nil disables injection (tests).
+	memInjectorFactory MemoryInjectorFactory
 }
 
 // NewHandler creates a chat Handler.
@@ -162,8 +166,13 @@ type sseEmitter struct {
 	writeErr error
 	// usageIn/usageOut hold the run's reported token usage, stashed from a
 	// KindUsage event, so finish() reports real counts instead of zeros.
-	usageIn  int
-	usageOut int
+	// cacheRead/cacheWrite carry the prompt-prefix cache hits (cache write is
+	// Anthropic-only). They ride a separate data-usage frame so the client can
+	// show cache detail the finish frame's input/output doesn't carry.
+	usageIn    int
+	usageOut   int
+	cacheRead  int
+	cacheWrite int
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +224,16 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// registers its file tools into the loop's registry.
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
+	}
+
+	// Incremental memory injection: surface new memories into the outgoing view
+	// (never the durable history). query = the user's latest text for relevance.
+	if h.memInjectorFactory != nil {
+		if user, ok := identity.UserFromContext(r.Context()); ok {
+			if inj := h.memInjectorFactory(r.Context(), user, lastUserText(req)); inj != nil {
+				loop.WithMemoryInjector(inj, sessID)
+			}
+		}
 	}
 
 	// Build the user turn's message so the run worker can persist it (full-block
@@ -310,6 +329,15 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	}
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
+	}
+	// A verdict continues the conversation with no new user text: surface any
+	// memories created since the last injection (empty query → recency order).
+	if h.memInjectorFactory != nil {
+		if user, ok := identity.UserFromContext(r.Context()); ok {
+			if inj := h.memInjectorFactory(r.Context(), user, ""); inj != nil {
+				loop.WithMemoryInjector(inj, sessID)
+			}
+		}
 	}
 
 	_, history, err := h.registry.Decide(r.Context(), av.ApprovalID, av.Approved, av.Answer, loop.Tools())
@@ -656,10 +684,20 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 	case agent.KindDone:
 		e.writeRunStatus("done")
 	case agent.KindUsage:
-		// Stash the run's token usage so finish() can report real counts. No frame
-		// is written here; the AI SDK carries usage on the terminal finish frame.
-		if in, out, ok := usageTokens(payload); ok {
-			e.usageIn, e.usageOut = in, out
+		// Stash the run's token usage so finish() can report real counts. Also
+		// emit a data-usage frame carrying the full breakdown (incl. cache hits)
+		// so the client can render token/cache detail; it's a durable (non-
+		// transient) data frame so it lands in message metadata and survives a
+		// history reload.
+		if u, ok := usageTokens(payload); ok {
+			e.usageIn, e.usageOut = u.InputTokens, u.OutputTokens
+			e.cacheRead, e.cacheWrite = u.CacheReadTokens, u.CacheWriteTokens
+			e.write(chunk{"type": "data-usage", "data": map[string]any{
+				"inputTokens":      u.InputTokens,
+				"outputTokens":     u.OutputTokens,
+				"cacheReadTokens":  u.CacheReadTokens,
+				"cacheWriteTokens": u.CacheWriteTokens,
+			}})
 		}
 	case agent.KindError:
 		if s, ok := payload.(string); ok {
@@ -724,25 +762,27 @@ func (e *sseEmitter) writeRaw(s string) {
 	}
 }
 
-// usageTokens extracts input/output token counts from a KindUsage payload,
-// tolerating both a provider.Usage value (the loop's direct-path emit) and a
-// decoded JSON object (the broker/replay path, where the payload round-trips
-// through storage as snake_case JSON). Returns ok=false when neither shape
-// yields counts, so a bad payload never clobbers a prior value with zeros.
-func usageTokens(payload any) (in, out int, ok bool) {
+// usageTokens extracts the full token usage (input/output + cache read/write)
+// from a KindUsage payload, tolerating both a provider.Usage value (the loop's
+// direct-path emit) and a decoded JSON object (the broker/replay path, where
+// the payload round-trips through storage as snake_case JSON). Returns ok=false
+// when no token keys are present, so a bad payload never clobbers a prior value.
+func usageTokens(payload any) (u provider.Usage, ok bool) {
 	switch v := payload.(type) {
 	case provider.Usage:
-		return v.InputTokens, v.OutputTokens, true
+		return v, true
 	case *provider.Usage:
 		if v != nil {
-			return v.InputTokens, v.OutputTokens, true
+			return *v, true
 		}
 	case map[string]any:
-		vin, iok := intFromAny(v["input_tokens"])
-		vout, ook := intFromAny(v["output_tokens"])
-		return vin, vout, iok || ook
+		in, iok := intFromAny(v["input_tokens"])
+		out, ook := intFromAny(v["output_tokens"])
+		cr, _ := intFromAny(v["cache_read_tokens"])
+		cw, _ := intFromAny(v["cache_write_tokens"])
+		return provider.Usage{InputTokens: in, OutputTokens: out, CacheReadTokens: cr, CacheWriteTokens: cw}, iok || ook
 	}
-	return 0, 0, false
+	return provider.Usage{}, false
 }
 
 // intFromAny reads an int from a JSON-decoded numeric value (float64 by default,

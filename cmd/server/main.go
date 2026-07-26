@@ -238,6 +238,7 @@ func run() error {
 			llm := dreaming.NewProviderLLM(adapter, model)
 			worker := dreaming.NewWorker(source, memPort, llm, dreaming.Budget{MaxTokens: cfg.Dreaming.MaxTokens})
 			worker.SetReflect(cfg.Dreaming.Reflect)
+			worker.SetRevise(cfg.Dreaming.Revise)
 			sched := scheduler.New(log, scheduler.Job{
 				Name:     "dreaming",
 				Interval: cfg.Dreaming.Interval,
@@ -247,7 +248,7 @@ func run() error {
 				},
 			})
 			go sched.Start(ctx)
-			log.Info("dreaming worker enabled", "interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens, "reflect", cfg.Dreaming.Reflect)
+			log.Info("dreaming worker enabled", "interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens, "reflect", cfg.Dreaming.Reflect, "revise", cfg.Dreaming.Revise)
 		}
 
 		// Subagent factory (subagent capability): builds a child loop for a
@@ -313,6 +314,18 @@ func run() error {
 				}
 				reg.Register(skill.NewLoadTool(skillEngine, scopes))
 			}
+			// recall_memory (type-split active-query side, capability K /
+			// context-mgmt): the model fetches summary/insight and other memories
+			// NOT auto-injected. Read-only; scopes mirror the context builder.
+			if memPort != nil {
+				scopes := []identity.ScopeRef{identity.SystemScope()}
+				if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
+					if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
+						scopes = sc
+					}
+				}
+				reg.Register(memory.NewRecallTool(memPort, scopes))
+			}
 			if sandboxMgr != nil {
 				h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
 					Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(cfg.Sandbox.Network)},
@@ -351,10 +364,17 @@ func run() error {
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
 		}
+		// Incremental memory injection (capability K / context-mgmt): each run's
+		// loop surfaces newly-created memories into the outgoing view (never the
+		// durable history), keeping the system prefix byte-stable for caching.
+		handler = handler.WithMemoryInjector(func(ctx context.Context, user identity.User, query string) agent.MemoryInjector {
+			return chatapi.NewSessionMemoryInjector(memPort, identitySvc, sessionRuntime, user, query)
+		})
 		// Tool binder: attach session-scoped tools to each run. Runs when the
-		// sandbox (file tools) OR MCP (network tools) is configured; MCP tools need
-		// no sandbox, so they must register even when the sandbox is off.
-		if sandboxMgr != nil || mcpClient != nil {
+		// sandbox (file tools), MCP (network tools), or memory (recall_memory) is
+		// configured — the latter two need no sandbox, so they must register even
+		// when the sandbox is off.
+		if sandboxMgr != nil || mcpClient != nil || memPort != nil {
 			handler = handler.WithToolBinder(bindChatTools)
 			if sandboxMgr != nil {
 				log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob)")

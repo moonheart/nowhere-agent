@@ -156,6 +156,11 @@ type Loop struct {
 	// ended the run for human input. The run worker reads it to persist the
 	// durable Approval.
 	PendingApproval *ApprovalRequest
+	// memInjector, when set, surfaces newly-created memories into the outgoing
+	// view at send time (never persisted). memSessionID identifies the session
+	// whose injection watermark the injector advances.
+	memInjector  MemoryInjector
+	memSessionID string
 }
 
 // New creates a Loop.
@@ -182,6 +187,18 @@ func (l *Loop) maxOverflowRetries() int { return l.config.MaxOverflowRetries }
 // provider error verbatim (no KindError emit) so the caller can distinguish a
 // retriable context-overflow from a fatal failure.
 func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (provider.Message, []toolruntime.Call, turnEnd, error) {
+	// Incremental memory injection (capability K / context-mgmt): append newly-
+	// surfaced memories to the tail of the OUTGOING view only. The local `view`
+	// is a per-attempt copy; the appended message never enters `produced`, so it
+	// is never persisted and the durable history stays append-only (byte-stable
+	// prefix for caching). A nil injector or an empty result leaves the view as-is.
+	if l.memInjector != nil {
+		if extra, err := l.memInjector.Inject(ctx, l.memSessionID, view); err != nil {
+			slog.Warn("agent: memory injection failed; continuing without it", "err", err)
+		} else if len(extra) > 0 {
+			view = append(append([]provider.Message{}, view...), extra...)
+		}
+	}
 	req := provider.Request{
 		Model:           l.config.Model,
 		System:          l.config.System,
@@ -208,6 +225,15 @@ func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitte
 // when the session (and thus the confined resolver) is known.
 func (l *Loop) WithImages(res provider.ImageResolver) *Loop {
 	l.config.Images = res
+	return l
+}
+
+// WithMemoryInjector sets the incremental memory injector + the session whose
+// watermark it advances. Called once per run, when the session is known. A nil
+// injector disables injection (unauthenticated/direct paths).
+func (l *Loop) WithMemoryInjector(inj MemoryInjector, sessionID string) *Loop {
+	l.memInjector = inj
+	l.memSessionID = sessionID
 	return l
 }
 
@@ -315,9 +341,10 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		}
 		produced = append(produced, assistant)
 		// Expose the assembled assistant message for full-block persistence
-		// (persist-raw-messages). Emit failures here don't abort the run — the
-		// persistence listener drops them — so ignore the error.
-		_ = emit.Emit(ctx, KindMessage, assistant)
+		// (persist-raw-messages), paired with the usage of the LLM call that
+		// produced it. Emit failures here don't abort the run — the persistence
+		// listener drops them — so ignore the error.
+		_ = emit.Emit(ctx, KindMessage, MessageWithUsage{Message: assistant, Usage: end.usage})
 
 		// No tool calls → the turn is final. But distinguish a natural finish from
 		// a max_tokens truncation: a truncated turn is a cut-off answer, not a
@@ -330,7 +357,8 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				_ = emit.Emit(ctx, KindError, truncErr.Error())
 				return produced, truncErr
 			}
-			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", total.InputTokens, "output_tokens", total.OutputTokens)
+			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", total.InputTokens, "output_tokens", total.OutputTokens,
+				"cache_read_tokens", total.CacheReadTokens, "cache_write_tokens", total.CacheWriteTokens, "cache_hit_pct", cacheHitPct(total))
 			emitUsage(ctx, emit, total)
 			_ = emit.Emit(ctx, KindDone, nil)
 			return produced, nil
@@ -393,12 +421,61 @@ func emitUsage(ctx context.Context, emit Emitter, total provider.Usage) {
 	_ = emit.Emit(ctx, KindUsage, total)
 }
 
+// cacheHitPct returns the prompt-prefix cache hit rate as a whole percentage.
+// Semantics differ by provider: DeepSeek/OpenAI's InputTokens (prompt_tokens)
+// already INCLUDES the cached prefix (hit + miss = total), so the hit share is
+// CacheRead / Input. Anthropic's input_tokens EXCLUDES the cached prefix, where
+// the share would be CacheRead / (Input + CacheRead). We report the DeepSeek/
+// OpenAI form (the deployed provider); the >100 clamp guards an Anthropic-style
+// payload from showing a nonsense rate. 0 when no input.
+func cacheHitPct(u provider.Usage) int {
+	if u.InputTokens == 0 {
+		return 0
+	}
+	pct := u.CacheReadTokens * 100 / u.InputTokens
+	if pct > 100 {
+		return 100
+	}
+	return pct
+}
+
+// MessageWithUsage pairs an assembled assistant message with the token usage
+// of the single LLM call that produced it (one assistant message == one LLM
+// call). The loop emits it as the KindMessage payload for assistant messages so
+// the persistence path can record per-call usage on that message's row. Tool
+// results are not LLM calls, so they keep the bare provider.Message payload
+// (no usage). The field is a pointer: nil means no usage was reported.
+type MessageWithUsage struct {
+	Message provider.Message
+	Usage   *provider.Usage
+}
+
 // turnEnd carries the terminal metadata of one provider turn: why generation
 // stopped and the reported token usage. It lets Run react to a max_tokens
 // truncation and accumulate usage without growing consume's return list.
 type turnEnd struct {
 	stop  provider.StopReason
 	usage *provider.Usage
+}
+
+// mergeUsage keeps the more informative of two usage reports. A proxy (newapi)
+// can inject a placeholder usage chunk (empty id/model, shrunken prompt_tokens,
+// cache cleared to 0) AFTER the real model chunk; naive last-wins would erase
+// the real cache-hit count. Take the max per field so the placeholder never
+// clobbers the real numbers.
+func mergeUsage(old, new *provider.Usage) *provider.Usage {
+	if old == nil {
+		return new
+	}
+	if new == nil {
+		return old
+	}
+	return &provider.Usage{
+		InputTokens:      max(old.InputTokens, new.InputTokens),
+		OutputTokens:     max(old.OutputTokens, new.OutputTokens),
+		CacheReadTokens:  max(old.CacheReadTokens, new.CacheReadTokens),
+		CacheWriteTokens: max(old.CacheWriteTokens, new.CacheWriteTokens),
+	}
 }
 
 // consume reads one provider stream into an assembled assistant message and
@@ -470,12 +547,13 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 			case provider.EventMessageStop:
 				// Terminal metadata. It can arrive across several stop events
 				// (OpenAI reports the finish reason and usage in separate chunks),
-				// so keep the last non-empty stop reason and usage seen.
+				// so keep the last non-empty stop reason and merge usage (a proxy
+				// placeholder chunk must not clobber the real cache-hit count).
 				if ev.StopReason != provider.StopUnknown {
 					end.stop = ev.StopReason
 				}
 				if ev.Usage != nil {
-					end.usage = ev.Usage
+					end.usage = mergeUsage(end.usage, ev.Usage)
 				}
 			}
 		}

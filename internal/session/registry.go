@@ -399,20 +399,51 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 		e.persistMessage(ctx, payload)
 		return nil
 	}
+	// The run's aggregate usage is recorded on the runs row (SetRunUsage is
+	// nil-safe and best-effort); the event still flows to the durable log below.
+	if kind == agent.KindUsage {
+		e.persistRunUsage(payload)
+	}
 	e.rg.append(ctx, e.sessionID, e.runID, kind, payload)
 	return nil
 }
 
+// persistRunUsage extracts the run's aggregate usage from a KindUsage payload
+// and records it on the runs row. Best-effort: failures are logged, not fatal.
+func (e *registryEmitter) persistRunUsage(payload any) {
+	var u *provider.Usage
+	switch v := payload.(type) {
+	case provider.Usage:
+		u = &v
+	case *provider.Usage:
+		u = v
+	}
+	if u == nil {
+		return
+	}
+	if err := e.rg.rt.store.SetRunUsage(context.Background(), e.runID, u); err != nil {
+		slog.Warn("record run usage", "run", e.runID, "err", err)
+	}
+}
+
 // persistMessage stores one assembled message in the MessageStore. The payload
-// is the provider.Message the loop emitted. Persistence is best-effort: a
-// failure is logged but does not abort the run (the run's render stream is
-// unaffected).
+// is either an agent.MessageWithUsage (an assistant message paired with the
+// usage of the LLM call that produced it) or a bare provider.Message (a tool
+// result, which is not an LLM call and has no usage). Persistence is
+// best-effort: a failure is logged but does not abort the run (the run's render
+// stream is unaffected).
 func (e *registryEmitter) persistMessage(ctx context.Context, payload any) {
 	if e.rg.msgStore == nil {
 		return
 	}
-	msg, ok := payload.(provider.Message)
-	if !ok {
+	var msg provider.Message
+	var usage *provider.Usage
+	switch v := payload.(type) {
+	case agent.MessageWithUsage:
+		msg, usage = v.Message, v.Usage
+	case provider.Message:
+		msg = v
+	default:
 		// Tolerate a marshalled-then-decoded message (map shape) too.
 		data, err := json.Marshal(payload)
 		if err != nil {
@@ -430,5 +461,6 @@ func (e *registryEmitter) persistMessage(ctx context.Context, payload any) {
 		RunID:     e.runID,
 		Role:      msg.Role,
 		Content:   contextmgmt.TruncateBlocksForPersistence(msg.Content),
+		Usage:     usage,
 	})
 }

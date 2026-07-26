@@ -38,7 +38,13 @@ type HistoryPart =
       /** Nested sub-conversation (a spawn_agent child's turns). */
       messages?: HistoryMessage[];
     };
-type HistoryMessage = { id: string; role: string; content: HistoryPart[] };
+type HistoryMessage = {
+  id: string;
+  role: string;
+  content: HistoryPart[];
+  /** Server-supplied metadata (token usage as an unstable_data entry). */
+  metadata?: { unstable_data?: unknown[] };
+};
 
 function authHeaders(): Record<string, string> {
   const token = getToken();
@@ -85,6 +91,9 @@ function mapMessage(m: HistoryMessage): ThreadMessageLike {
     id: m.id,
     role: m.role === "assistant" ? "assistant" : "user",
     content: m.content.map(mapPart),
+    // Carry the run's token usage (unstable_data) so a reloaded reply renders
+    // the same usage footer as the live stream.
+    ...(m.metadata ? { metadata: m.metadata as never } : {}),
   };
 }
 
