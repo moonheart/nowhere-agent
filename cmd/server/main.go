@@ -377,7 +377,7 @@ func run() error {
 		if sandboxMgr != nil || mcpClient != nil || memPort != nil {
 			handler = handler.WithToolBinder(bindChatTools)
 			if sandboxMgr != nil {
-				log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob)")
+				log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
 			}
 			if execEnabled {
 				log.Info("run_command tool enabled", "backend", cfg.Sandbox.Backend)

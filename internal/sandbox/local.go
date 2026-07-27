@@ -230,6 +230,112 @@ func (p *LocalPort) ListDir(_ context.Context, h Handle, path string) ([]string,
 	return names, nil
 }
 
+// Move renames/moves a workspace-confined file or directory. Both paths are
+// resolved (and thus confined) like every other workspace path.
+func (p *LocalPort) Move(_ context.Context, h Handle, src, dst string) error {
+	srcFull, err := p.resolve(h, src)
+	if err != nil {
+		return err
+	}
+	dstFull, err := p.resolve(h, dst)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dstFull), 0o755); err != nil {
+		return fmt.Errorf("prepare parent dir: %w", err)
+	}
+	if err := os.Rename(srcFull, dstFull); err != nil {
+		return fmt.Errorf("move %q to %q: %w", src, dst, err)
+	}
+	return nil
+}
+
+// Copy duplicates a workspace-confined file or directory (recursively). Both
+// paths are resolved (and thus confined) like every other workspace path.
+func (p *LocalPort) Copy(_ context.Context, h Handle, src, dst string) error {
+	srcFull, err := p.resolve(h, src)
+	if err != nil {
+		return err
+	}
+	dstFull, err := p.resolve(h, dst)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(srcFull)
+	if err != nil {
+		return fmt.Errorf("copy source %q: %w", src, err)
+	}
+	if info.IsDir() {
+		return copyDir(srcFull, dstFull)
+	}
+	return copyFile(srcFull, dstFull)
+}
+
+// copyFile copies a single file, creating the destination's parent directory.
+func copyFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("prepare parent dir: %w", err)
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// copyDir recursively copies a directory tree, preserving relative structure.
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		return copyFile(p, target)
+	})
+}
+
+// Delete removes a workspace-confined file or directory (recursively). The path
+// is resolved (and thus confined) like every other workspace path.
+func (p *LocalPort) Delete(_ context.Context, h Handle, path string) error {
+	full, err := p.resolve(h, path)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(full); err != nil {
+		return fmt.Errorf("delete %q: %w", path, err)
+	}
+	return nil
+}
+
+// Mkdir creates a workspace-confined directory (and any parents). The path is
+// resolved (and thus confined) like every other workspace path.
+func (p *LocalPort) Mkdir(_ context.Context, h Handle, path string) error {
+	full, err := p.resolve(h, path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		return fmt.Errorf("mkdir %q: %w", path, err)
+	}
+	return nil
+}
+
 // Walk lists every file under root recursively, as workspace-relative
 // forward-slash paths (Walker capability). Directories and the .git tree are
 // skipped. root is confined by resolve() like every other path.

@@ -252,6 +252,57 @@ func (p *DockerPort) ListDir(ctx context.Context, h Handle, path string) ([]stri
 	return out, nil
 }
 
+// Move renames/moves a file or directory in the container. Exec runs with
+// WorkingDir set to the workspace mount, so workspace-relative paths resolve
+// inside the mount; argv (not a shell string) means no quoting/injection risk.
+func (p *DockerPort) Move(ctx context.Context, h Handle, src, dst string) error {
+	// cp -a preserves the tree; mv would suffice for same-fs but a bind-mount
+	// boundary can make rename(2) fail across filesystems, so copy+remove is the
+	// portable container move. mkdir -p ensures the destination parent exists.
+	if res, err := p.Exec(ctx, h, []string{"sh", "-c",
+		"mkdir -p \"$(dirname \"$2\")\" && cp -a \"$1\" \"$2\" && rm -rf \"$1\"", "mv", src, dst}); err != nil {
+		return fmt.Errorf("move %q to %q: %w", src, dst, err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("move %q to %q: %s", src, dst, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
+// Copy duplicates a file or directory (recursively) in the container.
+func (p *DockerPort) Copy(ctx context.Context, h Handle, src, dst string) error {
+	if res, err := p.Exec(ctx, h, []string{"sh", "-c",
+		"mkdir -p \"$(dirname \"$2\")\" && cp -a \"$1\" \"$2\"", "cp", src, dst}); err != nil {
+		return fmt.Errorf("copy %q to %q: %w", src, dst, err)
+	} else if res.ExitCode != 0 {
+		return fmt.Errorf("copy %q to %q: %s", src, dst, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
+// Delete removes a file or directory (recursively) in the container.
+func (p *DockerPort) Delete(ctx context.Context, h Handle, path string) error {
+	res, err := p.Exec(ctx, h, []string{"rm", "-rf", "--", path})
+	if err != nil {
+		return fmt.Errorf("delete %q: %w", path, err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("delete %q: %s", path, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
+// Mkdir creates a directory (and any parents) in the container.
+func (p *DockerPort) Mkdir(ctx context.Context, h Handle, path string) error {
+	res, err := p.Exec(ctx, h, []string{"mkdir", "-p", "--", path})
+	if err != nil {
+		return fmt.Errorf("mkdir %q: %w", path, err)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("mkdir %q: %s", path, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
 // Walk lists every file under root recursively (Walker capability), as
 // workspace-relative forward-slash paths. Exec runs with WorkingDir set to the
 // workspace mount, so a relative root and the returned paths are workspace-
