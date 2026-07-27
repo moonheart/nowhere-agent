@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -300,6 +301,19 @@ func run() error {
 			// independent), RiskReadOnly so the permission gate leaves it to the
 			// interaction gate.
 			reg.Register(builtin.NewAskUser())
+			// Plan/TODO tracking (capability-gap O1): the model maintains a visible
+			// task list, persisted as the "plan" key of the session's generic state
+			// store and pushed live to attached clients. The writer is the low-
+			// coupling seam — the tool depends only on the SessionStateWriter func,
+			// not on the session store. Always available (sandbox-independent),
+			// RiskReadOnly.
+			reg.Register(builtin.NewPlanWrite(func(ctx context.Context, key string, value any) error {
+				data, err := json.Marshal(value)
+				if err != nil {
+					return err
+				}
+				return sessionRuntime.SetSessionStateKV(ctx, sessionID, key, data)
+			}))
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
 			// present (independent of the sandbox); scopes mirror the context

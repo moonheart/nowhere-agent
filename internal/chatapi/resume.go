@@ -78,6 +78,17 @@ func (h *Handler) latestRun(r *http.Request, sessionID string) (session.Run, boo
 // It is the live-delivery counterpart to emitResumeEvent: same render, but the
 // source is the StreamBroker, not the durable run event log.
 func emitStreamEvent(r *http.Request, emitter *sseEmitter, e session.StreamEvent) {
+	// session_state is a live-only session-KV frame (capability-gap O1), not an
+	// agent loop event: it is published directly to the broker by
+	// Runtime.SetSessionStateKV when a state-producing tool (plan_write) writes.
+	// Render it as a durable data frame so the client's plan panel updates live
+	// and the frame lands in message metadata for a history reload.
+	if e.Kind == "session_state" {
+		if m, ok := decodeMapPayload(e.Payload); ok {
+			emitter.write(chunk{"type": "data-session-state", "data": m})
+		}
+		return
+	}
 	switch agent.EventKind(e.Kind) {
 	case agent.KindThinking, agent.KindText, agent.KindError:
 		emitter.Emit(r.Context(), agent.EventKind(e.Kind), decodeTextPayload(e.Payload))

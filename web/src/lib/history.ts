@@ -25,6 +25,7 @@ import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
 import { reportApproval, type ToolApproval } from "@/lib/approval";
+import { reportPlan, type Plan } from "@/lib/plan";
 
 type HistoryPart =
   | { type: "text" | "reasoning"; text: string }
@@ -102,6 +103,7 @@ async function loadHistory(): Promise<{
   active: boolean;
   after: number;
   pendingApproval?: ToolApproval | null;
+  sessionState?: { plan?: Plan } | null;
 }> {
   const threadId = getSessionId();
   if (!threadId) return { messages: [], active: false, after: 0 };
@@ -115,6 +117,7 @@ async function loadHistory(): Promise<{
     active?: boolean;
     after?: number;
     pendingApproval?: ToolApproval | null;
+    sessionState?: { plan?: Plan } | null;
   };
   const messages = (data.messages ?? []).map(mapMessage);
   return {
@@ -122,6 +125,7 @@ async function loadHistory(): Promise<{
     active: data.active === true,
     after: typeof data.after === "number" ? data.after : 0,
     pendingApproval: data.pendingApproval ?? null,
+    sessionState: data.sessionState ?? null,
   };
 }
 
@@ -223,12 +227,16 @@ export async function hasActiveRun(): Promise<boolean> {
 
 export const threadHistory: ThreadHistoryAdapter = {
   async load() {
-    const { messages, active, after, pendingApproval } = await loadHistory();
+    const { messages, active, after, pendingApproval, sessionState } = await loadHistory();
     lastLoadedAfter = after;
     // Re-show a parked interaction (permission approve/deny, or an ask_user
     // card) the transient frame dropped on refresh; the durable row is the
     // source of truth, echoed by /history as pendingApproval.
     if (pendingApproval) reportApproval(pendingApproval);
+    // Restore the plan panel (capability-gap O1): the session's persisted plan
+    // state is echoed as sessionState.plan, the same source the live
+    // data-session-state frames feed.
+    if (sessionState?.plan) reportPlan(sessionState.plan);
     // When a run is in flight, drop the trailing partial assistant message from
     // the snapshot. The follow (resume) re-streams the whole run and renders
     // that message itself; importing a partial assistant message AND following

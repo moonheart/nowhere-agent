@@ -158,8 +158,19 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Session state (capability-gap O1): the session's generic key/value store,
+	// echoed so a reloading client restores session-level UI (the plan panel)
+	// that the live data-session-state frames drove before the refresh. Shape is
+	// the raw dictionary {key: value}; absent when empty.
+	var sessionState map[string]json.RawMessage
+	if h.runtime != nil {
+		if st, err := h.runtime.SessionState(r.Context(), threadID); err == nil && len(st) > 0 {
+			sessionState = st
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "pendingApproval": pending})
+	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "pendingApproval": pending, "sessionState": sessionState})
 }
 
 // isToolResultOnly reports whether a stored message is a user-role message that

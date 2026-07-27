@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AssistantRuntimeProvider } from "@assistant-ui/react";
+import { AssistantRuntimeProvider, useThread } from "@assistant-ui/react";
 import { useDataStreamRuntime } from "@assistant-ui/react-data-stream";
 import { LogOut } from "lucide-react";
 import { Thread } from "@/components/thread";
@@ -11,6 +11,7 @@ import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
 import { reportApproval, resetApprovals, registerDecisionFollower, type ToolApproval } from "@/lib/approval";
+import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
@@ -47,6 +48,11 @@ function Chat({
         // A dangerous tool call is parked awaiting a human verdict (O2): show
         // approve/deny on the matching tool card. Transient, not the message.
         reportApproval(d.data as ToolApproval);
+      } else if (d.name === "session-state") {
+        // Session-level state push (O1): the plan_write tool's plan, pushed
+        // live. Feeds the top plan panel.
+        const plan = planFromSessionState(d.data);
+        if (plan) reportPlan(plan);
       }
     },
     // The Stop button only aborts the local fetch; also tell the backend to
@@ -119,8 +125,28 @@ function Chat({
   return (
     <AssistantRuntimeProvider runtime={runtime} key={conversationKey}>
       <Thread />
+      <PlanMetadataWatcher />
     </AssistantRuntimeProvider>
   );
+}
+
+// PlanMetadataWatcher feeds the plan store from the message metadata, the path a
+// NON-transient data-session-state frame takes on the direct-submit flow (which
+// has no onData callback). useThread subscribes reactively, so the panel updates
+// live as the run streams and stays correct across a history reload. Must render
+// inside AssistantRuntimeProvider.
+function PlanMetadataWatcher() {
+  const plan = useThread((s) => {
+    for (let i = s.messages.length - 1; i >= 0; i--) {
+      const p = planFromMetadata(s.messages[i].metadata);
+      if (p) return p;
+    }
+    return null;
+  });
+  useEffect(() => {
+    if (plan) reportPlan(plan);
+  }, [plan]);
+  return null;
 }
 
 export default function App() {
@@ -137,6 +163,7 @@ export default function App() {
     setActiveSessionId(null);
     resetActivity();
     resetApprovals();
+    resetPlan();
     setConversationKey((k) => k + 1);
   };
 
@@ -152,6 +179,7 @@ export default function App() {
     setActiveSessionId(id);
     resetActivity();
     resetApprovals();
+    resetPlan();
     setConversationKey((k) => k + 1);
   };
 

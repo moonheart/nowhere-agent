@@ -5,6 +5,7 @@
 package session
 
 import (
+	"encoding/json"
 	"time"
 
 	"nowhere-agent/internal/provider"
@@ -64,6 +65,12 @@ type Session struct {
 	Status    SessionStatus
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// State is the session's generic key/value store (capability-gap O1): an
+	// open dictionary of session-scoped state, one JSON value per key. plan/todo
+	// is the first consumer ("plan"); any feature can add its own key without a
+	// schema change. Persisted as the sessions.state JSONB column. Nil means no
+	// state has been written yet.
+	State map[string]json.RawMessage
 }
 
 // Run is one agent turn-chain within a session.

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"sync"
@@ -118,6 +119,59 @@ func (m *MemStore) MarkMemoryInjectedAt(_ context.Context, id string, at time.Ti
 		m.memoryInjectedAt[id] = at
 	}
 	return nil
+}
+
+// SetSessionStateKV upserts one key in the session's in-memory state dictionary,
+// preserving sibling keys (the in-memory analogue of the PG jsonb_set). The value
+// is deep-copied so a caller mutating its buffer can't corrupt the stored state.
+func (m *MemStore) SetSessionStateKV(_ context.Context, id, key string, value json.RawMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return errors.New("session not found")
+	}
+	if s.State == nil {
+		s.State = map[string]json.RawMessage{}
+	}
+	cp := make(json.RawMessage, len(value))
+	copy(cp, value)
+	s.State[key] = cp
+	return nil
+}
+
+// SessionStateKV returns the JSON value stored under key, or false if unset.
+func (m *MemStore) SessionStateKV(_ context.Context, id, key string) (json.RawMessage, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return nil, false, errors.New("session not found")
+	}
+	v, ok := s.State[key]
+	if !ok {
+		return nil, false, nil
+	}
+	cp := make(json.RawMessage, len(v))
+	copy(cp, v)
+	return cp, true, nil
+}
+
+// SessionState returns the session's whole state dictionary (deep-copied).
+func (m *MemStore) SessionState(_ context.Context, id string) (map[string]json.RawMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return nil, errors.New("session not found")
+	}
+	out := make(map[string]json.RawMessage, len(s.State))
+	for k, v := range s.State {
+		cp := make(json.RawMessage, len(v))
+		copy(cp, v)
+		out[k] = cp
+	}
+	return out, nil
 }
 
 func (m *MemStore) ListSessionsByUser(_ context.Context, userID string) ([]Session, error) {

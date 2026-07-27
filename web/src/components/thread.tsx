@@ -10,10 +10,12 @@ import { StopButton } from "@/components/stop-button";
 import { ToolCall } from "@/components/tool-call";
 import { MarkdownText } from "@/components/markdown-text";
 import { UsageFooter } from "@/components/usage-footer";
+import { PlanPanel } from "@/components/plan-panel";
 
 export const Thread: FC = () => {
   return (
     <ThreadPrimitive.Root className="flex h-full flex-col bg-white">
+      <PlanPanel />
       <ThreadPrimitive.Viewport className="flex flex-1 flex-col gap-5 overflow-y-auto px-6 py-6">
         <ThreadPrimitive.Empty>
           <EmptyState />
