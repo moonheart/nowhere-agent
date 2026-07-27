@@ -321,7 +321,15 @@ func (rt *Runtime) SetSessionStateKV(ctx context.Context, sessionID, key string,
 	if err != nil {
 		return err
 	}
-	_, err = rt.broker.Publish(ctx, sessionID, StreamEvent{Kind: "session_state", Payload: payload})
+	// Tag the frame with the session's active run so attached clients (which
+	// filter content by run ID) accept it. A state write usually happens inside a
+	// run's tool call, so an active run exists; if there is none (an out-of-band
+	// write) the empty RunID still reaches subscribers that don't filter.
+	var runID string
+	if run, active, err := rt.ActiveRun(ctx, sessionID); err == nil && active {
+		runID = run.ID
+	}
+	_, err = rt.broker.Publish(ctx, sessionID, StreamEvent{RunID: runID, Kind: "session_state", Payload: payload})
 	return err
 }
 
