@@ -56,10 +56,27 @@ export function usePlan(): Plan | null {
   return useSyncExternalStore(subscribe, getSnapshot);
 }
 
-// pickPlanState extracts the plan from a session-state frame/history entry:
+// planFromSessionState extracts the plan from a session-state frame/history entry:
 // {key:"plan", value:{items:[...]}} → the value, or null for other keys.
 export function planFromSessionState(data: unknown): Plan | null {
   const d = data as { key?: string; value?: Plan } | undefined;
   if (d?.key !== "plan" || !d.value || !Array.isArray(d.value.items)) return null;
   return d.value;
+}
+
+// planFromMetadata finds the newest plan carried in a message's
+// metadata.unstable_data — where a NON-transient data-session-state frame lands
+// (the direct-submit path, which has no onData callback). Scanning from the end
+// returns the latest frame's plan.
+export function planFromMetadata(metadata: unknown): Plan | null {
+  const list = (metadata as { unstable_data?: unknown[] } | undefined)?.unstable_data;
+  if (!Array.isArray(list)) return null;
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i] as { name?: string; data?: unknown } | undefined;
+    if (e?.name === "session-state") {
+      const plan = planFromSessionState(e.data);
+      if (plan) return plan;
+    }
+  }
+  return null;
 }
