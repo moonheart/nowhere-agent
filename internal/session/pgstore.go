@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -162,6 +163,62 @@ func (s *PGStore) MarkMemoryInjectedAt(ctx context.Context, id string, at time.T
 		return fmt.Errorf("mark memory_injected_at: %w", err)
 	}
 	return nil
+}
+
+// SetSessionStateKV upserts one key in the session's state dictionary via
+// jsonb_set, so sibling keys are preserved (never a whole-column clobber). This
+// is what lets many features share the single state column.
+func (s *PGStore) SetSessionStateKV(ctx context.Context, id, key string, value json.RawMessage) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE sessions
+		SET state = jsonb_set(state, $2, $3, true), updated_at = now()
+		WHERE id = $1`,
+		id, "{"+key+"}", value)
+	if err != nil {
+		return fmt.Errorf("set session state: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	return nil
+}
+
+// SessionStateKV returns the JSON value stored under key, or false if unset.
+func (s *PGStore) SessionStateKV(ctx context.Context, id, key string) (json.RawMessage, bool, error) {
+	var v json.RawMessage
+	err := s.db.QueryRowContext(ctx, `
+		SELECT state -> $2 FROM sessions WHERE id = $1`, id, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, fmt.Errorf("session not found: %s", id)
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get session state: %w", err)
+	}
+	if v == nil || string(v) == "null" {
+		return nil, false, nil
+	}
+	return v, true, nil
+}
+
+// SessionState returns the session's whole state dictionary (for history
+// recovery, which hands every key to the reloading client).
+func (s *PGStore) SessionState(ctx context.Context, id string) (map[string]json.RawMessage, error) {
+	var raw json.RawMessage
+	err := s.db.QueryRowContext(ctx, `
+		SELECT state FROM sessions WHERE id = $1`, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("session not found: %s", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get session state: %w", err)
+	}
+	out := map[string]json.RawMessage{}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, fmt.Errorf("decode session state: %w", err)
+		}
+	}
+	return out, nil
 }
 
 // ListSessionsByUser returns a user's active (non-deleted) sessions,

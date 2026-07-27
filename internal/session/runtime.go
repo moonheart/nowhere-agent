@@ -52,6 +52,17 @@ type Store interface {
 	// injection surfaces only memories created after it. Idempotent.
 	MarkMemoryInjectedAt(ctx context.Context, id string, at time.Time) error
 
+	// Session state (capability-gap O1, migration 000014): a generic key/value
+	// store per session, backing plan/todo and any future session-level state.
+	// SetSessionStateKV upserts ONE key (jsonb_set on the DB; it must not clobber
+	// sibling keys). value is the raw JSON for that key.
+	SetSessionStateKV(ctx context.Context, id, key string, value json.RawMessage) error
+	// SessionStateKV returns the JSON value stored under key, or false if unset.
+	SessionStateKV(ctx context.Context, id, key string) (json.RawMessage, bool, error)
+	// SessionState returns the session's whole state dictionary (for history
+	// recovery, which hands every key to the reloading client).
+	SessionState(ctx context.Context, id string) (map[string]json.RawMessage, error)
+
 	CreateRun(ctx context.Context, sessionID string, seq int) (Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status RunStatus) error
 	// SetRunUsage records the run's aggregate token usage (across all its LLM
@@ -292,6 +303,32 @@ func (rt *Runtime) MemoryInjectedAt(ctx context.Context, id string) (time.Time, 
 // (pass-through to the store; never backwards).
 func (rt *Runtime) MarkMemoryInjectedAt(ctx context.Context, id string, at time.Time) error {
 	return rt.store.MarkMemoryInjectedAt(ctx, id, at)
+}
+
+// SetSessionStateKV persists one key of the session's generic state store and
+// fans the change out live (capability-gap O1). The durable write is the source
+// of truth (sessions.state via jsonb_set); the live push is a broker StreamEvent
+// of kind session_state — a live-only content frame that is NOT written to
+// run_events (that table is deprecated), so the state push rides the same fast
+// content path as text/tool frames and is re-readable by reconnecting clients
+// until the run's stream is cleaned up. Callers (e.g. the plan_write tool) go
+// through this so persistence and fan-out stay one write path.
+func (rt *Runtime) SetSessionStateKV(ctx context.Context, sessionID, key string, value json.RawMessage) error {
+	if err := rt.store.SetSessionStateKV(ctx, sessionID, key, value); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{"key": key, "value": value})
+	if err != nil {
+		return err
+	}
+	_, err = rt.broker.Publish(ctx, sessionID, StreamEvent{Kind: "session_state", Payload: payload})
+	return err
+}
+
+// SessionState returns the session's whole state dictionary (pass-through to
+// the store), for history recovery.
+func (rt *Runtime) SessionState(ctx context.Context, id string) (map[string]json.RawMessage, error) {
+	return rt.store.SessionState(ctx, id)
 }
 
 // CreateSession creates a session for a user (pass-through to the store).

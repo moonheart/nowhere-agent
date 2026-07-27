@@ -112,8 +112,8 @@
 
 > ✅ 已通:**运行取消全链路**(`chatapi/cancel.go` → `registry.Cancel` → ctx 取消 → 终帧,loop 在 `loop.go:295` 观察);**子代理并行扇出 + 深度/总量/并发三重预算**(架构评审 **C16** 已修,`subagent/tool.go` 的 `WithBudget`);**provider 瞬时错误重试**(架构评审 **A2** 已修,`provider/retry.go`)。以下是缺口。
 
-**O1 ○⭐ 无 planning / TODO 跟踪**
-纯 think→tool→think,跨轮唯一状态是原始消息日志 `produced []Message`(`loop.go:193-280`),`Config` 无 plan 字段。没有模型可维护的计划/任务清单工具(业界 agent 的 `update_plan`/`todo` 这里没有),也没有把计划注入 system prompt 或持久化。做多步复杂任务时容易"跑偏"且用户无法看到 agent 的计划。
+**O1 ✅ planning / TODO 跟踪已落地(分支 `feat/session-state-plan`,通用会话级 KV 状态)**
+~~纯 think→tool→think,跨轮唯一状态是原始消息日志,没有模型可维护的计划/任务清单。~~ **现已实现,且做成了一个通用机制**:`sessions` 表加 `state JSONB`(migration `000014`)—— 一个开放的会话级键值字典,**plan 只是第一个 key,后续任意会话级状态都能复用同一机制而无需改 schema**。写入经 `session.Runtime.SetSessionStateKV`(单键 `jsonb_set` upsert 不整列覆盖),工具只依赖 `agent.SessionStateWriter` 回调签名、不见存储细节(**高内聚低耦合**)。**plan_write 工具**(`builtin/plan.go`,`RiskReadOnly`,全量重写、至多一项 in_progress)维护任务清单。**实时推送**:状态变更经 broker 发 `session_state` 事件(live-only,**不写 run_events**)→ attach 路径转非瞬态 `data-session-state` SSE 帧。**前端顶部固定计划面板**(`plan-panel.tsx`,sticky,模块级 `lib/plan.ts` store,类比 approval.ts)实时渲染 ○/◐/●;重连/刷新经 `/api/chat/history` 响应顶层 `sessionState` 字段恢复。
 
 **O2 ◑⭐ 人在环审批(HITL)已落地(持久化挂起-恢复)**
 原状:`RunWaitingApproval` 有定义、被 SQL 索引引用,却从不被写入、也无恢复路径;服务端把 `"ask"` 直接映射成 deny。**现已实现完整"危险工具调用→挂起→推给用户→裁决→续跑"**:① loop 检测 `Ask`(经 `agent.ApprovalReasonPrefix` 标记)→ 不执行、emit `KindApprovalRequest`、返回 `ErrAwaitingApproval`;② registry 持久化 `approvals` 行(migration `000010`,一 pending/run 唯一约束)→ `SuspendRun` 置 `waiting_approval` 并**释放单活跃锁**(挂起放锁,用户可先发别的消息);③ 前端经 transient `data-tool-approval` 帧渲染批准/否决 → **复用 `POST /api/chat`(body 带 `approval`)裁决**,续跑内容经同一 SSE attach 路径流回(无独立端点、无轮询);④ `Resume` 裁决后**另起 worker 从 `MessageStore` 重建 history 续跑**(批准=执行该工具,拒绝=注入 `is_error`),并经注入的 `LoopSource` 重建 loop,故**跨进程重启仍可恢复**(启动对账保留 `waiting_approval`,不当 stranded fail)。刷新页面时 `GET /history` 回 `pendingApproval` 重建卡片;parked run 不计入 `RunningRun`,刷新不再误开续跑流。仅 `*-once` 授权,`allow/reject-always` 持久规则留扩展。
@@ -164,7 +164,7 @@
 | grep / glob 代码检索 | ✅ `grep`/`glob` | T4,T5 |
 | 文件变更原语(move/copy/delete/mkdir) | ✅ `move_file`/`copy_file`/`delete_file`/`make_dir` | T7 |
 | 抓取 URL / 读网页 | ✅ SearXNG MCP `web_url_read` | T6 |
-| 计划/TODO 可视化 | ○ 无 | O1 |
+| 计划/TODO 可视化 | ✅ `plan_write` + 顶部计划面板(会话级 KV 状态) | O1 |
 | 工具调用人工批准 | ✅ 持久化挂起-恢复(跨重启,挂起放锁) | O2 |
 | token 用量/成本上报 | ✅ 持久化 + 前端显示(messages/runs 表 + usage footer) | L2 |
 | 结构化输出 | ✅ 强制 tool_call 式(见 L3) | L3 |
@@ -207,7 +207,7 @@
 
 ### P3 — 交互与产品化
 - **[O2]** ~~补异步审批状态机~~ ✅ 已落地(持久化挂起-恢复 + 跨重启,见 §O.O2)。
-- **[O1]** 计划/TODO 工具 + 可视化;**[O3]** run 断点续跑;**[O6]** 子代理协作原语。
+- **[O1]** ~~计划/TODO 工具 + 可视化~~ ✅ 已落地(会话级 KV 状态 sessions.state + plan_write + 顶部面板,见 §O.O1);**[O3]** run 断点续跑;**[O6]** 子代理协作原语。
 - **[L3]** ~~结构化输出~~ ✅ 已落地(强制 tool_call 式,见 §L.L3);**[L4]** 可开启 extended thinking;**[L5]** OpenAI 视觉直通;**[L7/D20]** 工具前缀缓存。
 
 ---
@@ -233,7 +233,7 @@
 | L5 | ◑ | 模型 | 视觉输入仅 Anthropic,OpenAI 降级 | `openai/request.go:107` |
 | L6 | ◐ | 模型 | 多模型路由/降级未接线 | `routing/router.go`、`main.go:335` |
 | L7 | 🟡 | 模型 | Anthropic 工具前缀缓存未实现(=D20) | `anthropic/request.go:88` |
-| O1 | ○⭐ | 编排 | 无 planning/TODO 跟踪 | `agent/loop.go:193,59` |
+| O1 | ✅ | 编排 | planning/TODO 已接(会话级 KV 状态 sessions.state + plan_write + 顶部面板 + SSE 实时推送) | `internal/session/*`、`builtin/plan.go`、`web/.../plan-panel.tsx` |
 | O2 | ✅ | 编排 | HITL 已接(挂起-恢复 + 跨重启;approvals 表 + Resume + 复用 chat 端点裁决) | `session/registry.go`、`agent/loop.go`、`chatapi/handler.go`、`migrations/000010` |
 | O-ask | ✅ | 编排 | ask_user 结构化提问(1~4 题单/多选+默认+自定义+跳过;复用 O2 机制) | `toolruntime/builtin/askuser.go`、`agent/loop.go`、`web/src/components/tool-call.tsx` |
 | O3 | ◑ | 编排 | 无 run 续跑/断点恢复 | `session/runtime.go:276` |
