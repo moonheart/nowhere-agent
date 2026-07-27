@@ -35,10 +35,11 @@
 | `read_file` | 读单个工作区文件(整文件 `io.ReadAll`) | `toolruntime/builtin/files.go:47` | read_only |
 | `write_file` | 整文件覆盖(无追加/补丁) | `builtin/files.go:83` | sandbox_write |
 | `list_dir` | 列单层目录(非递归) | `builtin/files.go:120` | read_only |
-| `mcp_searxng_*` | SearXNG 网页搜索(远程 MCP 代理) | `mcp/tool.go:28` | network |
+| `move_file` / `copy_file` / `delete_file` / `make_dir` | 文件/目录变更原语(移动/递归复制/递归删除/建目录) | `builtin/fsops.go` | sandbox_write |
+| `mcp_searxng_*` | SearXNG 网页搜索 + **抓取 URL(`web_url_read`)** 等(远程 MCP 代理) | `mcp/tool.go:28` | network |
 | `spawn_agent` | 派生一个受限子代理,返回其最终文本 | `subagent/tool.go` | read_only |
 
-**= 3 个文件动词 + 网页搜索 + 子代理。** 下面四节是在此基线之上"还缺什么"。
+**= 3 个文件动词 + 4 个变更原语 + 网页搜索/抓取 + 子代理。** 下面四节是在此基线之上"还缺什么"。
 
 ---
 
@@ -46,7 +47,7 @@
 
 ### T. 工具执行面(最影响"能不能真干活")⭐
 
-> **状态更新**:T1–T5 已在分支 `feat/exec-surface-tools` 落地(`edit_file` / `grep` / `glob` / `run_command`,后者跨平台走统一 POSIX/bash 契约,Windows 用 Git Bash),T2 随 `run_command` 自然可用。**T8 已在分支 `feat/output-pagination-spill` 落地**(`read_file` 加字节 `offset/limit` 分页;`run_command` 超限输出把完整内容溢出到工作区 `.nowhere/tool-results/`、经分页 `read_file` 回取)。T6/T7 仍未做。
+> **状态更新**:T1–T5 已在分支 `feat/exec-surface-tools` 落地(`edit_file` / `grep` / `glob` / `run_command`,后者跨平台走统一 POSIX/bash 契约,Windows 用 Git Bash),T2 随 `run_command` 自然可用。**T8 已在分支 `feat/output-pagination-spill` 落地**(`read_file` 加字节 `offset/limit` 分页;`run_command` 超限输出把完整内容溢出到工作区 `.nowhere/tool-results/`、经分页 `read_file` 回取)。**T6 经核实已覆盖**(SearXNG MCP `web_url_read` 抓 URL→markdown,非"仅搜索")。**T7 已在分支 `feat/fs-mutation-ops` 落地**(`Port.Move/Copy/Delete/Mkdir` + `move_file`/`copy_file`/`delete_file`/`make_dir` 四工具,delete 目录需 `recursive:true`)。**T 组至此全部落地。**
 
 **T1 ◐⭐ 无"执行命令(shell)"工具 —— 但后端已实现,只差包一层**
 模型跑不了 `git`、编译器、包管理器、任何二进制。`sandbox.Port` 早已定义并实现了 `Exec`:Docker 走 `ContainerExecCreate/Attach`(`sandbox/docker.go:134-167`)、local 走 `exec.CommandContext`(`sandbox/local.go:137-165`)。**唯一的问题是没有任何注册的工具去调它** —— 全树唯一调用方是 `skill.ScriptTool`,而它只在测试里被构造。这是整个报告里 ROI 最高的一项:一个 `run_command` 工具就能把 agent 从"只读"变"能动手"。(接线前须先处理架构评审 **C15**(容器资源限制/降权,已修)与 **C17**(local 后端宿主机 RCE,未修)—— 即 `run_command` 应只允许走加固后的容器后端。)
@@ -63,11 +64,11 @@
 **T5 ○ 无 glob / 递归 find / 目录树**
 `list_dir` 只有一层(Docker 跑 `ls -1`,`docker.go:218`)。无模式匹配、无递归发现、无一次性项目树概览。定位文件是 O(逐目录往返),给一个新仓库"建立全局观"需要大量往返。
 
-**T6 ○ 无抓取指定 URL / HTTP 请求 / 浏览器**
-网络能力止于 SearXNG **搜索**;没有 fetch 一个具体 URL、读 API、抓文档页、渲染页面的工具。讽刺的是沙箱已有完整的 egress 策略引擎(`NetworkOpen/Allowlist/Deny`,`sandbox/port.go:13-31`,架构评审 C13 已修成 fail-closed)却没有任何工具真正走网络 I/O(除 SearXNG-MCP)。
+**T6 ✅ 抓取指定 URL 已覆盖(SearXNG MCP `web_url_read`)**
+~~网络能力止于 SearXNG **搜索**;没有 fetch 一个具体 URL、读 API、抓文档页、渲染页面的工具。~~ **经线上核实(2026-07-27),SearXNG MCP server 实际暴露 4 个工具,其中 `web_url_read` 即抓 URL**:抓一个具体 URL → content-type 感知地转 markdown(HTML→markdown、JSON 美化、text/YAML/TOML/XML→围栏文本、拒二进制)、支持 `startChar/maxLength` 分页、`section` 小节提取、`readHeadings` 只列标题;`searxng_web_search` 的 desc 明确引导"读全文用 `web_url_read`"。全部经 `mcp.Client.Connect` 透传注册(`internal/mcp/client.go:67`),agent 已可用。本报告原按"仅搜索"判断已过时。渲染页面(浏览器/JS)仍无,但读取类已够。
 
-**T7 ○ 无文件系统变更原语(move/copy/delete/mkdir)**
-`Port` 层根本没有 rename/remove/mkdir 动词,也没有工具暴露。`read`+`write`+`list` 三件套删不掉、挪不动文件。做重构/清理类任务直接卡死。
+**T7 ✅ 文件系统变更原语已补齐(分支 `feat/fs-mutation-ops`)**
+~~`Port` 层根本没有 rename/remove/mkdir 动词,也没有工具暴露。`read`+`write`+`list` 三件套删不掉、挪不动文件。~~ 现:`sandbox.Port` 接口新增 `Move`/`Copy`/`Delete`/`Mkdir` 四个变更动词,三后端都实现 —— **local** 对每个路径走 `resolve()` 结构收容后 `os.Rename`/递归复制(`filepath.WalkDir`)/`os.RemoveAll`/`os.MkdirAll`;**docker** 经 `Exec` 调容器 `mv`(实为 `cp -a`+`rm -rf` 跨挂载便携)/`cp -a`/`rm -rf`/`mkdir -p`(argv 非 shell 拼接,无注入);**mem** 扁平 key 空间按前缀改/复制/递归删。工具层 `builtin/fsops.go` 暴露 `move_file`/`copy_file`/`delete_file`/`make_dir`(均 `sandbox_write`),经 `FileTools` 聚合自动注册;`delete_file` 删目录需显式 `recursive:true`(用 `ReadFile` 判文件/目录 —— 三后端唯一一致的信号),防误删。
 
 **T8 ✅ 大输出无分页 / 截断即永久丢失 —— 已解决(分支 `feat/output-pagination-spill`)**
 ~~唯一的大小闸是持久化时 `MaxToolResultChars = 20_000` 硬截断(`contextmgmt/truncate.go:14`),且**剩余部分不落盘、永久丢弃**;工具无 `offset/limit/max_bytes`,`read_file` 整文件 slurp。~~ 现:`read_file` 加字节 `offset/limit` 分页(默认&上限一页 20k,续读标记给出下一 `offset`,`io.LimitReader` 免大文件 OOM);`run_command` 超限输出经 `capAndSpill`(`builtin/spill.go`)把**完整**内容按内容 hash 落盘到 `.nowhere/tool-results/<hash>.txt`,只回 head + 指回 `read_file(path,offset=)` 的标记,分页回取;顺带补齐 docker `WriteFile` 建父目录契约,grep/glob 隐藏该脚手架命名空间。持久化闸退化为**极少触发的兜底**。
@@ -158,13 +159,14 @@
 
 | 成熟 agent 标配 | 本仓状态 | 编号 |
 |---|---|---|
-| 执行命令 / 跑测试 | ○/◐(后端有 Exec,无工具) | T1,T2 |
-| `str_replace` 精确编辑 | ○ 无 | T3 |
-| grep / glob 代码检索 | ○ 无 | T4,T5 |
-| 抓取 URL / 读网页 | ○ 无(仅搜索) | T6 |
+| 执行命令 / 跑测试 | ✅ `run_command` | T1,T2 |
+| `str_replace` 精确编辑 | ✅ `edit_file` | T3 |
+| grep / glob 代码检索 | ✅ `grep`/`glob` | T4,T5 |
+| 文件变更原语(move/copy/delete/mkdir) | ✅ `move_file`/`copy_file`/`delete_file`/`make_dir` | T7 |
+| 抓取 URL / 读网页 | ✅ SearXNG MCP `web_url_read` | T6 |
 | 计划/TODO 可视化 | ○ 无 | O1 |
 | 工具调用人工批准 | ✅ 持久化挂起-恢复(跨重启,挂起放锁) | O2 |
-| token 用量/成本上报 | ◑ 丢弃 | L2 |
+| token 用量/成本上报 | ✅ 持久化 + 前端显示(messages/runs 表 + usage footer) | L2 |
 | 结构化输出 | ✅ 强制 tool_call 式(见 L3) | L3 |
 | 从记忆学习 | ◐ dreaming 已接(4 阶段+增量) | K1 |
 
@@ -175,10 +177,14 @@
 ## 4. 优先级路线图
 
 ### P0 — 让 agent"能真正动手"(执行面,最高价值)
-- **[T1]** 新增 `run_command` 工具,包现成的 `sandbox.Exec`;**限定只走加固后的容器后端**(依赖架构评审 C15 已修 / C17 未修)。
-- **[T3]** 新增 `edit_file`(str-replace / apply-diff)精确编辑。
-- **[T4]** 新增 `grep`/内容检索;**[T5]** 新增 `glob`/递归列举。
-- **[T2]** 在 T1 之上做"跑测试"结果结构化回传。
+
+> **状态:T 组已全部落地。** T1–T5(`feat/exec-surface-tools`)、T8(`feat/output-pagination-spill`)、T7(`feat/fs-mutation-ops`);T6 经核实由 SearXNG MCP `web_url_read` 覆盖。执行面原语(执行/编辑/检索/变更/抓取/分页)齐了。
+- **[T1]** ~~新增 `run_command` 工具~~ ✅ 已落地。
+- **[T3]** ~~新增 `edit_file`~~ ✅ 已落地。
+- **[T4]** ~~新增 `grep`~~ ✅;**[T5]** ~~新增 `glob`~~ ✅ 已落地。
+- **[T2]** ~~在 T1 之上做"跑测试"结果结构化回传~~ ✅ 随 `run_command` 可用。
+- **[T6]** 抓取 URL ✅ 由 SearXNG MCP `web_url_read` 覆盖。
+- **[T7]** ~~文件变更原语~~ ✅ 已落地。
 
 ### P1 — 修掉"静默错误"与观测盲区
 
@@ -217,8 +223,8 @@
 | T3 | ○⭐ | 工具 | 只有整文件覆盖,无精确编辑 | `builtin/files.go:83` |
 | T4 | ○⭐ | 工具 | 无内容搜索(grep) | `builtin/files.go` |
 | T5 | ○ | 工具 | 无 glob/递归 find/目录树 | `builtin/files.go:120`、`docker.go:218` |
-| T6 | ○ | 工具 | 无抓取 URL/HTTP/浏览器(仅搜索) | `mcp/tool.go`、`sandbox/port.go:13` |
-| T7 | ○ | 工具 | 无 move/copy/delete/mkdir | `sandbox/port.go` |
+| T6 | ✅ | 工具 | 抓 URL 已覆盖:SearXNG MCP `web_url_read`(转 markdown、分页、小节提取) | `internal/mcp/client.go:67`、`mcp/tool.go` |
+| T7 | ✅ | 工具 | 文件变更原语已补:`Port.Move/Copy/Delete/Mkdir` + `move_file`/`copy_file`/`delete_file`/`make_dir` | `sandbox/port.go`、`builtin/fsops.go` |
 | T8 | ✅ | 工具 | read_file 分页 + run_command 溢出落盘可回取 | `builtin/files.go`、`builtin/spill.go` |
 | L1 | ○⭐ | 模型 | stop/finish 未建模,截断当正常结束 | `provider/adapter.go:19`、`agent/loop.go:252` |
 | L2 | ◑⭐ | 模型 | token 用量被丢弃(=D22) | `agent/loop.go:347` |

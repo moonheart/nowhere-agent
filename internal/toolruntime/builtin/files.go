@@ -16,8 +16,9 @@ import (
 )
 
 // FileTools returns the built-in workspace tools bound to a session sandbox:
-// read_file, write_file, list_dir, edit_file, plus the search tools (grep,
-// glob). Paths are workspace-relative; the sandbox backend rejects any escape.
+// read_file, write_file, list_dir, edit_file, the search tools (grep, glob),
+// and the mutation tools (move_file, copy_file, delete_file, make_dir). Paths
+// are workspace-relative; the sandbox backend rejects any escape.
 func FileTools(sb sandbox.Port, h sandbox.Handle) []toolruntime.Tool {
 	tools := []toolruntime.Tool{
 		&fileReadTool{sb: sb, h: h},
@@ -25,7 +26,8 @@ func FileTools(sb sandbox.Port, h sandbox.Handle) []toolruntime.Tool {
 		&listDirTool{sb: sb, h: h},
 		&editFileTool{sb: sb, h: h},
 	}
-	return append(tools, SearchTools(sb, h)...)
+	tools = append(tools, SearchTools(sb, h)...)
+	return append(tools, FSOpsTools(sb, h)...)
 }
 
 // argString extracts a required string argument, reporting the missing key.

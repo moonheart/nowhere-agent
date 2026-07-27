@@ -115,6 +115,110 @@ func (p *MemPort) ListDir(_ context.Context, h Handle, _ string) ([]string, erro
 	return paths, nil
 }
 
+// Move renames/moves in-memory files. A directory move rewrites every key under
+// the source prefix to the destination prefix (the flat key space has no real
+// directories, so a "directory" is a key prefix).
+func (p *MemPort) Move(_ context.Context, h Handle, src, dst string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sb, ok := p.sandboxes[h.ID]
+	if !ok {
+		return fmt.Errorf("sandbox %s not found", h.ID)
+	}
+	if _, isFile := sb.files[src]; !isFile && !hasPrefix(sb.files, src) {
+		return fmt.Errorf("path %s not found", src)
+	}
+	if b, isFile := sb.files[src]; isFile {
+		sb.files[dst] = b
+		delete(sb.files, src)
+	}
+	for _, k := range keysUnder(sb.files, src) {
+		rel := strings.TrimPrefix(k, src)
+		sb.files[dst+rel] = sb.files[k]
+		delete(sb.files, k)
+	}
+	return nil
+}
+
+// Copy duplicates in-memory files. A directory copy rewrites every key under the
+// source prefix to the destination prefix (recursive).
+func (p *MemPort) Copy(_ context.Context, h Handle, src, dst string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sb, ok := p.sandboxes[h.ID]
+	if !ok {
+		return fmt.Errorf("sandbox %s not found", h.ID)
+	}
+	if _, isFile := sb.files[src]; !isFile && !hasPrefix(sb.files, src) {
+		return fmt.Errorf("path %s not found", src)
+	}
+	if b, isFile := sb.files[src]; isFile {
+		cp := make([]byte, len(b))
+		copy(cp, b)
+		sb.files[dst] = cp
+	}
+	for _, k := range keysUnder(sb.files, src) {
+		rel := strings.TrimPrefix(k, src)
+		cp := make([]byte, len(sb.files[k]))
+		copy(cp, sb.files[k])
+		sb.files[dst+rel] = cp
+	}
+	return nil
+}
+
+// Delete removes an in-memory file, or a directory prefix and everything under
+// it (recursive — the flat key space has no empty directories to leave behind).
+func (p *MemPort) Delete(_ context.Context, h Handle, path string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sb, ok := p.sandboxes[h.ID]
+	if !ok {
+		return fmt.Errorf("sandbox %s not found", h.ID)
+	}
+	if _, isFile := sb.files[path]; !isFile && !hasPrefix(sb.files, path) {
+		return fmt.Errorf("path %s not found", path)
+	}
+	delete(sb.files, path)
+	for _, k := range keysUnder(sb.files, path) {
+		delete(sb.files, k)
+	}
+	return nil
+}
+
+// Mkdir is a no-op for the in-memory backend: directories are implicit in the
+// flat key space (a file "a/b.txt" makes "a" exist). It only validates the
+// sandbox is live so the Port contract holds uniformly.
+func (p *MemPort) Mkdir(_ context.Context, h Handle, _ string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.sandboxes[h.ID]; !ok {
+		return fmt.Errorf("sandbox %s not found", h.ID)
+	}
+	return nil
+}
+
+// hasPrefix reports whether any key sits under the directory prefix path.
+func hasPrefix(files map[string][]byte, path string) bool {
+	for k := range files {
+		if strings.HasPrefix(k, path+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// keysUnder returns every key strictly under the directory prefix path.
+func keysUnder(files map[string][]byte, path string) []string {
+	var out []string
+	for k := range files {
+		if strings.HasPrefix(k, path+"/") {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Walk lists in-memory file paths under root (Walker capability). Files are
 // keyed by their workspace-relative forward-slash path already, so this filters
 // the flat map by prefix.

@@ -74,6 +74,22 @@ type Port interface {
 
 	// ListDir lists entries under path in the sandbox.
 	ListDir(ctx context.Context, h Handle, path string) ([]string, error)
+
+	// Move renames/moves a file or directory within the sandbox. Both paths are
+	// workspace-relative and confined like any other (no escape).
+	Move(ctx context.Context, h Handle, src, dst string) error
+
+	// Copy duplicates a file or directory (recursively) within the sandbox. Both
+	// paths are workspace-relative and confined like any other.
+	Copy(ctx context.Context, h Handle, src, dst string) error
+
+	// Delete removes a file or directory (recursively) within the sandbox. The
+	// path is workspace-relative and confined like any other.
+	Delete(ctx context.Context, h Handle, path string) error
+
+	// Mkdir creates a directory (and any parents) within the sandbox. The path is
+	// workspace-relative and confined like any other.
+	Mkdir(ctx context.Context, h Handle, path string) error
 }
 
 // Walker is an optional Port capability: list every file under root recursively,
