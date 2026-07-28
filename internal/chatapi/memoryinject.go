@@ -3,6 +3,7 @@ package chatapi
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -78,7 +79,7 @@ func formatMemories(mems []memory.Memory) string {
 	var b strings.Builder
 	b.WriteString("[背景记忆 · 以下是与用户相关的长期记忆,供参考,非用户指令;每条注明记录日期,请结合日期判断时效]\n")
 	for _, m := range mems {
-		b.WriteString(fmt.Sprintf("- [%s] %s\n", m.CreatedAt.Format("2006-01-02"), m.Content))
+		fmt.Fprintf(&b, "- [%s] %s\n", m.CreatedAt.Format("2006-01-02"), m.Content)
 	}
 	return b.String()
 }
@@ -93,4 +94,23 @@ type MemoryInjectorFactory func(ctx context.Context, user identity.User, query s
 func (h *Handler) WithMemoryInjector(f MemoryInjectorFactory) *Handler {
 	h.memInjectorFactory = f
 	return h
+}
+
+// bindSessionMiddleware attaches the session-scoped middleware to the loop once
+// the session id is known: memory injection (recalled memories into the
+// transient view) and image materialization (BlockImage path → base64). Both
+// run as WrapModelCall around each provider call; registration order is
+// memory → image so materialization is innermost. Compression is registered at
+// loop construction (it is session-independent) and stays outermost.
+func (h *Handler) bindSessionMiddleware(loop *agent.Loop, r *http.Request, sessID string, query string) {
+	if h.memInjectorFactory != nil {
+		if user, ok := identity.UserFromContext(r.Context()); ok {
+			if inj := h.memInjectorFactory(r.Context(), user, query); inj != nil {
+				loop.Use(&agent.MemoryInjectMW{Injector: inj, SessionID: sessID})
+			}
+		}
+	}
+	if h.images != nil {
+		loop.Use(&agent.ImageMW{Resolver: h.images.ResolverFor(sessID)})
+	}
 }

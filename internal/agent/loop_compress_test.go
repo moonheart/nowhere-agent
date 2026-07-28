@@ -68,10 +68,8 @@ func bigConversation(turns int, size int) []provider.Message {
 func TestLoopCompressesViewOverBudget(t *testing.T) {
 	rp := &recordingProvider{reply: "final"}
 	comp := &stubCompressor{}
-	cfg := Config{
-		Model: "m", MaxTokens: 100, ContextWindow: 200, Compressor: comp,
-	}
-	loop := New(rp, toolruntime.NewRegistry(), cfg)
+	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100})
 
 	// ~big history: estimated tokens far above (200-100)*0.8 = 80.
 	history := bigConversation(6, 400)
@@ -119,11 +117,8 @@ func TestLoopSkipsCompressionWhenUnconfigured(t *testing.T) {
 func TestLoopCompressionCircuitBreaker(t *testing.T) {
 	rp := &recordingProvider{reply: "final"}
 	comp := &stubCompressor{err: errors.New("summarizer down")}
-	cfg := Config{
-		Model: "m", MaxTokens: 100, ContextWindow: 200, Compressor: comp,
-		MaxCompressFailures: 2,
-	}
-	loop := New(rp, toolruntime.NewRegistry(), cfg)
+	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100, MaxFailures: 2})
 
 	history := bigConversation(6, 400)
 	// Drive several iterations worth of compress attempts: each Run does one

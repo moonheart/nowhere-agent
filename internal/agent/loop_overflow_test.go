@@ -42,6 +42,7 @@ func (p *overflowProvider) Stream(_ context.Context, req provider.Request) (<-ch
 func TestLoopRetriesOnContextOverflow(t *testing.T) {
 	op := &overflowProvider{failTimes: 2}
 	loop := New(op, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	loop.Use(&OverflowMW{})
 	history := bigConversation(8, 200) // plenty of rounds to drop
 
 	out, err := loop.Run(context.Background(), history, &memEmitter{})
@@ -65,8 +66,8 @@ func TestLoopRetriesOnContextOverflow(t *testing.T) {
 
 func TestLoopOverflowRetryBounded(t *testing.T) {
 	op := &overflowProvider{failTimes: 100} // never accepts
-	cfg := Config{Model: "m", MaxTokens: 100, MaxOverflowRetries: 3}
-	loop := New(op, toolruntime.NewRegistry(), cfg)
+	loop := New(op, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	loop.Use(&OverflowMW{MaxRetries: 3})
 	_, err := loop.Run(context.Background(), bigConversation(8, 200), &memEmitter{})
 	if err == nil {
 		t.Fatal("run should fail after exhausting overflow retries")

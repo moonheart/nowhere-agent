@@ -7,7 +7,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -18,10 +17,6 @@ import (
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/toolruntime"
 )
-
-// errCompressionSkipped is returned by maybeCompress when the circuit breaker
-// has tripped, so the caller doesn't count it as a fresh failure or a success.
-var errCompressionSkipped = errors.New("compression skipped: circuit breaker tripped")
 
 // ApprovalReasonPrefix marks a Permission deny-reason as "gated for human
 // approval" rather than a hard deny. The server's permission callback prefixes
@@ -106,42 +101,23 @@ type Emitter interface {
 	Emit(ctx context.Context, kind EventKind, payload any) error
 }
 
-// Config controls the loop.
+// Config controls the loop. It holds true configuration only; cross-cutting
+// concerns (compression, memory injection, image materialization, overflow
+// retry, usage) are middleware registered via Use. Permission stays here for
+// now — it is consulted twice with different semantics (interaction gate vs
+// execution gate) and is deferred from the middleware migration.
 type Config struct {
 	Model           string
 	System          string
 	MaxTokens       int
 	MaxIterations   int // guard against infinite loops
 	CacheablePrefix bool
-	// Images, when set, materializes BlockImage paths to base64 before each
-	// send (every turn, byte-stable for prompt caching). Nil leaves image
-	// blocks as-is (they degrade to text placeholders downstream).
-	Images provider.ImageResolver
 
 	// Permission, when set, authorizes each tool call before dispatch: it
 	// receives the resolved tool and returns (deny, reason). A denied call is not
 	// executed — it becomes an is_error tool_result carrying the reason, so the
 	// model can adapt. Nil leaves all calls ungated (pre-permission behaviour).
 	Permission func(toolruntime.Tool) (bool, string)
-
-	// ContextWindow is the model's context window in tokens. Combined with
-	// MaxTokens (the reserved reply space) it bounds the working view: the loop
-	// compresses when the view exceeds CompressThreshold of (ContextWindow −
-	// MaxTokens). Zero disables in-loop compression.
-	ContextWindow int
-	// Compressor summarizes dropped history when the working view is
-	// compressed. Nil disables compression (the view grows unbounded).
-	Compressor contextmgmt.Compressor
-	// CompressThreshold is the fraction of the usable window at which
-	// compression triggers (default 0.8).
-	CompressThreshold float64
-	// MaxCompressFailures is the circuit breaker: after this many consecutive
-	// compression failures the loop stops compressing for the run (default 3).
-	MaxCompressFailures int
-	// MaxOverflowRetries bounds the reactive context-overflow fallback: how many
-	// times the loop drops the oldest round and retries after the provider
-	// rejects a request as too large (default 3).
-	MaxOverflowRetries int
 }
 
 // Loop runs the think→tool→think cycle.
@@ -149,91 +125,57 @@ type Loop struct {
 	provider provider.Adapter
 	tools    *toolruntime.Registry
 	config   Config
-	// compressFailures counts consecutive compression failures in the current
-	// run, for the circuit breaker (design D6).
-	compressFailures int
+	// middleware is the registered cross-cutting chain, in registration order.
+	// It is partitioned into the hook slices below at Use time.
+	middleware []Middleware
+	before     []BeforeModelHook
+	afterModel []AfterModelHook
+	afterRun   []AfterRunHook
+	modelWrap  []ModelCallMiddleware
+	toolWrap   []ToolCallMiddleware
 	// PendingApproval, when set after Run returns, is the gated tool call that
 	// ended the run for human input. The run worker reads it to persist the
 	// durable Approval.
 	PendingApproval *ApprovalRequest
-	// memInjector, when set, surfaces newly-created memories into the outgoing
-	// view at send time (never persisted). memSessionID identifies the session
-	// whose injection watermark the injector advances.
-	memInjector  MemoryInjector
-	memSessionID string
 }
 
-// New creates a Loop.
+// New creates a Loop. UsageMW is registered by default so each run reports its
+// accumulated token usage via KindUsage at termination (the pre-middleware
+// behaviour); callers add further middleware with Use.
 func New(p provider.Adapter, tools *toolruntime.Registry, cfg Config) *Loop {
 	if cfg.MaxIterations == 0 {
 		cfg.MaxIterations = 25
 	}
-	if cfg.CompressThreshold <= 0 {
-		cfg.CompressThreshold = 0.8
-	}
-	if cfg.MaxCompressFailures <= 0 {
-		cfg.MaxCompressFailures = 3
-	}
-	if cfg.MaxOverflowRetries <= 0 {
-		cfg.MaxOverflowRetries = 3
-	}
-	return &Loop{provider: p, tools: tools, config: cfg}
+	l := &Loop{provider: p, tools: tools, config: cfg}
+	return l.Use(&UsageMW{})
 }
 
-func (l *Loop) maxOverflowRetries() int { return l.config.MaxOverflowRetries }
-
-// attempt runs one provider call over the given working view and consumes the
-// stream into an assembled assistant message + tool calls. It returns the
-// provider error verbatim (no KindError emit) so the caller can distinguish a
-// retriable context-overflow from a fatal failure.
-func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (provider.Message, []toolruntime.Call, turnEnd, error) {
-	// Incremental memory injection (capability K / context-mgmt): append newly-
-	// surfaced memories to the tail of the OUTGOING view only. The local `view`
-	// is a per-attempt copy; the appended message never enters `produced`, so it
-	// is never persisted and the durable history stays append-only (byte-stable
-	// prefix for caching). A nil injector or an empty result leaves the view as-is.
-	if l.memInjector != nil {
-		if extra, err := l.memInjector.Inject(ctx, l.memSessionID, view); err != nil {
-			slog.Warn("agent: memory injection failed; continuing without it", "err", err)
-		} else if len(extra) > 0 {
-			view = append(append([]provider.Message{}, view...), extra...)
+// Use registers middleware in order. Per turn the chain runs: BeforeModel
+// first→last, WrapModelCall nested (first registered outermost), AfterModel
+// last→first; WrapToolCall nests likewise; AfterRun runs last→first once at run
+// end. Use returns the loop for chaining.
+func (l *Loop) Use(mw ...Middleware) *Loop {
+	for _, m := range mw {
+		if m == nil {
+			continue
+		}
+		l.middleware = append(l.middleware, m)
+		if h, ok := m.(BeforeModelHook); ok {
+			l.before = append(l.before, h)
+		}
+		if h, ok := m.(AfterModelHook); ok {
+			l.afterModel = append(l.afterModel, h)
+		}
+		if h, ok := m.(AfterRunHook); ok {
+			l.afterRun = append(l.afterRun, h)
+		}
+		if h, ok := m.(ModelCallMiddleware); ok {
+			l.modelWrap = append(l.modelWrap, h)
+		}
+		if h, ok := m.(ToolCallMiddleware); ok {
+			l.toolWrap = append(l.toolWrap, h)
 		}
 	}
-	req := provider.Request{
-		Model:           l.config.Model,
-		System:          l.config.System,
-		Messages:        view,
-		Tools:           l.toolDefs(),
-		MaxTokens:       l.config.MaxTokens,
-		CacheablePrefix: l.config.CacheablePrefix,
-	}
-	// Materialize image blocks (path → base64) before every send so the
-	// provider receives the payload; byte-stable across turns for caching.
-	if l.config.Images != nil {
-		req = provider.MaterializeImages(ctx, req, l.config.Images)
-	}
-
-	events, err := l.provider.Stream(ctx, req)
-	if err != nil {
-		return provider.Message{}, nil, turnEnd{}, fmt.Errorf("stream: %w", err)
-	}
-	return l.consume(ctx, events, emit)
-}
-
-// WithImages sets the image resolver used to materialize BlockImage paths to
-// base64 before each send. It is called once per run, after the loop is built,
-// when the session (and thus the confined resolver) is known.
-func (l *Loop) WithImages(res provider.ImageResolver) *Loop {
-	l.config.Images = res
-	return l
-}
-
-// WithMemoryInjector sets the incremental memory injector + the session whose
-// watermark it advances. Called once per run, when the session is known. A nil
-// injector disables injection (unauthenticated/direct paths).
-func (l *Loop) WithMemoryInjector(inj MemoryInjector, sessionID string) *Loop {
-	l.memInjector = inj
-	l.memSessionID = sessionID
 	return l
 }
 
@@ -273,101 +215,86 @@ func (l *Loop) toolDefs() []provider.ToolDefinition {
 // history is the short-term memory; it is not persisted to long-term memory.
 //
 // The loop works over a working view of the conversation (history + what it
-// produces). When the view approaches the model's context window it is
-// compressed (older rounds summarized); compression rewrites only the view —
-// the durable conversation record the caller keeps is never touched (design
-// D1), and the split respects tool_use/tool_result pairing (D2/D3).
+// produces). Cross-cutting concerns (compression, memory injection, image
+// materialization, overflow retry, usage) run as middleware around each model
+// call, rewriting only the transient view — never the durable record (D1).
 func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter) ([]provider.Message, error) {
-	var produced []provider.Message
-
-	// total accumulates token usage across the run's provider calls (one per
-	// turn); it is reported once at termination via KindUsage.
-	var total provider.Usage
+	state := &RunState{Emit: emit}
 
 	for iter := 0; iter < l.config.MaxIterations; iter++ {
+		state.Iteration = iter
 		// Honour cancellation between iterations (e.g. after a tool batch).
 		if err := ctx.Err(); err != nil {
 			_ = emit.Emit(ctx, KindCancelled, nil)
-			return produced, err
+			return state.Produced, err
 		}
 
 		// Assemble the working view for this turn and repair tool pairing before
 		// every send (a prior cancel or a compression split can leave an unpaired
 		// block, which the provider would reject).
-		view := contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), produced...))
-		// Compress the view when it crosses the budget. A compression failure
-		// trips the circuit breaker rather than aborting the run; a success (or a
-		// no-op under threshold) resets the consecutive-failure count. A skipped
-		// attempt (breaker already tripped) leaves the count alone.
-		compressed, err := l.maybeCompress(ctx, view)
-		switch {
-		case err == nil:
-			view = compressed
-			l.compressFailures = 0
-		case errors.Is(err, errCompressionSkipped):
-			// breaker already tripped — don't re-count
-		default:
-			l.compressFailures++
-			slog.Warn("agent: compression failed; using uncompressed view", "iter", iter, "err", err, "failures", l.compressFailures)
+		state.View = contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), state.Produced...))
+
+		// Node hooks: observation before the model call (registration order).
+		for _, h := range l.before {
+			if err := h.BeforeModel(ctx, state); err != nil {
+				slog.Warn("agent: BeforeModel hook failed", "err", err)
+			}
 		}
 
-		assistant, toolCalls, end, err := l.attempt(ctx, view, emit)
-		for attempts := 0; err != nil && provider.IsContextOverflow(err) && attempts < l.maxOverflowRetries(); attempts++ {
-			// Reactive fallback (design D7): the threshold trigger mis-estimated
-			// and the provider rejected the request as too large. Drop the oldest
-			// round and retry rather than failing the run.
-			shrunk, ok := contextmgmt.DropOldestRound(view)
-			if !ok {
-				break // nothing safe left to drop
-			}
-			view = shrunk
-			assistant, toolCalls, end, err = l.attempt(ctx, view, emit)
-		}
+		res, err := l.attempt(ctx, state.View, emit)
 		if err != nil {
 			if ctx.Err() != nil {
 				slog.Info("agent: run cancelled", "iter", iter, "ctx_err", ctx.Err(), "attempt_err", err)
 				_ = emit.Emit(ctx, KindCancelled, nil)
-				return produced, ctx.Err()
+				return state.Produced, ctx.Err()
 			}
-			slog.Error("agent: provider attempt failed; run aborting", "iter", iter, "err", err, "view_msgs", len(view))
+			slog.Error("agent: provider attempt failed; run aborting", "iter", iter, "err", err, "view_msgs", len(state.View))
 			_ = emit.Emit(ctx, KindError, err.Error())
-			return produced, err
+			l.runAfterRun(ctx, state)
+			return state.Produced, err
 		}
-		if end.usage != nil {
-			total.InputTokens += end.usage.InputTokens
-			total.OutputTokens += end.usage.OutputTokens
-			total.CacheReadTokens += end.usage.CacheReadTokens
-			total.CacheWriteTokens += end.usage.CacheWriteTokens
+		if res.Usage != nil {
+			state.Usage.InputTokens += res.Usage.InputTokens
+			state.Usage.OutputTokens += res.Usage.OutputTokens
+			state.Usage.CacheReadTokens += res.Usage.CacheReadTokens
+			state.Usage.CacheWriteTokens += res.Usage.CacheWriteTokens
 		}
-		produced = append(produced, assistant)
+		state.Produced = append(state.Produced, res.Assistant)
 		// Expose the assembled assistant message for full-block persistence
 		// (persist-raw-messages), paired with the usage of the LLM call that
 		// produced it. Emit failures here don't abort the run — the persistence
 		// listener drops them — so ignore the error.
-		_ = emit.Emit(ctx, KindMessage, MessageWithUsage{Message: assistant, Usage: end.usage})
+		_ = emit.Emit(ctx, KindMessage, MessageWithUsage{Message: res.Assistant, Usage: res.Usage})
+
+		// Node hooks: observation after the model call (reverse order).
+		for i := len(l.afterModel) - 1; i >= 0; i-- {
+			if err := l.afterModel[i].AfterModel(ctx, state); err != nil {
+				slog.Warn("agent: AfterModel hook failed", "err", err)
+			}
+		}
 
 		// No tool calls → the turn is final. But distinguish a natural finish from
 		// a max_tokens truncation: a truncated turn is a cut-off answer, not a
 		// clean completion, so surface it as an error instead of a silent done
 		// (capability-gap L1). Without this the loop treats truncation as success.
-		if len(toolCalls) == 0 {
-			if end.stop == provider.StopMaxTokens {
+		if len(res.Calls) == 0 {
+			if res.Stop == provider.StopMaxTokens {
 				truncErr := fmt.Errorf("response truncated: hit the max_tokens limit (%d)", l.config.MaxTokens)
-				emitUsage(ctx, emit, total)
+				l.runAfterRun(ctx, state)
 				_ = emit.Emit(ctx, KindError, truncErr.Error())
-				return produced, truncErr
+				return state.Produced, truncErr
 			}
-			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", total.InputTokens, "output_tokens", total.OutputTokens,
-				"cache_read_tokens", total.CacheReadTokens, "cache_write_tokens", total.CacheWriteTokens, "cache_hit_pct", cacheHitPct(total))
-			emitUsage(ctx, emit, total)
+			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", state.Usage.InputTokens, "output_tokens", state.Usage.OutputTokens,
+				"cache_read_tokens", state.Usage.CacheReadTokens, "cache_write_tokens", state.Usage.CacheWriteTokens, "cache_hit_pct", cacheHitPct(state.Usage))
+			l.runAfterRun(ctx, state)
 			_ = emit.Emit(ctx, KindDone, nil)
-			return produced, nil
+			return state.Produced, nil
 		}
 
 		// Don't start a tool batch the caller has already cancelled.
 		if err := ctx.Err(); err != nil {
 			_ = emit.Emit(ctx, KindCancelled, nil)
-			return produced, err
+			return state.Produced, err
 		}
 
 		// Human-interaction gate (capability-gap O2 + ask_user): if a call needs a
@@ -376,27 +303,27 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// message (with the gated tool_use) is already produced/persisted, the run
 		// worker records the durable Approval, and a LATER run applies the verdict.
 		// The run is stateless — it ends here; there is no suspend/resume.
-		if gate := l.interactionGate(toolCalls); gate != nil {
+		if gate := l.interactionGate(res.Calls); gate != nil {
 			l.PendingApproval = gate
 			_ = emit.Emit(ctx, KindApprovalRequest, *gate)
 			slog.Info("agent: run ended awaiting human input", "tool", gate.ToolName, "kind", gate.Kind)
-			emitUsage(ctx, emit, total)
+			l.runAfterRun(ctx, state)
 			_ = emit.Emit(ctx, KindDone, nil)
-			return produced, nil
+			return state.Produced, nil
 		}
 
 		// Dispatch tool calls (concurrently) and append results.
-		results := l.dispatch(ctx, toolCalls)
-		for i, res := range results {
+		results := l.dispatch(ctx, res.Calls)
+		for i, r := range results {
 			_ = emit.Emit(ctx, KindToolResult, map[string]any{
-				"tool_use_id": toolCalls[i].ID,
-				"name":        toolCalls[i].Name,
-				"content":     res.Content,
-				"is_error":    res.IsError,
+				"tool_use_id": res.Calls[i].ID,
+				"name":        res.Calls[i].Name,
+				"content":     r.Content,
+				"is_error":    r.IsError,
 			})
 		}
-		resultMsg := toolResultMessage(toolCalls, results)
-		produced = append(produced, resultMsg)
+		resultMsg := toolResultMessage(res.Calls, results)
+		state.Produced = append(state.Produced, resultMsg)
 		// Expose the assembled tool-result message for full-block persistence.
 		_ = emit.Emit(ctx, KindMessage, resultMsg)
 	}
@@ -406,19 +333,55 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	// to failed (registry.execute), but the client sees the stream just end with no
 	// explanation. Emit KindError so a terminal frame always accompanies the failure.
 	err := fmt.Errorf("max iterations (%d) exceeded", l.config.MaxIterations)
-	emitUsage(ctx, emit, total)
+	l.runAfterRun(ctx, state)
 	_ = emit.Emit(ctx, KindError, err.Error())
-	return produced, err
+	return state.Produced, err
 }
 
-// emitUsage reports the run's accumulated token usage as a terminal KindUsage
-// event so the transport can surface real counts in its finish frame. A zero
-// total (no adapter reported usage) is skipped.
-func emitUsage(ctx context.Context, emit Emitter, total provider.Usage) {
-	if total == (provider.Usage{}) {
-		return
+// runAfterRun fires AfterRun hooks once (reverse registration order).
+func (l *Loop) runAfterRun(ctx context.Context, state *RunState) {
+	for i := len(l.afterRun) - 1; i >= 0; i-- {
+		if err := l.afterRun[i].AfterRun(ctx, state); err != nil {
+			slog.Warn("agent: AfterRun hook failed", "err", err)
+		}
 	}
-	_ = emit.Emit(ctx, KindUsage, total)
+}
+
+// attempt runs one provider call through the wrap chain and returns the
+// assembled result. It returns the provider error verbatim (no KindError emit)
+// so the caller can distinguish a retriable context-overflow from a fatal
+// failure.
+func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (ModelResult, error) {
+	call := &ModelCall{
+		Request: provider.Request{
+			Model:           l.config.Model,
+			System:          l.config.System,
+			Messages:        view,
+			Tools:           l.toolDefs(),
+			MaxTokens:       l.config.MaxTokens,
+			CacheablePrefix: l.config.CacheablePrefix,
+		},
+		// Per-attempt copy: middleware (compression, memory injection, image
+		// materialization) rewrites this without touching the durable record.
+		View: append([]provider.Message{}, view...),
+	}
+	return chainModel(l.modelWrap, l.realAttempt(emit))(ctx, call)
+}
+
+// realAttempt is the innermost model-call handler: it streams the request and
+// consumes the events into an assembled assistant message + tool calls.
+func (l *Loop) realAttempt(emit Emitter) ModelHandler {
+	return func(ctx context.Context, c *ModelCall) (ModelResult, error) {
+		events, err := l.provider.Stream(ctx, c.Request)
+		if err != nil {
+			return ModelResult{}, fmt.Errorf("stream: %w", err)
+		}
+		assistant, calls, end, err := l.consume(ctx, events, emit)
+		if err != nil {
+			return ModelResult{}, err
+		}
+		return ModelResult{Assistant: assistant, Calls: calls, Stop: end.stop, Usage: end.usage}, nil
+	}
 }
 
 // cacheHitPct returns the prompt-prefix cache hit rate as a whole percentage.
@@ -643,33 +606,6 @@ func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolrun
 		}
 	}
 	return results
-}
-
-// maybeCompress compresses the working view when it crosses the context budget,
-// returning the (possibly unchanged) view to send. Compression is skipped when
-// it is not configured or the circuit breaker has tripped; the durable record
-// is never touched — only the view handed to the provider shrinks (D1/D5).
-func (l *Loop) maybeCompress(ctx context.Context, view []provider.Message) ([]provider.Message, error) {
-	if l.config.Compressor == nil || l.config.ContextWindow <= 0 {
-		return view, nil
-	}
-	if l.compressFailures >= l.config.MaxCompressFailures {
-		// Breaker tripped: don't even call the failing summarizer. Return a
-		// sentinel so the caller leaves the count alone (neither a fresh failure
-		// nor a success that would reset it).
-		return view, errCompressionSkipped
-	}
-	// Usable window reserves room for the model's reply (design D5).
-	budget := l.config.ContextWindow - l.config.MaxTokens
-	if budget <= 0 {
-		budget = l.config.ContextWindow
-	}
-	policy := contextmgmt.Policy{
-		MaxTokens:  budget,
-		Threshold:  l.config.CompressThreshold,
-		KeepRecent: 2, // recent rounds stay verbatim; older rounds are summarized
-	}
-	return contextmgmt.Compress(ctx, view, policy, l.config.Compressor)
 }
 
 // toolResultMessage builds the user-role message carrying tool results back.

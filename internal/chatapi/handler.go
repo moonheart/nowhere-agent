@@ -212,13 +212,6 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	}
 	sessID := s.ID
 
-	// Bind the image materializer to this session so any BlockImage in the
-	// rebuilt history or produced output resolves within this session's
-	// workspace (confined). Set before the run starts.
-	if h.images != nil {
-		loop.WithImages(h.images.ResolverFor(sessID))
-	}
-
 	// Attach this session's sandbox-bound tools (file-tools) now that the
 	// session id is known. The binder ensures the session's sandbox and
 	// registers its file tools into the loop's registry.
@@ -226,15 +219,10 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		h.bindTools(r.Context(), loop, sessID)
 	}
 
-	// Incremental memory injection: surface new memories into the outgoing view
-	// (never the durable history). query = the user's latest text for relevance.
-	if h.memInjectorFactory != nil {
-		if user, ok := identity.UserFromContext(r.Context()); ok {
-			if inj := h.memInjectorFactory(r.Context(), user, lastUserText(req)); inj != nil {
-				loop.WithMemoryInjector(inj, sessID)
-			}
-		}
-	}
+	// Session-scoped middleware: memory injection (recalled memories into the
+	// transient view) + image materialization (BlockImage path → base64), in
+	// registration order. Compression is already on the loop from construction.
+	h.bindSessionMiddleware(loop, r, sessID, lastUserText(req))
 
 	// Build the user turn's message so the run worker can persist it (full-block
 	// conversation record) in addition to the replay event below.
@@ -324,21 +312,13 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	// Build the fresh run's loop and bind this session's tools BEFORE deciding:
 	// an approved permission call executes through this same registry.
 	loop := h.newLoop(r.Context(), h.system)
-	if h.images != nil {
-		loop.WithImages(h.images.ResolverFor(sessID))
-	}
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
 	}
 	// A verdict continues the conversation with no new user text: surface any
-	// memories created since the last injection (empty query → recency order).
-	if h.memInjectorFactory != nil {
-		if user, ok := identity.UserFromContext(r.Context()); ok {
-			if inj := h.memInjectorFactory(r.Context(), user, ""); inj != nil {
-				loop.WithMemoryInjector(inj, sessID)
-			}
-		}
-	}
+	// memories created since the last injection (empty query → recency order),
+	// and materialize this session's images.
+	h.bindSessionMiddleware(loop, r, sessID, "")
 
 	_, history, err := h.registry.Decide(r.Context(), av.ApprovalID, av.Approved, av.Answer, loop.Tools())
 	if err != nil {

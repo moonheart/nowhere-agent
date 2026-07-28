@@ -267,31 +267,39 @@ func run() error {
 			if def.MaxTurns > 0 {
 				maxIter = def.MaxTurns
 			}
-			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
+			loop := agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           childModel,
 				System:          def.System,
 				MaxTokens:       4096,
 				MaxIterations:   maxIter,
 				CacheablePrefix: true,
-				ContextWindow:   cfg.LLM.ContextWindow,
-				Compressor:      compressor,
 				Permission:      permit,
 			})
+			// Cross-cutting middleware, outermost first: compression shrinks the
+			// working view, overflow retry drops a round and retries on rejection.
+			if compressor != nil {
+				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 4096})
+			}
+			loop.Use(&agent.OverflowMW{})
+			return loop
 		}
 
 		// Loop factory + session tool binder, named so the approval Resume path
 		// can rebuild a parked run's loop after a restart (capability-gap O2).
 		newChatLoop := func(ctx context.Context, system string) *agent.Loop {
-			return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
+			loop := agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           model,
 				System:          system,
 				MaxTokens:       4096,
 				MaxIterations:   25,
 				CacheablePrefix: true,
-				ContextWindow:   cfg.LLM.ContextWindow,
-				Compressor:      compressor,
 				Permission:      permit,
 			})
+			if compressor != nil {
+				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 4096})
+			}
+			loop.Use(&agent.OverflowMW{})
+			return loop
 		}
 		bindChatTools := func(ctx context.Context, loop *agent.Loop, sessionID string) {
 			reg := toolruntime.NewRegistry()

@@ -33,7 +33,7 @@ func TestAttemptInjectsMemoryIntoOutgoingView(t *testing.T) {
 
 	memMsg := provider.TextMessage(provider.RoleUser, "[背景记忆] prefers dark mode")
 	inj := &fakeInjector{extra: []provider.Message{memMsg}}
-	loop.WithMemoryInjector(inj, "sess-1")
+	loop.Use(&MemoryInjectMW{Injector: inj, SessionID: "sess-1"})
 
 	history := []provider.Message{provider.TextMessage(provider.RoleUser, "hello")}
 	produced, err := loop.Run(context.Background(), history, &memEmitter{})
@@ -75,7 +75,7 @@ func TestAttemptInjectsMemoryIntoOutgoingView(t *testing.T) {
 func TestAttemptSkipsInjectionWhenEmpty(t *testing.T) {
 	p := &scriptProvider{script: [][]provider.Event{textResponse("hi")}}
 	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
-	loop.WithMemoryInjector(&fakeInjector{extra: nil}, "sess-1")
+	loop.Use(&MemoryInjectMW{Injector: &fakeInjector{extra: nil}, SessionID: "sess-1"})
 
 	history := []provider.Message{provider.TextMessage(provider.RoleUser, "hello")}
 	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
