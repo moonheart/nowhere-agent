@@ -48,7 +48,8 @@ func TestLoopPermissionDeniesGatedTool(t *testing.T) {
 	}}
 	reg := toolruntime.NewRegistry()
 	reg.Register(riskTool{name: "net", risk: toolruntime.RiskNetwork, called: &called})
-	loop := New(p, reg, Config{Model: "m", MaxTokens: 100, Permission: denyNetwork})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&PermissionMW{Check: denyNetwork})
 
 	produced, err := loop.Run(context.Background(), nil, &memEmitter{})
 	if err != nil {
@@ -76,7 +77,8 @@ func TestLoopPermissionAllowsUngatedTool(t *testing.T) {
 	}}
 	reg := toolruntime.NewRegistry()
 	reg.Register(riskTool{name: "reader", risk: toolruntime.RiskReadOnly, called: &called})
-	loop := New(p, reg, Config{Model: "m", MaxTokens: 100, Permission: denyNetwork})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&PermissionMW{Check: denyNetwork})
 
 	if _, err := loop.Run(context.Background(), nil, &memEmitter{}); err != nil {
 		t.Fatal(err)

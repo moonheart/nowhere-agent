@@ -26,7 +26,8 @@ func TestLoopEndsOnApprovalGate(t *testing.T) {
 	}}
 	reg := toolruntime.NewRegistry()
 	reg.Register(riskTool{name: "danger", risk: toolruntime.RiskExternalWrite, called: &called})
-	loop := New(p, reg, Config{Model: "m", MaxTokens: 100, Permission: askAll})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&PermissionMW{Check: askAll})
 
 	emit := &memEmitter{}
 	produced, err := loop.Run(context.Background(), nil, emit)

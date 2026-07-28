@@ -273,10 +273,11 @@ func run() error {
 				MaxTokens:       4096,
 				MaxIterations:   maxIter,
 				CacheablePrefix: true,
-				Permission:      permit,
 			})
-			// Cross-cutting middleware, outermost first: compression shrinks the
-			// working view, overflow retry drops a round and retries on rejection.
+			// Cross-cutting middleware, outermost first: tool authorization gates
+			// dispatch, compression shrinks the working view, overflow retry drops
+			// a round and retries on rejection.
+			loop.Use(&agent.PermissionMW{Check: permit})
 			if compressor != nil {
 				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 4096})
 			}
@@ -293,8 +294,8 @@ func run() error {
 				MaxTokens:       4096,
 				MaxIterations:   25,
 				CacheablePrefix: true,
-				Permission:      permit,
 			})
+			loop.Use(&agent.PermissionMW{Check: permit})
 			if compressor != nil {
 				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 4096})
 			}

@@ -73,6 +73,26 @@ type AfterRunHook interface {
 	AfterRun(ctx context.Context, s *RunState) error
 }
 
+// ---- gate hooks (tool authorization) ----------------------------------------
+// A GateFunc authorizes one tool: (deny, reason). deny=true blocks the call.
+// The loop consults gate middleware at two points with different semantics:
+// the interaction gate (should this call end the run for human input — when
+// the deny reason carries the ApprovalReasonPrefix marker) and the execution
+// gate (should this call dispatch at all). Each is a separate interface so a
+// middleware implements only the point it governs.
+type GateFunc func(toolruntime.Tool) (bool, string)
+
+// InteractionGateHook authorizes calls at the interaction gate, deciding
+// whether a call ends the run for human input.
+type InteractionGateHook interface {
+	GateInteraction() GateFunc
+}
+
+// ExecuteGateHook authorizes calls at dispatch, deciding whether a call runs.
+type ExecuteGateHook interface {
+	GateExecute() GateFunc
+}
+
 // ---- wrap-style hooks (control) ---------------------------------------------
 
 // ModelCall is one provider invocation handed through the wrap chain.
@@ -299,4 +319,23 @@ func (m *UsageMW) AfterRun(ctx context.Context, s *RunState) error {
 	_ = s.Emit.Emit(ctx, KindUsage, s.Usage)
 	return nil
 }
+
+// PermissionMW is the built-in tool-authorization middleware. It carries the
+// policy callback and exposes it at BOTH gate points the loop consults: the
+// interaction gate (deny with the ApprovalReasonPrefix marker ends the run for
+// human input) and the execution gate (any deny blocks dispatch, feeding the
+// reason back to the model as an error tool-result). It does not own the run
+// orchestration — the loop keeps the ask_user branch and the run-termination
+// semantics; PermissionMW only answers "is this tool allowed, and why".
+type PermissionMW struct {
+	Check GateFunc
+}
+
+func (m *PermissionMW) MiddlewareName() string { return "permission" }
+
+// GateInteraction exposes the policy at the interaction gate.
+func (m *PermissionMW) GateInteraction() GateFunc { return m.Check }
+
+// GateExecute exposes the policy at the execution gate.
+func (m *PermissionMW) GateExecute() GateFunc { return m.Check }
 

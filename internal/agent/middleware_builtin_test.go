@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/toolruntime"
 )
 
 // These tests exercise each built-in middleware in isolation, through the wrap
@@ -193,5 +194,43 @@ func TestUsageMWSkipsZeroTotal(t *testing.T) {
 	}
 	if emit.count(KindUsage) != 0 {
 		t.Errorf("zero usage must not emit KindUsage, got %d", emit.count(KindUsage))
+	}
+}
+
+// TestPermissionMWExposesBothGates verifies PermissionMW surfaces the same
+// policy at both the interaction and execution gate hooks.
+func TestPermissionMWExposesBothGates(t *testing.T) {
+	mw := &PermissionMW{Check: denyNetwork}
+	// Implements both gate interfaces.
+	var _ InteractionGateHook = mw
+	var _ ExecuteGateHook = mw
+
+	netTool := riskTool{name: "net", risk: toolruntime.RiskNetwork}
+	readTool := riskTool{name: "r", risk: toolruntime.RiskReadOnly}
+
+	for name, gate := range map[string]GateFunc{"interaction": mw.GateInteraction(), "execute": mw.GateExecute()} {
+		if gate == nil {
+			t.Fatalf("%s gate is nil", name)
+		}
+		if deny, _ := gate(netTool); !deny {
+			t.Errorf("%s gate should deny the network tool", name)
+		}
+		if deny, _ := gate(readTool); deny {
+			t.Errorf("%s gate should allow the read-only tool", name)
+		}
+	}
+}
+
+// TestLoopUseFirstGateWins verifies that when two middleware register the same
+// gate hook, the first registered is the one the loop consults.
+func TestLoopUseFirstGateWins(t *testing.T) {
+	loop := New(&scriptProvider{}, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	loop.Use(&PermissionMW{Check: denyNetwork})
+	loop.Use(&PermissionMW{Check: askAll}) // ignored: first registration wins
+	if loop.gateInteraction == nil || loop.gateExecute == nil {
+		t.Fatal("gates should be wired from the first PermissionMW")
+	}
+	if deny, reason := loop.gateExecute(riskTool{name: "net", risk: toolruntime.RiskNetwork}); !deny || IsApprovalReason(reason) {
+		t.Errorf("execute gate = (%v, %q), want the first (denyNetwork) policy, not the approval marker", deny, reason)
 	}
 }

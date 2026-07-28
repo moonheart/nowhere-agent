@@ -103,21 +103,13 @@ type Emitter interface {
 
 // Config controls the loop. It holds true configuration only; cross-cutting
 // concerns (compression, memory injection, image materialization, overflow
-// retry, usage) are middleware registered via Use. Permission stays here for
-// now — it is consulted twice with different semantics (interaction gate vs
-// execution gate) and is deferred from the middleware migration.
+// retry, usage, tool authorization) are middleware registered via Use.
 type Config struct {
 	Model           string
 	System          string
 	MaxTokens       int
 	MaxIterations   int // guard against infinite loops
 	CacheablePrefix bool
-
-	// Permission, when set, authorizes each tool call before dispatch: it
-	// receives the resolved tool and returns (deny, reason). A denied call is not
-	// executed — it becomes an is_error tool_result carrying the reason, so the
-	// model can adapt. Nil leaves all calls ungated (pre-permission behaviour).
-	Permission func(toolruntime.Tool) (bool, string)
 }
 
 // Loop runs the think→tool→think cycle.
@@ -133,6 +125,12 @@ type Loop struct {
 	afterRun   []AfterRunHook
 	modelWrap  []ModelCallMiddleware
 	toolWrap   []ToolCallMiddleware
+	// gateInteraction/gateExecute authorize tool calls at the interaction gate
+	// (end the run for human input) and the execution gate (block dispatch).
+	// First registered wins; both default to allow-all when no middleware
+	// registers the hook.
+	gateInteraction GateFunc
+	gateExecute     GateFunc
 	// PendingApproval, when set after Run returns, is the gated tool call that
 	// ended the run for human input. The run worker reads it to persist the
 	// durable Approval.
@@ -153,7 +151,9 @@ func New(p provider.Adapter, tools *toolruntime.Registry, cfg Config) *Loop {
 // Use registers middleware in order. Per turn the chain runs: BeforeModel
 // first→last, WrapModelCall nested (first registered outermost), AfterModel
 // last→first; WrapToolCall nests likewise; AfterRun runs last→first once at run
-// end. Use returns the loop for chaining.
+// end. Gate hooks (interaction/execute) go to the FIRST middleware that
+// registers each — later registrations for the same gate are ignored. Use
+// returns the loop for chaining.
 func (l *Loop) Use(mw ...Middleware) *Loop {
 	for _, m := range mw {
 		if m == nil {
@@ -174,6 +174,12 @@ func (l *Loop) Use(mw ...Middleware) *Loop {
 		}
 		if h, ok := m.(ToolCallMiddleware); ok {
 			l.toolWrap = append(l.toolWrap, h)
+		}
+		if h, ok := m.(InteractionGateHook); ok && l.gateInteraction == nil {
+			l.gateInteraction = h.GateInteraction()
+		}
+		if h, ok := m.(ExecuteGateHook); ok && l.gateExecute == nil {
+			l.gateExecute = h.GateExecute()
 		}
 	}
 	return l
@@ -562,9 +568,9 @@ func (l *Loop) interactionGate(calls []toolruntime.Call) *ApprovalRequest {
 			return &ApprovalRequest{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 		}
 		// Permission approval: a dangerous call the policy gates for a yes/no.
-		if l.config.Permission != nil {
+		if l.gateInteraction != nil {
 			if tool, ok := l.tools.Get(c.Name); ok {
-				if deny, reason := l.config.Permission(tool); deny && IsApprovalReason(reason) {
+				if deny, reason := l.gateInteraction(tool); deny && IsApprovalReason(reason) {
 					return &ApprovalRequest{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 				}
 			}
@@ -589,9 +595,9 @@ func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolrun
 		// Execution-permission gate (D10): authorize the call by the tool's risk
 		// before dispatch. A denied call is not executed; the reason is fed back as
 		// an error result so the model can adapt.
-		if l.config.Permission != nil {
+		if l.gateExecute != nil {
 			if tool, ok := l.tools.Get(c.Name); ok {
-				if deny, reason := l.config.Permission(tool); deny {
+				if deny, reason := l.gateExecute(tool); deny {
 					results[i] = toolruntime.Result{Content: "permission denied: " + reason, IsError: true}
 					continue
 				}
