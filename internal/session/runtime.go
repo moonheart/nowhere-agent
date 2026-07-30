@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/provider"
 )
 
@@ -248,10 +249,18 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 
 // isContentKind reports whether an event kind is a streaming content delta that
 // belongs on the live broker (not the durable per-token log). Lifecycle kinds
-// (running/done/error/cancelled/user) are persisted to run_events.
+// (running/done/error/cancelled/user) are persisted to run_events instead. The
+// interrupt frame is broker-routed too — the run worker persists the durable
+// Interaction record separately, and the transient data-interaction frame must
+// reach the client live to drive the approval/ask_user/client-tool card.
+//
+// Matched against the agent.EventKind constants (NOT string literals) so a
+// rename of a kind's value can't silently desync this routing — as happened when
+// "approval_request" became agent.KindInterrupt and this list still checked the
+// old string, dropping every interaction frame in the runtime-wired server.
 func isContentKind(kind string) bool {
-	switch kind {
-	case "text", "thinking", "tool_use", "tool_result", "subagent", "approval_request":
+	switch agent.EventKind(kind) {
+	case agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolResult, agent.KindSubagent, agent.KindInterrupt:
 		return true
 	default:
 		return false

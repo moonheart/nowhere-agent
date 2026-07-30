@@ -24,7 +24,7 @@ import { asAsyncIterableStream } from "assistant-stream/utils";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
-import { reportApproval, type ToolApproval } from "@/lib/approval";
+import { reportInteraction, type Interaction } from "@/lib/approval";
 import { reportPlan, type Plan } from "@/lib/plan";
 
 type HistoryPart =
@@ -102,7 +102,7 @@ async function loadHistory(): Promise<{
   messages: ThreadMessageLike[];
   active: boolean;
   after: number;
-  pendingApproval?: ToolApproval | null;
+  pendingApproval?: Interaction | null;
   sessionState?: { plan?: Plan } | null;
 }> {
   const threadId = getSessionId();
@@ -116,7 +116,7 @@ async function loadHistory(): Promise<{
     messages?: HistoryMessage[];
     active?: boolean;
     after?: number;
-    pendingApproval?: ToolApproval | null;
+    pendingApproval?: Interaction | null;
     sessionState?: { plan?: Plan } | null;
   };
   const messages = (data.messages ?? []).map(mapMessage);
@@ -154,7 +154,9 @@ async function* resumeStream(
     .pipeThrough(
       new UIMessageStreamDecoder({
         onData: (d) => {
-          if (d.name === "tool-approval") reportApproval(d.data as ToolApproval);
+          if (d.name === "interaction" || d.name === "tool-approval") {
+            reportInteraction(d.data as Interaction);
+          }
         },
       }),
     )
@@ -188,11 +190,14 @@ export async function* followBody(
   const accumulated = body
     .pipeThrough(
       // A verdict run can itself end on a new gate (the model asks a follow-up
-      // question): surface that card live, since this follow path bypasses the
-      // runtime's own onData. Mirrors App.tsx's onData → reportApproval.
+      // question, or calls another client tool): surface that card live, since
+      // this follow path bypasses the runtime's own onData. Mirrors App.tsx's
+      // onData → reportInteraction.
       new UIMessageStreamDecoder({
         onData: (d) => {
-          if (d.name === "tool-approval") reportApproval(d.data as ToolApproval);
+          if (d.name === "interaction" || d.name === "tool-approval") {
+            reportInteraction(d.data as Interaction);
+          }
         },
       }),
     )
@@ -229,10 +234,11 @@ export const threadHistory: ThreadHistoryAdapter = {
   async load() {
     const { messages, active, after, pendingApproval, sessionState } = await loadHistory();
     lastLoadedAfter = after;
-    // Re-show a parked interaction (permission approve/deny, or an ask_user
-    // card) the transient frame dropped on refresh; the durable row is the
-    // source of truth, echoed by /history as pendingApproval.
-    if (pendingApproval) reportApproval(pendingApproval);
+    // Re-show a parked interaction (permission approve/deny, an ask_user card,
+    // or a client_tool the browser auto-executes) the transient frame dropped on
+    // refresh; the durable row is the source of truth, echoed by /history as
+    // pendingApproval.
+    if (pendingApproval) reportInteraction(pendingApproval);
     // Restore the plan panel (capability-gap O1): the session's persisted plan
     // state is echoed as sessionState.plan, the same source the live
     // data-session-state frames feed.

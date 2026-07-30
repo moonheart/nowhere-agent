@@ -54,3 +54,27 @@ type Tool interface {
 	// Call executes the tool with JSON-decoded args.
 	Call(ctx context.Context, args map[string]any) (Result, error)
 }
+
+// ClientTool is a Tool that executes in the client (browser), not on the server
+// (general interrupt). The loop detects it via this OPTIONAL interface — the
+// base Tool contract is untouched — and suspends the run instead of dispatching:
+// the call is handed to the client, which executes it and returns the output,
+// folded back as the tool result on resume. Call is never reached in the gated
+// path (the loop intercepts first), mirroring ask_user.
+type ClientTool interface {
+	Tool
+	// ClientSide reports that this tool runs in the client. true → suspend.
+	ClientSide() bool
+	// OutputSchema, when non-nil, declares the shape of the output the client
+	// returns. The server validates the returned output against it before folding
+	// (declare + validate), so client output is never trusted blindly. Nil accepts
+	// any output.
+	OutputSchema() map[string]any
+}
+
+// IsClientTool reports whether t is a client-side tool (implements ClientTool
+// with ClientSide() == true). The loop uses it at the unified suspend point.
+func IsClientTool(t Tool) bool {
+	ct, ok := t.(ClientTool)
+	return ok && ct.ClientSide()
+}

@@ -197,27 +197,23 @@ func TestUsageMWSkipsZeroTotal(t *testing.T) {
 	}
 }
 
-// TestPermissionMWExposesBothGates verifies PermissionMW surfaces the same
-// policy at both the interaction and execution gate hooks.
-func TestPermissionMWExposesBothGates(t *testing.T) {
+// TestPermissionMWExposesGate verifies PermissionMW surfaces its policy to the
+// loop via the single GateFuncProvider hook (used at both gate points).
+func TestPermissionMWExposesGate(t *testing.T) {
 	mw := &PermissionMW{Check: denyNetwork}
-	// Implements both gate interfaces.
-	var _ InteractionGateHook = mw
-	var _ ExecuteGateHook = mw
+	var _ GateFuncProvider = mw
 
+	gate := mw.GateCheck()
+	if gate == nil {
+		t.Fatal("GateCheck returned nil")
+	}
 	netTool := riskTool{name: "net", risk: toolruntime.RiskNetwork}
 	readTool := riskTool{name: "r", risk: toolruntime.RiskReadOnly}
-
-	for name, gate := range map[string]GateFunc{"interaction": mw.GateInteraction(), "execute": mw.GateExecute()} {
-		if gate == nil {
-			t.Fatalf("%s gate is nil", name)
-		}
-		if deny, _ := gate(netTool); !deny {
-			t.Errorf("%s gate should deny the network tool", name)
-		}
-		if deny, _ := gate(readTool); deny {
-			t.Errorf("%s gate should allow the read-only tool", name)
-		}
+	if deny, _ := gate(netTool); !deny {
+		t.Error("gate should deny the network tool")
+	}
+	if deny, _ := gate(readTool); deny {
+		t.Error("gate should allow the read-only tool")
 	}
 }
 

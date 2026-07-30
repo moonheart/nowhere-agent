@@ -31,25 +31,31 @@ func IsApprovalReason(reason string) bool {
 	return strings.HasPrefix(reason, ApprovalReasonPrefix)
 }
 
-// ApprovalRequest describes the single gated tool call that ended a run for
-// human input (capability-gap O2). The loop emits it (KindApprovalRequest) and
-// finishes; the run's worker persists it as a durable Approval (thread state)
-// and surfaces it to the client. The run does NOT suspend — a fresh run applies
-// the verdict later. Kind distinguishes a permission approval (a dangerous call
-// needing a yes/no) from an ask_user question set.
-type ApprovalRequest struct {
-	// ID is the durable approval's id, generated the moment the gate is detected
-	// (LangGraph-style: the interrupt's id is known before it is surfaced). The
-	// loop emits it on the KindApprovalRequest frame and the run worker persists
-	// the Approval row with the SAME id, so the client's card can POST its verdict
-	// without a refresh or a store lookup.
+// Interaction describes the single client-interaction tool call that ended a
+// run (general interrupt, capability O2 + O-ask + client-side tools). The loop
+// emits it (KindInterrupt) and finishes; the run's worker persists it as a
+// durable Interaction (thread state) and surfaces it to the client. The run
+// does NOT suspend — a fresh run applies the result later. Kind distinguishes
+// the interaction kinds (a permission approval, an ask_user question set, a
+// client-side tool).
+type Interaction struct {
+	// ID is the durable interaction's id, generated the moment the gate is
+	// detected (LangGraph-style: the interrupt's id is known before it is
+	// surfaced). The loop emits it on the KindInterrupt frame and the run worker
+	// persists the Interaction row with the SAME id, so the client's card can POST
+	// its verdict without a refresh or a store lookup.
 	ID string
-	// Kind is "approval" or "ask_user". Empty means approval (the O2 default).
+	// Kind is the open interaction kind ("approval" | "ask_user" | "client_tool" |
+	// ...). Empty means approval (the O2 default).
 	Kind       string
 	ToolCallID string
 	ToolName   string
 	Input      map[string]any
 }
+
+// ApprovalRequest is retained as an alias of Interaction for source
+// compatibility during the transition to the general-interrupt model.
+type ApprovalRequest = Interaction
 
 // AskUserToolName is the built-in tool the model calls to ask the user
 // structured questions (capability O-ask). Like a permission approval, calling
@@ -89,11 +95,16 @@ const (
 	// once, at natural termination. It is persisted and fanned out so the
 	// transport's finish frame can report real token counts instead of zeros.
 	KindUsage EventKind = "usage"
-	// KindApprovalRequest carries the gated tool call that ended the run for
-	// human input (payload: ApprovalRequest). Live-only content (broker-routed,
-	// never persisted): the run's worker separately persists the durable Approval
-	// record the decision endpoint reads.
-	KindApprovalRequest EventKind = "approval_request"
+	// KindInterrupt carries the client-interaction tool call that ended the run
+	// (payload: Interaction). Live-only content (broker-routed, never persisted):
+	// the run's worker separately persists the durable Interaction record the
+	// decision endpoint reads. One unified frame for every interaction kind —
+	// approval, ask_user, client-side tool.
+	KindInterrupt EventKind = "interrupt"
+	// KindApprovalRequest is the pre-generalization name for KindInterrupt, kept
+	// as an alias so existing emitters/consumers keep working during the
+	// transition. Emit and match on KindInterrupt; treat them interchangeably.
+	KindApprovalRequest = KindInterrupt
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).
@@ -131,10 +142,13 @@ type Loop struct {
 	// registers the hook.
 	gateInteraction GateFunc
 	gateExecute     GateFunc
-	// PendingApproval, when set after Run returns, is the gated tool call that
-	// ended the run for human input. The run worker reads it to persist the
-	// durable Approval.
-	PendingApproval *ApprovalRequest
+	// PendingInteraction, when set after Run returns, is the client-interaction
+	// tool call that ended the run. The run worker reads it to persist the durable
+	// Interaction.
+	PendingInteraction *Interaction
+	// PendingApproval is the pre-generalization name for PendingInteraction. It
+	// points at the same value (set alongside it) for source compatibility.
+	PendingApproval *Interaction
 }
 
 // New creates a Loop. UsageMW is registered by default so each run reports its
@@ -151,9 +165,9 @@ func New(p provider.Adapter, tools *toolruntime.Registry, cfg Config) *Loop {
 // Use registers middleware in order. Per turn the chain runs: BeforeModel
 // first→last, WrapModelCall nested (first registered outermost), AfterModel
 // last→first; WrapToolCall nests likewise; AfterRun runs last→first once at run
-// end. Gate hooks (interaction/execute) go to the FIRST middleware that
-// registers each — later registrations for the same gate are ignored. Use
-// returns the loop for chaining.
+// end. A GateFuncProvider supplies the tool-authorization policy — the FIRST
+// registered provider wins (later ones are ignored); its single func governs
+// both the interaction and execution gates. Use returns the loop for chaining.
 func (l *Loop) Use(mw ...Middleware) *Loop {
 	for _, m := range mw {
 		if m == nil {
@@ -175,11 +189,10 @@ func (l *Loop) Use(mw ...Middleware) *Loop {
 		if h, ok := m.(ToolCallMiddleware); ok {
 			l.toolWrap = append(l.toolWrap, h)
 		}
-		if h, ok := m.(InteractionGateHook); ok && l.gateInteraction == nil {
-			l.gateInteraction = h.GateInteraction()
-		}
-		if h, ok := m.(ExecuteGateHook); ok && l.gateExecute == nil {
-			l.gateExecute = h.GateExecute()
+		if h, ok := m.(GateFuncProvider); ok && l.gateInteraction == nil {
+			gate := h.GateCheck()
+			l.gateInteraction = gate
+			l.gateExecute = gate
 		}
 	}
 	return l
@@ -200,6 +213,12 @@ func (l *Loop) WithTools(reg *toolruntime.Registry) *Loop {
 // rather than the loop) can share the same session-bound registry.
 func (l *Loop) Tools() *toolruntime.Registry {
 	return l.tools
+}
+
+// RegisterTool adds a tool to the loop's registry for this run. Used to attach
+// client-declared tools (parsed from the request body) after the loop is built.
+func (l *Loop) RegisterTool(t toolruntime.Tool) {
+	l.tools.Register(t)
 }
 
 // toolDefs converts registered tools to provider tool definitions.
@@ -303,16 +322,26 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			return state.Produced, err
 		}
 
-		// Human-interaction gate (capability-gap O2 + ask_user): if a call needs a
-		// human answer — a permission approval OR an ask_user question set — do NOT
-		// dispatch it. Emit the request and end the run cleanly: the assistant
-		// message (with the gated tool_use) is already produced/persisted, the run
-		// worker records the durable Approval, and a LATER run applies the verdict.
-		// The run is stateless — it ends here; there is no suspend/resume.
+		// Unified suspend point (general interrupt): if a call needs the client
+		// before the run can continue — a permission approval, an ask_user question
+		// set, or a client-side tool — do NOT dispatch it. Emit the interrupt frame
+		// and end the run cleanly: the assistant message (with the suspended
+		// tool_use) is already produced/persisted, the run worker records the
+		// durable Interaction, and a LATER run folds the result back. The run is
+		// stateless — it ends here; there is no suspend/resume.
 		if gate := l.interactionGate(res.Calls); gate != nil {
-			l.PendingApproval = gate
-			_ = emit.Emit(ctx, KindApprovalRequest, *gate)
-			slog.Info("agent: run ended awaiting human input", "tool", gate.ToolName, "kind", gate.Kind)
+			l.PendingInteraction = gate
+			l.PendingApproval = gate // alias for source compatibility
+			// Emitting the interrupt also records the durable Interaction row (the
+			// run worker's emitter persists it BEFORE the frame is published, so a
+			// fast client can't POST a verdict on a row that doesn't exist yet). If
+			// that fails — or the client disconnected — fail the run rather than
+			// ending it "done" with a prompt the client can act on but nothing
+			// backing it (which would 404 on resume).
+			if err := emit.Emit(ctx, KindInterrupt, *gate); err != nil {
+				return state.Produced, err
+			}
+			slog.Info("agent: run ended awaiting client interaction", "tool", gate.ToolName, "kind", gate.Kind)
 			l.runAfterRun(ctx, state)
 			_ = emit.Emit(ctx, KindDone, nil)
 			return state.Produced, nil
@@ -552,27 +581,31 @@ func (l *Loop) appendFinalized(ctx context.Context, acc *accumulator, assistant 
 	})
 }
 
-// interactionGate scans the batch for a call that needs a human answer before
-// the run can continue. Two kinds: (1) a permission approval — a tool whose
+// interactionGate is the loop's unified suspend point: it scans the batch for a
+// call that needs the client before the run can continue and returns the first
+// one. Three triggers, one check: (1) a permission approval — a tool whose
 // Permission callback denies with the ApprovalReasonPrefix marker; (2) an
-// ask_user question set — the model calling the built-in ask_user tool. Only
-// the first such call is returned — the run suspends on it. Returns nil when
-// nothing needs a human.
-func (l *Loop) interactionGate(calls []toolruntime.Call) *ApprovalRequest {
+// ask_user question set — the model calling the built-in ask_user tool; (3) a
+// client-side tool — one implementing toolruntime.ClientTool. Only the first
+// such call is returned — the run suspends on it. Returns nil when nothing needs
+// the client.
+func (l *Loop) interactionGate(calls []toolruntime.Call) *Interaction {
 	for _, c := range calls {
 		if c.ArgsError != "" {
 			continue
 		}
+		tool, registered := l.tools.Get(c.Name)
+		switch {
 		// ask_user: the model is explicitly asking the user for structured input.
-		if c.Name == AskUserToolName {
-			return &ApprovalRequest{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
-		}
+		case c.Name == AskUserToolName:
+			return &Interaction{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+		// Client-side tool: executes in the client, not the server — suspend.
+		case registered && toolruntime.IsClientTool(tool):
+			return &Interaction{ID: uuid.NewString(), Kind: "client_tool", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 		// Permission approval: a dangerous call the policy gates for a yes/no.
-		if l.gateInteraction != nil {
-			if tool, ok := l.tools.Get(c.Name); ok {
-				if deny, reason := l.gateInteraction(tool); deny && IsApprovalReason(reason) {
-					return &ApprovalRequest{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
-				}
+		case registered && l.gateInteraction != nil:
+			if deny, reason := l.gateInteraction(tool); deny && IsApprovalReason(reason) {
+				return &Interaction{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 			}
 		}
 	}

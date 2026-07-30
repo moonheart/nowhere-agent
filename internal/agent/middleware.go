@@ -73,24 +73,20 @@ type AfterRunHook interface {
 	AfterRun(ctx context.Context, s *RunState) error
 }
 
-// ---- gate hooks (tool authorization) ----------------------------------------
+// ---- gate hook (tool authorization) ------------------------------------------
 // A GateFunc authorizes one tool: (deny, reason). deny=true blocks the call.
-// The loop consults gate middleware at two points with different semantics:
-// the interaction gate (should this call end the run for human input — when
-// the deny reason carries the ApprovalReasonPrefix marker) and the execution
-// gate (should this call dispatch at all). Each is a separate interface so a
-// middleware implements only the point it governs.
+// The loop consults the policy at two points with different semantics: the
+// interaction gate (a deny whose reason carries the ApprovalReasonPrefix marker
+// ends the run for human input — a general interrupt) and the execution gate
+// (any other deny blocks dispatch, feeding the reason back to the model). A
+// middleware supplies the policy by exposing GateFuncProvider.
 type GateFunc func(toolruntime.Tool) (bool, string)
 
-// InteractionGateHook authorizes calls at the interaction gate, deciding
-// whether a call ends the run for human input.
-type InteractionGateHook interface {
-	GateInteraction() GateFunc
-}
-
-// ExecuteGateHook authorizes calls at dispatch, deciding whether a call runs.
-type ExecuteGateHook interface {
-	GateExecute() GateFunc
+// GateFuncProvider supplies the tool-authorization policy to the loop. The loop
+// uses the ONE returned func at both gate points (interaction and execution) —
+// a single policy governs both, so there is no separate per-gate registration.
+type GateFuncProvider interface {
+	GateCheck() GateFunc
 }
 
 // ---- wrap-style hooks (control) ---------------------------------------------
@@ -321,21 +317,19 @@ func (m *UsageMW) AfterRun(ctx context.Context, s *RunState) error {
 }
 
 // PermissionMW is the built-in tool-authorization middleware. It carries the
-// policy callback and exposes it at BOTH gate points the loop consults: the
-// interaction gate (deny with the ApprovalReasonPrefix marker ends the run for
-// human input) and the execution gate (any deny blocks dispatch, feeding the
+// policy callback and exposes it to the loop via GateFuncProvider: the loop
+// applies the ONE policy at both gate points — the interaction gate (a deny
+// with the ApprovalReasonPrefix marker ends the run for human input, a general
+// interrupt) and the execution gate (any other deny blocks dispatch, feeding the
 // reason back to the model as an error tool-result). It does not own the run
-// orchestration — the loop keeps the ask_user branch and the run-termination
-// semantics; PermissionMW only answers "is this tool allowed, and why".
+// orchestration — the loop keeps the unified suspend point and the run-
+// termination semantics; PermissionMW only answers "is this tool allowed, and
+// why".
 type PermissionMW struct {
 	Check GateFunc
 }
 
 func (m *PermissionMW) MiddlewareName() string { return "permission" }
 
-// GateInteraction exposes the policy at the interaction gate.
-func (m *PermissionMW) GateInteraction() GateFunc { return m.Check }
-
-// GateExecute exposes the policy at the execution gate.
-func (m *PermissionMW) GateExecute() GateFunc { return m.Check }
-
+// GateCheck supplies the policy to the loop (used at both gate points).
+func (m *PermissionMW) GateCheck() GateFunc { return m.Check }

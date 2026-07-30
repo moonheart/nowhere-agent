@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -62,6 +61,11 @@ type RunRegistry struct {
 
 	mu      sync.Mutex
 	workers map[string]*runWorker // sessionID -> active worker
+
+	// interactionHandlers maps an interaction Kind to the handler that folds its
+	// result into a tool_result on resume (general interrupt). Defaults wire the
+	// three built-in kinds; RegisterInteractionHandler adds/overrides kinds.
+	interactionHandlers map[string]InteractionHandler
 }
 
 // runWorker tracks one in-flight run's execution handle.
@@ -73,7 +77,26 @@ type runWorker struct {
 
 // NewRunRegistry creates a registry over a Runtime (state) and EventBus (fan-out).
 func NewRunRegistry(rt *Runtime, bus EventBus) *RunRegistry {
-	return &RunRegistry{rt: rt, bus: bus, workers: map[string]*runWorker{}}
+	return &RunRegistry{
+		rt:                  rt,
+		bus:                 bus,
+		workers:             map[string]*runWorker{},
+		interactionHandlers: defaultInteractionHandlers(),
+	}
+}
+
+// RegisterInteractionHandler registers (or overrides) the handler that folds an
+// interaction of the given Kind into a tool_result on resume. It returns the
+// registry for chaining. A nil handler unregisters the kind.
+func (rg *RunRegistry) RegisterInteractionHandler(kind string, h InteractionHandler) *RunRegistry {
+	rg.mu.Lock()
+	defer rg.mu.Unlock()
+	if h == nil {
+		delete(rg.interactionHandlers, kind)
+	} else {
+		rg.interactionHandlers[kind] = h
+	}
+	return rg
 }
 
 // WithMessageStore wires full-block message persistence and returns the registry.
@@ -197,33 +220,13 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 		}
 	}
 
-	// Human-interaction gate (capability-gap O2, run-stateless model): the loop
-	// hit a gated tool call and ended the run WITHOUT executing it, emitting
-	// KindApprovalRequest. The gated tool_use is already persisted (the loop's
-	// KindMessage). Persist the durable Approval (thread state, keyed by session)
-	// so a LATER run can apply the verdict. The run settles done — no suspend.
-	if gate := work.Loop.PendingApproval; gate != nil && status == RunDone {
-		bg := context.Background()
-		input, err := json.Marshal(gate.Input)
-		if err != nil {
-			input = []byte("{}")
-		}
-		kind := gate.Kind
-		if kind == "" {
-			kind = "approval"
-		}
-		ap, err := rg.rt.store.CreateApproval(bg, Approval{
-			ID: gate.ID, RunID: run.ID, SessionID: sessionID,
-			ToolCallID: gate.ToolCallID, ToolName: gate.ToolName,
-			ToolInput: input, Kind: kind,
-		})
-		if err != nil {
-			slog.Error("persist approval failed; failing run", "session", sessionID, "run", run.ID, "err", err)
-			status = RunFailed
-		} else {
-			slog.Info("run ended awaiting human input", "session", sessionID, "run", run.ID, "approval", ap.ID, "kind", kind, "tool", ap.ToolName)
-		}
-	}
+	// A run that suspended for a client interaction already recorded its durable
+	// Interaction row: the emitter persists it synchronously when the loop emits
+	// KindInterrupt, BEFORE the data-interaction frame is published (see
+	// registryEmitter.persistInteraction). That ordering is load-bearing — a fast
+	// client (an instant client-tool auto-run) could otherwise POST its verdict on
+	// a row that isn't committed yet and get a 404. Persisting here, after Run()
+	// returned, left that resume race open; it now lives on the emit path.
 
 	// The loop persists its own terminal content event (KindDone / KindError) on
 	// the live run context. The one exception is cancellation: the loop emits
@@ -255,65 +258,47 @@ func (rg *RunRegistry) appendEvent(ctx context.Context, sessionID, runID string,
 	})
 }
 
-// Decide applies the human verdict on a pending Approval and returns the
-// history for a FRESH run to continue the conversation (run-stateless model,
-// capability-gap O2). It atomically marks the row decided, rebuilds the durable
-// conversation from the message store, and appends the tool_result the gated
-// tool_use was waiting on:
-//   - permission approval approved → the tool is EXECUTED now (tools registry,
-//     supplied by the caller) and its real result is fed back;
-//   - permission approval rejected → an is_error denial;
-//   - ask_user answered → the user's structured answer;
-//   - ask_user skipped (approve=false) → a "skipped" note.
+// Decide applies the client's resolution of a pending Interaction and returns
+// the history for a FRESH run to continue the conversation (run-stateless model,
+// general interrupt). It atomically marks the row decided, rebuilds the durable
+// conversation from the message store, and appends the tool_result the suspended
+// call was waiting on. The per-kind fold is delegated to the Kind's registered
+// InteractionHandler (see interaction.go):
+//   - tool_approval approved → the tool is EXECUTED now and its real result fed
+//     back; rejected → an is_error denial;
+//   - ask_user answered → the structured answers; skipped → a "skipped" note;
+//   - client_tool → the client's output (validated against the declared output
+//     schema) or an is_error.
 //
 // The caller (chat handler) builds a fresh loop and Submits a new run with the
 // returned history; there is no suspended run to resume. tools may be nil only
-// when the verdict cannot require execution (reject / ask_user / skip).
-func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, answer json.RawMessage, tools *toolruntime.Registry) (Approval, []provider.Message, error) {
-	ap, err := rg.rt.store.DecideApproval(ctx, approvalID, approve, answer)
+// when the fold cannot require execution (reject / ask_user / skip).
+func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, result json.RawMessage, tools *toolruntime.Registry) (Interaction, []provider.Message, error) {
+	ap, err := rg.rt.store.DecideApproval(ctx, approvalID, approve, result)
 	if err != nil {
-		return Approval{}, nil, err // ErrNoPendingApproval for unknown/already-decided
+		return Interaction{}, nil, err // ErrNoPendingApproval for unknown/already-decided
 	}
 	sessionID := ap.SessionID
 
-	// Rebuild the durable conversation (full blocks, including the gated tool_use
-	// that ended the prior run). The verdict's tool_result is NOT yet in the
-	// store; it is appended below so the fresh run sees it.
+	// Rebuild the durable conversation (full blocks, including the suspended
+	// tool_use that ended the prior run). The verdict's tool_result is NOT yet in
+	// the store; it is appended below so the fresh run sees it.
 	var history []provider.Message
 	if rg.msgStore != nil {
 		stored, err := rg.msgStore.MessagesFor(ctx, sessionID)
 		if err != nil {
-			return Approval{}, nil, fmt.Errorf("rebuild history: %w", err)
+			return Interaction{}, nil, fmt.Errorf("rebuild history: %w", err)
 		}
 		history = StoredMessagesToProvider(stored)
 	}
 
-	// Resolve the verdict into a tool_result for the gated call.
-	var res toolruntime.Result
-	var input map[string]any
-	_ = json.Unmarshal(ap.ToolInput, &input)
-	isAskUser := ap.Kind == "ask_user" || ap.ToolName == agent.AskUserToolName
-	switch {
-	case isAskUser && !approve:
-		// Skipped: the run continues without the input; the model decides next.
-		res = toolruntime.Result{Content: "the user skipped these questions (no answer given)"}
-	case isAskUser:
-		if data, err := json.Marshal(ap.Answer); err == nil && len(ap.Answer) > 0 {
-			res = toolruntime.Result{Content: string(data)}
-		} else {
-			res = toolruntime.Result{Content: "the user answered (unparseable response)", IsError: true}
-		}
-	case !approve:
-		res = toolruntime.Result{Content: "the user denied permission to run " + ap.ToolName, IsError: true}
-	default:
-		// Approved: execute the gated tool now (the approval is its authorization).
-		if tools == nil {
-			return Approval{}, nil, errors.New("approved call needs a tool registry to execute")
-		}
-		res = tools.CallAll(ctx, []toolruntime.Call{{ID: ap.ToolCallID, Name: ap.ToolName, Args: input}})[0]
+	// Resolve the client's result into a tool_result via the kind's handler.
+	res, err := rg.foldInteraction(ctx, ap, approve, tools)
+	if err != nil {
+		return Interaction{}, nil, err
 	}
 
-	history = append(history, provider.Message{
+	resultMsg := provider.Message{
 		Role: provider.RoleUser,
 		Content: []provider.Block{{
 			Type:         provider.BlockToolResult,
@@ -322,7 +307,23 @@ func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bo
 			IsError:      res.IsError,
 			ToolMessages: res.Nested,
 		}},
-	})
+	}
+	// Persist the folded tool_result to the durable record. The suspended run
+	// recorded the assistant tool_use but never its result (it ended at the
+	// gate); Decide supplies that missing result, and it belongs in the durable
+	// history so the next resume / history rebuild sees the call answered, not
+	// dangling. Best-effort: a failure leaves the in-memory history correct for
+	// THIS resume (the fresh run still gets the result); the durable gap mirrors
+	// the pre-generalization behaviour.
+	if rg.msgStore != nil {
+		_, _ = rg.msgStore.AppendMessage(context.Background(), StoredMessage{
+			SessionID: sessionID,
+			RunID:     ap.RunID,
+			Role:      resultMsg.Role,
+			Content:   contextmgmt.TruncateBlocksForPersistence(resultMsg.Content),
+		})
+	}
+	history = append(history, resultMsg)
 	return ap, history, nil
 }
 
@@ -399,12 +400,64 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 		e.persistMessage(ctx, payload)
 		return nil
 	}
+	// The interrupt frame carries the interaction id the client POSTs its verdict
+	// with. Persist the durable Interaction row BEFORE publishing the frame, so a
+	// fast client (an instant client-tool auto-run) can never learn an id it can't
+	// yet resolve (which would 404 on resume). Synchronous, and ahead of the
+	// append below: once any client can see the frame, the row exists. A failure
+	// is returned so the loop fails the run instead of surfacing a phantom prompt.
+	if kind == agent.KindInterrupt {
+		if err := e.persistInteraction(payload); err != nil {
+			return err
+		}
+	}
 	// The run's aggregate usage is recorded on the runs row (SetRunUsage is
 	// nil-safe and best-effort); the event still flows to the durable log below.
 	if kind == agent.KindUsage {
 		e.persistRunUsage(payload)
 	}
 	e.rg.append(ctx, e.sessionID, e.runID, kind, payload)
+	return nil
+}
+
+// persistInteraction writes the durable Interaction row for a KindInterrupt
+// frame BEFORE the frame is published, closing the resume race (a client must
+// never learn an interaction id it cannot yet resolve). The payload is the
+// loop's agent.Interaction; its id was generated when the gate was detected, so
+// it matches the id the frame carries. A persistence failure is returned so the
+// emit — and thus the run — fails, rather than a prompt reaching the client with
+// no backing row.
+func (e *registryEmitter) persistInteraction(payload any) error {
+	var in agent.Interaction
+	switch v := payload.(type) {
+	case agent.Interaction:
+		in = v
+	case *agent.Interaction:
+		if v == nil {
+			return fmt.Errorf("interrupt payload is a nil *agent.Interaction")
+		}
+		in = *v
+	default:
+		return fmt.Errorf("interrupt payload is not an agent.Interaction: %T", payload)
+	}
+	input, err := json.Marshal(in.Input)
+	if err != nil {
+		input = []byte("{}")
+	}
+	kind := in.Kind
+	if kind == "" {
+		kind = "approval"
+	}
+	ap, err := e.rg.rt.store.CreateApproval(context.Background(), Interaction{
+		ID: in.ID, RunID: e.runID, SessionID: e.sessionID,
+		ToolCallID: in.ToolCallID, ToolName: in.ToolName,
+		Payload: input, Kind: kind,
+	})
+	if err != nil {
+		slog.Error("persist interaction failed; failing run", "session", e.sessionID, "run", e.runID, "err", err)
+		return err
+	}
+	slog.Info("run ended awaiting client interaction", "session", e.sessionID, "run", e.runID, "interaction", ap.ID, "kind", kind, "tool", ap.ToolName)
 	return nil
 }
 

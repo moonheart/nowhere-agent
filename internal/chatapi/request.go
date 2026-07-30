@@ -11,14 +11,31 @@ import (
 
 // dataStreamRequest mirrors the body the assistant-ui data-stream runtime POSTs.
 type dataStreamRequest struct {
-	System   string             `json:"system"`
-	Messages []incomingMessage  `json:"messages"`
-	Tools    map[string]any     `json:"tools"`
-	ThreadID string             `json:"threadId"`
+	System   string            `json:"system"`
+	Messages []incomingMessage `json:"messages"`
+	// Tools carries client-declared tool definitions (general interrupt): tools
+	// the CLIENT executes. The server registers them for the run; the loop
+	// suspends on a call to one and hands it to the client, which executes and
+	// returns the output as the tool result. Keyed by tool name.
+	Tools    map[string]clientToolDecl `json:"tools,omitempty"`
+	ThreadID string                    `json:"threadId"`
 	// Approval, when set, turns this POST into a verdict on a parked run rather
 	// than a new turn: the handler resumes the run and streams its continuation
 	// over the same ui-message-stream response (reusing the chat attach path).
 	Approval *approvalRequest `json:"approval,omitempty"`
+}
+
+// clientToolDecl is one client-declared tool definition from the request body.
+// The client owns execution; these fields are the calling contract shown to the
+// model plus the optional output contract the server validates against.
+type clientToolDecl struct {
+	Description  string         `json:"description"`
+	InputSchema  map[string]any `json:"inputSchema,omitempty"`
+	Parameters   map[string]any `json:"parameters,omitempty"` // AI-SDK alias for inputSchema
+	OutputSchema map[string]any `json:"outputSchema,omitempty"`
+	// ClientSide marks the tool as client-executed. When omitted, a tool declared
+	// in the body is assumed client-side (the only kind a client can declare).
+	ClientSide *bool `json:"clientSide,omitempty"`
 }
 
 // approvalRequest carries the human verdict for a parked tool-approval /

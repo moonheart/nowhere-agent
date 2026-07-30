@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/toolruntime"
@@ -78,4 +79,67 @@ func TestLoopEndsOnAskUser(t *testing.T) {
 	if len(produced) != 1 || produced[0].Content[0].Type != provider.BlockToolUse {
 		t.Fatalf("produced = %+v", produced)
 	}
+}
+
+// TestLoopEndsOnClientTool pins the client-side-tool gate: a tool implementing
+// toolruntime.ClientTool suspends the run (no permission needed, no server
+// execution) with Kind=client_tool. The loop emits KindInterrupt and ends
+// cleanly; the tool's Call is never reached.
+func TestLoopEndsOnClientTool(t *testing.T) {
+	called := false
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "get_clipboard", `{}`),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(clientSideTool{name: "get_clipboard", called: &called})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	emit := &memEmitter{}
+	produced, err := loop.Run(context.Background(), nil, emit)
+	if err != nil {
+		t.Fatalf("client-tool gate should end cleanly, got %v", err)
+	}
+	if called {
+		t.Error("a client-side tool must not execute on the server")
+	}
+	if loop.PendingInteraction == nil || loop.PendingInteraction.Kind != "client_tool" {
+		t.Fatalf("PendingInteraction = %+v, want client_tool", loop.PendingInteraction)
+	}
+	if loop.PendingInteraction.ID == "" {
+		t.Error("PendingInteraction.ID not generated for client_tool")
+	}
+	// PendingApproval aliases the same value (source compatibility).
+	if loop.PendingApproval != loop.PendingInteraction {
+		t.Error("PendingApproval should alias PendingInteraction")
+	}
+	if len(produced) != 1 || produced[0].Content[0].Type != provider.BlockToolUse {
+		t.Fatalf("produced = %+v", produced)
+	}
+	if emit.count(KindInterrupt) == 0 {
+		t.Errorf("no KindInterrupt emitted; events=%v", emit.events)
+	}
+}
+
+// clientSideTool is a toolruntime.ClientTool: it declares ClientSide()=true and
+// an output schema; Call records execution (which must never happen in the gated
+// path).
+type clientSideTool struct {
+	name   string
+	called *bool
+}
+
+func (c clientSideTool) Name() string           { return c.name }
+func (c clientSideTool) Description() string    { return "client tool" }
+func (c clientSideTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (c clientSideTool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
+func (c clientSideTool) Timeout() time.Duration { return 0 }
+func (c clientSideTool) ClientSide() bool       { return true }
+func (c clientSideTool) OutputSchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}}
+}
+func (c clientSideTool) Call(context.Context, map[string]any) (toolruntime.Result, error) {
+	if c.called != nil {
+		*c.called = true
+	}
+	return toolruntime.Result{Content: "server-ran"}, nil
 }

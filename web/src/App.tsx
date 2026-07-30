@@ -10,7 +10,8 @@ import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
-import { reportApproval, resetApprovals, registerDecisionFollower, type ToolApproval } from "@/lib/approval";
+import { reportInteraction, resetApprovals, registerDecisionFollower, type Interaction } from "@/lib/approval";
+import { clientToolDeclarations } from "@/lib/client-tools";
 import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
 import { cancelSession } from "@/lib/sessions";
 
@@ -31,7 +32,14 @@ function Chat({
     },
     body: async () => {
       const threadId = getSessionId();
-      return threadId ? { threadId } : {};
+      // Declare the browser's client-side tools (clipboard, timezone, …) to the
+      // agent on every turn. The model may call them; the backend suspends the
+      // run and streams a client_tool interaction the browser fulfils locally.
+      const tools = clientToolDeclarations();
+      return {
+        ...(threadId ? { threadId } : {}),
+        ...(Object.keys(tools).length > 0 ? { tools } : {}),
+      };
     },
     onData: (d) => {
       if (d.name === "session") {
@@ -44,10 +52,12 @@ function Chat({
         // Live subagent progress (from a spawn_agent tool call) — feed the
         // right panel's Runs tab; transient, never part of the message.
         reportSubagentActivity(d.data as SubagentSignal);
-      } else if (d.name === "tool-approval") {
-        // A dangerous tool call is parked awaiting a human verdict (O2): show
-        // approve/deny on the matching tool card. Transient, not the message.
-        reportApproval(d.data as ToolApproval);
+      } else if (d.name === "interaction" || d.name === "tool-approval") {
+        // A tool call is parked awaiting the client (general interrupt): a
+        // dangerous-action approval, an ask_user question set, or a client_tool
+        // the browser auto-executes. Show the matching card on the tool call;
+        // transient, not the message. ("tool-approval" is the legacy frame name.)
+        reportInteraction(d.data as Interaction);
       } else if (d.name === "session-state") {
         // Session-level state push (O1): the plan_write tool's plan, pushed
         // live. Feeds the top plan panel.

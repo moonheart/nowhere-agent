@@ -64,7 +64,7 @@ func TestDecideApprovedExecutesTool(t *testing.T) {
 	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "danger", map[string]any{"path": "/etc"})
 	ap, err := rg.rt.store.CreateApproval(context.Background(), Approval{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "danger",
-		ToolInput: json.RawMessage(`{"path":"/etc"}`), Kind: "approval",
+		Payload: json.RawMessage(`{"path":"/etc"}`), Kind: "approval",
 	})
 	if err != nil {
 		t.Fatal(err)

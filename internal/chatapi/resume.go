@@ -105,9 +105,12 @@ func emitStreamEvent(r *http.Request, emitter *sseEmitter, e session.StreamEvent
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.KindSubagent, m)
 		}
-	case agent.KindApprovalRequest:
+	case agent.KindInterrupt:
+		// The client-interaction prompt (approval / ask_user / client-tool). It is
+		// broker-routed content, so it arrives here on the content channel; decode
+		// the Interaction payload and render the data-interaction frame.
 		if m, ok := decodeMapPayload(e.Payload); ok {
-			emitter.Emit(r.Context(), agent.KindApprovalRequest, m)
+			emitter.Emit(r.Context(), agent.KindInterrupt, m)
 		}
 	}
 }

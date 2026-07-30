@@ -141,7 +141,7 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 	if h.registry != nil {
 		if ap, ok, err := h.registry.PendingApprovalForSession(r.Context(), threadID); err == nil && ok {
 			var args any
-			if err := json.Unmarshal(ap.ToolInput, &args); err != nil {
+			if err := json.Unmarshal(ap.Payload, &args); err != nil {
 				args = map[string]any{}
 			}
 			kind := ap.Kind

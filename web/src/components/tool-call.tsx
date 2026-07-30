@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FC } from "react";
 import type { ThreadMessage, ToolCallMessagePartProps } from "@assistant-ui/react";
-import { Bot, HelpCircle, ShieldAlert } from "lucide-react";
+import { Bot, HelpCircle, Laptop, ShieldAlert } from "lucide-react";
 import { reportToolCall, useActivity, type SubPart } from "@/lib/activity";
 import {
   useApproval,
@@ -199,8 +199,10 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
   const running = status?.type === "running";
   const [open, setOpen] = useState(false);
   const expanded = running || open;
-  // A parked approval for this call (O2): the backend is holding the run until
-  // the user approves/denies. Sourced from the transient data-tool-approval frame.
+  // A parked interaction for this call (general interrupt): the backend suspended
+  // the run until the client responds — a dangerous-action approval, an ask_user
+  // question set, or a client_tool the browser auto-runs. From the transient
+  // data-interaction frame (or the durable pendingApproval echo on reload).
   const approval = useApproval(toolCallId);
 
   useReport(props, running);
@@ -210,7 +212,13 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
   return (
     <div
       className={`mb-2 rounded-xl border text-sm ${
-        isError ? "border-red-200 bg-red-50" : approval ? "border-amber-300 bg-amber-50/60" : "border-neutral-200 bg-neutral-50"
+        isError
+          ? "border-red-200 bg-red-50"
+          : approval?.kind === "client_tool"
+            ? "border-sky-200 bg-sky-50/50"
+            : approval
+              ? "border-amber-300 bg-amber-50/60"
+              : "border-neutral-200 bg-neutral-50"
       }`}
     >
       <Header
@@ -220,8 +228,10 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
         expanded={expanded}
         onToggle={() => setOpen((o) => !o)}
       />
-      {approval && approval.kind === "ask_user" ? (
+      {approval?.kind === "ask_user" ? (
         <AskUserGate approval={approval} />
+      ) : approval?.kind === "client_tool" ? (
+        <ClientToolGate approval={approval} />
       ) : approval ? (
         <ApprovalGate approval={approval} argsText={argsText} />
       ) : null}
@@ -250,14 +260,14 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
 // ApprovalGate renders the approve/deny prompt for a parked tool call. Deciding
 // POSTs the verdict to the backend (which resumes the run); the card clears the
 // prompt and the resumed stream drives the rest of the render.
-const ApprovalGate: FC<{ approval: { approvalId: string; toolCallId: string; toolName: string; args?: unknown }; argsText?: string }> = ({
+const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
   approval,
   argsText,
 }) => {
   const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
   const decide = async (approved: boolean) => {
     setBusy(approved ? "approve" : "deny");
-    const stream = await respondToApproval(approval.approvalId, approved);
+    const stream = await respondToApproval(approval.interactionId, approved);
     if (stream) {
       clearApproval(approval.toolCallId);
       followDecisionStream(stream); // watch the resumed run continue live
@@ -302,6 +312,22 @@ const ApprovalGate: FC<{ approval: { approvalId: string; toolCallId: string; too
   );
 };
 
+// ClientToolGate renders the auto-executing state of a client-side tool call:
+// the browser runs the declared capability (clipboard, timezone, …) and POSTs
+// the output — approval.ts drives that automatically the moment the interaction
+// frame arrives, so this card is purely a live indicator, no buttons. When the
+// output posts, the prompt clears and the resumed run streams the tool result
+// into this same card. If the browser capability is unavailable the run folds an
+// is_error result instead and the model reacts to it.
+const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => (
+  <div className="flex items-center gap-2 border-t border-sky-200 bg-sky-50/60 px-3 py-2.5">
+    <Laptop size={15} className="shrink-0 animate-pulse text-sky-500" />
+    <p className="text-[13px] text-sky-800">
+      Running <span className="font-mono">{approval.toolName}</span> in your browser…
+    </p>
+  </div>
+);
+
 // AskUserGate renders the model's ask_user questions as one card: each question
 // is a single- or multi-select over its options (recommended option
 // pre-highlighted), with a per-question custom-answer box, a Submit that posts
@@ -342,7 +368,7 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
       else if (sel.length === 1) out[q.question] = sel[0];
       else if (sel.length > 1) out[q.question] = sel;
     });
-    const stream = await respondToAskUser(approval.approvalId, out);
+    const stream = await respondToAskUser(approval.interactionId, out);
     if (stream) {
       clearApproval(approval.toolCallId);
       followDecisionStream(stream);
@@ -353,7 +379,7 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
 
   const skip = async () => {
     setBusy(true);
-    const stream = await respondToAskUser(approval.approvalId, null);
+    const stream = await respondToAskUser(approval.interactionId, null);
     if (stream) {
       clearApproval(approval.toolCallId);
       followDecisionStream(stream);

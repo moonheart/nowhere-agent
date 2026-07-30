@@ -19,7 +19,7 @@ func TestMemStoreApprovalLifecycle(t *testing.T) {
 	a, err := s.CreateApproval(ctx, Approval{
 		RunID: run.ID, SessionID: sess.ID,
 		ToolCallID: "tc1", ToolName: "read_file",
-		ToolInput: json.RawMessage(`{"path":"/x"}`),
+		Payload: json.RawMessage(`{"path":"/x"}`),
 	})
 	if err != nil {
 		t.Fatalf("CreateApproval: %v", err)
@@ -27,7 +27,6 @@ func TestMemStoreApprovalLifecycle(t *testing.T) {
 	if a.ID == "" || a.Status != ApprovalPending {
 		t.Fatalf("new approval wrong: %+v", a)
 	}
-
 	// Pending lookup by session.
 	got, ok, err := s.PendingApprovalForSession(ctx, sess.ID)
 	if err != nil || !ok || got.ID != a.ID {

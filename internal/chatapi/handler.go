@@ -14,6 +14,7 @@ import (
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
+	"nowhere-agent/internal/toolruntime/builtin"
 	"nowhere-agent/internal/workspace"
 )
 
@@ -188,7 +189,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// rather than a separate response: resume the run, then stream its
 	// continuation exactly as a freshly-submitted run would.
 	if req.Approval != nil {
-		h.serveChatResume(w, r, req.Approval)
+		h.serveChatResume(w, r, req.Approval, req.Tools)
 		return
 	}
 
@@ -218,6 +219,11 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
 	}
+
+	// Client-declared tools (general interrupt): tools the CLIENT executes,
+	// declared in the request body. Register them so the loop suspends on a call
+	// to one and hands it to the client. They never shadow a built-in tool.
+	registerClientTools(loop, req.Tools)
 
 	// Session-scoped middleware: memory injection (recalled memories into the
 	// transient view) + image materialization (BlockImage path → base64), in
@@ -283,7 +289,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 // a normal chat turn uses. There is no suspended run to resume — the prior run
 // ended when it surfaced the gated call; the verdict's tool_result is folded into
 // the new run's history by the registry.
-func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *approvalRequest) {
+func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *approvalRequest, clientTools map[string]clientToolDecl) {
 	if h.runtime == nil || h.registry == nil {
 		http.Error(w, `{"error":"approval unavailable"}`, http.StatusServiceUnavailable)
 		return
@@ -315,10 +321,26 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
 	}
+	// Re-register the client-declared tools so a resumed client_tool fold can
+	// validate the returned output against the declared output schema.
+	registerClientTools(loop, clientTools)
 	// A verdict continues the conversation with no new user text: surface any
 	// memories created since the last injection (empty query → recency order),
 	// and materialize this session's images.
 	h.bindSessionMiddleware(loop, r, sessID, "")
+
+	// The run that parked this interaction settles RunDone right after emitting the
+	// interrupt frame (run-stateless model). The client, driven by that frame, can
+	// POST its verdict in the brief window before the run releases the
+	// single-active-run lock — so wait for the session to go idle before starting
+	// the verdict run, rather than 409-ing on a run that is already settling. Done
+	// BEFORE Decide so a timeout leaves the interaction pending (retriable), not
+	// decided-but-unsubmitted (which would lose the verdict). A genuine concurrent
+	// run (another tab submitting a new turn) still trips the timeout → 409.
+	if !h.waitForIdle(r.Context(), sessID, 5*time.Second) {
+		http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
+		return
+	}
 
 	_, history, err := h.registry.Decide(r.Context(), av.ApprovalID, av.Approved, av.Answer, loop.Tools())
 	if err != nil {
@@ -350,6 +372,30 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	h.attach(w, r, sessID, run, 0, pre)
 }
 
+// waitForIdle blocks until the session has no active run (the single-active-run
+// lock is free) or the timeout elapses, returning true once idle. It closes the
+// resume-vs-settle race: the run that parked the interaction settles moments
+// after publishing the interrupt frame, but a fast client can POST its verdict
+// before the lock is released. Polling ActiveRun (which consults the same
+// in-memory lock + durable backstop StartRun checks) lets the verdict run start
+// as soon as the parking run is gone, instead of failing on a transient conflict.
+func (h *Handler) waitForIdle(ctx context.Context, sessionID string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, active, err := h.runtime.ActiveRun(ctx, sessionID); err == nil && !active {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 // serveChatDirect streams a loop's output with no run persistence (no runtime
 // wired — tests/dev). The loop runs on the request goroutine and is cancelled
 // when the client disconnects, exactly as before the registry existed.
@@ -367,6 +413,37 @@ func (h *Handler) serveChatDirect(w http.ResponseWriter, r *http.Request, loop *
 		emitter.Emit(r.Context(), agent.KindError, err.Error())
 	}
 	emitter.finish()
+}
+
+// registerClientTools attaches client-declared tools (from the request body) to
+// the loop. Each becomes a toolruntime.ClientTool the loop suspends on — the
+// client executes it, not the server. A declaration whose name collides with an
+// already-registered (built-in) tool is skipped, so a client cannot shadow the
+// server's tools.
+func registerClientTools(loop *agent.Loop, decls map[string]clientToolDecl) {
+	for name, d := range decls {
+		if name == "" {
+			continue
+		}
+		if _, exists := loop.Tools().Get(name); exists {
+			continue // never shadow a built-in tool
+		}
+		// clientSide defaults to true: the only tools a client can declare are
+		// client-executed. An explicit clientSide=false is honoured (the tool is
+		// then registered but dispatch fails server-side — an unusual declaration).
+		clientSide := d.ClientSide == nil || *d.ClientSide
+		if !clientSide {
+			continue
+		}
+		inputSchema := d.InputSchema
+		if inputSchema == nil {
+			inputSchema = d.Parameters // AI-SDK alias
+		}
+		if inputSchema == nil {
+			inputSchema = map[string]any{"type": "object"}
+		}
+		loop.RegisterTool(builtin.NewClientTool(name, d.Description, inputSchema, d.OutputSchema))
+	}
 }
 
 // systemPromptFor composes the system prompt for a request: the ContextBuilder
@@ -634,12 +711,13 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 		if m, ok := payload.(map[string]any); ok {
 			e.write(chunk{"type": "data-subagent", "data": m, "transient": true})
 		}
-	case agent.KindApprovalRequest:
-		// Tool-approval prompt (capability-gap O2): stream the gated call to the
-		// client as the camelCase card /history also produces. The loop generated
-		// the approval's ID when it detected the gate (LangGraph-style), so the
-		// frame carries it — the card POSTs its verdict with no refresh or lookup.
-		// Transient: it drives UI, not the message record.
+	case agent.KindInterrupt:
+		// Client-interaction prompt (general interrupt): stream the suspended call
+		// to the client as a data-interaction frame. One frame for every kind —
+		// approval (yes/no), ask_user (question card), client_tool (auto-execute).
+		// The loop generated the interaction's ID when it detected the gate
+		// (LangGraph-style), so the frame carries it — the card POSTs its verdict
+		// with no refresh or lookup. Transient: it drives UI, not the message record.
 		m, ok := payload.(map[string]any)
 		if !ok {
 			break
@@ -654,12 +732,13 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 		if args == nil {
 			args = map[string]any{}
 		}
-		e.write(chunk{"type": "data-tool-approval", "data": map[string]any{
-			"approvalId": m["ID"],
-			"kind":       kind,
-			"toolCallId": toolCallID,
-			"toolName":   toolName,
-			"args":       args,
+		e.write(chunk{"type": "data-interaction", "data": map[string]any{
+			"interactionId": m["ID"],
+			"approvalId":    m["ID"], // legacy alias for clients still reading it
+			"kind":          kind,
+			"toolCallId":    toolCallID,
+			"toolName":      toolName,
+			"args":          args,
 		}, "transient": true})
 	case agent.KindDone:
 		e.writeRunStatus("done")
