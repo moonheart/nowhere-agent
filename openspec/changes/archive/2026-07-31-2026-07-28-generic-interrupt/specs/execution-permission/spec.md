@@ -11,6 +11,10 @@ interaction kinds SHALL be added by registering a handler. Interaction requests
 SHALL be delivered to the user over the session channel, and results SHALL be
 recorded.
 
+#### Scenario: Decision recorded
+- **WHEN** a user approves or denies a requested action
+- **THEN** the decision and action are logged for audit
+
 #### Scenario: Result recorded
 - **WHEN** a client resolves a pending interaction (approve/deny, answers, or client-tool output)
 - **THEN** the interaction kind and its result are recorded for audit
