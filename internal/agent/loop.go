@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 
@@ -322,6 +323,31 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			return state.Produced, err
 		}
 
+		// Truncation guard (capability-gap L1, tool-call half). Reaching here with
+		// StopMaxTokens means the message was cut off at the output-token limit
+		// WHILE emitting tool calls (the no-calls case returned above). The batch is
+		// not trustworthy: the model was still writing, so the plan behind these
+		// calls is only half-expressed and the calls it had not reached yet are
+		// missing. Fail every call in the batch instead of dispatching it.
+		//
+		// The malformed-arguments check does not cover this. A message can be cut
+		// off just after a complete tool_use block, leaving arguments that parse
+		// cleanly — only the stop reason reveals that the turn was truncated.
+		//
+		// This must run BEFORE the interaction gate: otherwise such a call suspends
+		// the run, parking a durable Interaction and putting a card in front of the
+		// user for an action the model had not finished specifying.
+		//
+		// Unlike the no-calls case this does NOT fail the run — the model is told
+		// exactly what happened and can re-issue with complete arguments, so the
+		// loop continues. MaxIterations bounds a model that keeps truncating.
+		if res.Stop == provider.StopMaxTokens {
+			slog.Warn("agent: tool batch truncated at max_tokens; failing the batch for re-issue",
+				"iter", iter, "calls", len(res.Calls), "max_tokens", l.config.MaxTokens)
+			l.recordToolResults(ctx, emit, state, res.Calls, truncatedCallResults(res.Calls, l.config.MaxTokens))
+			continue
+		}
+
 		// Unified suspend point (general interrupt): if a call needs the client
 		// before the run can continue — a permission approval, an ask_user question
 		// set, or a client-side tool — do NOT dispatch it. Emit the interrupt frame
@@ -348,19 +374,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		}
 
 		// Dispatch tool calls (concurrently) and append results.
-		results := l.dispatch(ctx, res.Calls)
-		for i, r := range results {
-			_ = emit.Emit(ctx, KindToolResult, map[string]any{
-				"tool_use_id": res.Calls[i].ID,
-				"name":        res.Calls[i].Name,
-				"content":     r.Content,
-				"is_error":    r.IsError,
-			})
-		}
-		resultMsg := toolResultMessage(res.Calls, results)
-		state.Produced = append(state.Produced, resultMsg)
-		// Expose the assembled tool-result message for full-block persistence.
-		_ = emit.Emit(ctx, KindMessage, resultMsg)
+		l.recordToolResults(ctx, emit, state, res.Calls, l.dispatch(ctx, res.Calls))
 	}
 
 	// Reached the iteration guard without a final answer. Surface it as a terminal
@@ -612,37 +626,109 @@ func (l *Loop) interactionGate(calls []toolruntime.Call) *Interaction {
 	return nil
 }
 
-// dispatch runs tool calls concurrently via the registry. A call whose
-// arguments failed to parse (ArgsError set) is not dispatched: it becomes an
-// is_error result inline so the model can retry with valid JSON, while results
-// stay index-aligned with calls for tool_use/tool_result pairing.
+// dispatch runs tool calls concurrently, each through the tool-middleware chain.
+// Calls are first screened sequentially — malformed arguments, an unregistered
+// name, or an execution-permission deny become is_error results inline (so the
+// model can self-correct) and never reach the chain. Results stay index-aligned
+// with calls for tool_use/tool_result pairing.
+//
+// The loop owns the fan-out rather than delegating to Registry.CallAll, because
+// each call must be wrapped by WrapToolCall middleware and toolruntime cannot
+// import this package. The screen resolves every live call's Tool up front, so
+// middleware is guaranteed a non-nil ToolCall.Tool.
 func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolruntime.Result {
 	results := make([]toolruntime.Result, len(calls))
-	live := make([]toolruntime.Call, 0, len(calls))
+	live := make([]*ToolCall, 0, len(calls))
 	liveIdx := make([]int, 0, len(calls))
 	for i, c := range calls {
 		if c.ArgsError != "" {
 			results[i] = toolruntime.Result{Content: "invalid tool arguments: " + c.ArgsError, IsError: true}
 			continue
 		}
+		// Resolve the tool here rather than inside the registry so the middleware
+		// chain always sees a real Tool. Registry.Call keeps its own unknown-tool
+		// guard for direct callers; this mirrors its message.
+		tool, ok := l.tools.Get(c.Name)
+		if !ok {
+			results[i] = toolruntime.Result{Content: fmt.Sprintf("unknown tool: %s", c.Name), IsError: true}
+			continue
+		}
 		// Execution-permission gate (D10): authorize the call by the tool's risk
 		// before dispatch. A denied call is not executed; the reason is fed back as
 		// an error result so the model can adapt.
 		if l.gateExecute != nil {
-			if tool, ok := l.tools.Get(c.Name); ok {
-				if deny, reason := l.gateExecute(tool); deny {
-					results[i] = toolruntime.Result{Content: "permission denied: " + reason, IsError: true}
-					continue
-				}
+			if deny, reason := l.gateExecute(tool); deny {
+				results[i] = toolruntime.Result{Content: "permission denied: " + reason, IsError: true}
+				continue
 			}
 		}
-		live = append(live, c)
+		live = append(live, &ToolCall{Call: c, Tool: tool})
 		liveIdx = append(liveIdx, i)
 	}
-	if len(live) > 0 {
-		for j, r := range l.tools.CallAll(ctx, live) {
-			results[liveIdx[j]] = r
-		}
+	if len(live) == 0 {
+		return results
+	}
+	// One chain for the batch: the middleware slice is fixed for the run, so the
+	// composed handler is shared and must be safe for concurrent use (the same
+	// contract the tools themselves carry).
+	handler := chainTool(l.toolWrap, l.realToolCall())
+	var wg sync.WaitGroup
+	for j, tc := range live {
+		wg.Add(1)
+		go func(j int, tc *ToolCall) {
+			defer wg.Done()
+			results[liveIdx[j]] = handler(ctx, tc)
+		}(j, tc)
+	}
+	wg.Wait()
+	return results
+}
+
+// realToolCall is the innermost tool-call handler: it executes the call through
+// the registry, which applies the tool's timeout and converts errors/panics into
+// error results. The call id rides the ctx so a tool that emits progress frames
+// can tag them with the call they belong to (nesting them correctly in the UI
+// when several run in parallel).
+func (l *Loop) realToolCall() ToolHandler {
+	return func(ctx context.Context, c *ToolCall) toolruntime.Result {
+		return l.tools.Call(toolruntime.ContextWithCallID(ctx, c.Call.ID), c.Call.Name, c.Call.Args)
+	}
+}
+
+// recordToolResults completes one tool batch: it streams each result to the
+// client, assembles the tool-result message, and appends it to the run's
+// produced messages for full-block persistence. Shared by the normal dispatch
+// path and the truncated-batch path so both produce an identical event shape —
+// a batch that was failed rather than executed must still be a well-formed
+// tool_result for every tool_use, or the next request is unpaired.
+func (l *Loop) recordToolResults(ctx context.Context, emit Emitter, state *RunState, calls []toolruntime.Call, results []toolruntime.Result) {
+	for i, r := range results {
+		_ = emit.Emit(ctx, KindToolResult, map[string]any{
+			"tool_use_id": calls[i].ID,
+			"name":        calls[i].Name,
+			"content":     r.Content,
+			"is_error":    r.IsError,
+		})
+	}
+	msg := toolResultMessage(calls, results)
+	state.Produced = append(state.Produced, msg)
+	_ = emit.Emit(ctx, KindMessage, msg)
+}
+
+// truncatedCallResults fails every call in a batch that arrived on a message cut
+// off at the output-token limit. The message names the real cause. Strict JSON
+// parsing already rejects a call whose arguments were sliced mid-object, but it
+// reports that as malformed JSON — sending the model looking for a syntax error
+// it did not make; and a call completed just before the cut parses fine, so
+// nothing else flags it at all. Telling the model it was truncated is what makes
+// re-issuing the obvious next move.
+func truncatedCallResults(calls []toolruntime.Call, maxTokens int) []toolruntime.Result {
+	content := fmt.Sprintf(
+		"not executed: the response hit the max_tokens limit (%d) while this tool call was being written, so its arguments may be incomplete. Re-issue the call with complete arguments, keeping the response shorter.",
+		maxTokens)
+	results := make([]toolruntime.Result, len(calls))
+	for i := range results {
+		results[i] = toolruntime.Result{Content: content, IsError: true}
 	}
 	return results
 }
