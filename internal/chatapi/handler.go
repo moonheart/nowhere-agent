@@ -136,6 +136,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat/cancel", h.serveCancel)
 	mux.HandleFunc("GET /api/chat/sessions", h.serveSessions)
 	mux.HandleFunc("DELETE /api/chat/sessions/{id}", h.serveDeleteSession)
+	mux.HandleFunc("POST /api/chat/sessions/{id}/state", h.serveSetSessionState)
 	mux.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
 }
 
@@ -148,6 +149,7 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	mux.Handle("POST /api/chat/cancel", auth(http.HandlerFunc(h.serveCancel)))
 	mux.Handle("GET /api/chat/sessions", auth(http.HandlerFunc(h.serveSessions)))
 	mux.Handle("DELETE /api/chat/sessions/{id}", auth(http.HandlerFunc(h.serveDeleteSession)))
+	mux.Handle("POST /api/chat/sessions/{id}/state", auth(http.HandlerFunc(h.serveSetSessionState)))
 	mux.Handle("GET /api/chat/sessions/{id}/files/{path...}", auth(http.HandlerFunc(h.serveFile)))
 }
 
@@ -174,6 +176,13 @@ type sseEmitter struct {
 	usageOut   int
 	cacheRead  int
 	cacheWrite int
+	// toolStarted tracks tool-call ids whose tool-call-start frame has been
+	// written (a streaming KindToolArgs opens the block; the later KindToolUse
+	// must not start it again). argsStreamed marks ids whose args arrived via
+	// incremental tool-call-delta frames, so KindToolUse skips re-sending the
+	// full input as one duplicate delta.
+	toolStarted  map[string]bool
+	argsStreamed map[string]bool
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
@@ -342,7 +351,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 		return
 	}
 
-	_, history, err := h.registry.Decide(r.Context(), av.ApprovalID, av.Approved, av.Answer, loop.Tools())
+	ap2, complete, err := h.registry.RecordDecision(r.Context(), av.ApprovalID, av.Approved, av.Answer)
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrNoPendingApproval):
@@ -353,8 +362,30 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 		return
 	}
 
-	// A verdict continues the conversation with no new user turn: the tool_result
-	// the gated call was waiting on is already in history. Submit a fresh run.
+	// The batch (this run's gated calls) still has siblings pending: do NOT start
+	// a run. The conversation waits for the rest of the queue; the model is only
+	// re-invoked once every gated call has a verdict, so it never sees a partial
+	// batch. Stream a trivial, immediately-finished message so the deciding
+	// client's fetch completes; its card is already cleared and the next pending
+	// card is now actionable. No content frames are emitted.
+	if !complete {
+		if !writeStreamHeaders(w) {
+			return
+		}
+		flusher := w.(http.Flusher)
+		emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
+		emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
+		emitter.finish()
+		return
+	}
+
+	// Batch complete: fold every resolved interaction's tool_result into the
+	// history and start a fresh run to continue the conversation.
+	history, err := h.registry.FoldBatch(r.Context(), sessID, ap2.RunID, loop.Tools())
+	if err != nil {
+		writeSSEError(w, err.Error())
+		return
+	}
 	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history})
 	if err != nil {
 		if errors.Is(err, session.ErrRunActive) {
@@ -683,18 +714,39 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 		if s, ok := payload.(string); ok {
 			e.write(chunk{"type": "text-delta", "id": e.textID, "delta": s})
 		}
+	case agent.KindToolArgs:
+		// Incremental tool-call arguments as the model streams them. Open the
+		// block (id + name) the first time, then forward each fragment as a
+		// tool-call-delta so the client renders a large input as it generates.
+		if m, ok := payload.(map[string]any); ok {
+			id, _ := m["id"].(string)
+			name, _ := m["name"].(string)
+			delta, _ := m["delta"].(string)
+			e.writeToolCallStart(id, name)
+			if delta != "" {
+				e.write(chunk{"type": "tool-call-delta", "toolCallId": id, "argsText": delta})
+				e.argsStreamed[id] = true
+			}
+		}
 	case agent.KindToolUse:
 		if m, ok := payload.(map[string]any); ok {
 			id, _ := m["id"].(string)
 			name, _ := m["name"].(string)
-			e.write(chunk{"type": "tool-call-start", "toolCallId": id, "toolName": name})
+			e.writeToolCallStart(id, name)
 			// assistant-ui streams tool args via tool-call-delta frames (the start
-			// frame carries only id+name). Emit the full input as one delta so the
-			// live UI shows the arguments; otherwise it renders "{}" until reload
-			// (the history path marshals ToolInput separately and is unaffected).
-			if input, ok := m["input"]; ok && input != nil {
-				if data, err := json.Marshal(input); err == nil {
-					e.write(chunk{"type": "tool-call-delta", "toolCallId": id, "argsText": string(data)})
+			// frame carries only id+name). When the args already streamed as
+			// incremental deltas (KindToolArgs) they're complete on the client, so
+			// don't re-send the full input as one duplicate delta. When they did
+			// NOT stream — the no-broker direct path, or a provider that closed the
+			// stream without emitting args deltas — emit the full input here as one
+			// delta so the live UI still shows the arguments (otherwise it renders
+			// "{}" until reload; the history path marshals ToolInput separately and
+			// is unaffected either way).
+			if !e.argsStreamed[id] {
+				if input, ok := m["input"]; ok && input != nil {
+					if data, err := json.Marshal(input); err == nil {
+						e.write(chunk{"type": "tool-call-delta", "toolCallId": id, "argsText": string(data)})
+					}
 				}
 			}
 			e.write(chunk{"type": "tool-call-end", "toolCallId": id})
@@ -805,6 +857,26 @@ func (e *sseEmitter) finish() {
 	})
 	e.writeRaw("data: [DONE]\n\n")
 	e.flusher.Flush()
+}
+
+// writeToolCallStart emits a tool-call-start frame for a call at most once,
+// guarding against the double-open a streaming KindToolArgs (which opens the
+// block) followed by the block-stop KindToolUse (which closes it) would cause.
+// Callers hold e.mu. The tracking maps are initialized lazily because emitters
+// are built as struct literals at several call sites.
+func (e *sseEmitter) writeToolCallStart(id, name string) {
+	if id == "" {
+		return
+	}
+	if e.toolStarted == nil {
+		e.toolStarted = map[string]bool{}
+		e.argsStreamed = map[string]bool{}
+	}
+	if e.toolStarted[id] {
+		return
+	}
+	e.toolStarted[id] = true
+	e.write(chunk{"type": "tool-call-start", "toolCallId": id, "toolName": name})
 }
 
 func (e *sseEmitter) write(c chunk) {

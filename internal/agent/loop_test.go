@@ -158,6 +158,68 @@ func TestLoopToolRoundTrip(t *testing.T) {
 	}
 }
 
+// argsCapture records the delta payloads of KindToolArgs events in order.
+type argsCapture struct {
+	memEmitter
+	mu     sync.Mutex
+	deltas []string
+}
+
+func (a *argsCapture) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if kind == KindToolArgs {
+		if m, ok := payload.(map[string]any); ok {
+			d, _ := m["delta"].(string)
+			a.mu.Lock()
+			a.deltas = append(a.deltas, d)
+			a.mu.Unlock()
+		}
+	}
+	return a.memEmitter.Emit(ctx, kind, payload)
+}
+
+// TestLoopStreamsToolArgs pins incremental argument streaming: a tool_use block
+// must surface as a sequence of KindToolArgs events — an opening marker (empty
+// delta) at block start, then one event per argument fragment as the model
+// streams it — rather than appearing whole only at block stop. The concatenated
+// deltas must reconstruct the full argument JSON.
+func TestLoopStreamsToolArgs(t *testing.T) {
+	fragments := []string{`{"content":"`, `# big file`, ` ...`, `"}`}
+	evs := []provider.Event{{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "echo", ToolInput: map[string]any{}}}}
+	for _, f := range fragments {
+		evs = append(evs, provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: f})
+	}
+	evs = append(evs,
+		provider.Event{Type: provider.EventBlockStop, Index: 0},
+		provider.Event{Type: provider.EventMessageStop})
+
+	p := &scriptProvider{script: [][]provider.Event{evs, textResponse("done")}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	emit := &argsCapture{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	if _, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}, emit); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1 opening marker ("") + one event per fragment.
+	want := append([]string{""}, fragments...)
+	if len(emit.deltas) != len(want) {
+		t.Fatalf("KindToolArgs deltas = %v, want %v", emit.deltas, want)
+	}
+	var joined string
+	for i, d := range emit.deltas {
+		if d != want[i] {
+			t.Errorf("delta[%d] = %q, want %q", i, d, want[i])
+		}
+		joined += d
+	}
+	if joined != `{"content":"# big file ..."}` {
+		t.Errorf("joined deltas = %q", joined)
+	}
+}
+
 func TestLoopMaxIterationsGuard(t *testing.T) {
 	// Provider always requests a tool → loop must stop at the guard.
 	p := &scriptProvider{script: [][]provider.Event{

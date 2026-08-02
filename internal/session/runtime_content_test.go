@@ -18,9 +18,15 @@ func TestIsContentKindRoutesInterruptToBroker(t *testing.T) {
 	if !isContentKind(string(agent.KindInterrupt)) {
 		t.Fatalf("agent.KindInterrupt (%q) must be a content kind so the data-interaction frame reaches the broker", agent.KindInterrupt)
 	}
-	// The other streaming-content kinds stay on the broker.
+	// The other streaming-content kinds stay on the broker. KindToolArgs (the
+	// incremental argument stream) is ephemeral like text: it must reach the
+	// broker so a large tool input renders live, but is never persisted.
+	// KindUsage is broker-routed too: it renders the live data-usage frame and
+	// the finish frame's counts. When it was NOT a content kind it fell to the
+	// lifecycle path (whose handler drops it), so live streams showed usage:0
+	// and only a history reload surfaced the real counts.
 	for _, k := range []agent.EventKind{
-		agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolResult, agent.KindSubagent,
+		agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolArgs, agent.KindToolResult, agent.KindSubagent, agent.KindUsage,
 	} {
 		if !isContentKind(string(k)) {
 			t.Errorf("%q should be a content kind", k)

@@ -71,8 +71,15 @@ const (
 	KindThinking   EventKind = "thinking"
 	KindToolUse    EventKind = "tool_use"
 	KindToolResult EventKind = "tool_result"
-	KindError      EventKind = "error"
-	KindDone       EventKind = "done"
+	// KindToolArgs carries one incremental fragment of a tool call's arguments
+	// (payload: {id, name, delta}) as the model streams them, so the client can
+	// render a large tool input (e.g. a 10k-token write_file) while it generates
+	// instead of only at block-stop. Live-only content (broker-routed, never
+	// persisted): the durable record keeps the COMPLETE args on KindToolUse, so
+	// history replay is unaffected.
+	KindToolArgs EventKind = "tool_args"
+	KindError    EventKind = "error"
+	KindDone     EventKind = "done"
 	// KindMessage carries a fully-assembled conversation message (payload:
 	// provider.Message) so the run path can persist it in original block form.
 	// It is emitted once per completed message: each assistant message and each
@@ -145,8 +152,13 @@ type Loop struct {
 	gateExecute     GateFunc
 	// PendingInteraction, when set after Run returns, is the client-interaction
 	// tool call that ended the run. The run worker reads it to persist the durable
-	// Interaction.
+	// Interaction. With a multi-call gated batch this is the FIRST (queue head);
+	// PendingInteractions carries the whole batch.
 	PendingInteraction *Interaction
+	// PendingInteractions, when non-empty after Run returns, is the full gated
+	// batch that ended the run (in order). Each element is persisted as its own
+	// durable Interaction row; the run resumes only once all are resolved.
+	PendingInteractions []*Interaction
 	// PendingApproval is the pre-generalization name for PendingInteraction. It
 	// points at the same value (set alongside it) for source compatibility.
 	PendingApproval *Interaction
@@ -348,26 +360,30 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			continue
 		}
 
-		// Unified suspend point (general interrupt): if a call needs the client
+		// Unified suspend point (general interrupt): if any call needs the client
 		// before the run can continue — a permission approval, an ask_user question
-		// set, or a client-side tool — do NOT dispatch it. Emit the interrupt frame
-		// and end the run cleanly: the assistant message (with the suspended
-		// tool_use) is already produced/persisted, the run worker records the
-		// durable Interaction, and a LATER run folds the result back. The run is
-		// stateless — it ends here; there is no suspend/resume.
-		if gate := l.interactionGate(res.Calls); gate != nil {
-			l.PendingInteraction = gate
-			l.PendingApproval = gate // alias for source compatibility
-			// Emitting the interrupt also records the durable Interaction row (the
+		// set, or a client-side tool — do NOT dispatch it. Emit one interrupt frame
+		// per gated call (the whole batch) and end the run cleanly: the assistant
+		// message (with the suspended tool_use blocks) is already produced/persisted,
+		// the run worker records each durable Interaction, and a LATER run folds all
+		// the results back once the batch is fully resolved. The run is stateless —
+		// it ends here; there is no suspend/resume.
+		if gated := l.interactionGate(ctx, res.Calls); len(gated) > 0 {
+			l.PendingInteractions = gated
+			l.PendingInteraction = gated[0]
+			l.PendingApproval = gated[0] // alias for source compatibility
+			// Emitting each interrupt also records its durable Interaction row (the
 			// run worker's emitter persists it BEFORE the frame is published, so a
 			// fast client can't POST a verdict on a row that doesn't exist yet). If
-			// that fails — or the client disconnected — fail the run rather than
-			// ending it "done" with a prompt the client can act on but nothing
-			// backing it (which would 404 on resume).
-			if err := emit.Emit(ctx, KindInterrupt, *gate); err != nil {
-				return state.Produced, err
+			// any emit fails — or the client disconnected — fail the run rather than
+			// ending it "done" with prompts the client can act on but nothing backing
+			// them (which would 404 on resume).
+			for _, gate := range gated {
+				if err := emit.Emit(ctx, KindInterrupt, *gate); err != nil {
+					return state.Produced, err
+				}
 			}
-			slog.Info("agent: run ended awaiting client interaction", "tool", gate.ToolName, "kind", gate.Kind)
+			slog.Info("agent: run ended awaiting client interactions", "batch", len(gated), "first_tool", gated[0].ToolName, "first_kind", gated[0].Kind)
 			l.runAfterRun(ctx, state)
 			_ = emit.Emit(ctx, KindDone, nil)
 			return state.Produced, nil
@@ -529,6 +545,17 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 			case provider.EventBlockStart:
 				if ev.Block != nil {
 					open[ev.Index] = &accumulator{block: *ev.Block}
+					// A tool_use block starts with its id/name already known (both
+					// adapters supply them at block start), so surface the call —
+					// and its name — immediately, before any arguments stream in.
+					// The empty delta opens the client block without adding args.
+					if ev.Block.Type == provider.BlockToolUse {
+						if err := emit.Emit(ctx, KindToolArgs, map[string]any{
+							"id": ev.Block.ToolUseID, "name": ev.Block.ToolName, "delta": "",
+						}); err != nil {
+							return assistant, calls, end, err
+						}
+					}
 				}
 
 			case provider.EventBlockDelta:
@@ -544,6 +571,15 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 						emitErr = emit.Emit(ctx, KindText, ev.Delta)
 					case provider.BlockThinking:
 						emitErr = emit.Emit(ctx, KindThinking, ev.Delta)
+					case provider.BlockToolUse:
+						// Stream the argument fragment too, so a large tool input
+						// renders as it generates rather than appearing whole at
+						// block-stop. An empty provider delta carries no args.
+						if ev.Delta != "" {
+							emitErr = emit.Emit(ctx, KindToolArgs, map[string]any{
+								"id": acc.block.ToolUseID, "name": acc.block.ToolName, "delta": ev.Delta,
+							})
+						}
 					}
 					if emitErr != nil {
 						return assistant, calls, end, emitErr
@@ -595,15 +631,18 @@ func (l *Loop) appendFinalized(ctx context.Context, acc *accumulator, assistant 
 	})
 }
 
-// interactionGate is the loop's unified suspend point: it scans the batch for a
-// call that needs the client before the run can continue and returns the first
-// one. Three triggers, one check: (1) a permission approval — a tool whose
-// Permission callback denies with the ApprovalReasonPrefix marker; (2) an
-// ask_user question set — the model calling the built-in ask_user tool; (3) a
-// client-side tool — one implementing toolruntime.ClientTool. Only the first
-// such call is returned — the run suspends on it. Returns nil when nothing needs
-// the client.
-func (l *Loop) interactionGate(calls []toolruntime.Call) *Interaction {
+// interactionGate is the loop's unified suspend point: it scans the batch for
+// every call that needs the client before the run can continue and returns them
+// ALL, in order. Three triggers, one check per call: (1) a permission approval
+// — a tool whose Permission callback denies with the ApprovalReasonPrefix
+// marker; (2) an ask_user question set — the model calling the built-in
+// ask_user tool; (3) a client-side tool — one implementing toolruntime.ClientTool.
+// Every gated call becomes its own pending interaction (multi-approval queue):
+// the run ends on the batch and a fresh run resumes only once the WHOLE batch is
+// resolved, so the model never sees a partial conversation (LangGraph-style).
+// Returns nil when nothing needs the client.
+func (l *Loop) interactionGate(ctx context.Context, calls []toolruntime.Call) []*Interaction {
+	var gated []*Interaction
 	for _, c := range calls {
 		if c.ArgsError != "" {
 			continue
@@ -612,18 +651,18 @@ func (l *Loop) interactionGate(calls []toolruntime.Call) *Interaction {
 		switch {
 		// ask_user: the model is explicitly asking the user for structured input.
 		case c.Name == AskUserToolName:
-			return &Interaction{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+			gated = append(gated, &Interaction{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args})
 		// Client-side tool: executes in the client, not the server — suspend.
 		case registered && toolruntime.IsClientTool(tool):
-			return &Interaction{ID: uuid.NewString(), Kind: "client_tool", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+			gated = append(gated, &Interaction{ID: uuid.NewString(), Kind: "client_tool", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args})
 		// Permission approval: a dangerous call the policy gates for a yes/no.
 		case registered && l.gateInteraction != nil:
-			if deny, reason := l.gateInteraction(tool); deny && IsApprovalReason(reason) {
-				return &Interaction{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
+			if deny, reason := l.gateInteraction(ctx, tool); deny && IsApprovalReason(reason) {
+				gated = append(gated, &Interaction{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args})
 			}
 		}
 	}
-	return nil
+	return gated
 }
 
 // dispatch runs tool calls concurrently, each through the tool-middleware chain.
@@ -657,7 +696,7 @@ func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolrun
 		// before dispatch. A denied call is not executed; the reason is fed back as
 		// an error result so the model can adapt.
 		if l.gateExecute != nil {
-			if deny, reason := l.gateExecute(tool); deny {
+			if deny, reason := l.gateExecute(ctx, tool); deny {
 				results[i] = toolruntime.Result{Content: "permission denied: " + reason, IsError: true}
 				continue
 			}

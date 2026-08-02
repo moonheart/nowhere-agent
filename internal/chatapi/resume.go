@@ -92,7 +92,7 @@ func emitStreamEvent(r *http.Request, emitter *sseEmitter, e session.StreamEvent
 	switch agent.EventKind(e.Kind) {
 	case agent.KindThinking, agent.KindText, agent.KindError:
 		emitter.Emit(r.Context(), agent.EventKind(e.Kind), decodeTextPayload(e.Payload))
-	case agent.KindToolUse, agent.KindToolResult:
+	case agent.KindToolUse, agent.KindToolArgs, agent.KindToolResult:
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.EventKind(e.Kind), m)
 		}

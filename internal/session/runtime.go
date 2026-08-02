@@ -86,10 +86,21 @@ type Store interface {
 
 	// Tool-approval records (capability-gap O2, migration 000010): the durable
 	// thread-level store for a pending human decision.
-	// CreateApproval persists a new pending approval (at most one per session).
+	// CreateApproval persists a new pending approval. Multiple pendings per
+	// session are allowed (multi-approval queue): one per gated call in a batch.
 	CreateApproval(ctx context.Context, a Approval) (Approval, error)
-	// PendingApprovalForSession returns the session's outstanding approval, or false.
+	// PendingApprovalForSession returns the session's earliest outstanding
+	// approval (the queue head), or false.
 	PendingApprovalForSession(ctx context.Context, sessionID string) (Approval, bool, error)
+	// PendingApprovalsForSession returns every pending interaction for a session
+	// in queue order (earliest first) — the full gated batch.
+	PendingApprovalsForSession(ctx context.Context, sessionID string) ([]Interaction, error)
+	// PendingApprovalsForRun returns the still-pending interactions of one run
+	// (one gated batch), in queue order; empty means the batch is fully resolved.
+	PendingApprovalsForRun(ctx context.Context, runID string) ([]Interaction, error)
+	// ApprovalsForRun returns ALL interactions of one run (one gated batch), any
+	// status, in queue order — used to fold a fully-resolved batch into results.
+	ApprovalsForRun(ctx context.Context, runID string) ([]Interaction, error)
 	// GetApproval fetches an approval by id (any status).
 	GetApproval(ctx context.Context, id string) (Approval, error)
 	// DecideApproval resolves a pending approval, or ErrNoPendingApproval. answer
@@ -254,13 +265,20 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 // Interaction record separately, and the transient data-interaction frame must
 // reach the client live to drive the approval/ask_user/client-tool card.
 //
+// Usage is broker-routed as well: it's ephemeral stream detail rendered as the
+// data-usage frame (and stashed for the finish frame's counts), not a durable
+// per-token record. Without this it fell to the lifecycle path, where the
+// attacher's lifecycle handler drops it — so live streams reported usage:0 and
+// only a history reload (which rebuilds usage from message metadata) showed the
+// real counts.
+//
 // Matched against the agent.EventKind constants (NOT string literals) so a
 // rename of a kind's value can't silently desync this routing — as happened when
 // "approval_request" became agent.KindInterrupt and this list still checked the
 // old string, dropping every interaction frame in the runtime-wired server.
 func isContentKind(kind string) bool {
 	switch agent.EventKind(kind) {
-	case agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolResult, agent.KindSubagent, agent.KindInterrupt:
+	case agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolArgs, agent.KindToolResult, agent.KindSubagent, agent.KindInterrupt, agent.KindUsage:
 		return true
 	default:
 		return false
@@ -340,6 +358,14 @@ func (rt *Runtime) SetSessionStateKV(ctx context.Context, sessionID, key string,
 	}
 	_, err = rt.broker.Publish(ctx, sessionID, StreamEvent{RunID: runID, Kind: "session_state", Payload: payload})
 	return err
+}
+
+// SessionStateKV returns one key of the session's state dictionary (pass-through
+// to the store). Call-time readers that need a single setting (e.g. the
+// permission middleware resolving permission_mode) use this instead of pulling
+// the whole SessionState map on every call.
+func (rt *Runtime) SessionStateKV(ctx context.Context, id, key string) (json.RawMessage, bool, error) {
+	return rt.store.SessionStateKV(ctx, id, key)
 }
 
 // SessionState returns the session's whole state dictionary (pass-through to
