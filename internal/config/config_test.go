@@ -67,19 +67,65 @@ func TestDreamingDefaults(t *testing.T) {
 	if cfg.Dreaming.MaxTokens != 100000 {
 		t.Errorf("got dreaming max tokens %d, want 100000", cfg.Dreaming.MaxTokens)
 	}
-	if !cfg.Dreaming.Reflect {
-		t.Error("dreaming reflect should default to true (compress+reflect stages on)")
+	if cfg.Dreaming.MaxFacts != 80 || cfg.Dreaming.MaxInsights != 30 || cfg.Dreaming.MaxSummaries != 40 {
+		t.Errorf("got caps facts=%d insights=%d summaries=%d, want 80/30/40",
+			cfg.Dreaming.MaxFacts, cfg.Dreaming.MaxInsights, cfg.Dreaming.MaxSummaries)
+	}
+	if cfg.Dreaming.PurgeAfter != 720*time.Hour {
+		t.Errorf("got purge-after %v, want 720h", cfg.Dreaming.PurgeAfter)
 	}
 }
 
-func TestDreamingReflectFromEnv(t *testing.T) {
-	t.Setenv("DREAMING_REFLECT", "false")
+func TestDreamingCapsFromEnv(t *testing.T) {
+	t.Setenv("DREAMING_ENABLED", "true")
+	t.Setenv("DREAMING_MAX_FACTS", "10")
+	t.Setenv("DREAMING_MAX_INSIGHTS", "5")
+	t.Setenv("DREAMING_MAX_SUMMARIES", "7")
+	t.Setenv("DREAMING_PURGE_AFTER", "48h")
+
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Dreaming.Reflect {
-		t.Error("DREAMING_REFLECT=false should disable the compress+reflect stages")
+	if cfg.Dreaming.MaxFacts != 10 || cfg.Dreaming.MaxInsights != 5 || cfg.Dreaming.MaxSummaries != 7 {
+		t.Errorf("got caps facts=%d insights=%d summaries=%d, want 10/5/7",
+			cfg.Dreaming.MaxFacts, cfg.Dreaming.MaxInsights, cfg.Dreaming.MaxSummaries)
+	}
+	if cfg.Dreaming.PurgeAfter != 48*time.Hour {
+		t.Errorf("got purge-after %v, want 48h", cfg.Dreaming.PurgeAfter)
+	}
+}
+
+// A cap of zero must be refused, not read as "unbounded". An unbounded store is
+// the failure these caps exist to fix, so restoring it via a typo'd env var
+// would be the worst available reading of the value.
+func TestDreamingNonPositiveCapRejected(t *testing.T) {
+	for _, key := range []string{"DREAMING_MAX_FACTS", "DREAMING_MAX_INSIGHTS", "DREAMING_MAX_SUMMARIES"} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv("DREAMING_ENABLED", "true")
+			t.Setenv(key, "0")
+			if _, err := Load(); err == nil {
+				t.Errorf("Load succeeded with %s=0; want an error", key)
+			}
+		})
+	}
+}
+
+func TestDreamingNonPositivePurgeRejected(t *testing.T) {
+	t.Setenv("DREAMING_ENABLED", "true")
+	t.Setenv("DREAMING_PURGE_AFTER", "0s")
+	if _, err := Load(); err == nil {
+		t.Error("Load succeeded with DREAMING_PURGE_AFTER=0s; want an error")
+	}
+}
+
+// Validation is scoped to an enabled worker: a deployment that never runs
+// dreaming should not have to hold valid caps for it.
+func TestDreamingCapsUnvalidatedWhenDisabled(t *testing.T) {
+	t.Setenv("DREAMING_ENABLED", "false")
+	t.Setenv("DREAMING_MAX_INSIGHTS", "0")
+	if _, err := Load(); err != nil {
+		t.Errorf("Load: %v; caps should not be validated while dreaming is off", err)
 	}
 }
 

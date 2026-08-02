@@ -63,10 +63,40 @@ type userDTO struct {
 	ID          string `json:"id"`
 	Email       string `json:"email"`
 	DisplayName string `json:"display_name"`
+	// PlatformRole tells the client whether to offer platform administration.
+	// It is presentation only: every platform route enforces the role
+	// server-side regardless of what the client renders.
+	PlatformRole string `json:"platform_role"`
+	Disabled     bool   `json:"disabled"`
 }
 
 func toDTO(u User) userDTO {
-	return userDTO{ID: u.ID, Email: u.Email, DisplayName: u.DisplayName}
+	role := u.PlatformRole
+	if role == "" {
+		role = PlatformRoleUser
+	}
+	return userDTO{
+		ID:           u.ID,
+		Email:        u.Email,
+		DisplayName:  u.DisplayName,
+		PlatformRole: string(role),
+		Disabled:     u.Disabled(),
+	}
+}
+
+// teamMembershipDTO is one of the caller's teams with their role in it.
+type teamMembershipDTO struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+func toTeamMembershipDTOs(teams []TeamWithRole) []teamMembershipDTO {
+	out := make([]teamMembershipDTO, 0, len(teams))
+	for _, t := range teams {
+		out = append(out, teamMembershipDTO{ID: t.Team.ID, Name: t.Team.Name, Role: string(t.Role)})
+	}
+	return out
 }
 
 func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +132,10 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	if errors.Is(err, ErrUserDisabled) {
+		writeError(w, http.StatusForbidden, "account is disabled")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "login failed")
 		return
@@ -119,7 +153,17 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	u, _ := UserFromContext(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"user": toDTO(u)})
+	// Teams ride along on the profile so the console can render its team
+	// navigation from one request rather than a second round trip on load.
+	teams, err := h.svc.TeamsForUser(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load teams failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":  toDTO(u),
+		"teams": toTeamMembershipDTOs(teams),
+	})
 }
 
 // requireAuth is middleware that resolves the bearer token to a user.

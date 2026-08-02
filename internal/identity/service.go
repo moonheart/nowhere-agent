@@ -36,6 +36,9 @@ func (s *Service) Signup(ctx context.Context, email, password, displayName strin
 }
 
 // Login verifies credentials and returns a fresh bearer token plus the user.
+// A disabled account fails as if the credentials were wrong: telling a
+// disabled account apart from a wrong password hands an attacker a valid-email
+// oracle, and the account holder learns nothing actionable either way.
 func (s *Service) Login(ctx context.Context, email, password string) (token string, u User, err error) {
 	u, err = s.store.UserByEmail(ctx, email)
 	if err != nil {
@@ -43,6 +46,9 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 	}
 	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
 		return "", User{}, ErrInvalidCredentials
+	}
+	if u.Disabled() {
+		return "", User{}, ErrUserDisabled
 	}
 	raw, err := generateToken()
 	if err != nil {
@@ -54,13 +60,23 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 	return raw, u, nil
 }
 
-// Authenticate resolves a bearer token to its user.
+// Authenticate resolves a bearer token to its user. Disabling an account
+// revokes its tokens, so this rarely fires — but a token issued in the same
+// instant as the disable would otherwise slip through, and re-checking is one
+// field comparison on a row already fetched.
 func (s *Service) Authenticate(ctx context.Context, token string) (User, error) {
 	userID, err := s.store.UserIDByTokenHash(ctx, hashToken(token), s.now())
 	if err != nil {
 		return User{}, err
 	}
-	return s.store.UserByID(ctx, userID)
+	u, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		return User{}, err
+	}
+	if u.Disabled() {
+		return User{}, ErrUserDisabled
+	}
+	return u, nil
 }
 
 // Logout invalidates a token.

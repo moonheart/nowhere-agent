@@ -15,17 +15,17 @@ var ErrNoProvider = errors.New("no provider available")
 
 // Credentials holds an API key and the quota scope it bills against.
 type Credentials struct {
-	APIKey    string
+	APIKey string
 	// TeamID is set when a team key is used; empty for platform key.
-	TeamID    string
-	Platform  bool
+	TeamID   string
+	Platform bool
 }
 
-// KeyStore resolves credentials for a user, preferring a team key.
+// KeyStore resolves credentials for a user's call to a given provider.
 type KeyStore interface {
-	// Resolve returns credentials for the user: the user's team key if one is
-	// configured, otherwise the platform key.
-	Resolve(ctx context.Context, userID string) (Credentials, error)
+	// Resolve returns credentials for the user: a team key configured for that
+	// provider if one applies, otherwise the platform key.
+	Resolve(ctx context.Context, userID, provider string) (Credentials, error)
 }
 
 // Target is a resolved provider+model+credentials triple.
@@ -49,16 +49,19 @@ func NewRouter(registry *provider.Registry, keys KeyStore, fallbacks []string) *
 	return &Router{registry: registry, keys: keys, fallbacks: fallbacks}
 }
 
-// Resolve picks the first available provider and resolves credentials.
+// Resolve picks the first available provider and resolves credentials for it.
+// Provider selection happens first: credentials are provider-specific, so there
+// is nothing to resolve until we know which vendor is being called.
 func (r *Router) Resolve(ctx context.Context, userID string) (Target, error) {
-	creds, err := r.keys.Resolve(ctx, userID)
-	if err != nil {
-		return Target{}, err
-	}
 	for _, name := range r.fallbacks {
-		if _, err := r.registry.Get(name); err == nil {
-			return Target{Provider: name, Credentials: creds}, nil
+		if _, err := r.registry.Get(name); err != nil {
+			continue
 		}
+		creds, err := r.keys.Resolve(ctx, userID, name)
+		if err != nil {
+			return Target{}, err
+		}
+		return Target{Provider: name, Credentials: creds}, nil
 	}
 	return Target{}, ErrNoProvider
 }

@@ -35,6 +35,9 @@ type Config struct {
 	Dreaming Dreaming
 	// Skills configures the skill runtime (capability-gap K3a).
 	Skills Skills
+	// Identity configures the account layer, notably platform-admin bootstrap
+	// (admin-console).
+	Identity Identity
 }
 
 // Permission maps each tool risk class to a decision for the execution-permission
@@ -69,15 +72,54 @@ type Dreaming struct {
 	Enabled   bool          `envconfig:"DREAMING_ENABLED" default:"false"`
 	Interval  time.Duration `envconfig:"DREAMING_INTERVAL" default:"1h"`
 	MaxTokens int           `envconfig:"DREAMING_MAX_TOKENS" default:"100000"`
-	// Reflect enables the compress + reflect stages (KindSummary/KindInsight),
-	// which each cost extra LLM calls per session batch. On by default; set
-	// DREAMING_REFLECT=false to run the cheaper extract→reorganize pipeline only.
-	Reflect bool `envconfig:"DREAMING_REFLECT" default:"true"`
-	// Revise upgrades REORGANIZE from a string heuristic to an LLM pass that
-	// detects contradictions AND time-stale memories (随时间保鲜). It costs one
-	// LLM call per extracted fact. On by default; set DREAMING_REVISE=false to
-	// fall back to the cheap string-negation heuristic.
-	Revise bool `envconfig:"DREAMING_REVISE" default:"true"`
+
+	// MaxFacts, MaxInsights and MaxSummaries cap the LIVE memories of each kind
+	// in one scope. Consolidation is told each cap and its current count and
+	// asked to merge to fit; anything still over is evicted oldest-first.
+	//
+	// Caps are per kind, not one shared total, because a shared total is won by
+	// whichever kind generates most freely. That is not hypothetical: before this
+	// existed, insights reached 83% of a live store whose facts were the part
+	// with any value.
+	//
+	// Facts and preferences share MaxFacts — both are "things true about the
+	// user", and splitting them would force an arbitrary line between "prefers
+	// X" and "is X".
+	MaxFacts     int `envconfig:"DREAMING_MAX_FACTS" default:"80"`
+	MaxInsights  int `envconfig:"DREAMING_MAX_INSIGHTS" default:"30"`
+	MaxSummaries int `envconfig:"DREAMING_MAX_SUMMARIES" default:"40"`
+
+	// PurgeAfter is how long a deprecated memory is kept before permanent
+	// deletion. Deprecation is reversible by design, so something has to close
+	// the window; without it the store grows without bound in rows nothing can
+	// recall.
+	PurgeAfter time.Duration `envconfig:"DREAMING_PURGE_AFTER" default:"720h"`
+}
+
+// Validate rejects a dreaming configuration that cannot hold its invariants.
+// A zero or negative cap is refused rather than read as "unbounded": the caps
+// exist because an unbounded store is the failure being fixed, so silently
+// restoring it via a typo'd env var would be the worst possible reading.
+func (d Dreaming) Validate() error {
+	if !d.Enabled {
+		return nil
+	}
+	for _, c := range []struct {
+		name string
+		v    int
+	}{
+		{"DREAMING_MAX_FACTS", d.MaxFacts},
+		{"DREAMING_MAX_INSIGHTS", d.MaxInsights},
+		{"DREAMING_MAX_SUMMARIES", d.MaxSummaries},
+	} {
+		if c.v <= 0 {
+			return fmt.Errorf("%s must be positive, got %d (there is no 'unbounded' setting)", c.name, c.v)
+		}
+	}
+	if d.PurgeAfter <= 0 {
+		return fmt.Errorf("DREAMING_PURGE_AFTER must be positive, got %s", d.PurgeAfter)
+	}
+	return nil
 }
 
 // Skills configures the skill runtime (capability-gap K3a). Dir points at a
@@ -161,6 +203,19 @@ type Web struct {
 	Dir string `envconfig:"WEB_DIR" default:""`
 }
 
+// Identity configures the account layer (admin-console). The first account
+// created on an empty platform is made a platform admin automatically, which
+// does nothing for a deployment whose accounts predate the role — those
+// designate one here.
+type Identity struct {
+	// BootstrapAdminEmail names an existing account to promote to platform
+	// admin at startup. Applied idempotently on every boot; an email matching
+	// no account logs a warning rather than failing startup, so a stale value
+	// never blocks a deploy. It is also the recovery path if the last admin
+	// loses the role.
+	BootstrapAdminEmail string `envconfig:"BOOTSTRAP_ADMIN_EMAIL" default:""`
+}
+
 // Workspace configures the per-session workspace storage that backs image
 // payloads referenced by conversation messages (persist-raw-messages).
 type Workspace struct {
@@ -201,6 +256,9 @@ func Load() (Config, error) {
 	var c Config
 	if err := envconfig.Process("", &c); err != nil {
 		return Config{}, fmt.Errorf("process env config: %w", err)
+	}
+	if err := c.Dreaming.Validate(); err != nil {
+		return Config{}, fmt.Errorf("dreaming config: %w", err)
 	}
 	return c, nil
 }

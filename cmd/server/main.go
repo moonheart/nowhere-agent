@@ -10,8 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
+	"path/filepath"
 	"syscall"
 
+	"nowhere-agent/internal/adminapi"
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/agentdef"
 	"nowhere-agent/internal/chatapi"
@@ -27,6 +30,7 @@ import (
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/provider/anthropic"
 	"nowhere-agent/internal/provider/openai"
+	"nowhere-agent/internal/routing"
 	"nowhere-agent/internal/sandbox"
 	"nowhere-agent/internal/scheduler"
 	"nowhere-agent/internal/session"
@@ -34,6 +38,7 @@ import (
 	"nowhere-agent/internal/subagent"
 	"nowhere-agent/internal/toolruntime"
 	"nowhere-agent/internal/toolruntime/builtin"
+	"nowhere-agent/internal/usage"
 	"nowhere-agent/internal/workspace"
 )
 
@@ -72,6 +77,27 @@ func run() error {
 	identitySvc := identity.NewService(identityStore)
 	identityHandler := identity.NewHandler(identitySvc)
 	identityHandler.Register(mux)
+
+	// Platform-admin bootstrap (admin-console): the first account to sign up on
+	// an empty database is made an admin automatically, which does nothing for a
+	// deployment whose accounts predate the role. BOOTSTRAP_ADMIN_EMAIL names
+	// one to promote; it is idempotent, so it can stay set, and it is the
+	// recovery path if no admin remains. An email nobody holds is a warning, not
+	// a boot failure — a stale value must not keep the server down.
+	if email := cfg.Identity.BootstrapAdminEmail; email != "" {
+		switch found, err := identitySvc.PromoteByEmail(ctx, email); {
+		case err != nil:
+			log.Warn("bootstrap admin promotion failed", "email", email, "err", err)
+		case found:
+			log.Info("bootstrap admin ensured", "email", email)
+		default:
+			log.Warn("bootstrap admin email matches no account", "email", email)
+		}
+	}
+
+	// Team-scoped provider credentials (model-routing D14). The store is both
+	// the resolver on the chat path (below) and the console's management path.
+	keyStore := routing.NewPGKeyStore(pool, cfg.LLM.APIKey)
 
 	// Durable session runtime over Postgres: chat requests persist as runs,
 	// and the run log doubles as the episodes for dreaming.
@@ -175,8 +201,13 @@ func run() error {
 	baseSystem := "You are nowhere-agent, a helpful AI assistant."
 	ctxBuilder := chatapi.NewContextBuilder(baseSystem, identitySvc, memPort, skillEngine)
 
+	// The consolidation runner is declared out here because the console's manual
+	// trigger needs it, and the console is wired below regardless of whether a
+	// provider was configured.
+	var dreamRunner *dreaming.Runner
+
 	// Chat endpoint: build an agent loop per request from the configured provider.
-	if adapter := buildProvider(cfg, log); adapter != nil {
+	if adapter, rawRecorder := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
 
 		// Execution-permission gate (D10): authorize each tool call by the tool's
@@ -189,18 +220,52 @@ func run() error {
 			Network:       permission.Decision(cfg.Permission.Network),
 			ExternalWrite: permission.Decision(cfg.Permission.ExternalWrite),
 		})
-		permit := func(t toolruntime.Tool) (bool, string) {
+		// permitEnv evaluates the env policy: deny → blocked (fed to the model);
+		// ask → gated for human approval (the ApprovalReasonPrefix marker tells the
+		// loop to SUSPEND and prompt, not error). This is the base policy the
+		// per-session mode wraps.
+		permitEnv := func(t toolruntime.Tool) (bool, string) {
 			switch permChecker.Check(t) {
 			case permission.Deny:
 				return true, fmt.Sprintf("%s (risk: %s) is not permitted by policy", t.Name(), t.Risk())
 			case permission.Ask:
-				// Gate for human approval (capability-gap O2): the marker tells the
-				// loop to SUSPEND the run and prompt the user, not feed an error to
-				// the model. The decision endpoint resumes the run.
 				return true, agent.ApprovalReasonPrefix + fmt.Sprintf("%s (risk: %s)", t.Name(), t.Risk())
 			default:
 				return false, ""
 			}
+		}
+		// permissionMode reads the session's permission mode from its state store.
+		// An empty session id (a run with no session binding), a read error, or an
+		// unknown value all fall back to auto — the safe default.
+		permissionMode := func(ctx context.Context, sessionID string) string {
+			if sessionID == "" {
+				return chatapi.PermissionModeAuto
+			}
+			v, ok, err := sessionRuntime.SessionStateKV(ctx, sessionID, chatapi.PermissionModeStateKey)
+			if err != nil || !ok {
+				return chatapi.PermissionModeAuto
+			}
+			var mode string
+			if err := json.Unmarshal(v, &mode); err != nil {
+				return chatapi.PermissionModeAuto
+			}
+			return mode
+		}
+		// permit is the GateFunc the PermissionMW middleware exposes to the loop,
+		// registered ONCE per loop. The loop calls it at both gate points on every
+		// tool call, so resolving the mode HERE (per call, from the run context's
+		// session id) — not at registration time — makes the client's "allow all"
+		// toggle take effect with no loop rebuild and no middleware re-wiring, and
+		// lets a subagent child inherit its parent session's mode through the same
+		// context. allow_all lifts ONLY the approval gate (the ask marker): an env
+		// deny still blocks, and ask_user/client_tool are unaffected. The mode read
+		// is best-effort: any failure or unknown value falls back to auto (env).
+		permit := func(ctx context.Context, t toolruntime.Tool) (bool, string) {
+			deny, reason := permitEnv(t)
+			if deny && agent.IsApprovalReason(reason) && permissionMode(ctx, agent.SessionIDFromContext(ctx)) == chatapi.PermissionModeAllowAll {
+				return false, ""
+			}
+			return deny, reason
 		}
 		log.Info("execution-permission gate enabled",
 			"read_only", cfg.Permission.ReadOnly, "sandbox_write", cfg.Permission.SandboxWrite,
@@ -228,28 +293,48 @@ func run() error {
 		}
 
 		// Dreaming worker + the scheduler that drives it (capability-gaps K1+K2).
-		// The worker consolidates ended sessions' episodes into long-term memory;
-		// the scheduler fires it every DREAMING_INTERVAL. Idempotency rests on the
-		// sessions.dreamed_at marker (migration 000008), not the scheduler's
-		// in-memory last-run map, so the catch-up run at every boot only processes
-		// sessions not already dreamed over. The scheduler runs in a goroutine like
-		// the HTTP server and stops when the root context is cancelled.
+		// The worker consolidates sessions' episodes into long-term memory; the
+		// scheduler fires it every DREAMING_INTERVAL. Idempotency rests on each
+		// session's dreamed_seq watermark (migration 000009), not the scheduler's
+		// in-memory last-run map, so the catch-up run at every boot only consolidates
+		// messages beyond that mark.
+		//
+		// The WORKER is built whether or not the scheduler runs: DREAMING_ENABLED
+		// governs the schedule, not the capability. Manual consolidation from the
+		// console stays available with the schedule off, which is the point of
+		// having it — an operator who wants consolidation to be deliberate rather
+		// than periodic turns the timer off and keeps the button.
+		source := dreaming.NewStoreSource(sessionStore, messageStore)
+		worker := dreaming.NewWorker(source, memPort,
+			dreaming.NewProviderLLM(adapter, model),
+			dreaming.Budget{MaxTokens: cfg.Dreaming.MaxTokens})
+		worker.SetCaps(dreaming.Caps{
+			Facts:     cfg.Dreaming.MaxFacts,
+			Insights:  cfg.Dreaming.MaxInsights,
+			Summaries: cfg.Dreaming.MaxSummaries,
+		})
+		worker.SetPurgeAfter(cfg.Dreaming.PurgeAfter)
+		worker.SetLogger(log)
+
+		// The runner serializes passes. Its base context is the root one, not a
+		// request's: a manually triggered pass outlives the HTTP call that asked for
+		// it, but must still stop when the server does.
+		dreamRunner = dreaming.NewRunner(worker, ctx)
+		dreamRunner.SetLogger(log)
+
 		if cfg.Dreaming.Enabled {
-			source := dreaming.NewStoreSource(sessionStore, messageStore)
-			llm := dreaming.NewProviderLLM(adapter, model)
-			worker := dreaming.NewWorker(source, memPort, llm, dreaming.Budget{MaxTokens: cfg.Dreaming.MaxTokens})
-			worker.SetReflect(cfg.Dreaming.Reflect)
-			worker.SetRevise(cfg.Dreaming.Revise)
 			sched := scheduler.New(log, scheduler.Job{
 				Name:     "dreaming",
 				Interval: cfg.Dreaming.Interval,
-				Run: func(ctx context.Context) error {
-					_, err := worker.Run(ctx)
-					return err
-				},
+				Run:      dreamRunner.RunScheduled,
 			})
 			go sched.Start(ctx)
-			log.Info("dreaming worker enabled", "interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens, "reflect", cfg.Dreaming.Reflect, "revise", cfg.Dreaming.Revise)
+			log.Info("dreaming scheduler enabled",
+				"interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens,
+				"cap_facts", cfg.Dreaming.MaxFacts, "cap_insights", cfg.Dreaming.MaxInsights,
+				"cap_summaries", cfg.Dreaming.MaxSummaries, "purge_after", cfg.Dreaming.PurgeAfter)
+		} else {
+			log.Info("dreaming scheduler disabled; manual consolidation still available")
 		}
 
 		// Subagent factory (subagent capability): builds a child loop for a
@@ -258,7 +343,7 @@ func run() error {
 		// the spawn tool via WithTools. Closes over the provider so the subagent
 		// package needs no wiring dependency.
 		subStore := agentdef.NewStore()
-		subFactory := func(_ context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
+		subFactory := func(ctx context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
 			childModel := def.Model
 			if childModel == "" {
 				childModel = model
@@ -270,16 +355,16 @@ func run() error {
 			loop := agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           childModel,
 				System:          def.System,
-				MaxTokens:       4096,
+				MaxTokens:       65536,
 				MaxIterations:   maxIter,
 				CacheablePrefix: true,
 			})
-			// Cross-cutting middleware, outermost first: tool authorization gates
-			// dispatch, compression shrinks the working view, overflow retry drops
-			// a round and retries on rejection.
+			// The child's permission policy resolves from the spawn context's session
+			// id (set on the run by the registry), so it inherits the parent session's
+			// permission mode.
 			loop.Use(&agent.PermissionMW{Check: permit})
 			if compressor != nil {
-				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 4096})
+				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 65536})
 			}
 			loop.Use(&agent.OverflowMW{})
 			return loop
@@ -287,17 +372,29 @@ func run() error {
 
 		// Loop factory + session tool binder, named so the approval Resume path
 		// can rebuild a parked run's loop after a restart (capability-gap O2).
+		//
+		// Credential resolution happens here, per request (model-routing): the
+		// caller is already on the context (both call sites pass the request
+		// context from a route behind RequireAuth), so a team that configured
+		// its own provider key gets its calls billed to that key instead of the
+		// platform one. Resolution failure falls back to the boot adapter —
+		// chat must not go down because a key lookup hiccuped.
 		newChatLoop := func(ctx context.Context, system string) *agent.Loop {
-			loop := agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
-				Model:           model,
-				System:          system,
-				MaxTokens:       4096,
-				MaxIterations:   25,
-				CacheablePrefix: true,
-			})
+			loop := agent.New(
+				adapterForCaller(ctx, cfg, rawRecorder, keyStore, adapter, log),
+				toolruntime.NewRegistry(), agent.Config{
+					Model:           model,
+					System:          system,
+					MaxTokens:       65536,
+					MaxIterations:   25,
+					CacheablePrefix: true,
+				})
+			// Tool authorization gates dispatch. The policy (permit) resolves the
+			// per-session permission mode from the run context at call time, so one
+			// registration covers every session and reacts to the live toggle.
 			loop.Use(&agent.PermissionMW{Check: permit})
 			if compressor != nil {
-				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 4096})
+				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 65536})
 			}
 			loop.Use(&agent.OverflowMW{})
 			return loop
@@ -421,9 +518,21 @@ func run() error {
 		log.Warn("chat endpoint disabled: no LLM provider configured (set LLM_PROVIDER/LLM_API_KEY)")
 	}
 
-	// Serve the built frontend if present.
+	// Management console (admin-console): self-service, team, and platform
+	// routes, all behind the same auth middleware the chat endpoint uses. It is
+	// registered outside the provider branch so the console stays reachable on
+	// a deployment with no LLM configured.
+	adminHandler := adminapi.NewHandler(identitySvc, keyStore, usage.NewStore(pool), memPort).
+		WithDreaming(dreamRunner)
+	adminHandler.RegisterAuthed(mux, identityHandler.RequireAuth)
+	log.Info("admin console endpoints enabled (auth required)")
+
+	// Serve the built frontend if present. The console is a client-side route,
+	// so a deep link like /admin/users has no file behind it — spaHandler falls
+	// back to index.html. API routes carry more specific patterns, which Go's
+	// ServeMux prefers over this one, so they are unaffected.
 	if cfg.Web.Dir != "" {
-		mux.Handle("GET /", http.FileServer(http.Dir(cfg.Web.Dir)))
+		mux.Handle("GET /", spaHandler(cfg.Web.Dir))
 	}
 
 	srv := &http.Server{
@@ -452,12 +561,91 @@ func run() error {
 	}
 }
 
-// buildProvider constructs the configured provider adapter, or nil if not configured.
-func buildProvider(cfg config.Config, log *slog.Logger) provider.Adapter {
+// adapterForCaller picks the provider adapter for one chat request
+// (model-routing): the platform adapter, unless the caller belongs to a team
+// that configured its own key for this provider, in which case an adapter bound
+// to that key.
+//
+// Every failure path returns the platform adapter. That is the whole point:
+// this runs on the chat hot path, and a credential lookup that errors — a
+// Postgres blip, a misconfigured row — must degrade to the platform key rather
+// than take chat down. An unauthenticated context does the same, which is what
+// makes this safe to call from paths that have no user.
+func adapterForCaller(
+	ctx context.Context,
+	cfg config.Config,
+	recorder *provider.RawRecorder,
+	keys *routing.PGKeyStore,
+	platform provider.Adapter,
+	log *slog.Logger,
+) provider.Adapter {
+	if keys == nil {
+		return platform
+	}
+	u, ok := identity.UserFromContext(ctx)
+	if !ok {
+		return platform
+	}
+	creds, err := keys.Resolve(ctx, u.ID, cfg.LLM.Provider)
+	if err != nil {
+		log.Warn("credential resolution failed; using platform key", "user", u.ID, "err", err)
+		return platform
+	}
+	if creds.Platform || creds.APIKey == "" {
+		return platform
+	}
+	teamAdapter := buildProviderWithKey(cfg, recorder, creds.APIKey)
+	if teamAdapter == nil {
+		return platform
+	}
+	return teamAdapter
+}
+
+// spaHandler serves static files from dir, falling back to index.html for
+// paths that do not name a file. That fallback is what makes client-side routes
+// (/admin/users and friends) survive a reload or a shared link — a plain
+// FileServer answers 404 for them.
+//
+// The fallback deliberately does NOT apply to /api/: those routes are
+// registered with more specific patterns, which Go 1.22+ ServeMux matches in
+// preference to "GET /". A request that reaches here asking for a missing asset
+// (a stale .js hash, say) gets index.html rather than a 404, which is the
+// standard SPA trade-off — the alternative is enumerating asset extensions.
+func spaHandler(dir string) http.Handler {
+	files := http.FileServer(http.Dir(dir))
+	index := filepath.Join(dir, "index.html")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reject traversal before touching the filesystem: path.Clean on a
+		// rooted path cannot escape, and http.ServeFile would reject it anyway,
+		// but checking here keeps the stat below honest.
+		clean := path.Clean("/" + r.URL.Path)
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(clean))); err == nil && clean != "/" {
+			files.ServeHTTP(w, r)
+			return
+		}
+		http.ServeFile(w, r, index)
+	})
+}
+
+// buildProvider constructs the configured provider adapter from the platform
+// key, or nil if not configured. It also returns the raw recorder so the
+// per-request adapters (built for team keys) share one rather than each opening
+// its own log directory handle.
+func buildProvider(cfg config.Config, log *slog.Logger) (provider.Adapter, *provider.RawRecorder) {
 	recorder := provider.NewRawRecorder(cfg.LLM.RawLogDir)
 	if recorder.Enabled() {
 		log.Info("recording raw LLM request/response", "dir", cfg.LLM.RawLogDir)
 	}
+	return buildProviderWithKey(cfg, recorder, cfg.LLM.APIKey), recorder
+}
+
+// buildProviderWithKey constructs an adapter for a specific API key. It is how
+// a team-configured credential becomes a usable adapter on the request path
+// (model-routing). Adapters hold the shared http.DefaultClient and a few
+// fields, so constructing one per request is a struct literal — connection
+// pooling is preserved through the shared client, and no adapter cache is
+// warranted.
+func buildProviderWithKey(cfg config.Config, recorder *provider.RawRecorder, apiKey string) provider.Adapter {
 	switch cfg.LLM.Provider {
 	case "anthropic":
 		var opts []anthropic.Option
@@ -465,14 +653,14 @@ func buildProvider(cfg config.Config, log *slog.Logger) provider.Adapter {
 			opts = append(opts, anthropic.WithEndpoint(cfg.LLM.BaseURL))
 		}
 		opts = append(opts, anthropic.WithRawRecorder(recorder))
-		return anthropic.New(cfg.LLM.APIKey, opts...)
+		return anthropic.New(apiKey, opts...)
 	case "openai":
 		var opts []openai.Option
 		if cfg.LLM.BaseURL != "" {
 			opts = append(opts, openai.WithEndpoint(cfg.LLM.BaseURL))
 		}
 		opts = append(opts, openai.WithRawRecorder(recorder))
-		return openai.New(cfg.LLM.APIKey, opts...)
+		return openai.New(apiKey, opts...)
 	default:
 		return nil
 	}

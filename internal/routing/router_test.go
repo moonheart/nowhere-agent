@@ -11,9 +11,15 @@ import (
 type staticKeys struct {
 	creds map[string]Credentials // userID -> creds
 	err   error
+	// gotProvider records the provider the router asked for, so a test can
+	// assert that credentials are resolved for the provider actually selected.
+	gotProvider *string
 }
 
-func (s staticKeys) Resolve(_ context.Context, userID string) (Credentials, error) {
+func (s staticKeys) Resolve(_ context.Context, userID, provider string) (Credentials, error) {
+	if s.gotProvider != nil {
+		*s.gotProvider = provider
+	}
 	if s.err != nil {
 		return Credentials{}, s.err
 	}
@@ -97,5 +103,26 @@ func TestAdapterLookup(t *testing.T) {
 	a, err := r.Adapter(Target{Provider: "anthropic"})
 	if err != nil || a.Name() != "anthropic" {
 		t.Errorf("adapter = %v err %v", a, err)
+	}
+}
+
+// Credentials are provider-specific, so the router must decide which provider
+// it is calling before it asks the keystore for a key — otherwise it could hand
+// one vendor's secret to another.
+func TestResolveAsksKeystoreForSelectedProvider(t *testing.T) {
+	var asked string
+	keys := staticKeys{gotProvider: &asked}
+	// anthropic is listed first but not registered, so openai is selected.
+	r := NewRouter(registryWith("openai"), keys, []string{"anthropic", "openai"})
+
+	tgt, err := r.Resolve(context.Background(), "u1")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if tgt.Provider != "openai" {
+		t.Fatalf("provider = %q, want openai", tgt.Provider)
+	}
+	if asked != "openai" {
+		t.Errorf("keystore asked for %q, want the selected provider openai", asked)
 	}
 }
