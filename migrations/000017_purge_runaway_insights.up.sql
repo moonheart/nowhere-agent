@@ -1,0 +1,16 @@
+-- memory-consolidation: delete the insights produced by the runaway reflect loop.
+--
+-- The stage that wrote these read its own output: insights are memories, so
+-- reflection generalized over its own generalizations. In the deployment this
+-- was measured on, insights reached 257 of 311 live memories (83%) and had
+-- converged on commentary about the memory system itself — "the consolidation
+-- function's continued receipt of verbatim duplicates it has repeatedly
+-- diagnosed". There is nothing to migrate that content toward.
+--
+-- Facts, preferences and summaries are kept: they describe the user, which is
+-- what a memory is for.
+--
+-- Every deployment running the previous code has the same polluted store by
+-- construction, so this cleanup ships with the code that fixes the cause rather
+-- than as a one-off script someone has to remember to run.
+DELETE FROM memories WHERE kind = 'insight';

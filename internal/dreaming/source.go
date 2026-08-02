@@ -13,6 +13,7 @@ import (
 // per-session in-memory filter when this is absent.
 type undreamedScanner interface {
 	ListUndreamedSessions(ctx context.Context) ([]session.Session, error)
+	ListUndreamedSessionsForUser(ctx context.Context, userID string) ([]session.Session, error)
 }
 
 // sessionWatermarks is the slice of the session store the worker needs for the
@@ -57,24 +58,47 @@ func (s *StoreSource) PendingSessions(ctx context.Context) ([]PendingSession, er
 		if err != nil {
 			return nil, err
 		}
-		out := make([]PendingSession, 0, len(sessions))
-		for _, sess := range sessions {
-			wm, err := s.sessions.DreamedSeq(ctx, sess.ID)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, PendingSession{Session: sess, Seq: wm})
-		}
-		return out, nil
+		return s.withWatermarks(ctx, sessions)
 	}
-	return s.pendingFallback(ctx)
+	return s.pendingFallback(ctx, "")
+}
+
+// PendingSessionsForUser is PendingSessions narrowed to one owner, backing the
+// user-triggered consolidation. The narrowing is the authorization boundary:
+// pressing "consolidate my memories" must not read — or spend tokens on —
+// anyone else's conversations.
+func (s *StoreSource) PendingSessionsForUser(ctx context.Context, userID string) ([]PendingSession, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	if s.scanner != nil {
+		sessions, err := s.scanner.ListUndreamedSessionsForUser(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		return s.withWatermarks(ctx, sessions)
+	}
+	return s.pendingFallback(ctx, userID)
+}
+
+// withWatermarks attaches each session's resume point.
+func (s *StoreSource) withWatermarks(ctx context.Context, sessions []session.Session) ([]PendingSession, error) {
+	out := make([]PendingSession, 0, len(sessions))
+	for _, sess := range sessions {
+		wm, err := s.sessions.DreamedSeq(ctx, sess.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, PendingSession{Session: sess, Seq: wm})
+	}
+	return out, nil
 }
 
 // pendingFallback computes eligibility without a native store query: it lists
 // the store's sessions and keeps those that actually have messages beyond
 // their watermark. Used by the in-memory session store (and any store without
-// ListUndreamedSessions).
-func (s *StoreSource) pendingFallback(ctx context.Context) ([]PendingSession, error) {
+// ListUndreamedSessions). An empty userID means every owner.
+func (s *StoreSource) pendingFallback(ctx context.Context, userID string) ([]PendingSession, error) {
 	type sessionLister interface {
 		Sessions() []session.Session
 	}
@@ -87,6 +111,9 @@ func (s *StoreSource) pendingFallback(ctx context.Context) ([]PendingSession, er
 	sort.Slice(all, func(i, j int) bool { return all[i].UpdatedAt.Before(all[j].UpdatedAt) })
 	var out []PendingSession
 	for _, sess := range all {
+		if userID != "" && sess.UserID != userID {
+			continue
+		}
 		wm, err := s.sessions.DreamedSeq(ctx, sess.ID)
 		if err != nil {
 			return nil, err

@@ -181,11 +181,11 @@ func TestProviderLLMCompleteJSONTextFallback(t *testing.T) {
 func TestProviderLLMCompleteJSONTruncation(t *testing.T) {
 	a := &scriptedAdapter{events: []provider.Event{
 		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse}},
-		{Type: provider.EventBlockDelta, Index: 0, Delta: `{"insights":["a long insight that got cut`},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: `{"add":[{"kind":"fact","content":"a long fact that got cut`},
 		{Type: provider.EventMessageStop, StopReason: provider.StopMaxTokens, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 4096}},
 	}}
-	var res reflectResult
-	_, err := NewProviderLLM(a, "m").CompleteJSON(context.Background(), "p", reflectSchema, &res)
+	var res consolidateResult
+	_, err := NewProviderLLM(a, "m").CompleteJSON(context.Background(), "p", consolidateSchema, &res)
 	if err == nil || !strings.Contains(err.Error(), "truncated at max_tokens") {
 		t.Errorf("err = %v, want a max_tokens truncation error", err)
 	}

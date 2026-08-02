@@ -1,20 +1,35 @@
 // Package dreaming implements the dreaming capability (design D6): a scheduled
 // offline worker that is the ONLY writer to long-term memory. It reads
-// persisted run episodes for sessions with unconsolidated messages and
-// consolidates them into user/team-scoped long-term memories via an extract →
-// compress → reorganize → reflect pipeline, bounded by an LLM budget. The four
-// stages write facts, per-batch summaries, and cross-memory insights
-// (KindFact/KindSummary/KindInsight).
+// persisted run episodes for sessions with unconsolidated messages and folds
+// them into user/team-scoped long-term memory.
 //
 // Dreaming is INCREMENTAL (capability-gap K1, watermark model): each session
 // carries a high-water mark (the messages.id consolidated up to), and the worker
 // learns from the messages beyond it. A conversation therefore stays open and
 // resumable while it is being learned from — learning no longer requires the
 // session to end.
+//
+// The pipeline is EXTRACT → COMPRESS → CONSOLIDATE (memory-consolidation).
+// Extract and compress read the transcript; consolidate receives their output
+// as new material together with the scope's ENTIRE live memory set, and returns
+// edits — revise an existing memory, add one, retire one. Consolidation is a
+// single call per batch regardless of how much the batch yielded, and its
+// prompt is bounded by the per-kind caps, so a pass costs about the same after a
+// year as it does on day one.
+//
+// It replaced a per-fact revise stage plus a separate reflect stage. Those had
+// two compounding defects: reflect read its own output (insights are memories,
+// so it generalized over its own generalizations until 83% of the store was
+// self-referential commentary), and revise ran one full-store LLM call per
+// extracted fact, making cost quadratic in a history that the first defect was
+// inflating.
 package dreaming
 
 import (
 	"context"
+	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +39,7 @@ import (
 	"nowhere-agent/internal/session"
 )
 
-// LLM is the model the worker calls for extraction/summarization/reflection.
+// LLM is the model the worker calls for extraction/summarization/consolidation.
 // Complete is a free-text completion; CompleteJSON is a structured completion
 // (capability L3) that forces a JSON object conforming to spec.Schema into out
 // (a pointer). Both return the tokens consumed (for budget accounting).
@@ -45,8 +60,16 @@ type Budget struct {
 type Result struct {
 	EpisodesProcessed int
 	MemoriesWritten   int
+	MemoriesRevised   int
+	MemoriesRetired   int
+	MemoriesPurged    int
 	TokensUsed        int
 	BudgetExhausted   bool
+	// Compacted reports that the pass reviewed the existing store rather than
+	// learning from new episodes. It distinguishes "there was nothing to do"
+	// from "there were no new conversations, so we tidied what was already
+	// there" — which look identical in the counters when both come back zero.
+	Compacted bool
 }
 
 // EpisodeSource provides episodes (persisted conversation messages) for
@@ -59,6 +82,11 @@ type EpisodeSource interface {
 	// watermark (any status — open conversations are learnable), oldest first,
 	// each carrying the watermark to start from.
 	PendingSessions(ctx context.Context) ([]PendingSession, error)
+	// PendingSessionsForUser is PendingSessions narrowed to one owner. It backs
+	// user-triggered consolidation, where reading another account's sessions
+	// would be both a privacy breach and a way to spend one user's request on
+	// another user's tokens.
+	PendingSessionsForUser(ctx context.Context, userID string) ([]PendingSession, error)
 	// Episodes returns the session's persisted messages with id > afterSeq (the
 	// watermark), ordered by seq — only the not-yet-dreamed tail.
 	Episodes(ctx context.Context, sessionID string, afterSeq int64) ([]session.StoredMessage, error)
@@ -81,32 +109,52 @@ type Worker struct {
 	memory   memory.Port
 	llm      LLM
 	budget   Budget
-	// enableReflect turns on the compress + reflect stages (KindSummary/
-	// KindInsight). Off runs the cheaper extract → reorganize pipeline only.
-	enableReflect bool
-	// enableRevise upgrades REORGANIZE from a string heuristic to an LLM pass
-	// that detects contradictions AND time-stale memories (config DREAMING_REVISE).
-	enableRevise bool
-	// now supplies the current time for time-aware prompts (extract/reflect/
-	// revise) — the "随时间保鲜" capability needs a clock to judge staleness.
-	// Defaults to time.Now.
+	caps     Caps
+	// purgeAfter is how long a deprecated memory is kept before deletion. Zero
+	// disables purging.
+	purgeAfter time.Duration
+	// now supplies the current time for time-aware prompts and for the purge
+	// cutoff. Defaults to time.Now.
 	now func() time.Time
+	log *slog.Logger
 }
 
-// NewWorker creates a Worker.
+// NewWorker creates a Worker with the default caps and a 30-day purge window.
 func NewWorker(episodes EpisodeSource, mem memory.Port, llm LLM, budget Budget) *Worker {
 	if budget.MaxTokens <= 0 {
 		budget.MaxTokens = 100_000
 	}
-	return &Worker{episodes: episodes, memory: mem, llm: llm, budget: budget, enableReflect: true, enableRevise: true, now: time.Now}
+	return &Worker{
+		episodes:   episodes,
+		memory:     mem,
+		llm:        llm,
+		budget:     budget,
+		caps:       DefaultCaps(),
+		purgeAfter: 720 * time.Hour,
+		now:        time.Now,
+		log:        slog.Default(),
+	}
 }
 
-// SetReflect toggles the compress + reflect stages (config DREAMING_REFLECT).
-func (w *Worker) SetReflect(on bool) { w.enableReflect = on }
+// SetCaps overrides the per-kind live-memory caps (config DREAMING_MAX_*).
+// A non-positive cap is ignored, so a partially-filled Caps cannot silently
+// unbound a kind — config validation rejects those before they reach here, and
+// this is the second line of the same defence.
+func (w *Worker) SetCaps(c Caps) {
+	if c.Facts > 0 {
+		w.caps.Facts = c.Facts
+	}
+	if c.Insights > 0 {
+		w.caps.Insights = c.Insights
+	}
+	if c.Summaries > 0 {
+		w.caps.Summaries = c.Summaries
+	}
+}
 
-// SetRevise toggles the LLM time-aware REORGANIZE (config DREAMING_REVISE). Off
-// falls back to the string-negation heuristic.
-func (w *Worker) SetRevise(on bool) { w.enableRevise = on }
+// SetPurgeAfter overrides the retention window for deprecated memories
+// (config DREAMING_PURGE_AFTER). Zero or negative disables purging.
+func (w *Worker) SetPurgeAfter(d time.Duration) { w.purgeAfter = d }
 
 // SetClock overrides the worker's clock (tests; production uses time.Now).
 func (w *Worker) SetClock(now func() time.Time) {
@@ -115,14 +163,73 @@ func (w *Worker) SetClock(now func() time.Time) {
 	}
 }
 
-// Run performs one dreaming pass over eligible sessions.
-func (w *Worker) Run(ctx context.Context) (Result, error) {
-	var res Result
+// SetLogger overrides the worker's logger.
+func (w *Worker) SetLogger(l *slog.Logger) {
+	if l != nil {
+		w.log = l
+	}
+}
 
+// Run performs one dreaming pass over every eligible session.
+func (w *Worker) Run(ctx context.Context) (Result, error) {
 	sessions, err := w.episodes.PendingSessions(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	return w.runOver(ctx, sessions)
+}
+
+// RunForUser performs one dreaming pass over a single account's eligible
+// sessions. It is what the console's "consolidate now" triggers, so the scan is
+// narrowed at the source rather than filtered afterwards — a pass must never
+// read or spend on sessions the requester does not own.
+//
+// When the account has no unconsolidated sessions it COMPACTS instead: it runs
+// consolidation over the existing store with no new material, so duplicates get
+// merged and time-stale memories retired. Without this the button is a no-op
+// exactly when a user reaches for it — their store is visibly untidy and there
+// is no new conversation to hang the work on. "Consolidate" has to mean
+// consolidate, not only "learn from new messages".
+func (w *Worker) RunForUser(ctx context.Context, userID string) (Result, error) {
+	sessions, err := w.episodes.PendingSessionsForUser(ctx, userID)
+	if err != nil {
+		return Result{}, err
+	}
+	res, err := w.runOver(ctx, sessions)
+	if err != nil || res.EpisodesProcessed > 0 || res.BudgetExhausted {
+		// Sessions were consolidated, so the whole store was already reviewed
+		// against them — a second pass over it would pay again for the same work.
+		return res, err
+	}
+	return w.compact(ctx, res, identity.UserScope(userID))
+}
+
+// compact reviews an existing store with no new material: merge what is
+// duplicated, retire what time has made stale, then hold the caps. It is the
+// only path that consolidates without an episode to learn from.
+func (w *Worker) compact(ctx context.Context, res Result, scope identity.ScopeRef) (Result, error) {
+	applied, tokens, err := w.consolidate(ctx, scope, nil, "")
+	res.TokensUsed += tokens
+	res.MemoriesWritten += applied.added
+	res.MemoriesRevised += applied.revised
+	res.MemoriesRetired += applied.retired
+	res.Compacted = true
 	if err != nil {
 		return res, err
 	}
+
+	evicted, err := w.enforceCaps(ctx, scope)
+	res.MemoriesRetired += evicted
+	if err != nil {
+		return res, err
+	}
+	res.MemoriesPurged = w.purge(ctx)
+	return res, nil
+}
+
+// runOver is the pass itself, over an already-selected set of sessions.
+func (w *Worker) runOver(ctx context.Context, sessions []PendingSession) (Result, error) {
+	var res Result
 
 	for _, sess := range sessions {
 		if res.TokensUsed >= w.budget.MaxTokens {
@@ -140,13 +247,25 @@ func (w *Worker) Run(ctx context.Context) (Result, error) {
 			continue
 		}
 
-		written, tokens, err := w.processSession(ctx, sess.Session, eps, w.budget.MaxTokens-res.TokensUsed)
+		out, err := w.processSession(ctx, sess.Session, eps, w.budget.MaxTokens-res.TokensUsed)
+		res.EpisodesProcessed += len(eps)
+		res.MemoriesWritten += out.added
+		res.MemoriesRevised += out.revised
+		res.MemoriesRetired += out.retired
+		res.TokensUsed += out.tokens
 		if err != nil {
 			return res, err
 		}
-		res.EpisodesProcessed += len(eps)
-		res.MemoriesWritten += written
-		res.TokensUsed += tokens
+		if !out.consolidated {
+			// The batch was not folded in. Advancing the watermark here would mark
+			// these episodes consumed and they would never be learned from — a
+			// silent, permanent loss. Leave it: a later pass, with a fresh budget,
+			// reads the same messages.
+			res.BudgetExhausted = true
+			w.log.Info("dreaming: batch deferred, watermark held",
+				"session", sess.ID, "reason", out.skipReason)
+			continue
+		}
 
 		// Advance the watermark to the newest message consumed. Episodes are
 		// seq-ordered (and ids ascend with seq), so the last is the maximum.
@@ -154,78 +273,95 @@ func (w *Worker) Run(ctx context.Context) (Result, error) {
 			return res, err
 		}
 	}
+
+	res.MemoriesPurged = w.purge(ctx)
 	return res, nil
 }
 
-// processSession runs the pipeline for one batch of a session's episodes,
-// staying within the remaining token budget. Returns memories written and
-// tokens used.
-//
-// Stages (design D6): EXTRACT facts → COMPRESS the batch to a summary →
-// REORGANIZE facts in (deprecating contradictions) → REFLECT over the summary
-// plus existing memories to derive cross-memory insights and dedupe. The two
-// LLM stages (extract/compress) run first so reflection can read the summary.
-func (w *Worker) processSession(ctx context.Context, sess session.Session, eps []session.StoredMessage, remainingBudget int) (int, int, error) {
-	scope := identity.UserScope(sess.UserID)
-	tokens := 0
-	written := 0
+// sessionOutcome is what one session batch produced.
+type sessionOutcome struct {
+	added, revised, retired int
+	tokens                  int
+	// consolidated reports whether the consolidate stage actually ran. Only then
+	// may the caller advance the watermark.
+	consolidated bool
+	skipReason   string
+}
 
-	// 1. EXTRACT: episodes → facts/preferences.
-	facts, tk, err := w.extract(ctx, eps, remainingBudget)
-	tokens += tk
+// processSession runs the pipeline for one batch of a session's episodes,
+// staying within the remaining token budget:
+//
+//	EXTRACT facts → COMPRESS the batch to a summary → CONSOLIDATE both against
+//	the scope's whole live store → enforce the caps.
+//
+// Each stage checks the remaining allowance before spending it, so the budget
+// bounds work WITHIN a batch and not merely between batches.
+func (w *Worker) processSession(ctx context.Context, sess session.Session, eps []session.StoredMessage, remaining int) (sessionOutcome, error) {
+	scope := identity.UserScope(sess.UserID)
+	var out sessionOutcome
+
+	// A stage cannot know its cost before it runs; what it can know is whether
+	// there is any allowance left to spend. Reserve enough for the stage that
+	// must not be skipped — consolidation — before spending on the two that
+	// feed it.
+	if remaining <= 0 {
+		out.skipReason = "no token allowance remaining"
+		return out, nil
+	}
+
+	facts, tk, err := w.extract(ctx, eps)
+	out.tokens += tk
 	if err != nil {
-		return 0, tokens, err
+		return out, err
 	}
 
 	var summary string
-	if w.enableReflect {
-		// 2. COMPRESS: episodes → one summary memory of this batch.
-		var tk2 int
-		summary, tk2, err = w.compress(ctx, eps, remainingBudget-tokens)
-		tokens += tk2
+	if remaining-out.tokens > 0 {
+		summary, tk, err = w.compress(ctx, eps)
+		out.tokens += tk
 		if err != nil {
-			return written, tokens, err
-		}
-		if summary != "" {
-			if err := w.store(ctx, scope, memory.KindSummary, summary); err != nil {
-				return written, tokens, err
-			}
-			written++
+			return out, err
 		}
 	}
 
-	// 3. REORGANIZE: store new facts, revising memories they contradict or make
-	// time-stale (each is an LLM call when revise is enabled).
-	for _, f := range facts {
-		tk, err := w.reorganize(ctx, scope, f, remainingBudget-tokens)
-		tokens += tk
-		if err != nil {
-			return written, tokens, err
-		}
-		written++
+	if remaining-out.tokens <= 0 {
+		// Extract and compress exhausted the allowance. Their output is discarded
+		// rather than stored half-folded, and the watermark stays put.
+		out.skipReason = "allowance exhausted before consolidation"
+		return out, nil
 	}
 
-	if w.enableReflect {
-		// 4. REFLECT: summary + existing memories → insights + dedupe/deprecations.
-		n, tk3, err := w.reflect(ctx, scope, summary, remainingBudget-tokens)
-		tokens += tk3
-		written += n
-		if err != nil {
-			return written, tokens, err
-		}
+	applied, tk, err := w.consolidate(ctx, scope, facts, summary)
+	out.tokens += tk
+	out.added, out.revised, out.retired = applied.added, applied.revised, applied.retired
+	if err != nil {
+		return out, err
 	}
-	return written, tokens, nil
+	out.consolidated = true
+
+	evicted, err := w.enforceCaps(ctx, scope)
+	if err != nil {
+		return out, err
+	}
+	out.retired += evicted
+	return out, nil
 }
 
-// store persists one memory of the given kind in the scope.
-func (w *Worker) store(ctx context.Context, scope identity.ScopeRef, kind memory.Kind, content string) error {
-	_, err := w.memory.Store(ctx, memory.Memory{Scope: scope, Kind: kind, Content: content})
-	return err
+// extract uses the LLM to pull durable facts/preferences from episodes. It uses
+// structured output (L3) so reasoning prose can never be parsed as a fact.
+func (w *Worker) extract(ctx context.Context, eps []session.StoredMessage) ([]string, int, error) {
+	var res extractResult
+	tokens, err := w.llm.CompleteJSON(ctx, extractPrompt(episodeText(eps), w.today()), extractSchema, &res)
+	if err != nil {
+		return nil, tokens, err
+	}
+	return cleanLines(res.Facts), tokens, nil
 }
 
-// compress uses the LLM to condense a batch of episodes into one running
-// summary (the COMPRESS stage → memory.KindSummary).
-func (w *Worker) compress(ctx context.Context, eps []session.StoredMessage, budget int) (string, int, error) {
+// compress uses the LLM to condense a batch of episodes into one summary. The
+// summary is not stored here — it is new material for consolidation, which
+// decides whether it becomes a memory or merges into an existing one.
+func (w *Worker) compress(ctx context.Context, eps []session.StoredMessage) (string, int, error) {
 	var res summaryResult
 	tokens, err := w.llm.CompleteJSON(ctx, summaryPrompt(episodeText(eps)), summarySchema, &res)
 	if err != nil {
@@ -234,69 +370,183 @@ func (w *Worker) compress(ctx context.Context, eps []session.StoredMessage, budg
 	return strings.TrimSpace(res.Summary), tokens, nil
 }
 
-// reflect derives cross-memory insights from the new batch summary plus the
-// scope's existing memories, and deprecates memories the reflection flags as
-// duplicated/superseded (the REFLECT stage → memory.KindInsight). Returns the
-// number of insight memories written and the tokens used.
-func (w *Worker) reflect(ctx context.Context, scope identity.ScopeRef, summary string, budget int) (int, int, error) {
-	existing, err := w.memory.ListByScope(ctx, scope)
+// applied counts what a consolidation actually changed.
+type applied struct{ added, revised, retired int }
+
+// consolidate folds the batch's new material into the scope's store in ONE LLM
+// call: it hands over every live memory (handle-labelled, with the caps and
+// current counts) plus the new facts and summary, and applies the edits it
+// returns.
+func (w *Worker) consolidate(ctx context.Context, scope identity.ScopeRef, facts []string, summary string) (applied, int, error) {
+	var done applied
+
+	all, err := w.memory.ListByScope(ctx, scope)
 	if err != nil {
-		return 0, 0, err
+		return done, 0, err
 	}
-	// Only reflect over live memories; skip when there's nothing but the summary
-	// we just wrote and no new information to generalize from.
-	var lines []string
-	for _, m := range existing {
-		if !m.Deprecated {
-			lines = append(lines, m.Content)
-		}
-	}
-	var res reflectResult
-	tokens, err := w.llm.CompleteJSON(ctx, reflectPrompt(summary, lines, w.today()), reflectSchema, &res)
-	if err != nil {
-		return 0, tokens, err
+	live := liveOf(all)
+	existing, byHandle := handles(live)
+
+	// Nothing new and nothing to reorganize: skip the call rather than pay for a
+	// model to confirm there is no work.
+	if len(facts) == 0 && strings.TrimSpace(summary) == "" && len(existing) == 0 {
+		return done, 0, nil
 	}
 
-	written := 0
-	for _, content := range cleanLines(res.Insights) {
-		if err := w.store(ctx, scope, memory.KindInsight, content); err != nil {
-			return written, tokens, err
-		}
-		written++
+	var res consolidateResult
+	tokens, err := w.llm.CompleteJSON(ctx,
+		consolidatePrompt(facts, summary, existing, w.caps, w.today()), consolidateSchema, &res)
+	if err != nil {
+		return done, tokens, err
 	}
-	for _, content := range cleanLines(res.Deprecate) {
-		w.deprecateMatching(ctx, existing, content)
-	}
-	return written, tokens, nil
-}
 
-// deprecateMatching deprecates the first live memory whose content matches the
-// reflected line (case-insensitive, after trimming). Reflection returns the
-// memory's exact text, so an exact match is the norm; a substring match is a
-// fallback for minor LLM paraphrase.
-func (w *Worker) deprecateMatching(ctx context.Context, existing []memory.Memory, content string) {
-	norm := strings.ToLower(strings.TrimSpace(content))
-	for _, m := range existing {
-		if m.Deprecated {
+	// Order matters: update → add → remove. A merge is expressed as "update the
+	// survivor, remove the absorbed"; applying the removal first would, on a
+	// partial failure, leave the source gone and the target un-merged — the one
+	// ordering that loses information.
+	for _, op := range res.Update {
+		m, ok := byHandle[strings.TrimSpace(op.ID)]
+		if !ok {
+			w.log.Warn("dreaming: consolidation referenced an unknown handle", "op", "update", "handle", op.ID)
 			continue
 		}
-		c := strings.ToLower(strings.TrimSpace(m.Content))
-		if c == norm || strings.Contains(c, norm) {
-			_ = w.memory.Deprecate(ctx, m.ID) // best-effort; a miss only skips dedupe
-			return
+		content := strings.TrimSpace(op.Content)
+		if content == "" {
+			// An empty rewrite is not a deletion request; remove says that.
+			w.log.Warn("dreaming: consolidation returned an empty rewrite", "handle", op.ID)
+			continue
 		}
+		if err := w.memory.Update(ctx, m.ID, content); err != nil {
+			return done, tokens, err
+		}
+		done.revised++
 	}
+
+	for _, op := range res.Add {
+		content := strings.TrimSpace(op.Content)
+		if content == "" {
+			continue
+		}
+		kind, ok := parseKind(op.Kind)
+		if !ok {
+			w.log.Warn("dreaming: consolidation returned an unknown kind", "kind", op.Kind)
+			continue
+		}
+		if _, err := w.memory.Store(ctx, memory.Memory{Scope: scope, Kind: kind, Content: content}); err != nil {
+			return done, tokens, err
+		}
+		done.added++
+	}
+
+	for _, op := range res.Remove {
+		m, ok := byHandle[strings.TrimSpace(op.ID)]
+		if !ok {
+			w.log.Warn("dreaming: consolidation referenced an unknown handle", "op", "remove", "handle", op.ID)
+			continue
+		}
+		if err := w.memory.Deprecate(ctx, m.ID); err != nil {
+			return done, tokens, err
+		}
+		done.retired++
+	}
+
+	// A pass that retires most of a store is either a genuine cleanup or a model
+	// having a bad day. Both are worth seeing; the removals are deprecations, so
+	// they are recoverable until the purge window closes.
+	if len(existing) > 0 && done.retired*2 > len(existing) {
+		w.log.Warn("dreaming: consolidation retired most of a scope's memories",
+			"scope", scope.Scope, "retired", done.retired, "live_before", len(existing))
+	}
+	return done, tokens, nil
 }
 
-// extract uses the LLM to pull durable facts/preferences from episodes. It uses
-// structured output (L3) so reasoning prose can never be parsed as a fact.
-func (w *Worker) extract(ctx context.Context, eps []session.StoredMessage, budget int) ([]string, int, error) {
-	var res extractResult
-	tokens, err := w.llm.CompleteJSON(ctx, extractPrompt(episodeText(eps), w.today()), extractSchema, &res)
+// enforceCaps brings every over-cap pool back under its ceiling by deprecating
+// its oldest live memories, and returns how many it evicted. This runs after
+// consolidation has had its chance to merge instead; the cap holds regardless
+// of what consolidation returned.
+func (w *Worker) enforceCaps(ctx context.Context, scope identity.ScopeRef) (int, error) {
+	all, err := w.memory.ListByScope(ctx, scope)
 	if err != nil {
-		return nil, tokens, err
+		return 0, err
 	}
-	return cleanLines(res.Facts), tokens, nil
+	live := liveOf(all)
+
+	evicted := 0
+	for _, g := range []capGroup{groupFacts, groupInsights, groupSummaries} {
+		for _, m := range overCap(live, g, w.caps.limit(g)) {
+			if err := w.memory.Deprecate(ctx, m.ID); err != nil {
+				return evicted, err
+			}
+			evicted++
+			w.log.Info("dreaming: evicted over-cap memory",
+				"pool", string(g), "kind", string(m.Kind), "id", m.ID, "created", m.CreatedAt)
+		}
+	}
+	return evicted, nil
+}
+
+// purge deletes deprecated memories past the retention window. Failures are
+// logged, not returned: a pass that consolidated correctly should not be
+// reported as failed because housekeeping could not run.
+func (w *Worker) purge(ctx context.Context) int {
+	if w.purgeAfter <= 0 {
+		return 0
+	}
+	n, err := w.memory.PurgeDeprecated(ctx, purgeCutoff(w.now(), w.purgeAfter))
+	if err != nil {
+		w.log.Warn("dreaming: purge of deprecated memories failed", "err", err)
+		return 0
+	}
+	if n > 0 {
+		w.log.Info("dreaming: purged deprecated memories", "count", n)
+	}
+	return n
+}
+
+// handles labels memories M1…Mn and returns both the labelled list (for the
+// prompt) and the reverse map (for resolving what the model returns). The map
+// is the whole point: an unknown handle resolves to nothing and is skipped,
+// where the previous substring matching would silently edit whichever memory
+// happened to contain the returned text.
+//
+// The list is sorted before labelling. ListByScope makes no ordering promise
+// (the in-memory port iterates a map), and unstable handles would make the
+// prompt differ run to run for an unchanged store — defeating prompt caching
+// and making any failure unreproducible.
+func handles(live []memory.Memory) ([]handled, map[string]memory.Memory) {
+	ordered := make([]memory.Memory, len(live))
+	copy(ordered, live)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].CreatedAt.Equal(ordered[j].CreatedAt) {
+			return ordered[i].ID < ordered[j].ID
+		}
+		return ordered[i].CreatedAt.Before(ordered[j].CreatedAt)
+	})
+
+	out := make([]handled, 0, len(ordered))
+	byHandle := make(map[string]memory.Memory, len(ordered))
+	for i, m := range ordered {
+		h := "M" + strconv.Itoa(i+1)
+		out = append(out, handled{handle: h, mem: m})
+		byHandle[h] = m
+	}
+	return out, byHandle
+}
+
+// parseKind maps a model-supplied kind string onto a known Kind. The schema
+// constrains it to an enum, but a schema is a request, not a guarantee.
+func parseKind(s string) (memory.Kind, bool) {
+	switch memory.Kind(strings.ToLower(strings.TrimSpace(s))) {
+	case memory.KindFact:
+		return memory.KindFact, true
+	case memory.KindPreference:
+		return memory.KindPreference, true
+	case memory.KindInsight:
+		return memory.KindInsight, true
+	case memory.KindSummary:
+		return memory.KindSummary, true
+	}
+	return "", false
 }
 
 // cleanLines trims and drops blank entries from a structured string list.
@@ -333,55 +583,6 @@ func episodeText(eps []session.StoredMessage) string {
 		}
 	}
 	return b.String()
-}
-
-// reorganize stores a fact, revising existing memories it contradicts or makes
-// time-stale. When revise is enabled it asks the LLM (with today's date) which
-// memories to deprecate and whether the fact needs time-correcting; otherwise
-// it falls back to the string-negation heuristic.
-func (w *Worker) reorganize(ctx context.Context, scope identity.ScopeRef, fact string, budget int) (int, error) {
-	existing, err := w.memory.ListByScope(ctx, scope)
-	if err != nil {
-		return 0, err
-	}
-	tokens := 0
-	content := fact
-
-	if w.enableRevise {
-		var live []string
-		for _, m := range existing {
-			if !m.Deprecated {
-				live = append(live, m.Content)
-			}
-		}
-		var res reviseResult
-		tk, err := w.llm.CompleteJSON(ctx, revisePrompt(fact, live, w.today()), reviseSchema, &res)
-		tokens += tk
-		if err != nil {
-			return tokens, err
-		}
-		for _, d := range cleanLines(res.Deprecate) {
-			w.deprecateMatching(ctx, existing, d)
-		}
-		if rw := strings.TrimSpace(res.Rewrite); rw != "" {
-			content = rw
-		}
-	} else {
-		for _, m := range existing {
-			if !m.Deprecated && contradicts(m.Content, fact) {
-				if err := w.memory.Deprecate(ctx, m.ID); err != nil {
-					return tokens, err
-				}
-			}
-		}
-	}
-
-	_, err = w.memory.Store(ctx, memory.Memory{
-		Scope:   scope,
-		Kind:    memory.KindFact,
-		Content: content,
-	})
-	return tokens, err
 }
 
 // today returns the current date (YYYY-MM-DD) for time-aware prompts.

@@ -144,12 +144,42 @@ func (p *MemPort) Deprecate(_ context.Context, id string) error {
 	return nil
 }
 
+// Update rewrites a memory's content in place, clearing its embedding (which
+// described the old text) and bumping UpdatedAt. Id and CreatedAt are kept.
+func (p *MemPort) Update(_ context.Context, id, content string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	m, ok := p.memories[id]
+	if !ok {
+		return ErrNotFound
+	}
+	m.Content = content
+	m.Embedding = nil
+	m.UpdatedAt = time.Now()
+	return nil
+}
+
 // Forget permanently deletes a memory.
 func (p *MemPort) Forget(_ context.Context, id string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.memories, id)
 	return nil
+}
+
+// PurgeDeprecated deletes memories deprecated before the cutoff. As in PGPort,
+// UpdatedAt dates the deprecation.
+func (p *MemPort) PurgeDeprecated(_ context.Context, before time.Time) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for id, m := range p.memories {
+		if m.Deprecated && m.UpdatedAt.Before(before) {
+			delete(p.memories, id)
+			n++
+		}
+	}
+	return n, nil
 }
 
 // ListByScope returns all memories (incl. deprecated) in a scope.
@@ -163,6 +193,17 @@ func (p *MemPort) ListByScope(_ context.Context, scope identity.ScopeRef) ([]Mem
 		}
 	}
 	return out, nil
+}
+
+// GetByID returns one memory, or ErrNotFound.
+func (p *MemPort) GetByID(_ context.Context, id string) (Memory, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	m, ok := p.memories[id]
+	if !ok {
+		return Memory{}, ErrNotFound
+	}
+	return *m, nil
 }
 
 // scopeIn reports whether target is among the allowed scopes.

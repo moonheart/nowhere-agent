@@ -160,15 +160,65 @@ func (p *PGPort) RecallVector(ctx context.Context, queryEmbedding []float32, sco
 func (p *PGPort) Deprecate(ctx context.Context, id string) error {
 	_, err := p.db.ExecContext(ctx, `
 		UPDATE memories SET deprecated = true, updated_at = now() WHERE id = $1`, id)
+	if identity.IsMalformedID(err) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("deprecate memory: %w", err)
 	}
 	return nil
 }
 
+// Update rewrites a memory's content in place. It clears the embedding, which
+// was derived from the old text and would otherwise rank the memory by content
+// it no longer holds. A malformed id names nothing, so it lands on ErrNotFound
+// like any other miss rather than surfacing a database fault.
+func (p *PGPort) Update(ctx context.Context, id, content string) error {
+	res, err := p.db.ExecContext(ctx, `
+		UPDATE memories
+		SET content = $2, embedding = NULL, updated_at = now()
+		WHERE id = $1`, id, content)
+	if identity.IsMalformedID(err) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("update memory: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update memory: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// PurgeDeprecated deletes memories deprecated before the cutoff.
+//
+// It dates a deprecation by `updated_at`: Deprecate stamps it, and nothing
+// touches a memory after it is deprecated (consolidation only ever sees live
+// ones), so on a deprecated row that column IS the deprecation time. A separate
+// deprecated_at column would carry the same value at the cost of a migration.
+func (p *PGPort) PurgeDeprecated(ctx context.Context, before time.Time) (int, error) {
+	res, err := p.db.ExecContext(ctx, `
+		DELETE FROM memories WHERE deprecated AND updated_at < $1`, before)
+	if err != nil {
+		return 0, fmt.Errorf("purge deprecated memories: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("purge deprecated memories: %w", err)
+	}
+	return int(n), nil
+}
+
 // Forget permanently deletes a memory (GDPR erasure).
 func (p *PGPort) Forget(ctx context.Context, id string) error {
 	_, err := p.db.ExecContext(ctx, `DELETE FROM memories WHERE id = $1`, id)
+	if identity.IsMalformedID(err) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("forget memory: %w", err)
 	}
@@ -186,8 +236,28 @@ func (p *PGPort) ListByScope(ctx context.Context, scope identity.ScopeRef) ([]Me
 	return p.query(ctx, q, args...)
 }
 
+// GetByID returns one memory, or ErrNotFound. A malformed id names nothing, so
+// query resolves it to an empty result and it lands on ErrNotFound too — ids
+// arrive from URL path segments, and a typo is a miss, not a server fault.
+func (p *PGPort) GetByID(ctx context.Context, id string) (Memory, error) {
+	out, err := p.query(ctx, `
+		SELECT id, scope, user_id, team_id, kind, content, embedding, deprecated, created_at, updated_at
+		FROM memories
+		WHERE id = $1`, id)
+	if err != nil {
+		return Memory{}, err
+	}
+	if len(out) == 0 {
+		return Memory{}, ErrNotFound
+	}
+	return out[0], nil
+}
+
 func (p *PGPort) query(ctx context.Context, q string, args ...any) ([]Memory, error) {
 	rows, err := p.db.QueryContext(ctx, q, args...)
+	if identity.IsMalformedID(err) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("query memories: %w", err)
 	}
