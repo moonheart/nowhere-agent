@@ -15,6 +15,23 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useActivity, type ToolActivity, type SubagentRun } from "@/lib/activity";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 
 type TabId = "workspace" | "runs" | "memory" | "skills";
 
@@ -36,63 +53,78 @@ export const RightPanel: FC = () => {
 
   if (collapsed) {
     return (
-      <div className="flex w-12 flex-col items-center gap-1 border-l border-neutral-200 bg-white py-2">
+      <div className="flex w-12 flex-col items-center gap-1 border-l border-border py-2">
         {TABS.map(({ id, label, icon: Icon }) => (
-          <button
+          <Button
             key={id}
-            type="button"
+            variant="ghost"
+            size="icon"
             title={label}
+            aria-label={label}
             onClick={() => {
               setTab(id);
               setCollapsed(false);
             }}
-            className={`rounded-lg p-2 ${
+            className={cn(
               tab === id
-                ? "bg-violet-100 text-violet-700"
-                : "text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600"
-            }`}
+                ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
+                : "text-muted-foreground",
+            )}
           >
-            <Icon size={18} />
-          </button>
+            <Icon />
+          </Button>
         ))}
       </div>
     );
   }
 
   return (
-    <aside className="flex w-72 flex-col border-l border-neutral-200 bg-white">
-      <div className="flex items-center gap-0.5 border-b border-neutral-200 px-2 py-2">
-        {TABS.map(({ id, label, icon: Icon }) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setTab(id)}
-            title={label}
-            className={`flex flex-1 flex-col items-center gap-1 rounded-lg px-1 py-1.5 text-[11px] font-medium transition-colors ${
-              tab === id
-                ? "bg-violet-100 text-violet-700"
-                : "text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700"
-            }`}
+    <aside className="flex w-72 flex-col border-l border-border bg-background">
+      <Tabs
+        value={tab}
+        onValueChange={(v) => setTab(v as TabId)}
+        className="min-h-0 flex-1 gap-0"
+      >
+        <div className="flex items-center gap-0.5 border-b border-border px-2 py-2">
+          <TabsList variant="line" className="h-auto flex-1">
+            {TABS.map(({ id, label, icon: Icon }) => (
+              <TabsTrigger
+                key={id}
+                value={id}
+                title={label}
+                className="h-auto flex-col gap-1 py-1.5 text-[11px]"
+              >
+                <Icon />
+                {label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="Collapse panel"
+            aria-label="Collapse panel"
+            onClick={() => setCollapsed(true)}
+            className="text-muted-foreground"
           >
-            <Icon size={16} />
-            {label}
-          </button>
-        ))}
-        <button
-          type="button"
-          title="Collapse panel"
-          onClick={() => setCollapsed(true)}
-          className="ml-0.5 rounded-lg p-1.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-600"
-        >
-          <ChevronRight size={16} />
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {tab === "workspace" && <WorkspaceTab />}
-        {tab === "runs" && <RunsTab />}
-        {tab === "memory" && <MemoryTab />}
-        {tab === "skills" && <SkillsTab />}
-      </div>
+            <ChevronRight />
+          </Button>
+        </div>
+        <ScrollArea className="min-h-0 flex-1">
+          <TabsContent value="workspace">
+            <WorkspaceTab />
+          </TabsContent>
+          <TabsContent value="runs">
+            <RunsTab />
+          </TabsContent>
+          <TabsContent value="memory">
+            <MemoryTab />
+          </TabsContent>
+          <TabsContent value="skills">
+            <SkillsTab />
+          </TabsContent>
+        </ScrollArea>
+      </Tabs>
     </aside>
   );
 };
@@ -131,7 +163,7 @@ const WorkspaceTab: FC = () => {
 
   if (files.length === 0) {
     return (
-      <EmptyState
+      <TabEmpty
         icon={FolderTree}
         title="No files yet"
         hint="Files the agent reads or writes in this conversation will appear here."
@@ -143,21 +175,15 @@ const WorkspaceTab: FC = () => {
       {files.map((f) => (
         <li
           key={f.path}
-          className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-neutral-50"
+          className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-muted/60"
         >
           <FileIcon path={f.path} />
-          <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-700">
+          <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80">
             {f.path}
           </span>
-          <span
-            className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-              f.op === "write"
-                ? "bg-violet-100 text-violet-700"
-                : "bg-neutral-100 text-neutral-500"
-            }`}
-          >
+          <Badge variant={f.op === "write" ? "default" : "secondary"}>
             {f.op}
-          </span>
+          </Badge>
         </li>
       ))}
     </ul>
@@ -169,7 +195,7 @@ const FileIcon: FC<{ path: string }> = ({ path }) => {
   const Code =
     /^(py|js|ts|tsx|jsx|go|rs|java|c|cpp|sh|json|ya?ml|toml|html|css)$/.test(ext);
   const Icon = Code ? FileCode2 : ext === "md" || ext === "txt" ? FileText : File;
-  return <Icon size={15} className="shrink-0 text-neutral-400" />;
+  return <Icon className="size-4 shrink-0 text-muted-foreground" />;
 };
 
 /* ---------- Runs ---------- */
@@ -178,7 +204,7 @@ const RunsTab: FC = () => {
   const { tools, subagents } = useActivity();
   if (tools.length === 0 && subagents.length === 0) {
     return (
-      <EmptyState
+      <TabEmpty
         icon={Activity}
         title="No runs yet"
         hint="Tool calls the agent makes will stream here as they run."
@@ -189,7 +215,7 @@ const RunsTab: FC = () => {
     <div className="p-2">
       {subagents.length > 0 && (
         <div className="mb-2">
-          <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
+          <div className="px-1 pb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
             Subagents
           </div>
           <ul>
@@ -210,28 +236,32 @@ const RunsTab: FC = () => {
   );
 };
 
+// StatusIcon is the running / error / done glyph shared by both row kinds.
+const StatusIcon: FC<{ status: string }> = ({ status }) =>
+  status === "running" ? (
+    <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+  ) : status === "error" ? (
+    <XCircle className="size-3.5 shrink-0 text-destructive" />
+  ) : (
+    <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
+  );
+
 const SubagentRow: FC<{ run: SubagentRun }> = ({ run }) => (
-  <li className="mb-1 rounded-lg border border-violet-100 bg-violet-50/40 px-2.5 py-2">
+  <li className="mb-1 rounded-lg border border-primary/20 bg-primary/5 px-2.5 py-2">
     <div className="flex items-center gap-2">
-      {run.status === "running" ? (
-        <Loader2 size={14} className="shrink-0 animate-spin text-violet-500" />
-      ) : run.status === "error" ? (
-        <XCircle size={14} className="shrink-0 text-red-500" />
-      ) : (
-        <CheckCircle2 size={14} className="shrink-0 text-emerald-500" />
-      )}
-      <Bot size={13} className="shrink-0 text-violet-400" />
-      <span className="min-w-0 flex-1 truncate text-xs font-medium text-neutral-800">
+      <StatusIcon status={run.status} />
+      <Bot className="size-3.5 shrink-0 text-primary" />
+      <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
         {run.agentType}
       </span>
       {run.depth > 1 && (
-        <span className="rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-600">
+        <Badge variant="secondary" className="h-4 px-1 text-[10px]">
           L{run.depth}
-        </span>
+        </Badge>
       )}
     </div>
     {run.tools.length > 0 && (
-      <div className="mt-1 pl-6 font-mono text-[10px] text-neutral-500">
+      <div className="mt-1 pl-6 font-mono text-[10px] text-muted-foreground">
         {run.tools.join(" · ")}
       </div>
     )}
@@ -247,48 +277,43 @@ const RunRow: FC<{ tool: ToolActivity }> = ({ tool }) => {
         ? tool.result
         : JSON.stringify(tool.result, null, 2);
   return (
-    <li className="mb-1 rounded-lg border border-neutral-200">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 px-2.5 py-2 text-left"
+    <li className="mb-1">
+      <Collapsible
+        open={open}
+        onOpenChange={setOpen}
+        className="rounded-lg border border-border"
       >
-        {tool.status === "running" ? (
-          <Loader2 size={14} className="shrink-0 animate-spin text-violet-500" />
-        ) : tool.status === "error" ? (
-          <XCircle size={14} className="shrink-0 text-red-500" />
-        ) : (
-          <CheckCircle2 size={14} className="shrink-0 text-emerald-500" />
-        )}
-        <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-neutral-800">
-          {tool.toolName}
-        </span>
-        <span className="text-[10px] text-neutral-400">
-          {new Date(tool.at).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          })}
-        </span>
-      </button>
-      {open && (
-        <div className="space-y-1.5 border-t border-neutral-100 px-2.5 py-2 font-mono text-[11px] leading-relaxed">
+        <CollapsibleTrigger className="flex w-full items-center gap-2 px-2.5 py-2 text-left">
+          <StatusIcon status={tool.status} />
+          <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-foreground">
+            {tool.toolName}
+          </span>
+          <span className="text-[10px] text-muted-foreground">
+            {new Date(tool.at).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            })}
+          </span>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="space-y-1.5 border-t border-border px-2.5 py-2 font-mono text-[11px] leading-relaxed">
           {tool.argsText && (
-            <pre className="whitespace-pre-wrap break-all text-neutral-500">
+            <pre className="break-all whitespace-pre-wrap text-muted-foreground">
               {tool.argsText}
             </pre>
           )}
           {resultText && (
             <pre
-              className={`whitespace-pre-wrap break-all ${
-                tool.isError ? "text-red-600" : "text-neutral-600"
-              }`}
+              className={cn(
+                "break-all whitespace-pre-wrap",
+                tool.isError ? "text-destructive" : "text-foreground/70",
+              )}
             >
               {resultText}
             </pre>
           )}
-        </div>
-      )}
+        </CollapsibleContent>
+      </Collapsible>
     </li>
   );
 };
@@ -326,38 +351,47 @@ const Placeholder: FC<{
   hint: string;
 }> = ({ icon: Icon, title, lines, hint }) => (
   <div className="p-3">
-    <div className="mb-2 flex items-center gap-2 text-sm font-medium text-neutral-800">
-      <Icon size={15} className="text-violet-500" />
+    <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+      <Icon className="size-4 text-primary" />
       {title}
-      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+      <Badge
+        variant="outline"
+        className="border-amber-500/40 text-amber-700 dark:text-amber-400"
+      >
         preview
-      </span>
+      </Badge>
     </div>
     <ul className="mb-3 space-y-1.5">
       {lines.map((l) => (
         <li
           key={l.k}
-          className="rounded-lg border border-dashed border-neutral-200 bg-neutral-50 px-2.5 py-2"
+          className="rounded-lg border border-dashed border-border bg-muted/50 px-2.5 py-2"
         >
-          <div className="text-[10px] font-medium uppercase tracking-wide text-neutral-400">
+          <div className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
             {l.k}
           </div>
-          <div className="text-xs text-neutral-700">{l.v}</div>
+          <div className="text-xs text-foreground/80">{l.v}</div>
         </li>
       ))}
     </ul>
-    <p className="text-[11px] leading-relaxed text-neutral-400">{hint}</p>
+    <p className="text-[11px] leading-relaxed text-muted-foreground">{hint}</p>
   </div>
 );
 
-const EmptyState: FC<{ icon: LucideIcon; title: string; hint: string }> = ({
+const TabEmpty: FC<{ icon: LucideIcon; title: string; hint: string }> = ({
   icon: Icon,
   title,
   hint,
 }) => (
-  <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
-    <Icon size={22} className="text-neutral-300" />
-    <div className="text-sm font-medium text-neutral-500">{title}</div>
-    <div className="text-[11px] leading-relaxed text-neutral-400">{hint}</div>
-  </div>
+  <Empty className="p-6">
+    <EmptyHeader>
+      <EmptyMedia variant="icon">
+        <Icon />
+      </EmptyMedia>
+      <EmptyTitle>{title}</EmptyTitle>
+      <EmptyDescription className="text-[11px] leading-relaxed">
+        {hint}
+      </EmptyDescription>
+    </EmptyHeader>
+  </Empty>
 );

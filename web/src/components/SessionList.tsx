@@ -1,6 +1,28 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { MessageSquare, Plus, Search, Trash2 } from "lucide-react";
 import { deleteSession, listSessions, relTime, type SessionSummary } from "@/lib/sessions";
+import { Button } from "@/components/ui/button";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
+import {
+  Item,
+  ItemContent,
+  ItemDescription,
+  ItemMedia,
+  ItemTitle,
+} from "@/components/ui/item";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { cn } from "@/lib/utils";
 
 type Props = {
   currentId: string | null;
@@ -43,93 +65,110 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   }, [sessions, query]);
 
   return (
-    <aside className="flex h-full w-64 flex-col border-r border-neutral-200 bg-neutral-50">
-      <div className="space-y-2 border-b border-neutral-200 p-3">
-        <button
-          type="button"
-          onClick={onNew}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-3 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-violet-700 active:bg-violet-800"
-        >
-          <Plus size={16} />
+    <aside className="flex h-full w-64 flex-col border-r border-border bg-muted/50">
+      <div className="space-y-2 border-b border-border p-3">
+        <Button size="lg" className="w-full" onClick={onNew}>
+          <Plus />
           New chat
-        </button>
+        </Button>
         {sessions.length > 0 && (
-          <div className="relative">
-            <Search
-              size={14}
-              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-400"
-            />
-            <input
-              type="text"
+          <InputGroup className="bg-background">
+            <InputGroupAddon>
+              <Search />
+            </InputGroupAddon>
+            <InputGroupInput
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search chats"
-              className="w-full rounded-lg border border-neutral-200 bg-white py-1.5 pl-8 pr-2 text-xs text-neutral-700 outline-none placeholder:text-neutral-400 focus:border-violet-400"
+              aria-label="Search chats"
             />
-          </div>
+          </InputGroup>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-2">
-        {sessions.length === 0 && (
-          <p className="px-2 py-8 text-center text-xs text-neutral-400">
-            No conversations yet
-          </p>
-        )}
-        {sessions.length > 0 && filtered.length === 0 && (
-          <p className="px-2 py-8 text-center text-xs text-neutral-400">
-            No matches for “{query}”
-          </p>
-        )}
-        <ul className="flex flex-col gap-0.5">
-          {filtered.map((s) => {
-            const active = s.id === currentId;
-            return (
-              <li key={s.id} className="group relative">
-                <button
-                  type="button"
-                  onClick={() => onSelect(s.id)}
-                  className={`flex w-full items-start gap-2.5 rounded-xl px-3 py-2.5 pr-9 text-left transition-colors ${
-                    active
-                      ? "bg-violet-100 text-violet-900"
-                      : "text-neutral-700 hover:bg-neutral-200/70"
-                  }`}
-                >
-                  <MessageSquare
-                    size={15}
-                    className={`mt-0.5 shrink-0 ${
-                      active ? "text-violet-500" : "text-neutral-400"
-                    }`}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">
-                      {s.title || "Untitled"}
-                    </span>
-                    <span
-                      className={`block text-xs ${
-                        active ? "text-violet-400" : "text-neutral-400"
-                      }`}
-                    >
-                      {relTime(s.updatedAt)}
-                    </span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  aria-label="Delete conversation"
-                  title="Delete conversation"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void handleDelete(s.id);
-                  }}
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-neutral-400 opacity-0 transition-opacity hover:bg-red-100 hover:text-red-600 group-hover:opacity-100"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      </div>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="p-2">
+          {sessions.length === 0 && (
+            <Empty className="p-4">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <MessageSquare />
+                </EmptyMedia>
+                <EmptyTitle>No conversations yet</EmptyTitle>
+                <EmptyDescription>
+                  Start one with “New chat”.
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          )}
+          {sessions.length > 0 && filtered.length === 0 && (
+            <Empty className="p-4">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <Search />
+                </EmptyMedia>
+                <EmptyTitle>No matches</EmptyTitle>
+                <EmptyDescription>Nothing matches “{query}”.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          )}
+          <ul className="flex flex-col gap-0.5">
+            {filtered.map((s) => {
+              const active = s.id === currentId;
+              return (
+                <li key={s.id} className="group relative">
+                  <Item
+                    size="sm"
+                    className={cn(
+                      "cursor-pointer pr-9 text-left",
+                      active
+                        ? "bg-primary/10 text-foreground"
+                        : "text-foreground/80 hover:bg-muted",
+                    )}
+                    render={
+                      <button type="button" onClick={() => onSelect(s.id)} />
+                    }
+                  >
+                    <ItemMedia variant="icon">
+                      <MessageSquare
+                        className={
+                          active ? "text-primary" : "text-muted-foreground"
+                        }
+                      />
+                    </ItemMedia>
+                    {/* min-w-0 on the content column: without it the flex item
+                        refuses to shrink below its text width and the title
+                        spills out of the w-64 sidebar instead of truncating. */}
+                    <ItemContent className="min-w-0 gap-0.5">
+                      <ItemTitle className="w-full min-w-0">
+                        <span className="truncate">
+                          {s.title || "Untitled"}
+                        </span>
+                      </ItemTitle>
+                      <ItemDescription className="text-xs">
+                        {relTime(s.updatedAt)}
+                      </ItemDescription>
+                    </ItemContent>
+                  </Item>
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Delete conversation"
+                    title="Delete conversation"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleDelete(s.id);
+                    }}
+                    className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100"
+                  >
+                    <Trash2 />
+                  </Button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </ScrollArea>
     </aside>
   );
 };

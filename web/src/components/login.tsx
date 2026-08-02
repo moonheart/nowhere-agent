@@ -1,5 +1,17 @@
 import { useState, type FC, type FormEvent } from "react";
+import { AlertCircle } from "lucide-react";
 import { login, signup } from "@/lib/auth";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 
 export const LoginForm: FC<{ onSuccess: () => void }> = ({ onSuccess }) => {
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -24,54 +36,72 @@ export const LoginForm: FC<{ onSuccess: () => void }> = ({ onSuccess }) => {
   };
 
   return (
-    <div className="flex h-full items-center justify-center">
-      <form
-        onSubmit={submit}
-        className="w-full max-w-sm space-y-4 rounded-2xl border border-neutral-200 p-6"
-      >
-        <h1 className="text-lg font-semibold">
-          {mode === "login" ? "Sign in" : "Create account"}
-        </h1>
+    <div className="flex h-full items-center justify-center p-6">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>
+            {mode === "login" ? "Sign in" : "Create account"}
+          </CardTitle>
+          <CardDescription>
+            {mode === "login"
+              ? "Continue to nowhere-agent."
+              : "Set up a new nowhere-agent account."}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={submit}>
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="login-email">Email</FieldLabel>
+                <Input
+                  id="login-email"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="login-password">Password</FieldLabel>
+                <Input
+                  id="login-password"
+                  type="password"
+                  required
+                  autoComplete={
+                    mode === "login" ? "current-password" : "new-password"
+                  }
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </Field>
 
-        <input
-          type="email"
-          required
-          autoComplete="email"
-          placeholder="Email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="w-full rounded-xl border border-neutral-300 px-3 py-2 outline-none focus:border-violet-500"
-        />
-        <input
-          type="password"
-          required
-          autoComplete={mode === "login" ? "current-password" : "new-password"}
-          placeholder="Password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full rounded-xl border border-neutral-300 px-3 py-2 outline-none focus:border-violet-500"
-        />
+              {error && (
+                <Alert variant="destructive">
+                  <AlertCircle />
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
 
-        {error && <p className="text-sm text-red-600">{error}</p>}
-
-        <button
-          type="submit"
-          disabled={busy}
-          className="w-full rounded-xl bg-violet-600 px-4 py-2 text-white disabled:opacity-40"
-        >
-          {busy ? "…" : mode === "login" ? "Sign in" : "Sign up"}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setMode(mode === "login" ? "signup" : "login")}
-          className="w-full text-center text-sm text-violet-600 hover:underline"
-        >
-          {mode === "login"
-            ? "No account? Sign up"
-            : "Have an account? Sign in"}
-        </button>
-      </form>
+              <Button type="submit" size="lg" disabled={busy}>
+                {busy ? "Working…" : mode === "login" ? "Sign in" : "Sign up"}
+              </Button>
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={() => setMode(mode === "login" ? "signup" : "login")}
+              >
+                {mode === "login"
+                  ? "No account? Sign up"
+                  : "Have an account? Sign in"}
+              </Button>
+            </FieldGroup>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 };

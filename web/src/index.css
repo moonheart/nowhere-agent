@@ -6,27 +6,16 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: oklch(0.922 0 0);
-  --code-bg: #f4f3ec;
-  --accent: oklch(0.97 0 0);
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
-
   --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
   --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
 
   font: 18px/145% var(--sans);
   letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
+  /* The app is light-only until something sets .dark (see below). Claiming
+     `light dark` here made the browser paint scrollbars and form controls dark
+     for an OS-dark visitor while every surface stayed white. */
+  color-scheme: light;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -48,7 +37,7 @@
 
   --popover-foreground: oklch(0.145 0 0);
 
-  --primary: oklch(0.205 0 0);
+  --primary: oklch(54.1% 0.281 293.009);
 
   --primary-foreground: oklch(0.985 0 0);
 
@@ -60,9 +49,13 @@
 
   --muted-foreground: oklch(0.556 0 0);
 
+  --accent: oklch(0.97 0 0);
+
   --accent-foreground: oklch(0.205 0 0);
 
   --destructive: oklch(0.577 0.245 27.325);
+
+  --border: oklch(0.922 0 0);
 
   --input: oklch(0.922 0 0);
 
@@ -96,26 +89,6 @@
 
   --sidebar-ring: oklch(0.708 0 0)}
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
 #root {
   min-height: 100svh;
   display: flex;
@@ -130,7 +103,7 @@ h1,
 h2 {
   font-family: var(--heading);
   font-weight: 500;
-  color: var(--text-h);
+  color: var(--foreground);
 }
 
 h1 {
@@ -160,19 +133,42 @@ code,
   font-family: var(--mono);
   display: inline-flex;
   border-radius: 4px;
-  color: var(--text-h);
+  color: var(--foreground);
 }
 
 code {
   font-size: 15px;
   line-height: 135%;
   padding: 4px 8px;
-  background: var(--code-bg);
+  background: var(--muted);
+}
+
+/* Management console (admin-console). The h1/h2/code rules above are UNLAYERED,
+   and unlayered CSS wins over anything in a layer regardless of specificity —
+   so a Tailwind utility like `text-lg` loses to `h1 { font-size: 56px }`. The
+   console uses Tailwind's type scale throughout, so it resets those element
+   rules within its own subtree. Scoped rather than moving the globals into
+   @layer base, which would change the chat app's typography. */
+.console-scope :is(h1, h2, h3, h4) {
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  margin: 0;
+}
+.console-scope code {
+  font-size: inherit;
+  line-height: inherit;
+  padding: 0;
+  background: none;
 }
 
 /* Markdown-rendered assistant text (marked output inside .markdown-body).
-   Scoped so it doesn't fight the global h1/h2/code styles above; the message
-   bubble centers text via #root's text-align, so we re-left-align here. */
+   Scoped so it doesn't fight the global h1/h2/code styles above. Colours come
+   from the shadcn tokens so a code block inside an assistant bubble matches the
+   bubble it sits in. */
 .markdown-body {
   text-align: left;
   color: inherit;
@@ -197,7 +193,7 @@ code {
 .markdown-body h3,
 .markdown-body h4 {
   font-family: var(--heading);
-  color: var(--text-h);
+  color: var(--foreground);
   font-weight: 600;
   line-height: 1.25;
   margin: 0.8em 0 0.4em;
@@ -229,11 +225,11 @@ code {
   margin: 0.2em 0;
 }
 .markdown-body strong {
-  color: var(--text-h);
+  color: var(--foreground);
   font-weight: 600;
 }
 .markdown-body a {
-  color: var(--accent);
+  color: var(--primary);
   text-decoration: underline;
 }
 .markdown-body hr {
@@ -244,19 +240,19 @@ code {
 .markdown-body blockquote {
   border-left: 3px solid var(--border);
   padding-left: 0.8em;
-  color: var(--text);
+  color: var(--muted-foreground);
 }
 .markdown-body code {
   font-family: var(--mono);
   font-size: 0.88em;
   padding: 0.15em 0.4em;
   border-radius: 4px;
-  background: var(--code-bg);
-  color: var(--text-h);
+  background: var(--muted);
+  color: var(--foreground);
   display: inline;
 }
 .markdown-body pre {
-  background: var(--code-bg);
+  background: var(--muted);
   border-radius: 8px;
   padding: 0.7em 0.9em;
   overflow-x: auto;
@@ -279,8 +275,8 @@ code {
   text-align: left;
 }
 .markdown-body th {
-  background: var(--code-bg);
-  color: var(--text-h);
+  background: var(--muted);
+  color: var(--foreground);
 }
 
 @theme inline {
@@ -327,14 +323,15 @@ code {
 }
 
 .dark {
+  color-scheme: dark;
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.205 0 0);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
+  --primary: oklch(60.6% 0.25 292.717);
+  --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.269 0 0);

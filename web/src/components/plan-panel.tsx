@@ -1,6 +1,8 @@
 import type { FC } from "react";
 import { CheckCircle2, Circle, Loader2 } from "lucide-react";
 import { usePlan, type PlanItem } from "@/lib/plan";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 function Item({ item }: { item: PlanItem }) {
   const label =
@@ -8,20 +10,20 @@ function Item({ item }: { item: PlanItem }) {
   return (
     <li className="flex items-center gap-2 text-sm">
       {item.status === "completed" ? (
-        <CheckCircle2 size={15} className="shrink-0 text-emerald-600" />
+        <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
       ) : item.status === "in_progress" ? (
-        <Loader2 size={15} className="shrink-0 animate-spin text-violet-600" />
+        <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
       ) : (
-        <Circle size={15} className="shrink-0 text-neutral-300" />
+        <Circle className="size-4 shrink-0 text-muted-foreground/40" />
       )}
       <span
-        className={
+        className={cn(
           item.status === "completed"
-            ? "text-neutral-400 line-through"
+            ? "text-muted-foreground line-through"
             : item.status === "in_progress"
-              ? "font-medium text-neutral-800"
-              : "text-neutral-500"
-        }
+              ? "font-medium text-foreground"
+              : "text-muted-foreground",
+        )}
       >
         {label}
       </span>
@@ -40,15 +42,15 @@ export const PlanPanel: FC = () => {
 
   const done = plan.items.filter((i) => i.status === "completed").length;
   return (
-    <div className="border-b border-neutral-200 bg-neutral-50 px-6 py-3">
+    <div className="border-b border-border bg-muted/50 px-6 py-3">
       <div className="mx-auto max-w-3xl">
         <div className="mb-1.5 flex items-center gap-2">
-          <span className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+          <span className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
             Plan
           </span>
-          <span className="text-xs text-neutral-400">
+          <Badge variant="secondary">
             {done}/{plan.items.length} completed
-          </span>
+          </Badge>
         </div>
         <ul className="flex flex-col gap-1">
           {plan.items.map((item, i) => (

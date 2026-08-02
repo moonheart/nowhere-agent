@@ -50,7 +50,7 @@ export const UsageFooter: FC = () => {
       : null;
 
   return (
-    <div className="mt-2 flex items-center gap-1.5 border-t border-neutral-100 pt-1.5 text-[11px] text-neutral-400">
+    <div className="mt-2 flex items-center gap-1.5 border-t border-border pt-1.5 text-[11px] text-muted-foreground">
       <span title="input tokens">↑{fmt(input)}</span>
       <span aria-hidden>·</span>
       <span title="output tokens">↓{fmt(output)}</span>

@@ -1,7 +1,10 @@
 import type { FC } from "react";
 import { useComposerRuntime } from "@assistant-ui/react";
+import { Square } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { getSessionId } from "@/lib/thread";
 import { cancelSession } from "@/lib/sessions";
+import { cn } from "@/lib/utils";
 
 // StopButton cancels the session's in-flight run. Unlike ComposerPrimitive.Cancel
 // — which only aborts this client's local stream — it ALSO tells the backend to
@@ -20,8 +23,16 @@ export const StopButton: FC<{ className?: string }> = ({ className }) => {
     composer.cancel();
   };
   return (
-    <button type="button" onClick={stop} className={className}>
+    <Button
+      type="button"
+      variant="secondary"
+      size="sm"
+      title="Stop this run"
+      onClick={stop}
+      className={cn(className)}
+    >
+      <Square className="fill-current" />
       Stop
-    </button>
+    </Button>
   );
 };

@@ -1,11 +1,25 @@
 import { useEffect, useState } from "react";
+import { Link, Route, Routes } from "react-router-dom";
 import { AssistantRuntimeProvider, useThread } from "@assistant-ui/react";
 import { useDataStreamRuntime } from "@assistant-ui/react-data-stream";
-import { LogOut } from "lucide-react";
+import { LogOut, Settings } from "lucide-react";
+import { AdminLayout } from "@/components/admin/AdminLayout";
+import { ProfilePage } from "@/components/admin/ProfilePage";
+import { MyMemoriesPage, MyUsagePage } from "@/components/admin/SelfPages";
+import { TeamsPage } from "@/components/admin/TeamsPage";
+import { TeamDetailPage } from "@/components/admin/TeamDetailPage";
+import {
+  PlatformMemoriesPage,
+  PlatformTeamsPage,
+  PlatformUsagePage,
+  PlatformUsersPage,
+} from "@/components/admin/PlatformPages";
 import { Thread } from "@/components/thread";
 import { LoginForm } from "@/components/login";
 import { SessionList } from "@/components/SessionList";
 import { RightPanel } from "@/components/right-panel";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
@@ -13,15 +27,24 @@ import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/li
 import { reportInteraction, resetApprovals, registerDecisionFollower, type Interaction } from "@/lib/approval";
 import { clientToolDeclarations } from "@/lib/client-tools";
 import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
+import {
+  resetPermissionMode,
+  reportPermissionMode,
+  permissionModeFromSessionState,
+  pendingDraftPermissionMode,
+  setPermissionMode,
+} from "@/lib/permission";
 import { cancelSession } from "@/lib/sessions";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
 // and re-runs history.load() for the now-current sessionId.
 function Chat({
   conversationKey,
+  sessionId,
   onSession,
 }: {
   conversationKey: number;
+  sessionId: string | null;
   onSession: (id: string) => void;
 }) {
   const runtime = useDataStreamRuntime({
@@ -60,9 +83,12 @@ function Chat({
         reportInteraction(d.data as Interaction);
       } else if (d.name === "session-state") {
         // Session-level state push (O1): the plan_write tool's plan, pushed
-        // live. Feeds the top plan panel.
+        // live. Feeds the top plan panel. The permission_mode setting rides the
+        // same channel — report whichever key the frame carries.
         const plan = planFromSessionState(d.data);
         if (plan) reportPlan(plan);
+        const mode = permissionModeFromSessionState(d.data);
+        if (mode !== null) reportPermissionMode(mode);
       }
     },
     // The Stop button only aborts the local fetch; also tell the backend to
@@ -134,7 +160,7 @@ function Chat({
 
   return (
     <AssistantRuntimeProvider runtime={runtime} key={conversationKey}>
-      <Thread />
+      <Thread sessionId={sessionId} />
       <PlanMetadataWatcher />
     </AssistantRuntimeProvider>
   );
@@ -159,8 +185,9 @@ function PlanMetadataWatcher() {
   return null;
 }
 
-export default function App() {
-  const [token, setToken] = useState<string | null>(() => getToken());
+// ChatApp is the conversation view. Authentication now lives in App, which
+// gates both this and the console, so ChatApp only reports the sign-out.
+function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
   const [conversationKey, setConversationKey] = useState(0);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(() =>
     getSessionId(),
@@ -174,6 +201,10 @@ export default function App() {
     resetActivity();
     resetApprovals();
     resetPlan();
+    // Do NOT resetPermissionMode here: a draft 完全允许 picked on this blank
+    // thread is a one-off for the session the first message creates; clearing it
+    // now would discard that choice. Once the session exists its own mode takes
+    // over, and allow_all stays scoped to that one session.
     setConversationKey((k) => k + 1);
   };
 
@@ -190,13 +221,19 @@ export default function App() {
     resetActivity();
     resetApprovals();
     resetPlan();
+    resetPermissionMode();
     setConversationKey((k) => k + 1);
   };
 
   // Called when a brand-new session is created server-side (first message of a
   // new chat): adopt it as active and refresh the sidebar. The runtime is
-  // already streaming into this session, so no remount is needed.
+  // already streaming into this session, so no remount is needed. If the user
+  // picked 完全允许 on the blank draft, apply that one-off choice to THIS new
+  // session (it is not a persistent default for future chats).
   const handleNewSession = (id: string) => {
+    if (pendingDraftPermissionMode() === "allow_all") {
+      void setPermissionMode(id, "allow_all");
+    }
     setActiveSessionId((prev) => {
       if (prev === id) return prev;
       setListVersion((v) => v + 1);
@@ -204,21 +241,11 @@ export default function App() {
     });
   };
 
-  if (!token) {
-    return (
-      <div className="flex h-dvh flex-col bg-neutral-50 text-neutral-900">
-        <div className="min-h-0 flex-1">
-          <LoginForm onSuccess={() => setToken(getToken())} />
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex h-dvh flex-col bg-neutral-50 text-neutral-900">
-      <header className="flex h-12 items-center gap-3 border-b border-neutral-200 bg-white px-4">
+    <div className="flex h-dvh flex-col bg-background text-foreground">
+      <header className="flex h-12 items-center gap-3 border-b border-border px-4">
         <div className="flex items-center gap-2">
-          <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-violet-600 text-xs font-bold text-white">
+          <span className="flex size-6 items-center justify-center rounded-lg bg-primary text-xs font-bold text-primary-foreground">
             n
           </span>
           <span className="text-sm font-semibold tracking-tight">
@@ -226,18 +253,29 @@ export default function App() {
           </span>
         </div>
         <div className="ml-auto flex items-center gap-1">
-          <button
-            type="button"
+          {/* buttonVariants, not <Button render={<Link/>}>: base-ui's Button
+              assumes a native <button>, and telling it otherwise costs the
+              anchor its link semantics (middle-click, open in new tab). */}
+          <Link
+            to="/admin"
+            title="Settings and administration"
+            className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+          >
+            <Settings />
+            Console
+          </Link>
+          <Button
+            variant="ghost"
+            size="sm"
             title="Sign out"
             onClick={() => {
               clearSessionId();
-              void logout().finally(() => setToken(null));
+              void logout().finally(onSignedOut);
             }}
-            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-neutral-500 transition-colors hover:bg-neutral-100 hover:text-neutral-800"
           >
-            <LogOut size={15} />
+            <LogOut />
             Sign out
-          </button>
+          </Button>
         </div>
       </header>
       <div className="flex min-h-0 flex-1">
@@ -248,11 +286,48 @@ export default function App() {
           onDeleteCurrent={handleDeleteCurrent}
           refreshToken={listVersion}
         />
-        <main className="min-w-0 flex-1 bg-white">
-          <Chat conversationKey={conversationKey} onSession={handleNewSession} />
+        <main className="min-w-0 flex-1 bg-background">
+          <Chat conversationKey={conversationKey} sessionId={activeSessionId} onSession={handleNewSession} />
         </main>
         <RightPanel />
       </div>
     </div>
+  );
+}
+
+// App gates everything behind a token and routes between the chat view and the
+// management console. The console lives at its own path so links into it are
+// shareable and the back button behaves; the Go server serves index.html for
+// those paths (see spaHandler) so a deep link loads.
+export default function App() {
+  const [token, setToken] = useState<string | null>(() => getToken());
+
+  if (!token) {
+    return (
+      <div className="flex h-dvh flex-col bg-background text-foreground">
+        <div className="min-h-0 flex-1">
+          <LoginForm onSuccess={() => setToken(getToken())} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <Routes>
+      <Route path="/" element={<ChatApp onSignedOut={() => setToken(null)} />} />
+      <Route path="/admin" element={<AdminLayout />}>
+        <Route index element={<ProfilePage />} />
+        <Route path="usage" element={<MyUsagePage />} />
+        <Route path="memories" element={<MyMemoriesPage />} />
+        <Route path="teams" element={<TeamsPage />} />
+        <Route path="teams/:teamId" element={<TeamDetailPage />} />
+        <Route path="platform/users" element={<PlatformUsersPage />} />
+        <Route path="platform/teams" element={<PlatformTeamsPage />} />
+        <Route path="platform/usage" element={<PlatformUsagePage />} />
+        <Route path="platform/memories" element={<PlatformMemoriesPage />} />
+      </Route>
+      {/* Anything else falls back to the chat view rather than a blank page. */}
+      <Route path="*" element={<ChatApp onSignedOut={() => setToken(null)} />} />
+    </Routes>
   );
 }
