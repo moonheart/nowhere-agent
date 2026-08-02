@@ -103,10 +103,14 @@ function Chat({
 
   // A decided approval/ask_user starts a FRESH run on the backend (run-stateless
   // model) and returns its SSE stream. Follow it here so the deciding client
-  // watches the continuation live. parentId = the current last message (the
-  // assistant turn that ended on the gated call): the new assistant message
-  // extends the SAME conversation branch, so history (the user's question + the
-  // ask_user card) is preserved — unlike parentId:null, which starts a new root.
+  // watches the continuation live.
+  //
+  // parentId = the current last message (the gated assistant turn). The new
+  // assistant message MUST be its child (U→M1→M3), NOT a root sibling
+  // (parentId:null): MessageRepository.resetHead HARD-DELETES the displaced
+  // subtree when head moves off a branch, so a root-level sibling makes the whole
+  // U→M1 chain an orphaned branch and wipes it off the canvas until a history
+  // reload. As a child of M1 it extends the same branch and nothing is pruned.
   useEffect(() => {
     registerDecisionFollower((stream) => {
       const msgs = runtime.thread.getState().messages;
@@ -142,9 +146,17 @@ function Chat({
       if (cancelled || !active || runtime.thread.getState().isRunning) return;
       attaching = true;
       try {
-        // parentId: null → startRun appends the streamed run after the current
-        // head, which is the user message this run is answering.
-        await runtime.thread.resumeRun({ parentId: null, stream: attachStream });
+        // Attach the re-streamed run as a child of the current head, NOT at the
+        // root (parentId:null). A root-level sibling makes the existing
+        // user→assistant branch an orphan, and resetHead then HARD-DELETES it —
+        // that was the "messages vanish after approve" bug: the poll fired while
+        // this client was idle (verdict run active on the backend, follow not yet
+        // started) and wiped the user's question + gated turn off the canvas.
+        // Appending after head keeps the whole chain on one branch; the runtime's
+        // stream-abort dedupes a decision-follow racing this same run.
+        const msgs = runtime.thread.getState().messages;
+        const parentId = msgs.length > 0 ? msgs[msgs.length - 1].id : null;
+        await runtime.thread.resumeRun({ parentId, stream: attachStream });
       } catch {
         // Attach is best-effort; a failed follow is retried next tick.
       } finally {
