@@ -75,12 +75,15 @@ type AfterRunHook interface {
 
 // ---- gate hook (tool authorization) ------------------------------------------
 // A GateFunc authorizes one tool: (deny, reason). deny=true blocks the call.
-// The loop consults the policy at two points with different semantics: the
-// interaction gate (a deny whose reason carries the ApprovalReasonPrefix marker
-// ends the run for human input — a general interrupt) and the execution gate
-// (any other deny blocks dispatch, feeding the reason back to the model). A
-// middleware supplies the policy by exposing GateFuncProvider.
-type GateFunc func(toolruntime.Tool) (bool, string)
+// It receives the run's context so a policy may resolve request/run-scoped
+// inputs (e.g. the owning session's permission-mode setting) at call time rather
+// than at middleware-registration time. The loop consults the policy at two
+// points with different semantics: the interaction gate (a deny whose reason
+// carries the ApprovalReasonPrefix marker ends the run for human input — a
+// general interrupt) and the execution gate (any other deny blocks dispatch,
+// feeding the reason back to the model). A middleware supplies the policy by
+// exposing GateFuncProvider.
+type GateFunc func(ctx context.Context, tool toolruntime.Tool) (bool, string)
 
 // GateFuncProvider supplies the tool-authorization policy to the loop. The loop
 // uses the ONE returned func at both gate points (interaction and execution) —

@@ -1,18 +1,39 @@
 import { useEffect, useRef, useState, type FC } from "react";
 import type { ThreadMessage, ToolCallMessagePartProps } from "@assistant-ui/react";
-import { Bot, HelpCircle, Laptop, ShieldAlert } from "lucide-react";
+import {
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  HelpCircle,
+  Laptop,
+  LoaderCircle,
+  ShieldAlert,
+} from "lucide-react";
 import { reportToolCall, useActivity, type SubPart } from "@/lib/activity";
+import { usePermissionMode } from "@/lib/permission";
 import {
   useApproval,
+  usePendingInteractions,
   respondToApproval,
   respondToAskUser,
   clearApproval,
+  hasPendingInteractions,
   followDecisionStream,
   parseQuestions,
   type ToolApproval,
 } from "@/lib/approval";
 import { Reasoning } from "@/components/reasoning";
 import { MarkdownText } from "@/components/markdown-text";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { cn } from "@/lib/utils";
 
 /**
  * Renders a tool call (file read/write, etc.) as a collapsible block in the
@@ -71,46 +92,55 @@ const SubagentCall: FC<ToolCallMessagePartProps> = (props) => {
   const mode = liveParts.length > 0 ? "live" : replayMessages.length > 0 ? "replay" : "result";
 
   return (
-    <div
-      className={`mb-2 rounded-xl border text-sm ${
-        isError ? "border-red-200 bg-red-50" : "border-violet-200 bg-violet-50/40"
-      }`}
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      className={cn(
+        "mb-2 rounded-xl border text-sm",
+        isError
+          ? "border-destructive/30 bg-destructive/5"
+          : "border-primary/30 bg-primary/5",
+      )}
     >
-      <Header
-        icon={<Bot size={13} className="shrink-0 text-violet-500" />}
+      <CallHeader
+        icon={<Bot className="size-3.5 shrink-0 text-primary" />}
         name={toolName}
         running={running}
         isError={isError}
         expanded={open}
-        onToggle={() => setOpen((o) => !o)}
         badge={live && live.depth > 1 ? `L${live.depth}` : undefined}
       />
-      {open && (
-        <div className="max-h-96 space-y-2 overflow-y-auto border-t border-violet-100 px-3 py-2">
-          {mode === "live" && (
-            <>
-              <SubParts parts={liveParts} running={running} />
-              {running && <span className="animate-pulse text-violet-400">▍</span>}
-            </>
-          )}
-          {mode === "replay" && <NestedReplay messages={replayMessages} />}
-          {mode === "result" && (
-            <>
-              {running && <div className="text-xs text-neutral-400">subagent working…</div>}
-              {resultText && (
-                <div className={isError ? "font-mono text-xs text-red-600" : ""}>
-                  {isError ? (
-                    <pre className="whitespace-pre-wrap break-all">{resultText}</pre>
-                  ) : (
-                    <MarkdownText type="text" text={resultText} status={completeStatus} />
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </div>
+      <CollapsibleContent className="max-h-96 space-y-2 overflow-y-auto border-t border-primary/20 px-3 py-2">
+        {mode === "live" && (
+          <>
+            <SubParts parts={liveParts} running={running} />
+            {running && <span className="animate-pulse text-primary/60">▍</span>}
+          </>
+        )}
+        {mode === "replay" && <NestedReplay messages={replayMessages} />}
+        {mode === "result" && (
+          <>
+            {running && (
+              <div className="text-xs text-muted-foreground">subagent working…</div>
+            )}
+            {resultText && (
+              <div className={isError ? "font-mono text-xs text-destructive" : ""}>
+                {isError ? (
+                  <pre className="break-all whitespace-pre-wrap">{resultText}</pre>
+                ) : (
+                  <MarkdownText type="text" text={resultText} status={completeStatus} />
+                )}
+              </div>
+            )}
+            {/* Calls predating nested persistence have no result AND no replay;
+                without this the panel opens onto nothing and reads as broken. */}
+            {!running && !resultText && (
+              <div className="text-xs text-muted-foreground">(no output)</div>
+            )}
+          </>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
   );
 };
 
@@ -197,65 +227,112 @@ const Dispatch = dispatch;
 const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
   const { toolName, argsText, result, isError, status, toolCallId } = props;
   const running = status?.type === "running";
-  const [open, setOpen] = useState(false);
-  const expanded = running || open;
+  // undefined = follow the default (open while running, closed when done);
+  // true/false = the user's explicit toggle, which wins until the run ends.
+  // This lets a user collapse a large tool call (e.g. a streaming write_file)
+  // mid-run without the auto-expand forcing it back open on the next delta.
+  const [manual, setManual] = useState<boolean | undefined>(undefined);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    // Reset the manual override when the run ends, so the next streaming call
+    // auto-expands again instead of staying stuck at the last toggle.
+    if (wasRunning.current && !running) setManual(undefined);
+    wasRunning.current = running;
+  }, [running]);
+  const expanded = manual ?? running;
   // A parked interaction for this call (general interrupt): the backend suspended
   // the run until the client responds — a dangerous-action approval, an ask_user
   // question set, or a client_tool the browser auto-runs. From the transient
   // data-interaction frame (or the durable pendingApproval echo on reload).
   const approval = useApproval(toolCallId);
+  // A gated batch parks several cards at once; only the queue head is
+  // actionable (decide it → it clears → the next promotes). Non-head cards show
+  // a waiting note instead of live buttons. Mirrors the sequential-permission
+  // UX (claude-code / pi): one prompt at a time, in order.
+  const queue = usePendingInteractions();
+  const isHead = approval !== undefined && queue.length > 0 && queue[0].toolCallId === approval.toolCallId;
+  // When the session is in allow_all, the backend's permission middleware runs
+  // gated calls without prompting, so no approval card should appear. Hide any
+  // stale approval-kind card (e.g. a frame that arrived just before the toggle)
+  // rather than leaving a dead prompt on a call that already executed. ask_user
+  // and client_tool are not permission approvals — they still render.
+  const permissionMode = usePermissionMode();
+  const hideApproval = permissionMode === "allow_all" && approval?.kind !== "ask_user" && approval?.kind !== "client_tool";
 
   useReport(props, running);
 
   const resultText = toText(result);
 
   return (
-    <div
-      className={`mb-2 rounded-xl border text-sm ${
+    <Collapsible
+      open={expanded}
+      onOpenChange={setManual}
+      className={cn(
+        "mb-2 rounded-xl border text-sm",
         isError
-          ? "border-red-200 bg-red-50"
+          ? "border-destructive/30 bg-destructive/5"
           : approval?.kind === "client_tool"
-            ? "border-sky-200 bg-sky-50/50"
+            ? "border-sky-500/30 bg-sky-500/5"
             : approval
-              ? "border-amber-300 bg-amber-50/60"
-              : "border-neutral-200 bg-neutral-50"
-      }`}
+              ? "border-amber-500/40 bg-amber-500/5"
+              : "border-border bg-muted/50",
+      )}
     >
-      <Header
+      <CallHeader
         name={toolName}
         running={running}
         isError={isError}
         expanded={expanded}
-        onToggle={() => setOpen((o) => !o)}
       />
       {approval?.kind === "ask_user" ? (
-        <AskUserGate approval={approval} />
+        isHead ? <AskUserGate approval={approval} /> : <QueuedNote />
       ) : approval?.kind === "client_tool" ? (
         <ClientToolGate approval={approval} />
-      ) : approval ? (
-        <ApprovalGate approval={approval} argsText={argsText} />
+      ) : approval && !hideApproval ? (
+        isHead ? (
+          <ApprovalGate approval={approval} argsText={argsText} />
+        ) : (
+          <QueuedNote />
+        )
       ) : null}
-      {expanded && (
-        <div className="space-y-2 border-t border-neutral-200 px-3 py-2 font-mono text-xs leading-relaxed">
-          {argsText && (
-            <div>
-              <div className="mb-1 font-sans text-neutral-400">arguments</div>
-              <pre className="whitespace-pre-wrap break-all text-neutral-600">{argsText}</pre>
-            </div>
-          )}
-          {(resultText || isError) && (
-            <div>
-              <div className="mb-1 font-sans text-neutral-400">result</div>
-              <pre className={`whitespace-pre-wrap break-all ${isError ? "text-red-600" : "text-neutral-600"}`}>
-                {resultText || "(no output)"}
-              </pre>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+      <CollapsibleContent className="space-y-2 border-t border-border px-3 py-2 font-mono text-xs leading-relaxed">
+        {argsText && (
+          <div>
+            <div className="mb-1 font-sans text-muted-foreground">arguments</div>
+            <pre className="break-all whitespace-pre-wrap text-foreground/70">
+              {argsText}
+            </pre>
+          </div>
+        )}
+        {(resultText || isError) && (
+          <div>
+            <div className="mb-1 font-sans text-muted-foreground">result</div>
+            <pre
+              className={cn(
+                "break-all whitespace-pre-wrap",
+                isError ? "text-destructive" : "text-foreground/70",
+              )}
+            >
+              {resultText || "(no output)"}
+            </pre>
+          </div>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
   );
 };
+
+// QueuedNote marks a gated call that is parked behind an earlier approval in a
+// multi-call batch: it is not yet actionable, and becomes live once the head of
+// the queue is decided. Rendered instead of the interactive gate.
+const QueuedNote: FC = () => (
+  <div className="flex items-center gap-2 border-t border-amber-500/30 px-3 py-2.5">
+    <ShieldAlert className="size-4 shrink-0 text-amber-600/60 dark:text-amber-500/60" />
+    <p className="text-[13px] text-muted-foreground">
+      Waiting for the earlier approval above…
+    </p>
+  </div>
+);
 
 // ApprovalGate renders the approve/deny prompt for a parked tool call. Deciding
 // POSTs the verdict to the backend (which resumes the run); the card clears the
@@ -270,41 +347,44 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
     const stream = await respondToApproval(approval.interactionId, approved);
     if (stream) {
       clearApproval(approval.toolCallId);
-      followDecisionStream(stream); // watch the resumed run continue live
+      // Only watch the resumed run live when the batch is now complete (the
+      // backend started a fresh run). While siblings are still queued the
+      // backend did NOT resume — following its trivial no-content stream would
+      // open an empty assistant bubble.
+      if (!hasPendingInteractions()) followDecisionStream(stream);
     } else {
       setBusy(null); // backend rejected (already decided / not waiting) — keep the prompt
     }
   };
   return (
-    <div className="border-t border-amber-200 px-3 py-2.5">
+    <div className="border-t border-amber-500/30 px-3 py-2.5">
       <div className="flex items-start gap-2">
-        <ShieldAlert size={15} className="mt-0.5 shrink-0 text-amber-500" />
+        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-500" />
         <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-medium text-amber-800">
+          <p className="text-[13px] font-medium text-amber-700 dark:text-amber-400">
             Approve running <span className="font-mono">{approval.toolName}</span>?
           </p>
           {argsText && (
-            <pre className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-all rounded bg-amber-100/60 p-1.5 font-mono text-[11px] text-amber-900">
+            <pre className="mt-1 max-h-24 overflow-y-auto rounded bg-amber-500/10 p-1.5 font-mono text-[11px] break-all whitespace-pre-wrap text-amber-800 dark:text-amber-300">
               {argsText}
             </pre>
           )}
           <div className="mt-2 flex gap-2">
-            <button
-              type="button"
+            <Button
+              size="sm"
               disabled={busy !== null}
               onClick={() => void decide(true)}
-              className="rounded-lg bg-amber-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-amber-700 disabled:opacity-50"
             >
               {busy === "approve" ? "Approving…" : "Approve"}
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               disabled={busy !== null}
               onClick={() => void decide(false)}
-              className="rounded-lg border border-amber-300 bg-white px-3 py-1 text-xs font-medium text-amber-700 transition-colors hover:bg-amber-100 disabled:opacity-50"
             >
               {busy === "deny" ? "Denying…" : "Deny"}
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -320,9 +400,9 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
 // into this same card. If the browser capability is unavailable the run folds an
 // is_error result instead and the model reacts to it.
 const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => (
-  <div className="flex items-center gap-2 border-t border-sky-200 bg-sky-50/60 px-3 py-2.5">
-    <Laptop size={15} className="shrink-0 animate-pulse text-sky-500" />
-    <p className="text-[13px] text-sky-800">
+  <div className="flex items-center gap-2 border-t border-sky-500/30 px-3 py-2.5">
+    <Laptop className="size-4 shrink-0 animate-pulse text-sky-600 dark:text-sky-400" />
+    <p className="text-[13px] text-sky-700 dark:text-sky-300">
       Running <span className="font-mono">{approval.toolName}</span> in your browser…
     </p>
   </div>
@@ -340,16 +420,8 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
   const [custom, setCustom] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState(false);
 
-  const toggle = (qi: number, label: string, multi: boolean) => {
-    setAnswers((prev) => {
-      const cur = prev[qi] ?? [];
-      const next = multi
-        ? cur.includes(label)
-          ? cur.filter((l) => l !== label)
-          : [...cur, label]
-        : [label];
-      return { ...prev, [qi]: next };
-    });
+  const choose = (qi: number, next: string[]) => {
+    setAnswers((prev) => ({ ...prev, [qi]: next }));
     setCustom((prev) => ({ ...prev, [qi]: "" })); // picking an option clears custom
   };
 
@@ -371,7 +443,7 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
     const stream = await respondToAskUser(approval.interactionId, out);
     if (stream) {
       clearApproval(approval.toolCallId);
-      followDecisionStream(stream);
+      if (!hasPendingInteractions()) followDecisionStream(stream);
     } else {
       setBusy(false);
     }
@@ -382,7 +454,7 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
     const stream = await respondToAskUser(approval.interactionId, null);
     if (stream) {
       clearApproval(approval.toolCallId);
-      followDecisionStream(stream);
+      if (!hasPendingInteractions()) followDecisionStream(stream);
     } else {
       setBusy(false);
     }
@@ -390,75 +462,77 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
 
   if (questions.length === 0) return null;
   return (
-    <div className="border-t border-violet-200 bg-violet-50/50 px-3 py-2.5">
+    <div className="border-t border-primary/20 bg-primary/5 px-3 py-2.5">
       <div className="flex items-start gap-2">
-        <HelpCircle size={15} className="mt-0.5 shrink-0 text-violet-500" />
+        <HelpCircle className="mt-0.5 size-4 shrink-0 text-primary" />
         <div className="min-w-0 flex-1 space-y-3">
           {questions.map((q, qi) => {
             const chosen = answers[qi] ?? [];
             const customText = custom[qi] ?? "";
             return (
               <div key={qi}>
-                <p className="text-[13px] font-medium text-violet-900">
+                <p className="text-[13px] font-medium text-foreground">
                   {q.header && (
-                    <span className="mr-1.5 rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-600">
+                    <Badge
+                      variant="secondary"
+                      className="mr-1.5 h-4 px-1 text-[10px]"
+                    >
                       {q.header}
-                    </span>
+                    </Badge>
                   )}
                   {q.question}
                 </p>
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {q.options.map((opt) => {
-                    const active = chosen.includes(opt.label);
-                    return (
-                      <button
-                        key={opt.label}
-                        type="button"
-                        disabled={busy}
-                        title={opt.description}
-                        onClick={() => toggle(qi, opt.label, !!q.multiselect)}
-                        className={`rounded-lg border px-2.5 py-1 text-xs transition-colors ${
-                          active
-                            ? "border-violet-500 bg-violet-600 text-white"
-                            : opt.recommended
-                              ? "border-violet-300 bg-white text-violet-700 hover:bg-violet-100"
-                              : "border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-100"
-                        }`}
-                      >
-                        {opt.label}
-                        {opt.recommended && !active && <span className="ml-1 text-[9px] text-violet-400">★</span>}
-                      </button>
-                    );
-                  })}
-                </div>
-                <input
+                <ToggleGroup
+                  variant="outline"
+                  size="sm"
+                  multiple={!!q.multiselect}
+                  disabled={busy}
+                  value={chosen}
+                  onValueChange={(next) => choose(qi, next)}
+                  className="mt-1.5 flex-wrap"
+                >
+                  {q.options.map((opt) => (
+                    <ToggleGroupItem
+                      key={opt.label}
+                      value={opt.label}
+                      title={opt.description}
+                      className={cn(
+                        "bg-background aria-pressed:bg-primary aria-pressed:text-primary-foreground",
+                        opt.recommended &&
+                          "border-primary/40 text-primary hover:text-primary",
+                      )}
+                    >
+                      {opt.label}
+                      {opt.recommended && !chosen.includes(opt.label) && (
+                        <span className="text-[9px] text-primary/70">★</span>
+                      )}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroup>
+                <Input
                   type="text"
                   value={customText}
                   disabled={busy}
                   onChange={(e) => setCustomAnswer(qi, e.target.value)}
                   placeholder="Or type your own answer…"
-                  className="mt-1.5 w-full rounded-lg border border-neutral-300 bg-white px-2.5 py-1 text-xs text-neutral-700 outline-none placeholder:text-neutral-400 focus:border-violet-400"
+                  aria-label="Custom answer"
+                  className="mt-1.5 h-7 bg-background text-xs"
                 />
               </div>
             );
           })}
           <div className="flex gap-2 pt-1">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void submit()}
-              className="rounded-lg bg-violet-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-violet-700 disabled:opacity-50"
-            >
+            <Button size="sm" disabled={busy} onClick={() => void submit()}>
               {busy ? "Sending…" : "Submit"}
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               disabled={busy}
               onClick={() => void skip()}
-              className="rounded-lg border border-neutral-300 bg-white px-3 py-1 text-xs font-medium text-neutral-500 transition-colors hover:bg-neutral-100 disabled:opacity-50"
             >
               Skip
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -491,31 +565,41 @@ function useReport(
   }, [toolCallId, toolName, argsText, result, isError, running]);
 }
 
-const Header: FC<{
+// CallHeader is the always-visible row that toggles the block. It must sit
+// inside a Collapsible: it IS the trigger.
+const CallHeader: FC<{
   name: string;
   running: boolean;
   isError?: boolean;
   expanded: boolean;
-  onToggle: () => void;
   icon?: React.ReactNode;
   badge?: string;
-}> = ({ name, running, isError, expanded, onToggle, icon, badge }) => (
-  <button
-    type="button"
-    onClick={onToggle}
-    className="flex w-full items-center gap-2 px-3 py-2 text-left text-neutral-500 hover:text-neutral-700"
-  >
-    <span
-      className={`inline-block h-2 w-2 rounded-full ${
-        running ? "animate-pulse bg-violet-500" : isError ? "bg-red-400" : "bg-emerald-400"
-      }`}
-    />
+}> = ({ name, running, isError, expanded, icon, badge }) => (
+  <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-left text-muted-foreground transition-colors hover:text-foreground">
+    {running ? (
+      <LoaderCircle className="size-3.5 shrink-0 animate-spin text-primary" />
+    ) : (
+      <span
+        className={cn(
+          "inline-block size-2 shrink-0 rounded-full",
+          isError ? "bg-destructive" : "bg-emerald-500",
+        )}
+      />
+    )}
     {icon}
     <span className="font-mono font-medium">{name}</span>
     {badge && (
-      <span className="rounded bg-violet-100 px-1 text-[10px] font-medium text-violet-600">{badge}</span>
+      <Badge variant="secondary" className="h-4 px-1 text-[10px]">
+        {badge}
+      </Badge>
     )}
-    <span className="text-xs text-neutral-400">{running ? "running…" : isError ? "error" : "done"}</span>
-    <span className="ml-auto text-xs text-neutral-400">{expanded ? "▾" : "▸"}</span>
-  </button>
+    <span className="text-xs">
+      {running ? "running…" : isError ? "error" : "done"}
+    </span>
+    {expanded ? (
+      <ChevronDown className="ml-auto size-3.5" />
+    ) : (
+      <ChevronRight className="ml-auto size-3.5" />
+    )}
+  </CollapsibleTrigger>
 );

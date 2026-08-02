@@ -209,10 +209,10 @@ func TestPermissionMWExposesGate(t *testing.T) {
 	}
 	netTool := riskTool{name: "net", risk: toolruntime.RiskNetwork}
 	readTool := riskTool{name: "r", risk: toolruntime.RiskReadOnly}
-	if deny, _ := gate(netTool); !deny {
+	if deny, _ := gate(context.Background(), netTool); !deny {
 		t.Error("gate should deny the network tool")
 	}
-	if deny, _ := gate(readTool); deny {
+	if deny, _ := gate(context.Background(), readTool); deny {
 		t.Error("gate should allow the read-only tool")
 	}
 }
@@ -226,7 +226,7 @@ func TestLoopUseFirstGateWins(t *testing.T) {
 	if loop.gateInteraction == nil || loop.gateExecute == nil {
 		t.Fatal("gates should be wired from the first PermissionMW")
 	}
-	if deny, reason := loop.gateExecute(riskTool{name: "net", risk: toolruntime.RiskNetwork}); !deny || IsApprovalReason(reason) {
+	if deny, reason := loop.gateExecute(context.Background(), riskTool{name: "net", risk: toolruntime.RiskNetwork}); !deny || IsApprovalReason(reason) {
 		t.Errorf("execute gate = (%v, %q), want the first (denyNetwork) policy, not the approval marker", deny, reason)
 	}
 }
