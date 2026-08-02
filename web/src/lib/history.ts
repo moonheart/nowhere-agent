@@ -26,6 +26,7 @@ import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
 import { reportInteraction, type Interaction } from "@/lib/approval";
 import { reportPlan, type Plan } from "@/lib/plan";
+import { reportPermissionMode, permissionModeFromSessionState } from "@/lib/permission";
 
 type HistoryPart =
   | { type: "text" | "reasoning"; text: string }
@@ -103,6 +104,7 @@ async function loadHistory(): Promise<{
   active: boolean;
   after: number;
   pendingApproval?: Interaction | null;
+  pendingInteractions?: Interaction[] | null;
   sessionState?: { plan?: Plan } | null;
 }> {
   const threadId = getSessionId();
@@ -117,6 +119,7 @@ async function loadHistory(): Promise<{
     active?: boolean;
     after?: number;
     pendingApproval?: Interaction | null;
+    pendingInteractions?: Interaction[] | null;
     sessionState?: { plan?: Plan } | null;
   };
   const messages = (data.messages ?? []).map(mapMessage);
@@ -125,6 +128,7 @@ async function loadHistory(): Promise<{
     active: data.active === true,
     after: typeof data.after === "number" ? data.after : 0,
     pendingApproval: data.pendingApproval ?? null,
+    pendingInteractions: data.pendingInteractions ?? null,
     sessionState: data.sessionState ?? null,
   };
 }
@@ -232,17 +236,27 @@ export async function hasActiveRun(): Promise<boolean> {
 
 export const threadHistory: ThreadHistoryAdapter = {
   async load() {
-    const { messages, active, after, pendingApproval, sessionState } = await loadHistory();
+    const { messages, active, after, pendingApproval, pendingInteractions, sessionState } = await loadHistory();
     lastLoadedAfter = after;
-    // Re-show a parked interaction (permission approve/deny, an ask_user card,
-    // or a client_tool the browser auto-executes) the transient frame dropped on
-    // refresh; the durable row is the source of truth, echoed by /history as
-    // pendingApproval.
-    if (pendingApproval) reportInteraction(pendingApproval);
+    // Re-show every parked interaction of a gated batch (the transient frames
+    // dropped on refresh); the durable rows are the source of truth, echoed by
+    // /history as pendingInteractions (queue order). Fall back to the singular
+    // pendingApproval for older backends.
+    const pending = pendingInteractions && pendingInteractions.length > 0
+      ? pendingInteractions
+      : pendingApproval
+        ? [pendingApproval]
+        : [];
+    for (const p of pending) reportInteraction(p);
     // Restore the plan panel (capability-gap O1): the session's persisted plan
     // state is echoed as sessionState.plan, the same source the live
     // data-session-state frames feed.
     if (sessionState?.plan) reportPlan(sessionState.plan);
+    // Restore the permission mode (per-session allow-all toggle): echoed as
+    // sessionState.permission_mode, the same source the live frames feed.
+    const st = sessionState as Record<string, unknown> | null | undefined;
+    const mode = permissionModeFromSessionState({ key: "permission_mode", value: st?.permission_mode });
+    if (mode !== null) reportPermissionMode(mode);
     // When a run is in flight, drop the trailing partial assistant message from
     // the snapshot. The follow (resume) re-streams the whole run and renders
     // that message itself; importing a partial assistant message AND following

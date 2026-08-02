@@ -8,7 +8,7 @@ import (
 )
 
 // TestMemStoreApprovalLifecycle covers create → pending lookup → decide, plus
-// the one-pending-per-session invariant and the double-decide error.
+// the double-decide error.
 func TestMemStoreApprovalLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -33,12 +33,6 @@ func TestMemStoreApprovalLifecycle(t *testing.T) {
 		t.Fatalf("PendingApprovalForSession: ok=%v got=%+v err=%v", ok, got, err)
 	}
 
-	// One pending per session (even across runs).
-	run2, _ := s.CreateRun(ctx, sess.ID, 2)
-	if _, err := s.CreateApproval(ctx, Approval{RunID: run2.ID, SessionID: sess.ID, ToolCallID: "tc2", ToolName: "y"}); err == nil {
-		t.Fatal("expected error creating a second pending approval for the same session")
-	}
-
 	// Approve it.
 	dec, err := s.DecideApproval(ctx, a.ID, true, nil)
 	if err != nil {
@@ -60,6 +54,72 @@ func TestMemStoreApprovalLifecycle(t *testing.T) {
 	fetched, err := s.GetApproval(ctx, a.ID)
 	if err != nil || fetched.Status != ApprovalApproved {
 		t.Fatalf("GetApproval after decide: %+v err=%v", fetched, err)
+	}
+}
+
+// TestMemStoreMultiPendingQueue pins the multi-approval queue: several pending
+// interactions coexist per session (a gated batch parks one per call), the
+// session query returns them in queue order, and the per-run query reports the
+// batch's remaining pendings until the last is decided.
+func TestMemStoreMultiPendingQueue(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	sess, _ := s.CreateSession(ctx, "u1", "t")
+	run, _ := s.CreateRun(ctx, sess.ID, 1)
+
+	// A gated batch of three calls in one run.
+	ids := make([]string, 3)
+	for i, tc := range []string{"tc1", "tc2", "tc3"} {
+		a, err := s.CreateApproval(ctx, Approval{RunID: run.ID, SessionID: sess.ID, ToolCallID: tc, ToolName: "edit_file"})
+		if err != nil {
+			t.Fatalf("CreateApproval %d: %v", i, err)
+		}
+		ids[i] = a.ID
+	}
+
+	// The whole queue is pending, in creation order.
+	queue, err := s.PendingApprovalsForSession(ctx, sess.ID)
+	if err != nil || len(queue) != 3 {
+		t.Fatalf("PendingApprovalsForSession = %v, err %v", queue, err)
+	}
+	for i, q := range queue {
+		if q.ID != ids[i] {
+			t.Errorf("queue[%d] = %s, want %s (creation order)", i, q.ID, ids[i])
+		}
+	}
+	// Head is the earliest.
+	head, ok, _ := s.PendingApprovalForSession(ctx, sess.ID)
+	if !ok || head.ID != ids[0] {
+		t.Errorf("head = %+v, want %s", head, ids[0])
+	}
+
+	// Decide the first two; the run still has one pending each time until the last.
+	if _, err := s.DecideApproval(ctx, ids[0], true, nil); err != nil {
+		t.Fatalf("decide 0: %v", err)
+	}
+	if p, _ := s.PendingApprovalsForRun(ctx, run.ID); len(p) != 2 {
+		t.Fatalf("after 1 decide, run pending = %d, want 2", len(p))
+	}
+	if _, err := s.DecideApproval(ctx, ids[1], false, nil); err != nil {
+		t.Fatalf("decide 1: %v", err)
+	}
+	if p, _ := s.PendingApprovalsForRun(ctx, run.ID); len(p) != 1 || p[0].ID != ids[2] {
+		t.Fatalf("after 2 decides, run pending = %+v, want [%s]", p, ids[2])
+	}
+	// The full batch (any status) reads back in order for folding.
+	batch, _ := s.ApprovalsForRun(ctx, run.ID)
+	if len(batch) != 3 {
+		t.Fatalf("ApprovalsForRun = %d, want 3", len(batch))
+	}
+	if batch[0].Status != ApprovalApproved || batch[1].Status != ApprovalRejected || batch[2].Status != ApprovalPending {
+		t.Errorf("batch statuses = %v %v %v", batch[0].Status, batch[1].Status, batch[2].Status)
+	}
+	// Last decision empties the run's pending queue.
+	if _, err := s.DecideApproval(ctx, ids[2], true, nil); err != nil {
+		t.Fatalf("decide 2: %v", err)
+	}
+	if p, _ := s.PendingApprovalsForRun(ctx, run.ID); len(p) != 0 {
+		t.Fatalf("batch complete, run pending = %d, want 0", len(p))
 	}
 }
 

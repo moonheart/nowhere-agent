@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
 )
 
@@ -104,6 +105,42 @@ func (s *PGStore) ListUndreamedSessions(ctx context.Context) ([]Session, error) 
 		LIMIT 100`)
 	if err != nil {
 		return nil, fmt.Errorf("list undreamed sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Session
+	for rows.Next() {
+		var sess Session
+		if err := rows.Scan(&sess.ID, &sess.UserID, &sess.Title, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan undreamed session: %w", err)
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// ListUndreamedSessionsForUser is ListUndreamedSessions narrowed to one owner.
+// It backs the user-triggered consolidation on the console: a user asking to
+// consolidate "my memories" must not cause anyone else's sessions to be read or
+// spent on, so the narrowing happens in SQL rather than by filtering a global
+// scan in Go.
+func (s *PGStore) ListUndreamedSessionsForUser(ctx context.Context, userID string) ([]Session, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT s.id, s.user_id, s.title, s.status, s.created_at, s.updated_at
+		FROM sessions s
+		WHERE s.user_id = $1 AND EXISTS (
+			SELECT 1 FROM messages m
+			WHERE m.session_id = s.id AND m.id > s.dreamed_seq
+		)
+		ORDER BY s.updated_at
+		LIMIT 100`, userID)
+	if err != nil {
+		if identity.IsMalformedID(err) {
+			// The id came from a URL or a token claim; a malformed one owns no
+			// sessions, which is an empty result rather than a server fault.
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list undreamed sessions for user: %w", err)
 	}
 	defer rows.Close()
 

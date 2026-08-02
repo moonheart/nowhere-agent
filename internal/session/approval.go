@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -59,6 +60,10 @@ type Interaction struct {
 	Result    json.RawMessage
 	CreatedAt time.Time
 	DecidedAt *time.Time
+	// seq is a store-assigned insertion counter giving a batch a stable queue
+	// order when CreatedAt ties (a batch created in one tick). 0 for PG rows,
+	// which order by created_at,ctid instead. Unexported: not a DB column.
+	seq int64
 }
 
 // Approval is retained as an alias of Interaction for source compatibility
@@ -82,21 +87,35 @@ var ErrNoPendingApproval = errors.New("no pending approval")
 // ErrNoPendingInteraction is the general name for ErrNoPendingApproval.
 var ErrNoPendingInteraction = ErrNoPendingApproval
 
+// sortInteractions orders interactions by creation order (queue order: earliest
+// first). The in-memory seq counter is authoritative when set; otherwise fall
+// back to CreatedAt then id so a same-timestamp batch is deterministic.
+func sortInteractions(is []Interaction) {
+	sort.SliceStable(is, func(i, j int) bool {
+		if is[i].seq != 0 && is[j].seq != 0 {
+			return is[i].seq < is[j].seq
+		}
+		if is[i].CreatedAt.Equal(is[j].CreatedAt) {
+			return is[i].ID < is[j].ID
+		}
+		return is[i].CreatedAt.Before(is[j].CreatedAt)
+	})
+}
+
 // --- MemStore (in-memory, tests/dev) ---
 
 func (m *MemStore) CreateApproval(_ context.Context, a Interaction) (Interaction, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, ex := range m.approvals {
-		if ex.SessionID == a.SessionID && ex.Status == InteractionPending {
-			return Interaction{}, fmt.Errorf("session %s already has a pending interaction", a.SessionID)
-		}
-	}
+	// Multiple pending interactions per session are allowed (multi-approval
+	// queue): a gated batch parks one interaction per gated call.
 	if a.ID == "" {
 		a.ID = uuid.NewString()
 	}
 	a.Status = InteractionPending
 	a.CreatedAt = time.Now()
+	m.approvalSeq++
+	a.seq = m.approvalSeq
 	cp := a
 	m.approvals[a.ID] = &cp
 	return a, nil
@@ -105,12 +124,65 @@ func (m *MemStore) CreateApproval(_ context.Context, a Interaction) (Interaction
 func (m *MemStore) PendingApprovalForSession(_ context.Context, sessionID string) (Interaction, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var head *Interaction
 	for _, a := range m.approvals {
 		if a.SessionID == sessionID && a.Status == InteractionPending {
-			return *a, true, nil
+			if head == nil || a.CreatedAt.Before(head.CreatedAt) {
+				head = a
+			}
 		}
 	}
-	return Interaction{}, false, nil
+	if head == nil {
+		return Interaction{}, false, nil
+	}
+	return *head, true, nil
+}
+
+// PendingApprovalsForSession returns every pending interaction for a session in
+// queue order (earliest created first) — the full gated batch a reloading client
+// must re-render, not just the head.
+func (m *MemStore) PendingApprovalsForSession(_ context.Context, sessionID string) ([]Interaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Interaction
+	for _, a := range m.approvals {
+		if a.SessionID == sessionID && a.Status == InteractionPending {
+			out = append(out, *a)
+		}
+	}
+	sortInteractions(out)
+	return out, nil
+}
+
+// PendingApprovalsForRun returns the still-pending interactions of one run (one
+// gated batch), in queue order. Empty means the batch is fully resolved — the
+// signal that a fresh run may resume the conversation.
+func (m *MemStore) PendingApprovalsForRun(_ context.Context, runID string) ([]Interaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Interaction
+	for _, a := range m.approvals {
+		if a.RunID == runID && a.Status == InteractionPending {
+			out = append(out, *a)
+		}
+	}
+	sortInteractions(out)
+	return out, nil
+}
+
+// ApprovalsForRun returns ALL interactions of one run (one gated batch), any
+// status, in queue order. Used to fold a fully-resolved batch into tool_results.
+func (m *MemStore) ApprovalsForRun(_ context.Context, runID string) ([]Interaction, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Interaction
+	for _, a := range m.approvals {
+		if a.RunID == runID {
+			out = append(out, *a)
+		}
+	}
+	sortInteractions(out)
+	return out, nil
 }
 
 func (m *MemStore) GetApproval(_ context.Context, id string) (Interaction, error) {
@@ -188,7 +260,7 @@ func (s *PGStore) PendingApprovalForSession(ctx context.Context, sessionID strin
 		SELECT `+approvalCols+`
 		FROM approvals
 		WHERE session_id = $1 AND status = 'pending'
-		ORDER BY created_at DESC LIMIT 1`, sessionID)
+		ORDER BY created_at ASC, ctid ASC LIMIT 1`, sessionID)
 	a, err := scanApproval(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Interaction{}, false, nil
@@ -197,6 +269,56 @@ func (s *PGStore) PendingApprovalForSession(ctx context.Context, sessionID strin
 		return Interaction{}, false, fmt.Errorf("pending interaction for session: %w", err)
 	}
 	return a, true, nil
+}
+
+// PendingApprovalsForSession returns every pending interaction for a session in
+// queue order (earliest created first) — the full gated batch a reloading client
+// must re-render, not just the head.
+func (s *PGStore) PendingApprovalsForSession(ctx context.Context, sessionID string) ([]Interaction, error) {
+	return s.queryInteractions(ctx, `
+		SELECT `+approvalCols+`
+		FROM approvals
+		WHERE session_id = $1 AND status = 'pending'
+		ORDER BY created_at ASC, ctid ASC`, sessionID)
+}
+
+// PendingApprovalsForRun returns the still-pending interactions of one run (one
+// gated batch), in queue order. Empty means the batch is fully resolved — the
+// signal that a fresh run may resume the conversation.
+func (s *PGStore) PendingApprovalsForRun(ctx context.Context, runID string) ([]Interaction, error) {
+	return s.queryInteractions(ctx, `
+		SELECT `+approvalCols+`
+		FROM approvals
+		WHERE run_id = $1 AND status = 'pending'
+		ORDER BY created_at ASC, ctid ASC`, runID)
+}
+
+// ApprovalsForRun returns ALL interactions of one run (one gated batch), any
+// status, in queue order. Used to fold a fully-resolved batch into tool_results.
+func (s *PGStore) ApprovalsForRun(ctx context.Context, runID string) ([]Interaction, error) {
+	return s.queryInteractions(ctx, `
+		SELECT `+approvalCols+`
+		FROM approvals
+		WHERE run_id = $1
+		ORDER BY created_at ASC, ctid ASC`, runID)
+}
+
+// queryInteractions runs a pending-interactions SELECT and scans the rows.
+func (s *PGStore) queryInteractions(ctx context.Context, query string, arg any) ([]Interaction, error) {
+	rows, err := s.db.QueryContext(ctx, query, arg)
+	if err != nil {
+		return nil, fmt.Errorf("query interactions: %w", err)
+	}
+	defer rows.Close()
+	var out []Interaction
+	for rows.Next() {
+		a, err := scanApproval(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan interaction: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (s *PGStore) GetApproval(ctx context.Context, id string) (Interaction, error) {

@@ -76,7 +76,7 @@ async function executeClientTool(a: Interaction) {
   const stream = await respondToClientTool(a.interactionId, result);
   if (stream) {
     clearApproval(a.toolCallId);
-    followDecisionStream(stream);
+    if (!hasPendingInteractions()) followDecisionStream(stream);
   }
   // On a failed decide the prompt stays; the user can retry / the run expires.
 }
@@ -88,6 +88,15 @@ export function clearApproval(toolCallId: string) {
   pending = new Map(pending);
   pending.delete(toolCallId);
   emit();
+}
+
+// hasPendingInteractions reports whether any card is still parked. After a
+// verdict the deciding client uses it to tell a real resume (batch complete → a
+// fresh run streams) from a no-op (siblings still queued → the backend did NOT
+// start a run), so it only attaches the runtime's follower to an actual run and
+// never opens an empty assistant bubble for a still-waiting batch.
+export function hasPendingInteractions(): boolean {
+  return pending.size > 0;
 }
 
 // resetApprovals clears all prompts (new conversation / session switch).
@@ -119,6 +128,14 @@ export function useApproval(toolCallId: string | undefined): Interaction | undef
   const all = useSyncExternalStore(subscribe, getSnapshot);
   if (!toolCallId) return undefined;
   return all.find((a) => a.toolCallId === toolCallId);
+}
+
+// usePendingInteractions returns the full pending queue in batch (insertion)
+// order. The head ([0]) is the one the user should act on first; a gated batch
+// surfaces several cards but only the head is actionable — deciding it clears it
+// and promotes the next. Mirrors the claude-code / pi sequential-permission UX.
+export function usePendingInteractions(): Interaction[] {
+  return useSyncExternalStore(subscribe, getSnapshot);
 }
 
 // respondToApproval POSTs a permission-approval verdict (approve/deny). Returns

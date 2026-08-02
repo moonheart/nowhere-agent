@@ -133,29 +133,38 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		active = false
 	}
 
-	// A run parked in waiting_approval has a durable pending interaction the
-	// transient data-tool-approval frame showed live but a refresh dropped. Echo
-	// it here so the reloading client re-renders the card (approve/deny or the
-	// ask_user questions). Shape matches that frame's payload.
-	var pending map[string]any
+	// A run parked in waiting_approval has durable pending interactions the
+	// transient data-interaction frames showed live but a refresh dropped. Echo
+	// the WHOLE queue here (a gated batch parks one interaction per gated call) so
+	// the reloading client re-renders every card (approve/deny or the ask_user
+	// questions). Shape matches that frame's payload; the array is in queue order.
+	var pendingList []map[string]any
 	if h.registry != nil {
-		if ap, ok, err := h.registry.PendingApprovalForSession(r.Context(), threadID); err == nil && ok {
-			var args any
-			if err := json.Unmarshal(ap.Payload, &args); err != nil {
-				args = map[string]any{}
-			}
-			kind := ap.Kind
-			if kind == "" {
-				kind = "approval"
-			}
-			pending = map[string]any{
-				"approvalId": ap.ID,
-				"kind":       kind,
-				"toolCallId": ap.ToolCallID,
-				"toolName":   ap.ToolName,
-				"args":       args,
+		if list, err := h.registry.PendingApprovalsForSession(r.Context(), threadID); err == nil {
+			for _, ap := range list {
+				var args any
+				if err := json.Unmarshal(ap.Payload, &args); err != nil {
+					args = map[string]any{}
+				}
+				kind := ap.Kind
+				if kind == "" {
+					kind = "approval"
+				}
+				pendingList = append(pendingList, map[string]any{
+					"approvalId": ap.ID,
+					"kind":       kind,
+					"toolCallId": ap.ToolCallID,
+					"toolName":   ap.ToolName,
+					"args":       args,
+				})
 			}
 		}
+	}
+	// pendingApproval keeps the legacy singular shape for older clients (the head
+	// of the queue); pendingInteractions carries the whole batch.
+	var pending map[string]any
+	if len(pendingList) > 0 {
+		pending = pendingList[0]
 	}
 
 	// Session state (capability-gap O1): the session's generic key/value store,
@@ -170,7 +179,7 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "pendingApproval": pending, "sessionState": sessionState})
+	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "pendingApproval": pending, "pendingInteractions": pendingList, "sessionState": sessionState})
 }
 
 // isToolResultOnly reports whether a stored message is a user-role message that

@@ -209,6 +209,11 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 		rg.append(runCtx, sessionID, run.ID, agent.KindSubagent, a)
 	})
 
+	// Tag the run context with its owning session id so context-resolved policies
+	// (the permission middleware's per-session mode) and tools (the subagent spawn
+	// tool, which propagates the id to child loops) can read it at call time.
+	runCtx = agent.ContextWithSessionID(runCtx, sessionID)
+
 	_, runErr := work.Loop.Run(runCtx, work.History, emit)
 
 	// Determine terminal status; cancelled beats failed when the ctx was cancelled.
@@ -258,72 +263,122 @@ func (rg *RunRegistry) appendEvent(ctx context.Context, sessionID, runID string,
 	})
 }
 
-// Decide applies the client's resolution of a pending Interaction and returns
-// the history for a FRESH run to continue the conversation (run-stateless model,
-// general interrupt). It atomically marks the row decided, rebuilds the durable
-// conversation from the message store, and appends the tool_result the suspended
-// call was waiting on. The per-kind fold is delegated to the Kind's registered
-// InteractionHandler (see interaction.go):
+// RecordDecision applies the client's verdict to ONE pending interaction and
+// reports whether its batch (the run's interactions) is now fully resolved. It
+// only marks the row decided — it does NOT start a run or fold any tool_result.
+// batchComplete=false means siblings are still pending: the conversation keeps
+// waiting (the model is NOT re-invoked on a partial batch). Only when
+// batchComplete=true should the caller start a fresh run via FoldBatch — the
+// LangGraph pattern that guarantees the model always sees a complete
+// tool_use→tool_result set, never a half-decided batch.
+func (rg *RunRegistry) RecordDecision(ctx context.Context, approvalID string, approve bool, result json.RawMessage) (Interaction, bool, error) {
+	ap, err := rg.rt.store.DecideApproval(ctx, approvalID, approve, result)
+	if err != nil {
+		return Interaction{}, false, err // ErrNoPendingApproval for unknown/already-decided
+	}
+	pending, err := rg.rt.store.PendingApprovalsForRun(ctx, ap.RunID)
+	if err != nil {
+		return Interaction{}, false, fmt.Errorf("check batch pending: %w", err)
+	}
+	return ap, len(pending) == 0, nil
+}
+
+// FoldBatch folds every interaction of one run (one gated batch) into a single
+// user message carrying each call's tool_result, persists it, and returns the
+// rebuilt history for a FRESH run to continue the conversation. Call it only
+// after RecordDecision reports the batch complete. Each interaction is folded by
+// its Kind's registered InteractionHandler (see interaction.go):
 //   - tool_approval approved → the tool is EXECUTED now and its real result fed
 //     back; rejected → an is_error denial;
 //   - ask_user answered → the structured answers; skipped → a "skipped" note;
-//   - client_tool → the client's output (validated against the declared output
-//     schema) or an is_error.
+//   - client_tool → the client's output (validated) or an is_error.
 //
-// The caller (chat handler) builds a fresh loop and Submits a new run with the
-// returned history; there is no suspended run to resume. tools may be nil only
-// when the fold cannot require execution (reject / ask_user / skip).
-func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, result json.RawMessage, tools *toolruntime.Registry) (Interaction, []provider.Message, error) {
-	ap, err := rg.rt.store.DecideApproval(ctx, approvalID, approve, result)
+// tools may be nil only when no fold can require execution (all rejected /
+// ask_user / skipped).
+func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, tools *toolruntime.Registry) ([]provider.Message, error) {
+	batch, err := rg.rt.store.ApprovalsForRun(ctx, runID)
 	if err != nil {
-		return Interaction{}, nil, err // ErrNoPendingApproval for unknown/already-decided
+		return nil, fmt.Errorf("read batch: %w", err)
 	}
-	sessionID := ap.SessionID
+	if len(batch) == 0 {
+		return nil, fmt.Errorf("no interactions for run %s", runID)
+	}
 
 	// Rebuild the durable conversation (full blocks, including the suspended
-	// tool_use that ended the prior run). The verdict's tool_result is NOT yet in
-	// the store; it is appended below so the fresh run sees it.
+	// tool_use batch that ended the prior run). The verdicts' tool_results are NOT
+	// yet in the store; they are appended below so the fresh run sees them.
 	var history []provider.Message
 	if rg.msgStore != nil {
 		stored, err := rg.msgStore.MessagesFor(ctx, sessionID)
 		if err != nil {
-			return Interaction{}, nil, fmt.Errorf("rebuild history: %w", err)
+			return nil, fmt.Errorf("rebuild history: %w", err)
 		}
 		history = StoredMessagesToProvider(stored)
 	}
 
-	// Resolve the client's result into a tool_result via the kind's handler.
-	res, err := rg.foldInteraction(ctx, ap, approve, tools)
-	if err != nil {
-		return Interaction{}, nil, err
-	}
-
-	resultMsg := provider.Message{
-		Role: provider.RoleUser,
-		Content: []provider.Block{{
+	// Fold each resolved interaction into its tool_result, preserving batch order
+	// (queue order matches the tool_use order in the assistant message).
+	resultMsg := provider.Message{Role: provider.RoleUser}
+	for _, ap := range batch {
+		approve := ap.Status == InteractionResolved
+		res, err := rg.foldInteraction(ctx, ap, approve, tools)
+		if err != nil {
+			return nil, err
+		}
+		content := res.Content
+		if content == "" {
+			content = emptyToolResultPlaceholder
+		}
+		resultMsg.Content = append(resultMsg.Content, provider.Block{
 			Type:         provider.BlockToolResult,
 			ToolResultID: ap.ToolCallID,
-			ToolContent:  res.Content,
+			ToolContent:  content,
 			IsError:      res.IsError,
 			ToolMessages: res.Nested,
-		}},
+		})
 	}
-	// Persist the folded tool_result to the durable record. The suspended run
-	// recorded the assistant tool_use but never its result (it ended at the
-	// gate); Decide supplies that missing result, and it belongs in the durable
-	// history so the next resume / history rebuild sees the call answered, not
-	// dangling. Best-effort: a failure leaves the in-memory history correct for
-	// THIS resume (the fresh run still gets the result); the durable gap mirrors
-	// the pre-generalization behaviour.
+
+	// Persist the folded tool_results to the durable record. The suspended run
+	// recorded the assistant tool_use batch but never its results (it ended at the
+	// gate); FoldBatch supplies those missing results, and they belong in the
+	// durable history so the next resume / history rebuild sees every call
+	// answered, not dangling. Best-effort: a failure leaves the in-memory history
+	// correct for THIS resume.
 	if rg.msgStore != nil {
 		_, _ = rg.msgStore.AppendMessage(context.Background(), StoredMessage{
 			SessionID: sessionID,
-			RunID:     ap.RunID,
+			RunID:     runID,
 			Role:      resultMsg.Role,
 			Content:   contextmgmt.TruncateBlocksForPersistence(resultMsg.Content),
 		})
 	}
 	history = append(history, resultMsg)
+	return history, nil
+}
+
+// emptyToolResultPlaceholder stands in for a folded interaction whose result is
+// empty, so the serialized tool message always carries a non-empty content field.
+const emptyToolResultPlaceholder = "(no output)"
+
+// Decide applies the client's resolution of a pending Interaction and returns
+// the history for a FRESH run to continue the conversation (run-stateless model,
+// general interrupt). It is the single-interaction convenience wrapper over
+// RecordDecision + FoldBatch, kept for the common one-gated-call case: it marks
+// the row decided and, when the batch is complete (the usual case for a single
+// gated call), folds the batch and returns the resume history. When siblings are
+// still pending it returns nil history — the caller must not resume yet.
+func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, result json.RawMessage, tools *toolruntime.Registry) (Interaction, []provider.Message, error) {
+	ap, complete, err := rg.RecordDecision(ctx, approvalID, approve, result)
+	if err != nil {
+		return Interaction{}, nil, err
+	}
+	if !complete {
+		return ap, nil, nil
+	}
+	history, err := rg.FoldBatch(ctx, ap.SessionID, ap.RunID, tools)
+	if err != nil {
+		return Interaction{}, nil, err
+	}
 	return ap, history, nil
 }
 
@@ -356,13 +411,19 @@ func (rg *RunRegistry) ApprovalByID(ctx context.Context, id string) (Approval, e
 	return rg.rt.store.GetApproval(ctx, id)
 }
 
-// PendingApprovalForSession returns the session's outstanding human interaction
-// (a pending permission approval or ask_user question set), or false. There is
-// at most one pending approval per session (enforced by the partial unique
-// index). A reloading client uses it to re-render the card the transient
-// data-tool-approval frame showed before the refresh.
+// PendingApprovalForSession returns the session's earliest outstanding human
+// interaction (the queue head — a pending permission approval or ask_user
+// question set), or false. A reloading client uses it to re-render the card the
+// transient data-interaction frame showed before the refresh.
 func (rg *RunRegistry) PendingApprovalForSession(ctx context.Context, sessionID string) (Approval, bool, error) {
 	return rg.rt.store.PendingApprovalForSession(ctx, sessionID)
+}
+
+// PendingApprovalsForSession returns the session's full pending interaction
+// queue in order (a gated batch parks one interaction per gated call). A
+// reloading client re-renders every card from this list, not just the head.
+func (rg *RunRegistry) PendingApprovalsForSession(ctx context.Context, sessionID string) ([]Interaction, error) {
+	return rg.rt.store.PendingApprovalsForSession(ctx, sessionID)
 }
 
 // append persists an event through the Runtime (which fans it out to subscribers

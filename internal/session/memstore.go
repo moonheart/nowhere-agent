@@ -29,6 +29,10 @@ type MemStore struct {
 	// approvals is the in-memory analogue of the approvals table (migration
 	// 000010): approvalID -> pending/decided tool-approval record.
 	approvals map[string]*Approval
+	// approvalSeq is a monotonic insertion counter giving interactions a stable
+	// queue order independent of wall-clock timestamp ties (CreatedAt can collide
+	// for a batch created in the same tick). Stamped on each new Approval.
+	approvalSeq int64
 }
 
 // NewMemStore creates an empty in-memory Store.
@@ -89,6 +93,11 @@ func (m *MemStore) ListIdleSessions(_ context.Context, before time.Time) ([]Sess
 // drive dreaming with a fake EpisodeSource instead.
 func (m *MemStore) ListUndreamedSessions(_ context.Context) ([]Session, error) {
 	return nil, errors.New("MemStore.ListUndreamedSessions: not supported (needs the messages join; use PGStore)")
+}
+
+// ListUndreamedSessionsForUser is likewise unsupported, for the same reason.
+func (m *MemStore) ListUndreamedSessionsForUser(_ context.Context, _ string) ([]Session, error) {
+	return nil, errors.New("MemStore.ListUndreamedSessionsForUser: not supported (needs the messages join; use PGStore)")
 }
 
 func (m *MemStore) DreamedSeq(_ context.Context, id string) (int64, error) {

@@ -2,12 +2,14 @@ package chatapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/session"
 )
 
 // TestSSEEmitterFinishReportsUsage pins L2: a KindUsage event stashes real token
@@ -72,5 +74,35 @@ func TestUsageTokensBrokerMapPath(t *testing.T) {
 	}
 	if _, ok := usageTokens(provider.Usage{InputTokens: 1}); !ok {
 		t.Error("a provider.Usage value must be recognised")
+	}
+}
+
+// TestEmitStreamEventUsageFromBroker pins the live-delivery path that was broken:
+// a usage frame carried by the StreamBroker (JSON-encoded like every content
+// event) flows through emitStreamEvent into the emitter, stashing real counts for
+// finish() and writing the data-usage frame. Before KindUsage classified as a
+// content kind it never reached the broker, so live streams showed usage:0 and
+// only a history reload surfaced the real counts.
+func TestEmitStreamEventUsageFromBroker(t *testing.T) {
+	rec := httptest.NewRecorder()
+	e := &sseEmitter{w: rec, flusher: rec, msgID: "m", textID: "t", thinkID: "r"}
+
+	// Encode the payload exactly as the broker carries it — the provider.Usage
+	// marshalled to its snake_case JSON form, the same bytes the registry publishes
+	// for a content event — then hand it to emitStreamEvent as the broker would.
+	payload, err := json.Marshal(provider.Usage{InputTokens: 14910, OutputTokens: 283, CacheReadTokens: 13200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("GET", "/", nil)
+	emitStreamEvent(req, e, session.StreamEvent{RunID: "r", Kind: string(agent.KindUsage), Payload: payload})
+
+	e.finish()
+	body := rec.Body.String()
+	if !strings.Contains(body, `"inputTokens":14910`) || !strings.Contains(body, `"outputTokens":283`) {
+		t.Errorf("finish frame missing broker-delivered usage:\n%s", body)
+	}
+	if !strings.Contains(body, `"type":"data-usage"`) || !strings.Contains(body, `"cacheReadTokens":13200`) {
+		t.Errorf("data-usage frame missing broker-delivered usage:\n%s", body)
 	}
 }
