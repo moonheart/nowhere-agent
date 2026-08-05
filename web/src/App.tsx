@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, Route, Routes } from "react-router-dom";
+import { Link, Route, Routes, useSearchParams } from "react-router-dom";
 import { AssistantRuntimeProvider, useThread } from "@assistant-ui/react";
 import { useDataStreamRuntime } from "@assistant-ui/react-data-stream";
 import { LogOut, Settings } from "lucide-react";
@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 import { getToken, logout } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
-import { resetActivity, reportSubagentActivity, type SubagentSignal } from "@/lib/activity";
+import { resetActivity, reportSubagentActivity, activityEpoch, type SubagentSignal } from "@/lib/activity";
 import { reportInteraction, resetApprovals, registerDecisionFollower, type Interaction } from "@/lib/approval";
 import { clientToolDeclarations } from "@/lib/client-tools";
 import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
@@ -47,6 +47,9 @@ function Chat({
   sessionId: string | null;
   onSession: (id: string) => void;
 }) {
+  // Captured once per mounted conversation. Subagent signals stream from the
+  // backend; if a late frame arrives after a reset/switch, the store drops it.
+  const chatEpoch = activityEpoch();
   const runtime = useDataStreamRuntime({
     api: "/api/chat",
     headers: async (): Promise<Record<string, string>> => {
@@ -74,7 +77,7 @@ function Chat({
       } else if (d.name === "subagent") {
         // Live subagent progress (from a spawn_agent tool call) — feed the
         // right panel's Runs tab; transient, never part of the message.
-        reportSubagentActivity(d.data as SubagentSignal);
+        reportSubagentActivity(d.data as SubagentSignal, chatEpoch);
       } else if (d.name === "interaction" || d.name === "tool-approval") {
         // A tool call is parked awaiting the client (general interrupt): a
         // dangerous-action approval, an ask_user question set, or a client_tool
@@ -201,11 +204,48 @@ function PlanMetadataWatcher() {
 // gates both this and the console, so ChatApp only reports the sign-out.
 function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
   const [conversationKey, setConversationKey] = useState(0);
+  // The URL is the shareable source of truth for the active conversation: the
+  // `session` query carries its id, so a reload/deep-link reopens it and the
+  // address bar always reflects what you're chatting in.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlSessionId = searchParams.get("session");
   const [activeSessionId, setActiveSessionId] = useState<string | null>(() =>
-    getSessionId(),
+    urlSessionId ?? getSessionId(),
   );
   // Bumped whenever a session is created/switched so the sidebar refetches.
   const [listVersion, setListVersion] = useState(0);
+
+  // Open the conversation the URL points at. `replace` keeps session hops out of
+  // the history stack, so Back leaves the chat rather than cycling prior
+  // conversations; delete/empty URLs fall back to the stored id. (initialUrlId
+  // is captured on mount: the URL's own updates would otherwise retrigger this.)
+  const [initialUrlId] = useState(urlSessionId);
+  useEffect(() => {
+    if (initialUrlId && initialUrlId !== activeSessionId) {
+      setSessionId(initialUrlId);
+      setActiveSessionId(initialUrlId);
+      resetActivity();
+      resetApprovals();
+      resetPlan();
+      resetPermissionMode();
+      setConversationKey((k) => k + 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sync the URL's `session` query with the active id (or drop it for a fresh
+  // chat). `replace` again keeps this off the Back-button trail.
+  useEffect(() => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (activeSessionId) next.set("session", activeSessionId);
+        else next.delete("session");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [activeSessionId, setSearchParams]);
 
   const startNewChat = () => {
     clearSessionId();
@@ -299,7 +339,15 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
           refreshToken={listVersion}
         />
         <main className="min-w-0 flex-1 bg-background">
-          <Chat conversationKey={conversationKey} sessionId={activeSessionId} onSession={handleNewSession} />
+          {/* key on Chat itself (not just the provider inside it): switching /
+              starting a chat must rebuild the WHOLE Chat, including its runtime.
+              Without it, Chat survives the switch and keeps the previous
+              conversation's runtime — the remounted provider's cards then render
+              that stale runtime's old messages under the NEW epoch and re-report
+              them into the right panel, leaking the prior chat's files into a
+              fresh conversation's Workspace. A fresh runtime starts empty and
+              reloads only the now-current session's history. */}
+          <Chat key={conversationKey} conversationKey={conversationKey} sessionId={activeSessionId} onSession={handleNewSession} />
         </main>
         <RightPanel />
       </div>

@@ -74,6 +74,12 @@ export type ActivityState = {
 
 let state: ActivityState = { tools: [], subagents: [] };
 let subagentSeq = 0;
+// epoch bumps on every resetActivity. A gated tool call resumes on a FRESH
+// backend run whose re-stream (decision-follow / poll-attach) can still be
+// draining when the user switches or starts a new chat — its late report would
+// otherwise re-add the just-cleared rows to the new conversation's panel.
+// Reports captured against an older epoch are dropped.
+let epoch = 0;
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -86,8 +92,14 @@ function setState(next: ActivityState) {
 }
 
 // reportToolCall upserts a tool activity by id: called as a call starts and
-// again when its result lands, so the Runs tab reflects progress live.
-export function reportToolCall(entry: Omit<ToolActivity, "at"> & { at?: number }) {
+// again when its result lands, so the Runs tab reflects progress live. `atEpoch`
+// is the conversation epoch the reporter is streaming for; a stale report (from
+// a run whose conversation was already reset) is ignored.
+export function reportToolCall(
+  entry: Omit<ToolActivity, "at"> & { at?: number },
+  atEpoch: number = epoch,
+) {
+  if (atEpoch !== epoch) return;
   const id = entry.id || `${entry.toolName}:${entry.at ?? 0}`;
   const existing = state.tools.findIndex((t) => t.id === id);
   const record: ToolActivity = {
@@ -110,7 +122,8 @@ export function reportToolCall(entry: Omit<ToolActivity, "at"> & { at?: number }
 // part, `tool` opens a tool part, `result` fills it, `done`/`error` closes the
 // run. Runs are matched by toolCallId when present (parallel subagents), falling
 // back to most-recent running run at that depth.
-export function reportSubagentActivity(sig: SubagentSignal) {
+export function reportSubagentActivity(sig: SubagentSignal, atEpoch: number = epoch) {
+  if (atEpoch !== epoch) return;
   const runs = state.subagents.slice();
   if (sig.phase === "start") {
     runs.push({
@@ -213,9 +226,18 @@ function findRun(runs: SubagentRun[], sig: SubagentSignal): number {
 }
 
 // resetActivity clears per-conversation activity when switching threads so the
-// panel doesn't show a previous chat's runs.
+// panel doesn't show a previous chat's runs. Bumping the epoch also invalidates
+// any report still in flight from the old conversation's streams.
 export function resetActivity() {
+  epoch++;
   setState({ tools: [], subagents: [] });
+}
+
+// activityEpoch exposes the current conversation epoch so a streaming reporter
+// (tool-call card, subagent feed) can tag its reports and have them dropped
+// once the conversation resets underneath it.
+export function activityEpoch(): number {
+  return epoch;
 }
 
 export function subscribeActivity(cb: () => void): () => void {

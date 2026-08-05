@@ -9,7 +9,7 @@ import {
   LoaderCircle,
   ShieldAlert,
 } from "lucide-react";
-import { reportToolCall, useActivity, type SubPart } from "@/lib/activity";
+import { reportToolCall, useActivity, activityEpoch, type SubPart } from "@/lib/activity";
 import { usePermissionMode } from "@/lib/permission";
 import {
   useApproval,
@@ -549,20 +549,30 @@ function toText(result: unknown): string {
 
 // useReport publishes the call to the right panel's Runs/Workspace feed,
 // re-reporting as it streams running → done (upserts by toolCallId).
+//
+// The epoch is captured ONCE (useState initializer) when this card mounts. A
+// gated call resumes on a fresh backend run, and that re-stream can still be
+// delivering this very part when the user switches / starts a new chat —
+// resetActivity bumps the epoch and the store then drops these late reports,
+// so the new conversation's panel isn't repopulated with the old run's rows.
 function useReport(
   { toolName, argsText, result, isError, toolCallId }: ToolCallMessagePartProps,
   running: boolean,
 ) {
+  const [epoch] = useState(() => activityEpoch());
   useEffect(() => {
-    reportToolCall({
-      id: toolCallId ?? `${toolName}`,
-      toolName,
-      argsText: argsText ?? "",
-      result,
-      isError,
-      status: running ? "running" : isError ? "error" : "done",
-    });
-  }, [toolCallId, toolName, argsText, result, isError, running]);
+    reportToolCall(
+      {
+        id: toolCallId ?? `${toolName}`,
+        toolName,
+        argsText: argsText ?? "",
+        result,
+        isError,
+        status: running ? "running" : isError ? "error" : "done",
+      },
+      epoch,
+    );
+  }, [toolCallId, toolName, argsText, result, isError, running, epoch]);
 }
 
 // CallHeader is the always-visible row that toggles the block. It must sit
