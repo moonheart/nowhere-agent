@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"nowhere-agent/internal/adminapi"
 	"nowhere-agent/internal/agent"
@@ -272,17 +273,18 @@ func run() error {
 			"network", cfg.Permission.Network, "external_write", cfg.Permission.ExternalWrite)
 
 		// MCP integration (mcp capability): connect to the configured SearXNG MCP
-		// server over Streamable HTTP and list its tools once. The client is shared
+		// server over Streamable HTTP and list its tools. The client is shared
 		// across runs; the ToolBinder registers its tools into each run's registry
-		// so subagents inherit them via the scoped view. Fail fast on a handshake
-		// error — enabling MCP against an unreachable server is a misconfiguration.
+		// so subagents inherit them via the scoped view. The connect runs async
+		// (reconnectMCP, below): an unreachable/slow server is a degraded
+		// capability, not a boot failure — a transient network or TLS blip must
+		// not take the whole server down. Tools stay unregistered until the
+		// handshake lands; a config mistake surfaces as a clear startup warning
+		// and keeps retrying rather than exiting.
 		var mcpClient *mcp.Client
 		if cfg.MCP.Enabled {
 			mcpClient = mcp.NewSearxng(cfg.MCP.SearxngURL, 0)
-			if err := mcpClient.Connect(ctx); err != nil {
-				return fmt.Errorf("mcp searxng connect: %w", err)
-			}
-			log.Info("mcp searxng connected", "url", cfg.MCP.SearxngURL, "tools", len(mcpClient.Tools()))
+			go reconnectMCP(ctx, mcpClient, log)
 		}
 		// Context compression (context-compression): the loop compresses its
 		// working view as it approaches the model's context window, using a
@@ -502,9 +504,8 @@ func run() error {
 			if execEnabled {
 				log.Info("run_command tool enabled", "backend", cfg.Sandbox.Backend)
 			}
-			if mcpClient != nil {
-				log.Info("mcp tools enabled", "server", mcpClient.Server(), "count", len(mcpClient.Tools()))
-			}
+			// MCP tool count is logged by reconnectMCP when the async connect
+			// lands; at this point it is still 0, so there is nothing to report.
 			if cfg.Subagent.Enabled {
 				log.Info("subagent tool enabled (spawn_agent)", "max_depth", cfg.Subagent.MaxDepth)
 			}
@@ -558,6 +559,38 @@ func run() error {
 		return srv.Shutdown(shutCtx)
 	case err := <-errCh:
 		return err
+	}
+}
+
+// reconnectMCP keeps trying to establish the MCP session until it succeeds or
+// the server shuts down. The first failure is logged as a warning so an
+// unreachable/misconfigured server is visible; subsequent retries back off
+// quietly and success is announced once tools are registered. It runs for the
+// process lifetime (ctx is the signal context) and only stops on shutdown.
+func reconnectMCP(ctx context.Context, c *mcp.Client, log *slog.Logger) {
+	backoff := time.Second
+	first := true
+	for {
+		if err := c.Connect(ctx); err != nil {
+			if ctx.Err() != nil {
+				return // shutting down
+			}
+			if first {
+				log.Warn("mcp connect failed; retrying in background", "server", c.Server(), "err", err)
+				first = false
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		log.Info("mcp connected", "server", c.Server(), "tools", len(c.Tools()))
+		return
 	}
 }
 
