@@ -5,6 +5,7 @@
 package skill
 
 import (
+	"sort"
 	"time"
 
 	"nowhere-agent/internal/identity"
@@ -37,6 +38,10 @@ type Skill struct {
 type L0 struct {
 	Name        string
 	Description string
+	// Scripts are the names of the skill's executable entry points (the keys of
+	// Skill.Scripts), surfaced so the model can discover what run_skill_script can
+	// run without loading the full L1 body. Nil when the skill has no scripts.
+	Scripts []string
 }
 
 // Manifest is the parsed SKILL.md frontmatter + body.
@@ -44,4 +49,18 @@ type Manifest struct {
 	Name        string
 	Description string
 	Body        string
+}
+
+// scriptNames returns the sorted keys of a skill's Scripts map, so L0 listings
+// and the run_skill_script tool see a deterministic order.
+func scriptNames(scripts map[string]string) []string {
+	if len(scripts) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(scripts))
+	for name := range scripts {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }

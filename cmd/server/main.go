@@ -36,6 +36,7 @@ import (
 	"nowhere-agent/internal/scheduler"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
+	"nowhere-agent/internal/skillapi"
 	"nowhere-agent/internal/subagent"
 	"nowhere-agent/internal/toolruntime"
 	"nowhere-agent/internal/toolruntime/builtin"
@@ -186,11 +187,12 @@ func run() error {
 	// Memory (PG+vector) and skill engine feed the loop's system prompt:
 	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
 	memPort := memory.NewPGPort(pool)
-	skillStore := skill.NewStore()
-	// Seed the skill store from disk (capability-gap K3a): each SKILL.md under
+	skillStore := skill.NewPGStore(pool)
+	// Seed the skill store from disk (capability-gap K3): each SKILL.md under
 	// SKILLS_DIR becomes a system-scope skill, lighting up the L0 index in the
-	// system prompt. Empty SKILLS_DIR leaves the runtime dormant. The loader
-	// never loads scripts — skill execution is K3b, gated on C17.
+	// system prompt. Empty SKILLS_DIR leaves the runtime dormant. Scripts are
+	// loaded too and run in the session sandbox (C17 fixed: interpreter-per-
+	// extension, no sh -c concatenation).
 	if cfg.Skills.Dir != "" {
 		n, err := skill.LoadDir(ctx, skillStore, cfg.Skills.Dir)
 		if err != nil {
@@ -425,15 +427,14 @@ func run() error {
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
 			// present (independent of the sandbox); scopes mirror the context
-			// builder (caller user + teams + system). It executes nothing — skill
-			// script execution is K3b, gated on C17.
-			if len(skillEngine.LoadL0(ctx, nil)) > 0 {
-				scopes := []identity.ScopeRef{identity.SystemScope()}
-				if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
-					if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
-						scopes = sc
-					}
+			// builder (caller user + teams + system). It executes nothing.
+			scopes := []identity.ScopeRef{identity.SystemScope()}
+			if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
+				if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
+					scopes = sc
 				}
+			}
+			if l0, err := skillEngine.LoadL0(ctx, scopes); err == nil && len(l0) > 0 {
 				reg.Register(skill.NewLoadTool(skillEngine, scopes))
 			}
 			// recall_memory (type-split active-query side, capability K /
@@ -460,6 +461,23 @@ func run() error {
 					}
 					if execEnabled {
 						reg.Register(builtin.NewRunCommand(sandboxPort, h))
+						// Skill L2 script execution (capability-gap K3b): ONE fixed
+						// run_skill_script tool runs any visible skill's script by
+						// name, resolved lazily against the caller's scopes. A single
+						// constant tool — instead of one tool per script — keeps the
+						// tools array (and thus the LLM's cacheable prompt prefix)
+						// byte-stable no matter how many scripts exist or how often
+						// skills are edited. Execution stays C17-safe: argv +
+						// interpreter whitelist, no sh -c concatenation. Registered
+						// only when some visible skill actually has scripts.
+						if l0, err := skillEngine.LoadL0(ctx, scopes); err == nil {
+							for _, meta := range l0 {
+								if len(meta.Scripts) > 0 {
+									reg.Register(skill.NewRunSkillScript(skillEngine, scopes, sandboxPort, h))
+									break
+								}
+							}
+						}
 					}
 				}
 			}
@@ -527,6 +545,11 @@ func run() error {
 		WithDreaming(dreamRunner)
 	adminHandler.RegisterAuthed(mux, identityHandler.RequireAuth)
 	log.Info("admin console endpoints enabled (auth required)")
+
+	// Skill management (skill-console): user/team/system skill CRUD + versioning,
+	// behind the same auth middleware. Registered alongside the admin console.
+	skillapi.NewHandler(identitySvc, skillStore).RegisterAuthed(mux, identityHandler.RequireAuth)
+	log.Info("skill management endpoints enabled (auth required)")
 
 	// Serve the built frontend if present. The console is a client-side route,
 	// so a deep link like /admin/users has no file behind it — spaHandler falls

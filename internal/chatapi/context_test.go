@@ -17,6 +17,48 @@ func (s staticScopes) AccessibleScopes(context.Context, string) ([]identity.Scop
 	return s.scopes, nil
 }
 
+// staticSkills is a test double for the skill Reader the context builder needs:
+// a fixed L0 catalog and priority-resolved Get. The production store is PG; the
+// builder only reads, so a slice stands in.
+type staticSkills struct{ skills []skill.Skill }
+
+func (s staticSkills) Get(_ context.Context, name string, scopes []identity.ScopeRef) (skill.Skill, bool, error) {
+	for _, scope := range scopes {
+		for _, sk := range s.skills {
+			if sk.Name == name && sk.Scope == scope {
+				return sk, true, nil
+			}
+		}
+	}
+	return skill.Skill{}, false, nil
+}
+
+func (s staticSkills) List(_ context.Context, scopes []identity.ScopeRef) ([]skill.L0, error) {
+	best := map[string]skill.L0{}
+	bestRank := map[string]int{}
+	for _, sk := range s.skills {
+		r := -1
+		for i, sc := range scopes {
+			if sc == sk.Scope {
+				r = i
+				break
+			}
+		}
+		if r < 0 {
+			continue
+		}
+		if cur, ok := bestRank[sk.Name]; !ok || r < cur {
+			best[sk.Name] = skill.L0{Name: sk.Name, Description: sk.Description}
+			bestRank[sk.Name] = r
+		}
+	}
+	out := make([]skill.L0, 0, len(best))
+	for _, l := range best {
+		out = append(out, l)
+	}
+	return out, nil
+}
+
 // TestContextBuilderComposesSkillsNotMemory pins the slimmed system prompt: it
 // carries base + skills (L0) but NOT recalled memories — those are injected
 // incrementally into the message view (capability K / context-mgmt), so the
@@ -25,13 +67,10 @@ func TestContextBuilderComposesSkillsNotMemory(t *testing.T) {
 	user := identity.User{ID: "u1"}
 	scopes := staticScopes{scopes: []identity.ScopeRef{identity.UserScope("u1"), identity.SystemScope()}}
 
-	skillStore := skill.NewStore()
+	skillStore := staticSkills{skills: []skill.Skill{
+		{Name: "deploy", Scope: identity.UserScope("u1"), Description: "deploy the app"},
+	}}
 	skills := skill.NewEngine(skillStore)
-	if _, err := skillStore.Put(context.Background(), skill.Skill{
-		Name: "deploy", Scope: identity.UserScope("u1"), Description: "deploy the app",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	mem := memory.NewMemPort()
 	if _, err := mem.Store(context.Background(), memory.Memory{
 		Scope: identity.UserScope("u1"), Kind: memory.KindPreference, Content: "prefers dark mode",
@@ -81,7 +120,7 @@ func TestContextBuilderSystemStableAcrossQueries(t *testing.T) {
 func TestContextBuilderOmitsEmptySections(t *testing.T) {
 	user := identity.User{ID: "u1"}
 	scopes := staticScopes{scopes: []identity.ScopeRef{identity.UserScope("u1")}}
-	cb := NewContextBuilder("base", scopes, memory.NewMemPort(), skill.NewEngine(skill.NewStore()))
+	cb := NewContextBuilder("base", scopes, memory.NewMemPort(), skill.NewEngine(staticSkills{}))
 
 	out := cb.SystemPrompt(context.Background(), user, "anything")
 	if out != "base" {

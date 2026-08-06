@@ -111,3 +111,16 @@ type Walker interface {
 type Sheller interface {
 	ShellArgv(script string) ([]string, error)
 }
+
+// InterpreterResolver is an optional Port capability: pick a working interpreter
+// for a script from a candidate list, for the backend's own execution
+// environment. The skill ScriptTool calls it so a `.py` script runs under an
+// interpreter that actually exists where the command will run — the local
+// backend probes the host (and must sidestep the Windows Store `python3` stub),
+// while the docker backend answers for the container image. A Port that does not
+// implement it leaves the tool to use the first candidate.
+type InterpreterResolver interface {
+	// ResolveInterpreter returns the first candidate usable in this backend, or
+	// "" if none are. Candidates are bare executable names ("python3", "node").
+	ResolveInterpreter(candidates []string) string
+}

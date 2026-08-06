@@ -49,7 +49,9 @@ func (c *contextBuilder) SystemPrompt(ctx context.Context, user identity.User, q
 		sections = append(sections, s)
 	}
 	if c.skills != nil {
-		if s := c.skills.RenderL0Prompt(ctx, scopes); s != "" {
+		// A store error must not break the prompt: fall back to no skill index
+		// rather than failing the whole run.
+		if s, err := c.skills.RenderL0Prompt(ctx, scopes); err == nil && s != "" {
 			sections = append(sections, s)
 		}
 	}

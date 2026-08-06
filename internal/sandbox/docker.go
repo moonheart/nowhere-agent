@@ -303,6 +303,18 @@ func (p *DockerPort) Mkdir(ctx context.Context, h Handle, path string) error {
 	return nil
 }
 
+// ResolveInterpreter answers for the container (InterpreterResolver capability).
+// The container is a conventional Linux image, so the candidate order (python3
+// first) already matches; the host cannot probe inside the image cheaply, so the
+// first candidate is returned and a missing interpreter surfaces as a clear exec
+// error from Exec itself.
+func (p *DockerPort) ResolveInterpreter(candidates []string) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[0]
+}
+
 // Walk lists every file under root recursively (Walker capability), as
 // workspace-relative forward-slash paths. Exec runs with WorkingDir set to the
 // workspace mount, so a relative root and the returned paths are workspace-

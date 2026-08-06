@@ -32,18 +32,20 @@ func writeSkill(t *testing.T, root, dirName, manifest string, extra map[string]s
 }
 
 // TestLoadDirSeedsSystemSkills: each subdir with a SKILL.md becomes a
-// system-scope skill — L0 metadata + L1 body + L2 resources, and no scripts
-// (script loading is deferred to K3b).
+// system-scope skill — L0 metadata + L1 body + L2 resources, and sibling files
+// with a script extension become executable L2 scripts.
 func TestLoadDirSeedsSystemSkills(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	writeSkill(t, root, "review", "---\nname: review\ndescription: Code review helper\n---\nReview the diff carefully.", map[string]string{
 		"checklist.md":  "- tests\n- lint",
 		"ref/rubric.md": "severity ladder",
+		"lint.py":       "print('linting')",
+		"verify.sh":     "echo ok",
 	})
 	writeSkill(t, root, "greeter", "---\nname: greeter\ndescription: Says hi\n---\nBe warm.", nil)
 
-	st := NewStore()
+	st := newMemStore()
 	n, err := LoadDir(ctx, st, root)
 	if err != nil {
 		t.Fatalf("LoadDir: %v", err)
@@ -53,12 +55,12 @@ func TestLoadDirSeedsSystemSkills(t *testing.T) {
 	}
 
 	scopes := []identity.ScopeRef{identity.SystemScope()}
-	l0 := st.List(ctx, scopes)
+	l0, _ := st.List(ctx, scopes)
 	if len(l0) != 2 {
 		t.Fatalf("L0 list = %+v want 2 skills", l0)
 	}
 
-	review, ok := st.Get(ctx, "review", scopes)
+	review, ok, _ := st.Get(ctx, "review", scopes)
 	if !ok {
 		t.Fatal("review skill not resolvable at system scope")
 	}
@@ -74,8 +76,15 @@ func TestLoadDirSeedsSystemSkills(t *testing.T) {
 	if review.Resources["ref/rubric.md"] != "severity ladder" {
 		t.Errorf("nested resource = %q", review.Resources["ref/rubric.md"])
 	}
-	if len(review.Scripts) != 0 {
-		t.Errorf("scripts must stay empty until K3b, got %v", review.Scripts)
+	// Script extensions land in Scripts, not Resources.
+	if review.Scripts["lint.py"] != "print('linting')" {
+		t.Errorf("py script = %q", review.Scripts["lint.py"])
+	}
+	if review.Scripts["verify.sh"] != "echo ok" {
+		t.Errorf("sh script = %q", review.Scripts["verify.sh"])
+	}
+	if _, isResource := review.Resources["lint.py"]; isResource {
+		t.Error("a .py file must be a script, not a resource")
 	}
 }
 
@@ -92,7 +101,7 @@ func TestLoadDirSkipsNonSkillDirs(t *testing.T) {
 	}
 	writeSkill(t, root, "one", "---\nname: one\ndescription: d\n---\nbody", nil)
 
-	st := NewStore()
+	st := newMemStore()
 	n, err := LoadDir(ctx, st, root)
 	if err != nil {
 		t.Fatalf("LoadDir: %v", err)
@@ -109,15 +118,14 @@ func TestLoadDirBadManifestFails(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, root, "broken", "---\ndescription: no name here\n---\nbody", nil)
 
-	st := NewStore()
-	if _, err := LoadDir(ctx, st, root); err == nil {
+	if _, err := LoadDir(ctx, newMemStore(), root); err == nil {
 		t.Fatal("expected an error for a manifest without a name")
 	}
 }
 
 // TestLoadDirMissingDirFails: pointing at a nonexistent dir is an error.
 func TestLoadDirMissingDirFails(t *testing.T) {
-	if _, err := LoadDir(context.Background(), NewStore(), filepath.Join(t.TempDir(), "nope")); err == nil {
+	if _, err := LoadDir(context.Background(), newMemStore(), filepath.Join(t.TempDir(), "nope")); err == nil {
 		t.Fatal("expected an error for a missing skills dir")
 	}
 }

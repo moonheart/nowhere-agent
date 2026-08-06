@@ -3,6 +3,7 @@ package skill
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"nowhere-agent/internal/identity"
@@ -70,13 +71,17 @@ func (t *LoadTool) Call(ctx context.Context, args map[string]any) (toolruntime.R
 		return toolruntime.Result{Content: content}, nil
 	}
 
-	// The skill's full instructions (L1).
+	// The skill's full instructions (L1), plus its script names so the model
+	// knows what it can run with run_skill_script.
 	body, ok, err := t.engine.LoadL1(ctx, name, t.scopes)
 	if err != nil {
 		return toolruntime.Result{}, err
 	}
 	if !ok {
 		return toolruntime.Result{Content: fmt.Sprintf("unknown skill %q — call load_skill with a name from the Available skills index", name), IsError: true}, nil
+	}
+	if scripts, ok, err := t.engine.ScriptNames(ctx, name, t.scopes); err == nil && ok && len(scripts) > 0 {
+		body += fmt.Sprintf("\n\nScripts (run with %s): %s", RunSkillScriptName, strings.Join(scripts, ", "))
 	}
 	return toolruntime.Result{Content: body}, nil
 }

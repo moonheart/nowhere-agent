@@ -42,6 +42,43 @@ func (p *LocalPort) ShellArgv(script string) ([]string, error) {
 	return shellArgv(runtime.GOOS, p.shell, script)
 }
 
+// ResolveInterpreter picks a working interpreter on the host (InterpreterResolver
+// capability). It probes with LookPath, but orders Python candidates to sidestep
+// the Windows Store `python3` stub: that shim sits on PATH as a real executable
+// yet exits nonzero doing nothing, so on Windows the `py` launcher and a real
+// `python` are preferred over it. Other interpreters resolve in candidate order.
+func (p *LocalPort) ResolveInterpreter(candidates []string) string {
+	ordered := orderForHost(runtime.GOOS, candidates)
+	for _, c := range ordered {
+		if _, err := exec.LookPath(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
+// orderForHost reorders interpreter candidates for the host OS. On Windows the
+// Python launcher `py` and a real `python` come before `python3` (often the
+// Store stub); elsewhere the conventional `python3`-first order is kept. Only
+// Python names are reordered — anything else keeps its given priority.
+func orderForHost(goos string, candidates []string) []string {
+	if goos != "windows" {
+		return candidates
+	}
+	rank := map[string]int{"py": 0, "python": 1, "python3": 2}
+	out := append([]string(nil), candidates...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ri, iOk := rank[out[i]]
+		rj, jOk := rank[out[j]]
+		if iOk && jOk {
+			return ri < rj
+		}
+		// Ranked (Python) names sort ahead of unranked ones.
+		return iOk
+	})
+	return out
+}
+
 // Create makes the session workspace directory and returns its handle. When
 // opts.WorkspaceDir is set it is used verbatim; otherwise the workspace is
 // <root>/<sessionID>. Idempotent: re-creating an existing workspace keeps its

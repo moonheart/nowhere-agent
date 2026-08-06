@@ -12,6 +12,7 @@ import (
 	"nowhere-agent/internal/agentdef"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/toolruntime"
 )
 
@@ -248,21 +249,22 @@ func TestSpawnAllowListScoping(t *testing.T) {
 
 func TestSkillToolNames(t *testing.T) {
 	reg := toolruntime.NewRegistry()
-	reg.Register(funcTool{name: "skill_lint_run"})
-	reg.Register(funcTool{name: "skill_lint_fix"})
+	reg.Register(funcTool{name: skill.RunSkillScriptName})
 	reg.Register(funcTool{name: "read_file"})
 
+	// A definition that declares any skill gains the single fixed script runner.
 	got := skillToolNames(reg, []string{"lint"})
-	if len(got) != 2 {
-		t.Fatalf("expected 2 lint tools, got %v", got)
+	if len(got) != 1 || got[0] != skill.RunSkillScriptName {
+		t.Fatalf("expected [%s], got %v", skill.RunSkillScriptName, got)
 	}
-	for _, n := range got {
-		if !strings.HasPrefix(n, "skill_lint_") {
-			t.Fatalf("unexpected mapped tool %q", n)
-		}
+	// No declared skills → nothing extra.
+	if len(skillToolNames(reg, nil)) != 0 {
+		t.Fatalf("no skills should map to no tools")
 	}
-	if len(skillToolNames(reg, []string{"missing"})) != 0 {
-		t.Fatalf("missing skill should map to no tools")
+	// Parent run has no script runner (exec disabled / no scripts) → nothing.
+	empty := toolruntime.NewRegistry()
+	if len(skillToolNames(empty, []string{"lint"})) != 0 {
+		t.Fatalf("missing runner should map to no tools")
 	}
 }
 

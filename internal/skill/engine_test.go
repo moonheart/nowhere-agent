@@ -6,30 +6,44 @@ import (
 	"testing"
 
 	"nowhere-agent/internal/identity"
-	"nowhere-agent/internal/sandbox"
 )
 
 func TestEngineProgressiveDisclosure(t *testing.T) {
-	store := NewStore()
-	store.Put(context.Background(), Skill{
+	store := newMemStore()
+	if _, err := store.Put(context.Background(), Skill{
 		Name: "deploy", Scope: identity.SystemScope(),
 		Description: "Deploy the app",
 		Body:        "# Deploy\nfull instructions",
 		Resources:   map[string]string{"guide.md": "detailed guide"},
 		Scripts:     map[string]string{"run.sh": "echo deploying"},
-	})
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
 	e := NewEngine(store)
 	ctx := context.Background()
 	scopes := []identity.ScopeRef{identity.SystemScope()}
 
 	// L0: only name+description.
-	l0 := e.LoadL0(ctx, scopes)
+	l0, err := e.LoadL0(ctx, scopes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(l0) != 1 || l0[0].Name != "deploy" {
 		t.Fatalf("L0 = %+v", l0)
 	}
-	prompt := e.RenderL0Prompt(ctx, scopes)
+	prompt, err := e.RenderL0Prompt(ctx, scopes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(prompt, "deploy: Deploy the app") {
 		t.Errorf("L0 prompt missing skill: %q", prompt)
+	}
+	// The L0 entry and prompt surface the skill's script names for discovery.
+	if len(l0[0].Scripts) != 1 || l0[0].Scripts[0] != "run.sh" {
+		t.Errorf("L0 scripts = %v, want [run.sh]", l0[0].Scripts)
+	}
+	if !strings.Contains(prompt, "run.sh") {
+		t.Errorf("L0 prompt should name the script, got %q", prompt)
 	}
 
 	// L1: full body.
@@ -52,32 +66,9 @@ func TestEngineProgressiveDisclosure(t *testing.T) {
 }
 
 func TestEngineMissingSkill(t *testing.T) {
-	e := NewEngine(NewStore())
+	e := NewEngine(newMemStore())
 	_, ok, _ := e.LoadL1(context.Background(), "nope", []identity.ScopeRef{identity.SystemScope()})
 	if ok {
 		t.Error("expected not found")
-	}
-}
-
-func TestScriptToolName(t *testing.T) {
-	sb := sandbox.NewMemPort()
-	h, _ := sb.Create(context.Background(), "s1", sandbox.Options{})
-	tool := NewScriptTool("my-skill", "run.sh", "echo hi", "desc", sb, h)
-	if tool.Name() != "skill_my_skill_run_sh" {
-		t.Errorf("name = %q", tool.Name())
-	}
-}
-
-func TestScriptToolCall(t *testing.T) {
-	sb := sandbox.NewMemPort()
-	h, _ := sb.Create(context.Background(), "s1", sandbox.Options{})
-	tool := NewScriptTool("deploy", "run.sh", "echo deploying", "desc", sb, h)
-	res, err := tool.Call(context.Background(), map[string]any{"args": "--prod"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// MemPort returns empty stdout with exit 0.
-	if res.IsError {
-		t.Errorf("unexpected error result: %+v", res)
 	}
 }

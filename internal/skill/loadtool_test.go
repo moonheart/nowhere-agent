@@ -11,14 +11,14 @@ import (
 
 func seededEngine(t *testing.T) *Engine {
 	t.Helper()
-	st := NewStore()
+	st := newMemStore()
 	if _, err := st.Put(context.Background(), Skill{
 		Name:        "review",
 		Description: "Code review helper",
 		Body:        "Review the diff carefully.",
 		Scope:       identity.SystemScope(),
 		Resources:   map[string]string{"checklist.md": "- tests\n- lint"},
-	}); err != nil {
+	}, "test"); err != nil {
 		t.Fatal(err)
 	}
 	return NewEngine(st)
@@ -86,10 +86,10 @@ func TestLoadToolUnknownNameAndResource(t *testing.T) {
 
 // TestLoadToolRespectsScope: a skill outside the caller's scopes is invisible.
 func TestLoadToolRespectsScope(t *testing.T) {
-	st := NewStore()
+	st := newMemStore()
 	_, _ = st.Put(context.Background(), Skill{
 		Name: "secret", Body: "only for user1", Scope: identity.UserScope("user1"),
-	})
+	}, "test")
 	// A different user resolves only their own + system scope.
 	tool := NewLoadTool(NewEngine(st), []identity.ScopeRef{identity.UserScope("user2"), identity.SystemScope()})
 	res, _ := tool.Call(context.Background(), map[string]any{"name": "secret"})
