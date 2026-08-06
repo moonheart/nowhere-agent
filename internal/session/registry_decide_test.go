@@ -181,3 +181,86 @@ func TestDecideUnknownOrDecided(t *testing.T) {
 		t.Fatalf("second decide should error, got %v", err)
 	}
 }
+
+// readTool records execution for the un-gated sibling in a parallel batch.
+type readTool struct{ ran *bool }
+
+func (d readTool) Name() string           { return "load_skill" }
+func (d readTool) Description() string    { return "read-only" }
+func (d readTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (d readTool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
+func (d readTool) Timeout() time.Duration { return time.Second }
+func (d readTool) Call(context.Context, map[string]any) (toolruntime.Result, error) {
+	*d.ran = true
+	return toolruntime.Result{Content: "skill body"}, nil
+}
+
+// TestDecideParallelBatchResumesUngatedCall pins the resume bug fix: a batch of
+// parallel tool_use calls where ONE gated (approval) suspended the whole run
+// before dispatch, so its un-gated sibling never executed and had no tool_result.
+// On resume, the gated call folds its verdict AND the un-gated sibling is
+// dispatched now — both get a tool_result, so the model sees no dangling tool_use.
+func TestDecideParallelBatchResumesUngatedCall(t *testing.T) {
+	rg, ms, sess := newDecideRegistry(t)
+	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
+
+	// The suspended assistant message carries TWO tool_use blocks in one batch:
+	// tu1 = load_skill (read-only, never gated, never ran), tu2 = danger (gated).
+	_, _ = ms.AppendMessage(context.Background(), StoredMessage{
+		SessionID: sess.ID, RunID: run.ID, Role: provider.RoleUser,
+		Content: []provider.Block{{Type: provider.BlockText, Text: "load then run"}},
+	})
+	_, _ = ms.AppendMessage(context.Background(), StoredMessage{
+		SessionID: sess.ID, RunID: run.ID, Role: provider.RoleAssistant,
+		Content: []provider.Block{
+			{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "load_skill", ToolInput: map[string]any{"name": "calc"}},
+			{Type: provider.BlockToolUse, ToolUseID: "tu2", ToolName: "danger", ToolInput: map[string]any{"path": "/etc"}},
+		},
+	})
+	ap, err := rg.rt.store.CreateApproval(context.Background(), Approval{
+		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu2", ToolName: "danger",
+		Payload: json.RawMessage(`{"path":"/etc"}`), Kind: "approval",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readRan, dangerRan := false, false
+	reg := toolruntime.NewRegistry()
+	reg.Register(readTool{ran: &readRan})
+	reg.Register(decideTool{ran: &dangerRan})
+
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, nil, reg)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if !dangerRan {
+		t.Error("approved gated tool was not executed")
+	}
+	if !readRan {
+		t.Error("un-gated sibling was not dispatched on resume (the dropped-call bug)")
+	}
+
+	// History = user, assistant(tool_use×2), ONE folded tool_result message with
+	// BOTH results in batch order (tu1 first, then tu2).
+	if len(history) != 3 {
+		t.Fatalf("history len = %d want 3: %+v", len(history), history)
+	}
+	last := history[len(history)-1]
+	if last.Role != provider.RoleUser || len(last.Content) != 2 {
+		t.Fatalf("folded message should carry 2 tool_results, got %+v", last)
+	}
+	if last.Content[0].ToolResultID != "tu1" || last.Content[0].ToolContent != "skill body" || last.Content[0].IsError {
+		t.Errorf("tool_result[0] = %+v want {tu1, skill body, no error}", last.Content[0])
+	}
+	if last.Content[1].ToolResultID != "tu2" || last.Content[1].ToolContent != "danger done" || last.Content[1].IsError {
+		t.Errorf("tool_result[1] = %+v want {tu2, danger done, no error}", last.Content[1])
+	}
+
+	// The folded message is persisted too, so the NEXT resume sees both answers.
+	stored, _ := ms.MessagesFor(context.Background(), sess.ID)
+	folded := stored[len(stored)-1]
+	if len(folded.Content) != 2 || folded.Content[0].ToolResultID != "tu1" || folded.Content[1].ToolResultID != "tu2" {
+		t.Errorf("persisted folded message = %+v want both tool_results", folded)
+	}
+}

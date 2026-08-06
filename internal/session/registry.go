@@ -316,25 +316,60 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 		history = StoredMessagesToProvider(stored)
 	}
 
-	// Fold each resolved interaction into its tool_result, preserving batch order
-	// (queue order matches the tool_use order in the assistant message).
-	resultMsg := provider.Message{Role: provider.RoleUser}
+	// Fold the WHOLE suspended tool_use batch, not just the calls that parked an
+	// interaction. The run ended on the unified gate the moment ANY call was gated
+	// (agent loop), so its sibling calls in the same batch — the ones that needed no
+	// approval — were never dispatched and have no tool_result. Rebuild that full
+	// batch from the suspended assistant message and answer every call: a call with
+	// an interaction folds its verdict; a call without one (no approval row) is
+	// dispatched now, so the model never sees a dangling tool_use.
+	allCalls := suspendedToolUses(history)
+	byCall := make(map[string]Interaction, len(batch))
 	for _, ap := range batch {
-		approve := ap.Status == InteractionResolved
-		res, err := rg.foldInteraction(ctx, ap, approve, tools)
+		byCall[ap.ToolCallID] = ap
+	}
+
+	// Fold each call into its tool_result, preserving batch order (the tool_use
+	// order in the assistant message). Dispatch the no-interaction calls together
+	// (concurrently, mirroring the loop's dispatch) so a resumed batch of several
+	// plain reads doesn't serialize.
+	resultMsg := provider.Message{Role: provider.RoleUser}
+	results := make([]toolruntime.Result, len(allCalls))
+	var dispatchIdx []int
+	var dispatchCalls []toolruntime.Call
+	for i, c := range allCalls {
+		ap, gated := byCall[c.ID]
+		if !gated {
+			dispatchIdx = append(dispatchIdx, i)
+			dispatchCalls = append(dispatchCalls, c)
+			continue
+		}
+		res, err := rg.foldInteraction(ctx, ap, ap.Status == InteractionResolved, tools)
 		if err != nil {
 			return nil, err
 		}
-		content := res.Content
+		results[i] = res
+	}
+	if len(dispatchCalls) > 0 {
+		if tools == nil {
+			return nil, fmt.Errorf("resuming a suspended batch needs a tool registry to dispatch the un-gated calls")
+		}
+		got := tools.CallAll(ctx, dispatchCalls)
+		for j, i := range dispatchIdx {
+			results[i] = got[j]
+		}
+	}
+	for i, c := range allCalls {
+		content := results[i].Content
 		if content == "" {
 			content = emptyToolResultPlaceholder
 		}
 		resultMsg.Content = append(resultMsg.Content, provider.Block{
 			Type:         provider.BlockToolResult,
-			ToolResultID: ap.ToolCallID,
+			ToolResultID: c.ID,
 			ToolContent:  content,
-			IsError:      res.IsError,
-			ToolMessages: res.Nested,
+			IsError:      results[i].IsError,
+			ToolMessages: results[i].Nested,
 		})
 	}
 
@@ -359,6 +394,32 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 // emptyToolResultPlaceholder stands in for a folded interaction whose result is
 // empty, so the serialized tool message always carries a non-empty content field.
 const emptyToolResultPlaceholder = "(no output)"
+
+// suspendedToolUses walks a rebuilt history and returns the tool_use calls of the
+// most recent assistant message that carries any, in block order. That message is
+// the suspended batch: the run ended the moment one of its calls gated, so its
+// tool_use blocks are the calls that still need answering. Earlier assistant
+// messages with tool_use already have their tool_result folded, so only the LAST
+// tool_use-bearing message is returned.
+func suspendedToolUses(history []provider.Message) []toolruntime.Call {
+	for i := len(history) - 1; i >= 0; i-- {
+		m := history[i]
+		if m.Role != provider.RoleAssistant {
+			continue
+		}
+		var calls []toolruntime.Call
+		for _, b := range m.Content {
+			if b.Type != provider.BlockToolUse || b.ToolUseID == "" {
+				continue
+			}
+			calls = append(calls, toolruntime.Call{ID: b.ToolUseID, Name: b.ToolName, Args: b.ToolInput})
+		}
+		if len(calls) > 0 {
+			return calls
+		}
+	}
+	return nil
+}
 
 // Decide applies the client's resolution of a pending Interaction and returns
 // the history for a FRESH run to continue the conversation (run-stateless model,
