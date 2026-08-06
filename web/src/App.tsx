@@ -14,6 +14,10 @@ import {
   PlatformUsagePage,
   PlatformUsersPage,
 } from "@/components/admin/PlatformPages";
+import {
+  MySkillsPage,
+  PlatformSkillsPage,
+} from "@/components/admin/SkillsPages";
 import { Thread } from "@/components/thread";
 import { LoginForm } from "@/components/login";
 import { SessionList } from "@/components/SessionList";
@@ -379,12 +383,14 @@ export default function App() {
         <Route index element={<ProfilePage />} />
         <Route path="usage" element={<MyUsagePage />} />
         <Route path="memories" element={<MyMemoriesPage />} />
+        <Route path="skills" element={<MySkillsPage />} />
         <Route path="teams" element={<TeamsPage />} />
         <Route path="teams/:teamId" element={<TeamDetailPage />} />
         <Route path="platform/users" element={<PlatformUsersPage />} />
         <Route path="platform/teams" element={<PlatformTeamsPage />} />
         <Route path="platform/usage" element={<PlatformUsagePage />} />
         <Route path="platform/memories" element={<PlatformMemoriesPage />} />
+        <Route path="platform/skills" element={<PlatformSkillsPage />} />
       </Route>
       {/* Anything else falls back to the chat view rather than a blank page. */}
       <Route path="*" element={<ChatApp onSignedOut={() => setToken(null)} />} />

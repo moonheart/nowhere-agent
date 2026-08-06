@@ -12,6 +12,7 @@ import {
   ChartNoAxesColumn,
   Loader2,
   ShieldCheck,
+  Sparkles,
   UserRound,
   Users,
 } from "lucide-react";
@@ -73,6 +74,12 @@ function SectionLabel({ children }: { children: ReactNode }) {
   );
 }
 
+// isSkillEditorRoute reports whether the path renders a standalone skill
+// editor, which is laid out full-width rather than in the reading column.
+function isSkillEditorRoute(pathname: string): boolean {
+  return pathname === "/admin/skills" || pathname === "/admin/platform/skills";
+}
+
 export function AdminLayout() {
   const { me, loading, error, reload } = useMe();
   const location = useLocation();
@@ -125,6 +132,9 @@ export function AdminLayout() {
             <NavItem to="/admin/memories" icon={<Brain />}>
               My memories
             </NavItem>
+            <NavItem to="/admin/skills" icon={<Sparkles />}>
+              My skills
+            </NavItem>
 
             <SectionLabel>Teams</SectionLabel>
             <NavItem to="/admin/teams" end icon={<Building2 />}>
@@ -165,6 +175,9 @@ export function AdminLayout() {
                 <NavItem to="/admin/platform/memories" icon={<Brain />}>
                   Memories
                 </NavItem>
+                <NavItem to="/admin/platform/skills" icon={<Sparkles />}>
+                  Skills
+                </NavItem>
               </>
             )}
           </nav>
@@ -193,7 +206,16 @@ export function AdminLayout() {
           // does not leak into the next one.
           key={location.pathname}
         >
-          <div className="mx-auto max-w-5xl space-y-6 p-6">
+          {/* min-h-full + flex-col lets a full-height page (the skill editor)
+              fill the viewport; ordinary pages just stack as before. The skill
+              editor is an IDE-style tool, not a reading column, so it gets the
+              console's full width instead of the centered reading measure. */}
+          <div
+            className={cn(
+              "mx-auto flex min-h-full w-full flex-col space-y-6 p-6",
+              isSkillEditorRoute(location.pathname) ? "max-w-none" : "max-w-5xl",
+            )}
+          >
             <Outlet />
           </div>
         </main>

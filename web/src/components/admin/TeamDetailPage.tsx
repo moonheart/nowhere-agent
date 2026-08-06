@@ -63,6 +63,7 @@ import {
 } from "@/components/admin/common";
 import { ConfirmButton } from "@/components/admin/confirm";
 import { MemoryTable } from "@/components/admin/SelfPages";
+import { SkillEditor } from "@/components/admin/SkillEditor";
 import {
   ApproximationNotice,
   DateRangePicker,
@@ -130,6 +131,7 @@ export function TeamDetailPage() {
               {manage && <TabsTrigger value="keys">Provider keys</TabsTrigger>}
               {manage && <TabsTrigger value="usage">Usage</TabsTrigger>}
               <TabsTrigger value="memories">Memories</TabsTrigger>
+              <TabsTrigger value="skills">Skills</TabsTrigger>
             </TabsList>
 
             <TabsContent value="members" className="pt-4">
@@ -147,6 +149,13 @@ export function TeamDetailPage() {
             )}
             <TabsContent value="memories" className="pt-4">
               <TeamMemoriesTab teamId={teamId} canManage={manage} />
+            </TabsContent>
+            <TabsContent value="skills" className="pt-4">
+              {/* The editor sizes itself with flex-1 inside its parent's flex
+                  column; a tab panel is not one, so give it an explicit height. */}
+              <div className="flex h-[calc(100dvh-16rem)] flex-col">
+                <SkillEditor base={{ kind: "team", teamId }} canWrite={manage} />
+              </div>
             </TabsContent>
           </Tabs>
         </>
