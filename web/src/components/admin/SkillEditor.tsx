@@ -16,6 +16,7 @@ import type { Extension } from "@codemirror/state";
 import {
   FileCode2,
   FileText,
+  FolderInput,
   History,
   Loader2,
   Plus,
@@ -40,14 +41,28 @@ import {
 } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { ConfirmButton } from "@/components/admin/confirm";
 import { ErrorNotice } from "@/components/admin/common";
 import { cn } from "@/lib/utils";
+import { useMe, canManageTeam } from "@/lib/me";
 import {
   createSkill,
   deleteSkill,
+  disableSkill,
+  enableSkill,
   getSkill,
   listSkills,
+  moveSkillToTeam,
   rollbackSkill,
   skillVersionAt,
   skillVersions,
@@ -111,6 +126,9 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveTeamId, setMoveTeamId] = useState<string>("");
+  const { me } = useMe();
 
   const viewingHistory = viewVersion !== null && current !== null && viewVersion !== current.current_version;
 
@@ -246,6 +264,48 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
     await refreshList();
   };
 
+  // Toggle the agent-resolution gate without a version bump. The backend returns
+  // the updated skill; sync it into `current` and the list.
+  const setEnabled = async (enabled: boolean) => {
+    if (!selectedId || !current) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { skill } = enabled
+        ? await enableSkill(base, selectedId)
+        : await disableSkill(base, selectedId);
+      setCurrent(skill);
+      setSkills((prev) => prev?.map((s) => (s.id === skill.id ? skill : s)) ?? prev);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Teams the signed-in account can push a skill into (write access). Move is
+  // self-scope only, so this is only consulted for the "me" editor.
+  const movableTeams = (me?.teams ?? []).filter((t) => canManageTeam(me, t.id));
+
+  const moveToTeam = async () => {
+    if (!selectedId || !moveTeamId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await moveSkillToTeam(selectedId, moveTeamId);
+      // The skill left the user scope: drop the selection and refresh the list.
+      setMoveOpen(false);
+      setSelectedId(null);
+      setCurrent(null);
+      setDraft(null);
+      await refreshList();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const rollback = async (v: number) => {
     if (!selectedId) return;
     setBusy(true);
@@ -337,6 +397,11 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
                 >
                   <Sparkles className="size-3.5 shrink-0" />
                   <span className="min-w-0 flex-1 truncate">{sk.name}</span>
+                  {!sk.enabled && (
+                    <Badge variant="outline" className="shrink-0 text-[10px] text-muted-foreground">
+                      off
+                    </Badge>
+                  )}
                   {sk.needs_review && (
                     <Badge variant="secondary" className="shrink-0 text-[10px]">
                       review
@@ -406,6 +471,32 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
               </>
             ) : null}
             <div className="ml-auto flex items-center gap-2">
+              {selectedId && current && canWrite && (
+                <div className="flex items-center gap-1.5" title="Disabled skills are hidden from the agent but stay editable here">
+                  <Switch
+                    id="skill-enabled"
+                    checked={current.enabled}
+                    disabled={busy}
+                    onCheckedChange={(v) => void setEnabled(v)}
+                  />
+                  <Label htmlFor="skill-enabled" className="text-xs text-muted-foreground">
+                    {current.enabled ? "Enabled" : "Disabled"}
+                  </Label>
+                </div>
+              )}
+              {selectedId && canWrite && base.kind === "me" && movableTeams.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  title="Move to a team"
+                  onClick={() => {
+                    setMoveTeamId(movableTeams[0]?.id ?? "");
+                    setMoveOpen(true);
+                  }}
+                >
+                  <FolderInput className="size-4" />
+                </Button>
+              )}
               {selectedId && canWrite && (
                 <ConfirmButton
                   title="Delete this skill?"
@@ -481,6 +572,46 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
           )}
         </div>
       </ResizablePanel>
+
+      {/* ---- move-to-team dialog (self scope only) ---- */}
+      <Dialog open={moveOpen} onOpenChange={setMoveOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Move “{current?.name}” to a team</DialogTitle>
+            <DialogDescription>
+              The skill and its whole version history move into the team's shared
+              scope, where every member can use it. It leaves your personal
+              skills. Only teams you can manage are listed.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="move-team" className="text-sm">
+              Destination team
+            </Label>
+            <Select value={moveTeamId} onValueChange={(v) => setMoveTeamId(v ?? "")}>
+              <SelectTrigger id="move-team">
+                <SelectValue placeholder="Select a team" />
+              </SelectTrigger>
+              <SelectContent>
+                {movableTeams.map((t) => (
+                  <SelectItem key={t.id} value={t.id}>
+                    {t.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMoveOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={() => void moveToTeam()} disabled={busy || !moveTeamId}>
+              {busy ? <Loader2 className="size-4 animate-spin" /> : <FolderInput className="size-4" />}
+              Move to team
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </ResizablePanelGroup>
   );
 }

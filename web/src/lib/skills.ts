@@ -21,6 +21,7 @@ export type Skill = {
   resources: Record<string, string>;
   scripts: Record<string, string>;
   needs_review: boolean;
+  enabled: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -82,3 +83,18 @@ export const skillVersionAt = (b: SkillBase, id: string, v: number) =>
 
 export const rollbackSkill = (b: SkillBase, id: string, v: number) =>
   api<{ skill: Skill }>(`${basePath(b)}/${enc(id)}/rollback/${v}`, { method: "POST" });
+
+export const enableSkill = (b: SkillBase, id: string) =>
+  api<{ skill: Skill }>(`${basePath(b)}/${enc(id)}/enable`, { method: "POST" });
+
+export const disableSkill = (b: SkillBase, id: string) =>
+  api<{ skill: Skill }>(`${basePath(b)}/${enc(id)}/disable`, { method: "POST" });
+
+// Move is self-scope only: it relocates one of the caller's own user skills
+// into a team (callers must be able to write in that team). No team/platform
+// base variant exists on the backend, so this is only valid for { kind: "me" }.
+export const moveSkillToTeam = (id: string, teamId: string) =>
+  api<{ skill: Skill }>(`/api/me/skills/${enc(id)}/move`, {
+    method: "POST",
+    body: { team_id: teamId },
+  });
