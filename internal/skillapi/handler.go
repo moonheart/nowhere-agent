@@ -26,6 +26,8 @@ type Store interface {
 	VersionAt(ctx context.Context, skillID string, version int) (skill.Skill, error)
 	Rollback(ctx context.Context, skillID string, version int, createdBy string) (skill.Skill, error)
 	Delete(ctx context.Context, id string) error
+	SetEnabled(ctx context.Context, id string, enabled bool) (skill.Skill, error)
+	MoveToTeam(ctx context.Context, id, teamID string) (skill.Skill, error)
 }
 
 // Handler serves the skill-management endpoints.
@@ -53,6 +55,9 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	route(mux, auth, "GET /api/me/skills/{id}/versions", h.mySkillVersions)
 	route(mux, auth, "GET /api/me/skills/{id}/versions/{v}", h.mySkillVersionAt)
 	route(mux, auth, "POST /api/me/skills/{id}/rollback/{v}", h.rollbackMySkill)
+	route(mux, auth, "POST /api/me/skills/{id}/enable", h.enableMySkill)
+	route(mux, auth, "POST /api/me/skills/{id}/disable", h.disableMySkill)
+	route(mux, auth, "POST /api/me/skills/{id}/move", h.moveMySkill)
 
 	// ---- team (team scope): members read, admins write ----
 	route(mux, auth, "GET /api/teams/{id}/skills", h.requireTeamRole(identity.RoleMember, h.teamSkills))
@@ -63,6 +68,8 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	route(mux, auth, "GET /api/teams/{id}/skills/{sid}/versions", h.requireTeamRole(identity.RoleMember, h.teamSkillVersions))
 	route(mux, auth, "GET /api/teams/{id}/skills/{sid}/versions/{v}", h.requireTeamRole(identity.RoleMember, h.teamSkillVersionAt))
 	route(mux, auth, "POST /api/teams/{id}/skills/{sid}/rollback/{v}", h.requireTeamRole(identity.RoleAdmin, h.rollbackTeamSkill))
+	route(mux, auth, "POST /api/teams/{id}/skills/{sid}/enable", h.requireTeamRole(identity.RoleAdmin, h.enableTeamSkill))
+	route(mux, auth, "POST /api/teams/{id}/skills/{sid}/disable", h.requireTeamRole(identity.RoleAdmin, h.disableTeamSkill))
 
 	// ---- platform (system scope) ----
 	route(mux, auth, "GET /api/admin/skills", h.requireAdmin(h.systemSkills))
@@ -73,6 +80,8 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	route(mux, auth, "GET /api/admin/skills/{id}/versions", h.requireAdmin(h.systemSkillVersions))
 	route(mux, auth, "GET /api/admin/skills/{id}/versions/{v}", h.requireAdmin(h.systemSkillVersionAt))
 	route(mux, auth, "POST /api/admin/skills/{id}/rollback/{v}", h.requireAdmin(h.rollbackSystemSkill))
+	route(mux, auth, "POST /api/admin/skills/{id}/enable", h.requireAdmin(h.enableSystemSkill))
+	route(mux, auth, "POST /api/admin/skills/{id}/disable", h.requireAdmin(h.disableSystemSkill))
 }
 
 // route mounts one pattern behind the auth middleware.

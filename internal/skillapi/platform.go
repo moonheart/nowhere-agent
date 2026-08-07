@@ -64,3 +64,11 @@ func (h *Handler) systemSkillVersionAt(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) rollbackSystemSkill(w http.ResponseWriter, r *http.Request) {
 	h.rollbackScopedSkill(w, r, identity.SystemScope(), r.PathValue("id"))
 }
+
+func (h *Handler) enableSystemSkill(w http.ResponseWriter, r *http.Request) {
+	h.setScopedSkillEnabled(w, r, identity.SystemScope(), r.PathValue("id"), true)
+}
+
+func (h *Handler) disableSystemSkill(w http.ResponseWriter, r *http.Request) {
+	h.setScopedSkillEnabled(w, r, identity.SystemScope(), r.PathValue("id"), false)
+}

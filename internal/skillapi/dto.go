@@ -24,6 +24,7 @@ type skillDTO struct {
 	Resources        map[string]string `json:"resources"`
 	Scripts          map[string]string `json:"scripts"`
 	NeedsReview      bool              `json:"needs_review"`
+	Enabled          bool              `json:"enabled"`
 	CreatedAt        time.Time         `json:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at"`
 }
@@ -42,6 +43,7 @@ func skillDTOOf(sk skill.Skill) skillDTO {
 		Resources:        orEmpty(sk.Resources),
 		Scripts:          orEmpty(sk.Scripts),
 		NeedsReview:      sk.NeedsReview,
+		Enabled:          sk.Enabled,
 		CreatedAt:        sk.CreatedAt,
 		UpdatedAt:        sk.UpdatedAt,
 	}

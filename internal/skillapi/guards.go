@@ -121,6 +121,8 @@ func (h *Handler) writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, skill.ErrNotFound):
 		writeError(w, http.StatusNotFound, "skill not found")
+	case errors.Is(err, skill.ErrConflict):
+		writeError(w, http.StatusConflict, "a skill with this name already exists in the destination team")
 	default:
 		writeError(w, http.StatusInternalServerError, "request failed")
 	}

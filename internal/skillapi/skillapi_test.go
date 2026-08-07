@@ -368,6 +368,162 @@ func TestPlatformSkillRequiresAdmin(t *testing.T) {
 	}
 }
 
+// ---- enable / disable ----
+
+// TestSelfSkillEnableDisable: a user disables and re-enables their own skill;
+// the DTO reports the flag and the skill stays readable while disabled.
+func TestSelfSkillEnableDisable(t *testing.T) {
+	e := newEnv(t)
+	u := e.user(identity.PlatformRoleUser)
+
+	rec := e.as(u, "POST", "/api/me/skills", skillPayload("enab-"+randSuffix()))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d (%s)", rec.Code, rec.Body.String())
+	}
+	id := e.createdSkillID(rec)
+	if en := decodeBody(t, rec)["skill"].(map[string]any)["enabled"]; en != true {
+		t.Fatalf("new skill enabled = %v, want true", en)
+	}
+
+	rec = e.as(u, "POST", "/api/me/skills/"+id+"/disable", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable = %d (%s)", rec.Code, rec.Body.String())
+	}
+	if en := decodeBody(t, rec)["skill"].(map[string]any)["enabled"]; en != false {
+		t.Errorf("after disable enabled = %v, want false", en)
+	}
+
+	// Still readable (and still reporting disabled) in the management surface.
+	rec = e.as(u, "GET", "/api/me/skills/"+id, nil)
+	if rec.Code != http.StatusOK || decodeBody(t, rec)["skill"].(map[string]any)["enabled"] != false {
+		t.Errorf("get while disabled = %d enabled=%v, want 200/false", rec.Code, decodeBody(t, rec)["skill"].(map[string]any)["enabled"])
+	}
+
+	rec = e.as(u, "POST", "/api/me/skills/"+id+"/enable", nil)
+	if rec.Code != http.StatusOK || decodeBody(t, rec)["skill"].(map[string]any)["enabled"] != true {
+		t.Errorf("enable = %d enabled=%v, want 200/true", rec.Code, decodeBody(t, rec)["skill"].(map[string]any)["enabled"])
+	}
+}
+
+// TestEnableDisableScopeEnforcement: a user cannot toggle another account's
+// skill, and team toggles require team admin.
+func TestEnableDisableScopeEnforcement(t *testing.T) {
+	e := newEnv(t)
+	a := e.user(identity.PlatformRoleUser)
+	b := e.user(identity.PlatformRoleUser)
+
+	rec := e.as(b, "POST", "/api/me/skills", skillPayload("x-"+randSuffix()))
+	id := e.createdSkillID(rec)
+	for _, op := range []string{"enable", "disable"} {
+		if rec := e.as(a, "POST", "/api/me/skills/"+id+"/"+op, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("%s another account's skill = %d, want 404", op, rec.Code)
+		}
+	}
+
+	// Team tier: a plain member cannot toggle; the team admin can.
+	owner := e.user(identity.PlatformRoleUser)
+	teamAdmin := e.user(identity.PlatformRoleUser)
+	member := e.user(identity.PlatformRoleUser)
+	tm := e.team(owner)
+	e.join(tm, teamAdmin, identity.RoleAdmin)
+	e.join(tm, member, identity.RoleMember)
+	rec = e.as(teamAdmin, "POST", "/api/teams/"+tm.ID+"/skills", skillPayload("t-"+randSuffix()))
+	tid := e.createdSkillID(rec)
+	if rec := e.as(member, "POST", "/api/teams/"+tm.ID+"/skills/"+tid+"/disable", nil); rec.Code != http.StatusForbidden {
+		t.Errorf("member disable team skill = %d, want 403", rec.Code)
+	}
+	if rec := e.as(teamAdmin, "POST", "/api/teams/"+tm.ID+"/skills/"+tid+"/disable", nil); rec.Code != http.StatusOK {
+		t.Errorf("team admin disable = %d, want 200", rec.Code)
+	}
+}
+
+// ---- move to team ----
+
+// TestMoveMySkillToTeam: a team admin moves their own user skill into their
+// team; the skill then resolves under the team scope and reports the new scope.
+func TestMoveMySkillToTeam(t *testing.T) {
+	e := newEnv(t)
+	admin := e.user(identity.PlatformRoleUser)
+	tm := e.team(admin) // owner is implicitly a member; make them admin below
+	e.join(tm, admin, identity.RoleAdmin)
+
+	rec := e.as(admin, "POST", "/api/me/skills", skillPayload("mv-"+randSuffix()))
+	id := e.createdSkillID(rec)
+
+	rec = e.as(admin, "POST", "/api/me/skills/"+id+"/move", map[string]any{"team_id": tm.ID})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("move = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	sk := decodeBody(t, rec)["skill"].(map[string]any)
+	if sk["scope"] != "team" || sk["team_id"] != tm.ID {
+		t.Errorf("moved skill scope = %v team_id = %v, want team/%s", sk["scope"], sk["team_id"], tm.ID)
+	}
+
+	// It now appears in the team's list, not the user's.
+	if rec := e.as(admin, "GET", "/api/me/skills/"+id, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("get moved skill via self route = %d, want 404", rec.Code)
+	}
+	if rec := e.as(admin, "GET", "/api/teams/"+tm.ID+"/skills/"+id, nil); rec.Code != http.StatusOK {
+		t.Errorf("get moved skill via team route = %d, want 200", rec.Code)
+	}
+}
+
+// TestMoveMySkillAuthorization: a plain member cannot move a skill into their
+// team (403), an outsider cannot target the team at all (404), and another
+// account's skill reads as not-found (404).
+func TestMoveMySkillAuthorization(t *testing.T) {
+	e := newEnv(t)
+	owner := e.user(identity.PlatformRoleUser)
+	member := e.user(identity.PlatformRoleUser)
+	outsider := e.user(identity.PlatformRoleUser)
+	tm := e.team(owner)
+	e.join(tm, member, identity.RoleMember)
+
+	// The member owns a skill but is only a member of the team -> 403.
+	rec := e.as(member, "POST", "/api/me/skills", skillPayload("m-"+randSuffix()))
+	mid := e.createdSkillID(rec)
+	if rec := e.as(member, "POST", "/api/me/skills/"+mid+"/move", map[string]any{"team_id": tm.ID}); rec.Code != http.StatusForbidden {
+		t.Errorf("member move into team = %d, want 403", rec.Code)
+	}
+
+	// The outsider owns a skill but is not in the team -> 404 (anti-enumeration).
+	rec = e.as(outsider, "POST", "/api/me/skills", skillPayload("o-"+randSuffix()))
+	oid := e.createdSkillID(rec)
+	if rec := e.as(outsider, "POST", "/api/me/skills/"+oid+"/move", map[string]any{"team_id": tm.ID}); rec.Code != http.StatusNotFound {
+		t.Errorf("outsider move into team = %d, want 404", rec.Code)
+	}
+
+	// The owner cannot move the member's skill (it is not theirs) -> 404.
+	if rec := e.as(owner, "POST", "/api/me/skills/"+mid+"/move", map[string]any{"team_id": tm.ID}); rec.Code != http.StatusNotFound {
+		t.Errorf("move another account's skill = %d, want 404", rec.Code)
+	}
+}
+
+// TestMoveMySkillConflict: moving onto a team that already has a skill of the
+// same name is a 409, and the source skill stays put.
+func TestMoveMySkillConflict(t *testing.T) {
+	e := newEnv(t)
+	admin := e.user(identity.PlatformRoleUser)
+	tm := e.team(admin)
+	e.join(tm, admin, identity.RoleAdmin)
+	name := "conf-" + randSuffix()
+
+	// The team already owns a skill with this name.
+	rec := e.as(admin, "POST", "/api/teams/"+tm.ID+"/skills", skillPayload(name))
+	e.createdSkillID(rec)
+	// The user owns a same-named user skill.
+	rec = e.as(admin, "POST", "/api/me/skills", skillPayload(name))
+	uid := e.createdSkillID(rec)
+
+	if rec := e.as(admin, "POST", "/api/me/skills/"+uid+"/move", map[string]any{"team_id": tm.ID}); rec.Code != http.StatusConflict {
+		t.Errorf("move onto existing = %d (%s), want 409", rec.Code, rec.Body.String())
+	}
+	// The source skill is still a user skill.
+	if rec := e.as(admin, "GET", "/api/me/skills/"+uid, nil); rec.Code != http.StatusOK {
+		t.Errorf("source skill after conflict = %d, want still 200", rec.Code)
+	}
+}
+
 // ---- store unavailable ----
 
 func TestStoreUnavailableAnswers503(t *testing.T) {

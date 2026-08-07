@@ -68,3 +68,15 @@ func (h *Handler) mySkillVersionAt(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) rollbackMySkill(w http.ResponseWriter, r *http.Request) {
 	h.rollbackScopedSkill(w, r, identity.UserScope(caller(r).ID), r.PathValue("id"))
 }
+
+func (h *Handler) enableMySkill(w http.ResponseWriter, r *http.Request) {
+	h.setScopedSkillEnabled(w, r, identity.UserScope(caller(r).ID), r.PathValue("id"), true)
+}
+
+func (h *Handler) disableMySkill(w http.ResponseWriter, r *http.Request) {
+	h.setScopedSkillEnabled(w, r, identity.UserScope(caller(r).ID), r.PathValue("id"), false)
+}
+
+func (h *Handler) moveMySkill(w http.ResponseWriter, r *http.Request) {
+	h.moveMySkillToTeam(w, r, r.PathValue("id"))
+}

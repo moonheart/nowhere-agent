@@ -65,3 +65,11 @@ func (h *Handler) teamSkillVersionAt(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) rollbackTeamSkill(w http.ResponseWriter, r *http.Request) {
 	h.rollbackScopedSkill(w, r, identity.TeamScope(r.PathValue("id")), r.PathValue("sid"))
 }
+
+func (h *Handler) enableTeamSkill(w http.ResponseWriter, r *http.Request) {
+	h.setScopedSkillEnabled(w, r, identity.TeamScope(r.PathValue("id")), r.PathValue("sid"), true)
+}
+
+func (h *Handler) disableTeamSkill(w http.ResponseWriter, r *http.Request) {
+	h.setScopedSkillEnabled(w, r, identity.TeamScope(r.PathValue("id")), r.PathValue("sid"), false)
+}
