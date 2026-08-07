@@ -20,7 +20,7 @@ func TestStreamWriterEmitsValidFrames(t *testing.T) {
 	mustContain := []string{
 		`data: {"messageId":"msg1","type":"start"}`,
 		`"type":"text-start"`,
-		`"delta":"Hello"`,
+		`"textDelta":"Hello"`,
 		`"type":"text-end"`,
 		`"type":"finish"`,
 		"data: [DONE]",

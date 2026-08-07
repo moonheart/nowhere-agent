@@ -194,7 +194,7 @@ func TestResumeReplaysRun(t *testing.T) {
 	case out := <-resumed:
 		for _, want := range []string{
 			`"status":"running"`, // durable lifecycle replay marks the run started
-			`"delta":"Doudou "`,  // content delta from the live broker
+			`"textDelta":"Doudou "`,  // content delta from the live broker
 			"data: [DONE]",
 		} {
 			if !strings.Contains(out, want) {
@@ -223,7 +223,7 @@ func TestResumeSettledRunStreamsNothing(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	out := rec.Body.String()
-	if strings.Contains(out, `"delta":"Doudou "`) {
+	if strings.Contains(out, `"textDelta":"Doudou "`) {
 		t.Errorf("settled resume must not re-stream content (served by /history)\n---\n%s", out)
 	}
 	if !strings.Contains(out, "data: [DONE]") {
@@ -249,7 +249,7 @@ func TestResumeHonorsOffset(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	out := rec.Body.String()
-	if strings.Contains(out, `"delta":"Doudou "`) {
+	if strings.Contains(out, `"textDelta":"Doudou "`) {
 		t.Errorf("after=final offset should stream no deltas\n---\n%s", out)
 	}
 	if !strings.Contains(out, "data: [DONE]") {

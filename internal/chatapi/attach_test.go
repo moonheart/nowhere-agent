@@ -173,7 +173,7 @@ func TestMultiClientAttachSameStream(t *testing.T) {
 		if !strings.Contains(body, `"status":"running"`) {
 			t.Errorf("attached client missing run-start frame\n---\n%s", body)
 		}
-		if !strings.Contains(body, `"delta":"alpha "`) {
+		if !strings.Contains(body, `"textDelta":"alpha "`) {
 			t.Errorf("attached client missing first delta\n---\n%s", body)
 		}
 		if !strings.Contains(body, "data: [DONE]") {
@@ -195,7 +195,7 @@ func TestMultiClientAttachSameStream(t *testing.T) {
 	if !strings.Contains(body, "data: [DONE]") {
 		t.Errorf("post-completion attach should terminate cleanly\n---\n%s", body)
 	}
-	if strings.Contains(body, `"delta":"alpha "`) {
+	if strings.Contains(body, `"textDelta":"alpha "`) {
 		t.Errorf("settled run must not re-stream content deltas (served by /history)\n---\n%s", body)
 	}
 }
@@ -240,7 +240,7 @@ func TestResumeActiveRunIgnoresAfterOffset(t *testing.T) {
 	// The key assertion: the stream began from the run's start (running marker +
 	// first delta), proving `after=999` was ignored for the active run. Later
 	// deltas may drop to a slow test consumer, so don't require every one.
-	for _, want := range []string{`"status":"running"`, `"delta":"alpha "`, "data: [DONE]"} {
+	for _, want := range []string{`"status":"running"`, `"textDelta":"alpha "`, "data: [DONE]"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("active-run resume(after=999) missing %q — must stream from start\n---\n%s", want, body)
 		}

@@ -51,7 +51,7 @@ func TestServeChatStreamsUIProtocol(t *testing.T) {
 	out := rec.Body.String()
 	for _, want := range []string{
 		`"type":"start"`,
-		`"delta":"Hi there"`,
+		`"textDelta":"Hi there"`,
 		`"type":"finish"`,
 		"data: [DONE]",
 	} {

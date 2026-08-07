@@ -183,6 +183,17 @@ type sseEmitter struct {
 	// full input as one duplicate delta.
 	toolStarted  map[string]bool
 	argsStreamed map[string]bool
+	// finishReason latches the run's terminal ui-message-stream finish reason
+	// ("error" on KindError, "other" on KindCancelled, "length" when the final
+	// step was a non-continued max_tokens truncation). Empty means unset; finish()
+	// resolves it to "stop" or, at settle time, the run's terminal status.
+	finishReason string
+	// lastStepReason/lastStepContinued record the most recent finish-step so a
+	// following terminal KindError can be classified as a truncation ("length")
+	// rather than a generic error when the final step hit max_tokens without
+	// continuing (the loop emits that step-finish before the terminal error).
+	lastStepReason    string
+	lastStepContinued bool
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
@@ -591,9 +602,10 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 
 	// A settled run has no live stream: its content is durable in the message
 	// store and delivered to the client via serveHistory, so there is nothing to
-	// attach to here. Just close the message cleanly.
+	// attach to here. Just close the message cleanly — with the run's real terminal
+	// reason (a failed run must not finish "stop").
 	if run.Status.Terminal() {
-		emitter.finish()
+		h.settleFinish(r, emitter, sessionID, run.ID, run.Status)
 		return
 	}
 
@@ -643,7 +655,8 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			return
 		case <-settlePoll.C:
 			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
-				emitter.finish()
+				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
 			}
 		case e, open := <-lifecycleCh:
@@ -658,7 +671,8 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			// the stream on the next tick (giving any trailing content a chance).
 		case e, open := <-contentCh:
 			if !open {
-				emitter.finish()
+				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
 			}
 			if e.RunID != run.ID || e.Offset <= maxOffset {
@@ -668,9 +682,70 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			emitStreamEvent(r, emitter, e)
 			// The run may have settled without a further frame we can observe.
 			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
-				emitter.finish()
+				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
 			}
+		}
+	}
+}
+
+// settleFinish terminates an attached stream with the correct terminal finish
+// reason. The latched reason (set when this emitter saw the terminal
+// KindError/KindCancelled) is the common path — the run's terminal lifecycle
+// event is persisted and published before the run settles, so it almost always
+// arrived first. When it didn't (a late attacher, or the settle-poll firing
+// before the buffered event drained), re-fetch the run's terminal status and
+// map it: a failed run must not finish "stop" (which would show a cut-off answer
+// as a clean completion). statusOverride, when terminal, is used directly and
+// skips the re-fetch (the settled-run early-return already knows the status).
+func (h *Handler) settleFinish(r *http.Request, e *sseEmitter, sessionID, runID string, statusOverride session.RunStatus) {
+	if e.finishReason != "" {
+		e.finish()
+		return
+	}
+	status := statusOverride
+	if !status.Terminal() && h.runtime != nil {
+		if runs, err := h.runtime.RunsForSession(r.Context(), sessionID); err == nil {
+			for _, run := range runs {
+				if run.ID == runID {
+					status = run.Status
+					break
+				}
+			}
+		}
+	}
+	reason := "stop"
+	switch status {
+	case session.RunFailed:
+		reason = "error"
+	case session.RunCancelled:
+		reason = "other"
+	}
+	e.finishWithReason(reason)
+}
+
+// drainContent flushes any content frames still buffered on the subscription
+// before the stream is settled. It closes the race where the run completes and
+// its terminal lifecycle fires before the client has drained the broker backlog
+// (the run finishing clears the retained frames via Settle, so a Read can't
+// recover them): without this drain, fast runs — notably the step frames of a
+// multi-iteration tool run — would be dropped between the last frame the client
+// saw and the finish. Non-blocking: only frames already queued are taken.
+func (h *Handler) drainContent(r *http.Request, emitter *sseEmitter, contentCh <-chan session.StreamEvent, runID string, maxOffset int64) int64 {
+	for {
+		select {
+		case e, open := <-contentCh:
+			if !open {
+				return maxOffset
+			}
+			if e.RunID != runID || e.Offset <= maxOffset {
+				continue
+			}
+			maxOffset = e.Offset
+			emitStreamEvent(r, emitter, e)
+		default:
+			return maxOffset
 		}
 	}
 }
@@ -712,7 +787,28 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 			e.textStarted = true
 		}
 		if s, ok := payload.(string); ok {
-			e.write(chunk{"type": "text-delta", "id": e.textID, "delta": s})
+			e.write(chunk{"type": "text-delta", "id": e.textID, "textDelta": s})
+		}
+	case agent.KindStepStart:
+		// A new think→tool step (multi-iteration run). No messageId — the decoder
+		// falls back to the current message id.
+		e.write(chunk{"type": "start-step"})
+	case agent.KindStepFinish:
+		// A step closed: record it for terminal-reason classification, then emit a
+		// finish-step frame with the step's real usage and isContinued flag.
+		if se, ok := stepEvent(payload); ok {
+			e.lastStepReason = se.FinishReason
+			e.lastStepContinued = se.IsContinued
+			in, out := 0, 0
+			if se.Usage != nil {
+				in, out = se.Usage.InputTokens, se.Usage.OutputTokens
+			}
+			e.write(chunk{
+				"type":         "finish-step",
+				"finishReason": se.FinishReason,
+				"usage":        map[string]any{"inputTokens": in, "outputTokens": out},
+				"isContinued":  se.IsContinued,
+			})
 		}
 	case agent.KindToolArgs:
 		// Incremental tool-call arguments as the model streams them. Open the
@@ -814,11 +910,21 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 		if s, ok := payload.(string); ok {
 			e.write(chunk{"type": "error", "errorText": s})
 		}
+		// Latch the terminal reason. A final step that hit max_tokens without
+		// continuing is a truncation ("length"), not a generic failure — the loop
+		// emits that non-continued length finish-step just before this error.
+		if e.lastStepReason == "length" && !e.lastStepContinued {
+			e.finishReason = "length"
+		} else {
+			e.finishReason = "error"
+		}
 		e.writeRunStatus("failed")
 	case agent.KindCancelled:
 		// Close any open block, then flag the run cancelled via a transient data
 		// frame so attached clients (and reconnects) can show it stopped early.
-		// finish() still terminates the message normally.
+		// finish() still terminates the message normally. The spec's FinishReason
+		// union has no "cancelled", so the honest member is "other" (not "error" —
+		// an intentional stop is not a failure).
 		if e.thinkOpen {
 			e.write(chunk{"type": "reasoning-end"})
 			e.thinkOpen = false
@@ -827,6 +933,7 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 			e.write(chunk{"type": "text-end", "id": e.textID})
 			e.textStarted = false
 		}
+		e.finishReason = "other"
 		e.writeRunStatus("cancelled")
 	}
 	return e.writeErr
@@ -839,8 +946,18 @@ func (e *sseEmitter) writeRunStatus(status string) {
 	e.write(chunk{"type": "data-run", "data": map[string]any{"status": status}, "transient": true})
 }
 
-// finish closes the text block, sends finish + [DONE].
+// finish closes the text block, sends finish + [DONE] using the latched
+// terminal reason (or "stop").
 func (e *sseEmitter) finish() {
+	e.finishWithReason("")
+}
+
+// finishWithReason closes the message with an explicit terminal reason. An empty
+// reason falls back to the latched finishReason, then to "stop". The reason is
+// what the assistant-ui accumulator turns into the message status: only
+// "stop"/"unknown" render as complete, so a failed/truncated/cancelled run must
+// NOT finish "stop" (that would show a cut-off answer as a clean completion).
+func (e *sseEmitter) finishWithReason(reason string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.thinkOpen {
@@ -850,9 +967,15 @@ func (e *sseEmitter) finish() {
 	if e.textStarted {
 		e.write(chunk{"type": "text-end", "id": e.textID})
 	}
+	if reason == "" {
+		reason = e.finishReason
+	}
+	if reason == "" {
+		reason = "stop"
+	}
 	e.write(chunk{
 		"type":         "finish",
-		"finishReason": "stop",
+		"finishReason": reason,
 		"usage":        map[string]any{"inputTokens": e.usageIn, "outputTokens": e.usageOut},
 	})
 	e.writeRaw("data: [DONE]\n\n")
@@ -876,7 +999,7 @@ func (e *sseEmitter) writeToolCallStart(id, name string) {
 		return
 	}
 	e.toolStarted[id] = true
-	e.write(chunk{"type": "tool-call-start", "toolCallId": id, "toolName": name})
+	e.write(chunk{"type": "tool-call-start", "id": id, "toolCallId": id, "toolName": name})
 }
 
 func (e *sseEmitter) write(c chunk) {
@@ -914,6 +1037,45 @@ func usageTokens(payload any) (u provider.Usage, ok bool) {
 		return provider.Usage{InputTokens: in, OutputTokens: out, CacheReadTokens: cr, CacheWriteTokens: cw}, iok || ook
 	}
 	return provider.Usage{}, false
+}
+
+// stepEvent extracts a StepEvent from a KindStepFinish payload, tolerating both
+// an agent.StepEvent value (the loop's direct-path emit) and a decoded JSON
+// object (the broker/replay path, where the payload round-trips through storage
+// with snake_case keys). Returns ok=false when the payload carries no step data.
+func stepEvent(payload any) (se agent.StepEvent, ok bool) {
+	switch v := payload.(type) {
+	case agent.StepEvent:
+		return v, true
+	case *agent.StepEvent:
+		if v != nil {
+			return *v, true
+		}
+	case map[string]any:
+		reason, _ := v["finish_reason"].(string)
+		if reason == "" {
+			reason, _ = v["finishReason"].(string)
+		}
+		cont, _ := v["is_continued"].(bool)
+		if _, present := v["isContinued"]; present {
+			cont, _ = v["isContinued"].(bool)
+		}
+		se.FinishReason = reason
+		se.IsContinued = cont
+		if um, ok := v["usage"].(map[string]any); ok {
+			in, _ := intFromAny(um["input_tokens"])
+			if i, ok2 := intFromAny(um["inputTokens"]); ok2 {
+				in = i
+			}
+			out, _ := intFromAny(um["output_tokens"])
+			if o, ok2 := intFromAny(um["outputTokens"]); ok2 {
+				out = o
+			}
+			se.Usage = &provider.Usage{InputTokens: in, OutputTokens: out}
+		}
+		return se, reason != ""
+	}
+	return agent.StepEvent{}, false
 }
 
 // intFromAny reads an int from a JSON-decoded numeric value (float64 by default,

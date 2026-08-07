@@ -112,15 +112,26 @@ func emitStreamEvent(r *http.Request, emitter *sseEmitter, e session.StreamEvent
 		if m, ok := decodeMapPayload(e.Payload); ok {
 			emitter.Emit(r.Context(), agent.KindInterrupt, m)
 		}
+	case agent.KindStepStart:
+		emitter.Emit(r.Context(), agent.KindStepStart, nil)
+	case agent.KindStepFinish:
+		if m, ok := decodeMapPayload(e.Payload); ok {
+			emitter.Emit(r.Context(), agent.KindStepFinish, m)
+		}
 	}
 }
 
 // emitLifecycleEvent renders a durable lifecycle event (running/done/cancelled)
-// as a run-status frame so an attached client syncs run state. Lifecycle events
-// carry no content payload.
+// as a run-status frame so an attached client syncs run state. KindError also
+// flows here: it is a lifecycle kind (persisted to run_events, fanned out on the
+// bus), so without this arm a failed run's error frame never reached attached
+// clients — their stream just ended with finishReason "stop", indistinguishable
+// from success. Its payload is the JSON-encoded error string, decoded like text.
 func emitLifecycleEvent(r *http.Request, emitter *sseEmitter, e session.Event) {
 	switch agent.EventKind(e.Kind) {
 	case agent.KindRunning, agent.KindDone, agent.KindCancelled:
 		emitter.Emit(r.Context(), agent.EventKind(e.Kind), nil)
+	case agent.KindError:
+		emitter.Emit(r.Context(), agent.KindError, decodeTextPayload(e.Payload))
 	}
 }

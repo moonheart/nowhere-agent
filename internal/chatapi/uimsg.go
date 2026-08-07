@@ -55,7 +55,7 @@ func (w *streamWriter) textStart(id string) {
 }
 
 func (w *streamWriter) textDelta(id, delta string) {
-	w.buf = append(w.buf, sseFrame(chunk{"type": "text-delta", "id": id, "delta": delta})...)
+	w.buf = append(w.buf, sseFrame(chunk{"type": "text-delta", "id": id, "textDelta": delta})...)
 }
 
 func (w *streamWriter) textEnd(id string) {
@@ -63,7 +63,7 @@ func (w *streamWriter) textEnd(id string) {
 }
 
 func (w *streamWriter) toolCallStart(toolCallID, toolName string) {
-	w.buf = append(w.buf, sseFrame(chunk{"type": "tool-call-start", "toolCallId": toolCallID, "toolName": toolName})...)
+	w.buf = append(w.buf, sseFrame(chunk{"type": "tool-call-start", "id": toolCallID, "toolCallId": toolCallID, "toolName": toolName})...)
 }
 
 func (w *streamWriter) toolCallDelta(toolCallID, argsText string) {

@@ -113,6 +113,14 @@ const (
 	// as an alias so existing emitters/consumers keep working during the
 	// transition. Emit and match on KindInterrupt; treat them interchangeably.
 	KindApprovalRequest = KindInterrupt
+	// KindStepStart opens a new think→tool step (one model iteration after the
+	// first). Live-only content (broker-routed, never persisted): a render hint so
+	// the transport can emit a start-step frame for multi-iteration runs.
+	KindStepStart EventKind = "step_start"
+	// KindStepFinish closes a step (payload: StepEvent) carrying that iteration's
+	// stop reason, usage, and whether another step follows. Live-only content, so
+	// the transport can emit a finish-step frame with real per-step usage.
+	KindStepFinish EventKind = "step_finish"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).
@@ -266,6 +274,11 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			_ = emit.Emit(ctx, KindCancelled, nil)
 			return state.Produced, err
 		}
+		// Open a new step for every iteration after the first, so the transport can
+		// render a start-step frame between the tool batch and the next model call.
+		if iter > 0 {
+			_ = emit.Emit(ctx, KindStepStart, nil)
+		}
 
 		// Assemble the working view for this turn and repair tool pairing before
 		// every send (a prior cancel or a compression split can leave an unpaired
@@ -318,12 +331,14 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		if len(res.Calls) == 0 {
 			if res.Stop == provider.StopMaxTokens {
 				truncErr := fmt.Errorf("response truncated: hit the max_tokens limit (%d)", l.config.MaxTokens)
+				l.emitStepFinish(ctx, emit, res, "length", false)
 				l.runAfterRun(ctx, state)
 				_ = emit.Emit(ctx, KindError, truncErr.Error())
 				return state.Produced, truncErr
 			}
 			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", state.Usage.InputTokens, "output_tokens", state.Usage.OutputTokens,
 				"cache_read_tokens", state.Usage.CacheReadTokens, "cache_write_tokens", state.Usage.CacheWriteTokens, "cache_hit_pct", cacheHitPct(state.Usage))
+			l.emitStepFinish(ctx, emit, res, "stop", false)
 			l.runAfterRun(ctx, state)
 			_ = emit.Emit(ctx, KindDone, nil)
 			return state.Produced, nil
@@ -357,6 +372,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			slog.Warn("agent: tool batch truncated at max_tokens; failing the batch for re-issue",
 				"iter", iter, "calls", len(res.Calls), "max_tokens", l.config.MaxTokens)
 			l.recordToolResults(ctx, emit, state, res.Calls, truncatedCallResults(res.Calls, l.config.MaxTokens))
+			l.emitStepFinish(ctx, emit, res, "length", true)
 			continue
 		}
 
@@ -384,6 +400,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				}
 			}
 			slog.Info("agent: run ended awaiting client interactions", "batch", len(gated), "first_tool", gated[0].ToolName, "first_kind", gated[0].Kind)
+			l.emitStepFinish(ctx, emit, res, "tool-calls", false)
 			l.runAfterRun(ctx, state)
 			_ = emit.Emit(ctx, KindDone, nil)
 			return state.Produced, nil
@@ -391,6 +408,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 
 		// Dispatch tool calls (concurrently) and append results.
 		l.recordToolResults(ctx, emit, state, res.Calls, l.dispatch(ctx, res.Calls))
+		l.emitStepFinish(ctx, emit, res, "tool-calls", true)
 	}
 
 	// Reached the iteration guard without a final answer. Surface it as a terminal
@@ -410,6 +428,15 @@ func (l *Loop) runAfterRun(ctx context.Context, state *RunState) {
 			slog.Warn("agent: AfterRun hook failed", "err", err)
 		}
 	}
+}
+
+// emitStepFinish emits the KindStepFinish event closing one think→tool step.
+// reason is the ui-message-stream step finish reason ("stop" | "length" |
+// "tool-calls"); continued is true when the loop iterates again (tool calls were
+// dispatched). Emit failures are ignored — step frames are render hints, and the
+// run must not abort on a broker hiccup.
+func (l *Loop) emitStepFinish(ctx context.Context, emit Emitter, res ModelResult, reason string, continued bool) {
+	_ = emit.Emit(ctx, KindStepFinish, StepEvent{FinishReason: reason, Usage: res.Usage, IsContinued: continued})
 }
 
 // attempt runs one provider call through the wrap chain and returns the
@@ -476,6 +503,17 @@ func cacheHitPct(u provider.Usage) int {
 type MessageWithUsage struct {
 	Message provider.Message
 	Usage   *provider.Usage
+}
+
+// StepEvent is the KindStepFinish payload: how one think→tool step ended.
+// FinishReason is a ui-message-stream finish reason for the step ("stop" |
+// "length" | "tool-calls"); Usage is the per-LLM-call usage (nil if unreported);
+// IsContinued is true when another step follows in this run (tool calls were
+// dispatched, so the loop iterates again) and false at a run-terminal step.
+type StepEvent struct {
+	FinishReason string          `json:"finish_reason"`
+	Usage        *provider.Usage `json:"usage,omitempty"`
+	IsContinued  bool            `json:"is_continued"`
 }
 
 // turnEnd carries the terminal metadata of one provider turn: why generation

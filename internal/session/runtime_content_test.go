@@ -27,6 +27,9 @@ func TestIsContentKindRoutesInterruptToBroker(t *testing.T) {
 	// and only a history reload surfaced the real counts.
 	for _, k := range []agent.EventKind{
 		agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolArgs, agent.KindToolResult, agent.KindSubagent, agent.KindUsage,
+		// Step frames are live render detail (start-step/finish-step), served for
+		// settled runs via /history, so they ride the broker and are never persisted.
+		agent.KindStepStart, agent.KindStepFinish,
 	} {
 		if !isContentKind(string(k)) {
 			t.Errorf("%q should be a content kind", k)
