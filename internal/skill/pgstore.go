@@ -28,10 +28,14 @@ type PGStore struct {
 func NewPGStore(db *sql.DB) *PGStore { return &PGStore{db: db} }
 
 // skillColumns is the `skills` projection, in scan order.
-const skillColumns = `id, name, scope, COALESCE(user_id,''), COALESCE(team_id,''), current_version, overrides_version, needs_review, created_at, updated_at`
+const skillColumns = `id, name, scope, COALESCE(user_id,''), COALESCE(team_id,''), current_version, overrides_version, needs_review, enabled, created_at, updated_at`
 
 // ErrNotFound is returned when a skill or version does not exist.
 var ErrNotFound = errors.New("skill not found")
+
+// ErrConflict is returned when a move would collide with an existing skill of
+// the same name in the destination scope (identity is (name, scope, owner)).
+var ErrConflict = errors.New("skill already exists in destination")
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
 type rowScanner interface {
@@ -98,7 +102,7 @@ func scanSkillRow(row rowScanner) (Skill, error) {
 	)
 	err := row.Scan(
 		&sk.ID, &sk.Name, &sk.Scope.Scope, &sk.Scope.UserID, &sk.Scope.TeamID,
-		&sk.Version, &sk.OverridesVersion, &sk.NeedsReview, &sk.CreatedAt, &sk.UpdatedAt,
+		&sk.Version, &sk.OverridesVersion, &sk.NeedsReview, &sk.Enabled, &sk.CreatedAt, &sk.UpdatedAt,
 		&sk.Description, &sk.Body, &resourcesRaw, &scriptsRaw,
 	)
 	if err != nil {
@@ -123,20 +127,22 @@ func scanSkillRow(row rowScanner) (Skill, error) {
 // version's content. The column list mirrors skillColumns, prefixed with `s.`.
 const currentJoin = `
 	SELECT s.id, s.name, s.scope, COALESCE(s.user_id,''), COALESCE(s.team_id,''),
-	       s.current_version, s.overrides_version, s.needs_review, s.created_at, s.updated_at,
+	       s.current_version, s.overrides_version, s.needs_review, s.enabled, s.created_at, s.updated_at,
 	       v.description, v.body, v.resources, v.scripts
 	FROM skills s
 	JOIN skill_versions v ON v.skill_id = s.id AND v.version = s.current_version`
 
 // Get resolves a skill by name with scope priority user > team > system: the
 // caller's scopes are searched in priority order and the first scope holding
-// the name wins. Returns the resolved current-version Skill.
+// the name wins. Returns the resolved current-version Skill. Only ENABLED
+// skills resolve — a disabled skill is invisible to the agent even if it is the
+// highest-priority override (it does not shadow a lower-scope enabled skill).
 func (s *PGStore) Get(ctx context.Context, name string, scopes []identity.ScopeRef) (Skill, bool, error) {
 	for _, scope := range scopes {
 		// name is bound as $1, so the scope placeholders start at $2 (offset 1).
 		where, args := scopeWhere([]identity.ScopeRef{scope}, 1)
 		args = append([]any{name}, args...)
-		q := currentJoin + " WHERE s.name = $1 AND (" + where + ") LIMIT 1"
+		q := currentJoin + " WHERE s.enabled AND s.name = $1 AND (" + where + ") LIMIT 1"
 		sk, err := scanSkillRow(s.db.QueryRowContext(ctx, q, args...))
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -149,14 +155,14 @@ func (s *PGStore) Get(ctx context.Context, name string, scopes []identity.ScopeR
 	return Skill{}, false, nil
 }
 
-// List returns L0 metadata for every skill visible in the given scopes,
+// List returns L0 metadata for every ENABLED skill visible in the given scopes,
 // deduplicated by name with user>team>system priority applied.
 func (s *PGStore) List(ctx context.Context, scopes []identity.ScopeRef) ([]L0, error) {
 	where, args := scopeWhere(scopes, 0)
 	if where == "" {
 		return nil, nil
 	}
-	q := currentJoin + " WHERE (" + where + ")"
+	q := currentJoin + " WHERE s.enabled AND (" + where + ")"
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list skills: %w", err)
@@ -246,9 +252,9 @@ func (s *PGStore) Put(ctx context.Context, sk Skill, createdBy string) (Skill, e
 		err = tx.QueryRowContext(ctx, `
 			INSERT INTO skills (name, scope, user_id, team_id, current_version, overrides_version)
 			VALUES ($1, $2, $3, $4, $5, $6)
-			RETURNING id, created_at, updated_at`,
+			RETURNING id, enabled, created_at, updated_at`,
 			sk.Name, string(sk.Scope.Scope), userID, teamID, newVersion, sk.OverridesVersion).
-			Scan(&existingID, &sk.CreatedAt, &sk.UpdatedAt)
+			Scan(&existingID, &sk.Enabled, &sk.CreatedAt, &sk.UpdatedAt)
 		if err != nil {
 			return Skill{}, fmt.Errorf("insert skill: %w", err)
 		}
@@ -256,8 +262,8 @@ func (s *PGStore) Put(ctx context.Context, sk Skill, createdBy string) (Skill, e
 		newVersion = existingVersion + 1
 		err = tx.QueryRowContext(ctx, `
 			UPDATE skills SET current_version = $1, updated_at = now()
-			WHERE id = $2 RETURNING created_at, updated_at`,
-			newVersion, existingID).Scan(&sk.CreatedAt, &sk.UpdatedAt)
+			WHERE id = $2 RETURNING enabled, created_at, updated_at`,
+			newVersion, existingID).Scan(&sk.Enabled, &sk.CreatedAt, &sk.UpdatedAt)
 		if err != nil {
 			return Skill{}, fmt.Errorf("bump skill: %w", err)
 		}
@@ -388,13 +394,13 @@ func (s *PGStore) VersionAt(ctx context.Context, skillID string, version int) (S
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT s.id, s.name, s.scope, COALESCE(s.user_id,''), COALESCE(s.team_id,''),
-		       v.version, s.overrides_version, s.needs_review, s.created_at, s.updated_at,
+		       v.version, s.overrides_version, s.needs_review, s.enabled, s.created_at, s.updated_at,
 		       v.description, v.body, v.resources, v.scripts
 		FROM skills s
 		JOIN skill_versions v ON v.skill_id = s.id AND v.version = $2
 		WHERE s.id = $1`, skillID, version).
 		Scan(&sk.ID, &sk.Name, &sk.Scope.Scope, &sk.Scope.UserID, &sk.Scope.TeamID,
-			&sk.Version, &sk.OverridesVersion, &sk.NeedsReview, &sk.CreatedAt, &sk.UpdatedAt,
+			&sk.Version, &sk.OverridesVersion, &sk.NeedsReview, &sk.Enabled, &sk.CreatedAt, &sk.UpdatedAt,
 			&sk.Description, &sk.Body, &resourcesRaw, &scriptsRaw)
 	if errors.Is(err, sql.ErrNoRows) || identity.IsMalformedID(err) {
 		return Skill{}, ErrNotFound
@@ -441,4 +447,73 @@ func (s *PGStore) Delete(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetEnabled flips the agent-resolution gate without touching content or
+// version history: a disabled skill drops out of Get/List but stays editable in
+// the management surface. Content and history are unchanged, so re-enabling
+// restores exactly what the agent saw before.
+func (s *PGStore) SetEnabled(ctx context.Context, id string, enabled bool) (Skill, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE skills SET enabled = $1, updated_at = now() WHERE id = $2`, enabled, id)
+	if err != nil {
+		if identity.IsMalformedID(err) {
+			return Skill{}, ErrNotFound
+		}
+		return Skill{}, fmt.Errorf("set skill enabled: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Skill{}, ErrNotFound
+	}
+	return s.ByID(ctx, id)
+}
+
+// MoveToTeam relocates a user-scope skill into a team, preserving its whole
+// version history (only the pointer row's scope/owner columns change — no new
+// version is written). The override bookkeeping is cleared: the skill's old
+// overrides_version/needs_review refer to its user-scope lineage, which does
+// not carry into the team scope.
+//
+// A move that collides with an existing same-name skill in the destination
+// team is refused with ErrConflict rather than merging or overwriting. Only a
+// user-scope skill can move; any other scope returns ErrNotFound (the caller's
+// scope check already reported a non-user skill as not-in-scope).
+func (s *PGStore) MoveToTeam(ctx context.Context, id, teamID string) (Skill, error) {
+	// Refuse the move up front when the destination team already owns a skill of
+	// this name, so the UPDATE below never has to attempt a duplicate identity
+	// (the unique index would reject it as a 23505; naming it ErrConflict keeps
+	// the conflict a clean client error instead of a raw constraint violation).
+	var name string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT name FROM skills WHERE id = $1 AND scope = 'user'`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) || identity.IsMalformedID(err) {
+		return Skill{}, ErrNotFound
+	}
+	if err != nil {
+		return Skill{}, fmt.Errorf("lookup skill to move: %w", err)
+	}
+	var clash bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM skills
+			WHERE name = $1 AND scope = 'team' AND COALESCE(team_id,'') = $2)`,
+		name, teamID).Scan(&clash); err != nil {
+		return Skill{}, fmt.Errorf("check move destination: %w", err)
+	}
+	if clash {
+		return Skill{}, ErrConflict
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE skills
+		SET scope = 'team', team_id = $1, user_id = NULL,
+		    overrides_version = 0, needs_review = false, updated_at = now()
+		WHERE id = $2 AND scope = 'user'`, teamID, id)
+	if err != nil {
+		return Skill{}, fmt.Errorf("move skill to team: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Skill{}, ErrNotFound
+	}
+	return s.ByID(ctx, id)
 }

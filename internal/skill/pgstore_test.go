@@ -151,6 +151,199 @@ func TestPGStoreListDedup(t *testing.T) {
 	}
 }
 
+// TestPGStoreDisabledHiddenFromAgent: SetEnabled(false) drops a skill from the
+// agent's Get/List resolution while keeping it visible in the management reads
+// (ListByScope/ByID); re-enabling restores it.
+func TestPGStoreDisabledHiddenFromAgent(t *testing.T) {
+	db := pgSkillDB(t)
+	st := NewPGStore(db)
+	ctx := context.Background()
+	name := "enab-" + skillSuffix()
+	userID := "u-" + skillSuffix()
+	scopes := []identity.ScopeRef{identity.UserScope(userID)}
+
+	sk := putSkill(t, st, Skill{Name: name, Description: "d", Body: "b", Scope: identity.UserScope(userID)})
+	cleanupSkill(t, db, sk.ID)
+	if !sk.Enabled {
+		t.Fatalf("new skill enabled = false, want true by default")
+	}
+
+	// Disable: agent resolution loses the skill entirely.
+	dis, err := st.SetEnabled(ctx, sk.ID, false)
+	if err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if dis.Enabled {
+		t.Errorf("after disable enabled = true, want false")
+	}
+	if _, ok, err := st.Get(ctx, name, scopes); err != nil || ok {
+		t.Errorf("Get after disable: ok=%v err=%v, want ok=false", ok, err)
+	}
+	l0, err := st.List(ctx, scopes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range l0 {
+		if e.Name == name {
+			t.Errorf("disabled skill %q still in the L0 catalog", name)
+		}
+	}
+
+	// The management reads still see it (so it can be reviewed and re-enabled).
+	if _, err := st.ByID(ctx, sk.ID); err != nil {
+		t.Errorf("ByID after disable: %v, want the skill still readable", err)
+	}
+	mgmt, err := st.ListByScope(ctx, identity.UserScope(userID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen bool
+	for _, m := range mgmt {
+		if m.ID == sk.ID {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("disabled skill missing from management ListByScope")
+	}
+
+	// Re-enable restores agent resolution.
+	if _, err := st.SetEnabled(ctx, sk.ID, true); err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if got, ok, err := st.Get(ctx, name, scopes); err != nil || !ok || got.Body != "b" {
+		t.Errorf("Get after re-enable: ok=%v body=%q err=%v", ok, got.Body, err)
+	}
+}
+
+// TestPGStoreDisabledOverrideFallsThrough: a disabled user override does not
+// shadow the lower-scope enabled skill — resolution falls through to system.
+func TestPGStoreDisabledOverrideFallsThrough(t *testing.T) {
+	db := pgSkillDB(t)
+	st := NewPGStore(db)
+	ctx := context.Background()
+	name := "fall-" + skillSuffix()
+	userID := "u-" + skillSuffix()
+	scopes := []identity.ScopeRef{identity.UserScope(userID), identity.SystemScope()}
+
+	sys := putSkill(t, st, Skill{Name: name, Description: "sys", Body: "sys-body", Scope: identity.SystemScope()})
+	cleanupSkill(t, db, sys.ID)
+	usr := putSkill(t, st, Skill{Name: name, Description: "usr", Body: "usr-body", Scope: identity.UserScope(userID)})
+	cleanupSkill(t, db, usr.ID)
+
+	if _, err := st.SetEnabled(ctx, usr.ID, false); err != nil {
+		t.Fatalf("disable override: %v", err)
+	}
+	got, ok, err := st.Get(ctx, name, scopes)
+	if err != nil || !ok {
+		t.Fatalf("get: ok=%v err=%v", ok, err)
+	}
+	if got.Body != "sys-body" {
+		t.Errorf("disabled override should fall through to system, got body %q", got.Body)
+	}
+}
+
+// TestPGStoreMoveToTeam: a user-scope skill moves into a team with its version
+// history intact and override bookkeeping cleared.
+func TestPGStoreMoveToTeam(t *testing.T) {
+	db := pgSkillDB(t)
+	st := NewPGStore(db)
+	ctx := context.Background()
+	name := "move-" + skillSuffix()
+	userID := "u-" + skillSuffix()
+	teamID := "t-" + skillSuffix()
+
+	sk := putSkill(t, st, Skill{Name: name, Description: "d", Body: "v1", Scope: identity.UserScope(userID)})
+	cleanupSkill(t, db, sk.ID)
+	// A second save gives it a history worth preserving.
+	if v2 := putSkill(t, st, Skill{Name: name, Description: "d", Body: "v2", Scope: identity.UserScope(userID)}); v2.Version != 2 {
+		t.Fatalf("setup: expected v2, got %d", v2.Version)
+	}
+
+	moved, err := st.MoveToTeam(ctx, sk.ID, teamID)
+	if err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if moved.Scope.Scope != identity.ScopeTeam || moved.Scope.TeamID != teamID || moved.Scope.UserID != "" {
+		t.Errorf("moved scope = %+v, want team %q", moved.Scope, teamID)
+	}
+	if moved.ID != sk.ID {
+		t.Errorf("move changed the pointer id: %q -> %q", sk.ID, moved.ID)
+	}
+	if moved.Version != 2 || moved.Body != "v2" {
+		t.Errorf("moved content = v%d body %q, want v2", moved.Version, moved.Body)
+	}
+	if moved.OverridesVersion != 0 || moved.NeedsReview {
+		t.Errorf("override bookkeeping not cleared: ov=%d review=%v", moved.OverridesVersion, moved.NeedsReview)
+	}
+
+	// History survived the move: both revisions are still listed under the same id.
+	vs, err := st.Versions(ctx, sk.ID)
+	if err != nil || len(vs) != 2 {
+		t.Errorf("versions after move = %v (n=%d), want 2", err, len(vs))
+	}
+
+	// It now resolves under the team scope, not the old user scope.
+	if _, ok, _ := st.Get(ctx, name, []identity.ScopeRef{identity.UserScope(userID)}); ok {
+		t.Errorf("moved skill still resolves in the old user scope")
+	}
+	if _, ok, _ := st.Get(ctx, name, []identity.ScopeRef{identity.TeamScope(teamID)}); !ok {
+		t.Errorf("moved skill does not resolve in the destination team scope")
+	}
+}
+
+// TestPGStoreMoveToTeamConflict: moving onto an existing same-name team skill is
+// refused with ErrConflict (no merge, no overwrite).
+func TestPGStoreMoveToTeamConflict(t *testing.T) {
+	db := pgSkillDB(t)
+	st := NewPGStore(db)
+	ctx := context.Background()
+	name := "clash-" + skillSuffix()
+	userID := "u-" + skillSuffix()
+	teamID := "t-" + skillSuffix()
+
+	mine := putSkill(t, st, Skill{Name: name, Body: "mine", Scope: identity.UserScope(userID)})
+	cleanupSkill(t, db, mine.ID)
+	existing := putSkill(t, st, Skill{Name: name, Body: "theirs", Scope: identity.TeamScope(teamID)})
+	cleanupSkill(t, db, existing.ID)
+
+	if _, err := st.MoveToTeam(ctx, mine.ID, teamID); !errors.Is(err, ErrConflict) {
+		t.Errorf("move onto existing = %v, want ErrConflict", err)
+	}
+	// The team skill is untouched and mine is still a user skill.
+	if got, err := st.ByID(ctx, existing.ID); err != nil || got.Body != "theirs" {
+		t.Errorf("existing team skill disturbed: body=%q err=%v", got.Body, err)
+	}
+	if got, err := st.ByID(ctx, mine.ID); err != nil || got.Scope.Scope != identity.ScopeUser {
+		t.Errorf("source skill moved despite conflict: scope=%v err=%v", got.Scope.Scope, err)
+	}
+}
+
+// TestPGStoreMoveToTeamOnlyUserScope: only a user-scope skill can move; a team
+// or system skill reports ErrNotFound.
+func TestPGStoreMoveToTeamOnlyUserScope(t *testing.T) {
+	db := pgSkillDB(t)
+	st := NewPGStore(db)
+	ctx := context.Background()
+	teamID := "t-" + skillSuffix()
+
+	team := putSkill(t, st, Skill{Name: "tmv-" + skillSuffix(), Scope: identity.TeamScope(teamID)})
+	cleanupSkill(t, db, team.ID)
+	if _, err := st.MoveToTeam(ctx, team.ID, "t-other"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("move team skill = %v, want ErrNotFound", err)
+	}
+
+	sys := putSkill(t, st, Skill{Name: "smv-" + skillSuffix(), Scope: identity.SystemScope()})
+	cleanupSkill(t, db, sys.ID)
+	if _, err := st.MoveToTeam(ctx, sys.ID, teamID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("move system skill = %v, want ErrNotFound", err)
+	}
+
+	if _, err := st.MoveToTeam(ctx, "00000000-0000-0000-0000-000000000000", teamID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("move unknown id = %v, want ErrNotFound", err)
+	}
+}
+
 // TestPGStoreOverrideReview: bumping a system skill flags a same-name user
 // override whose base version is now stale (D16).
 func TestPGStoreOverrideReview(t *testing.T) {

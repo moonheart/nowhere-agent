@@ -30,8 +30,12 @@ type Skill struct {
 	OverridesVersion int
 	// NeedsReview is set when the upstream skill this overrides was updated.
 	NeedsReview bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// Enabled gates agent resolution only: a disabled skill drops out of Get/List
+	// (so the model stops seeing it) but stays visible and editable in the
+	// management surface. Disabling is the reversible alternative to Delete.
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // L0 is the always-resident metadata view of a skill.
