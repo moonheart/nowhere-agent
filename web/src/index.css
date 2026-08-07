@@ -10,7 +10,12 @@
   --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
 
-  font: 18px/145% var(--sans);
+  /* Keep the root at 16px so 1rem = 16px. Tailwind's `--spacing` is 0.25rem
+     and shadcn geometry (the Switch thumb, radii, icon size-*) is tuned for
+     that; an 18px root inflated every rem measurement by 12.5% and broke
+     hard-px-vs-rem components like the Switch. The larger app type lives on
+     `body` below, expressed in rem so it scales correctly. */
+  font-size: 16px;
   letter-spacing: 0.18px;
   /* The app is light-only until something sets .dark (see below). Claiming
      `light dark` here made the browser paint scrollbars and form controls dark
@@ -20,10 +25,6 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
 
   --background: oklch(1 0 0);
 
@@ -97,6 +98,12 @@
 
 body {
   margin: 0;
+  /* App body text at 18px (1.125rem of the 16px root), scaling down on narrow
+     viewports. rem keeps this proportional without touching the rem unit. */
+  font: 1.125rem/145% var(--sans);
+  @media (max-width: 1024px) {
+    font-size: 1rem;
+  }
 }
 
 h1,
