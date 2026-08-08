@@ -241,6 +241,14 @@ func (l *Loop) Tools() *toolruntime.Registry {
 	return l.tools
 }
 
+// Gate returns the tool-authorization policy registered via GateFuncProvider
+// middleware (nil when none). The suspended-batch fold path re-applies it to
+// un-gated sibling calls so a hard-deny that the dispatch screen would have
+// enforced applies identically on resume (the two execution paths must agree).
+func (l *Loop) Gate() GateFunc {
+	return l.gateExecute
+}
+
 // Model returns the model the loop was configured with, for stamping on the run
 // so usage reports can break down by model (enterprise-readiness P1-3).
 func (l *Loop) Model() string { return l.config.Model }

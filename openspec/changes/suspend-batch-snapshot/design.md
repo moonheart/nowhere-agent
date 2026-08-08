@@ -50,7 +50,7 @@ CREATE TABLE suspended_batches (
 
 `FoldBatch` becomes:
 
-1. Load the `suspended_batches` row for `runID`. Missing → error (no heuristic fallback; legacy rows are backfilled at migration, D5).
+1. Load the `suspended_batches` row for `runID`. Missing → error (no heuristic fallback; legacy rows are backfilled at migration, D7).
 2. Rebuild history from `messages`; find the LAST tool_use-bearing assistant message **with RunID == runID** (StoredMessage already carries RunID — scoping makes cross-run pollution structurally impossible).
 3. Validate: the message's tool_use ID set MUST equal `tool_call_ids`. Mismatch → error, nothing executes, nothing persists.
 4. Fold each call: interaction verdicts by ToolCallID; calls without an interaction dispatch via the provided registry (unchanged semantics — but now provably only calls from THIS suspended batch).
@@ -71,13 +71,17 @@ True atomicity of "record final decision + persist tool_result message" is impos
 
 A call whose arguments failed to parse is refused by the loop's dispatch screen ("invalid tool arguments") and gets no interaction row. The parse failure is persisted on the tool_use block (`args_error`) — without it, a nil `ToolInput` is ambiguous with a legitimate no-args call. The fold screens such calls exactly like the loop does: it never dispatches them and folds an `is_error: "invalid tool arguments: ..."` tool_result, while gated siblings still execute per their verdicts.
 
-### D4: Pending-interaction submission gate (durable)
+### D5: Fold re-applies the execution gate to un-gated siblings
+
+"Not gated" ≠ "within policy": the interaction gate suspends only on deny-with-approval-marker (plus ask_user / client tools), so a HARD-denied call (env policy `Deny`, no approval marker) is an un-gated sibling. The loop's dispatch screen would have refused it; if the fold executed it via the bare registry, one policy's outcome would depend on whether the batch happened to contain an approval-gated neighbour. LangGraph avoids this structurally: its HITL middleware never executes tools — execution happens in the downstream tools node through the normal chain on resume. Our fold mirrors that by threading the loop's execution gate (`agent.Loop.Gate()` → `session.ToolGate`) into `FoldBatch`: a denied sibling folds an `is_error: "permission denied: ..."` result and never dispatches. Gated calls skip the re-check — the human verdict supersedes the ask-tier, and the env tier is static config unchanged since suspend. The tool-wrap middleware chain is NOT threaded (no `WrapToolCall` implementation exists; `CallAll` replicates the loop's innermost call exactly); if one is ever added it must be routed into the fold.
+
+### D6: Pending-interaction submission gate (durable)
 
 - `serveChat` (chat submit path) checks `PendingInteractionsForSession(sessionID)` against the STORE (PG — an in-memory check would be wrong in multi-instance deployments where instance B doesn't know instance A's pending cards) before `Submit`. Any pending → 409 with a typed error body (`{"error":"pending_interaction"}`), so the frontend can point at the unresolved card instead of showing a generic conflict.
 - The schedule trigger's submit path (internal/schedule/trigger.go) applies the same check and skips with a log line — a scheduled run must not bury a human's pending approval either.
 - Deliberately reject, not enqueue: while an interaction is pending the model context is incomplete; queueing a user turn would either wait on a human or resume against a stale conversation. Enqueue can be added later as a product decision without changing the gate's mechanics.
 
-### D5: Migration with backfill
+### D7: Migration with backfill
 
 1. Create `suspended_batches`.
 2. Backfill: for every run with pending interactions, find that run's last tool_use-bearing assistant message and insert `(run_id, session_id, seq, ids)`. Runs where no such message exists are unrecoverable under any semantics — their pending interactions are marked rejected ("superseded by migration") so they can't hang a session's submission gate forever.
@@ -92,7 +96,7 @@ A call whose arguments failed to parse is refused by the loop's dispatch screen 
 ## Migration Plan
 
 1. Ship migration (table + backfill) — safe before code: nothing reads the table yet.
-2. Ship backend (D1–D4). Old pending interactions work via backfilled snapshots.
+2. Ship backend (D1–D6). Old pending interactions work via backfilled snapshots.
 3. Ship frontend handling of the typed 409.
 4. Rollback: code rollback only needs to restore the legacy `suspendedToolUses` path (kept behind nothing — it's deleted; rollback = revert commit). The table is additive; no down-migration needed for data safety.
 

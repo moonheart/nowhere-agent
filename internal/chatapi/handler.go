@@ -488,8 +488,11 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	}
 
 	// Batch complete: fold every resolved interaction's tool_result into the
-	// history and start a fresh run to continue the conversation.
-	history, err := h.registry.FoldBatch(r.Context(), sessID, ap2.RunID, loop.Tools())
+	// history and start a fresh run to continue the conversation. The loop's
+	// execution gate rides along so un-gated siblings (including hard-denied
+	// calls, which never become interactions) are re-authorized at fold exactly
+	// as the dispatch screen would have.
+	history, err := h.registry.FoldBatch(r.Context(), sessID, ap2.RunID, loop.Tools(), session.ToolGate(loop.Gate()))
 	if err != nil {
 		writeSSEError(w, err.Error())
 		return

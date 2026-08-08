@@ -304,6 +304,13 @@ func (rg *RunRegistry) RecordDecision(ctx context.Context, approvalID string, ap
 	return ap, len(pending) == 0, nil
 }
 
+// ToolGate authorizes one tool at fold time — the same policy the loop's
+// dispatch screen (gateExecute) applies, threaded into the fold so the two
+// execution paths agree. (deny, reason) blocks the call; the reason is folded
+// back as an is_error result, mirroring the loop's "permission denied" result.
+// Nil means no gate (tests / policy-free deployments).
+type ToolGate func(ctx context.Context, tool toolruntime.Tool) (deny bool, reason string)
+
 // FoldBatch folds every interaction of one run (one gated batch) into a single
 // user message carrying each call's tool_result, persists it, and returns the
 // rebuilt history for a FRESH run to continue the conversation. Call it only
@@ -322,8 +329,9 @@ func (rg *RunRegistry) RecordDecision(ctx context.Context, approvalID string, ap
 // batch re-executes nothing and returns the rebuilt history.
 //
 // tools may be nil only when no fold can require execution (all rejected /
-// ask_user / skipped).
-func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, tools *toolruntime.Registry) ([]provider.Message, error) {
+// ask_user / skipped). gate re-authorizes the un-gated sibling calls (see the
+// dispatch branch below); pass nil only when the caller has no policy.
+func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, tools *toolruntime.Registry, gate ToolGate) ([]provider.Message, error) {
 	snap, err := rg.rt.store.SuspendedBatchForRun(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("fold batch: %w", err)
@@ -372,17 +380,22 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 	// plain reads doesn't serialize.
 	//
 	// Execution contract: the fold dispatches through the bare tool registry
-	// (CallAll), NOT the loop's chainTool/gateExecute chain. This is safe today
-	// because no middleware implements WrapToolCall and CallAll replicates the
-	// loop's innermost realToolCall exactly (call-id ctx for progress nesting,
-	// per-tool timeout, unknown-tool guard), and it is semantically right for
-	// gated calls — the human verdict IS the authorization, re-running the
-	// execution gate would second-guess it. Known narrow window: an un-gated
-	// sibling executes under the policy as of suspend time; if the session's
-	// permission mode tightened while the batch hung, the fold does not
-	// re-evaluate it. If a WrapToolCall middleware is ever added, it must be
+	// (CallAll), NOT the loop's chainTool wrap chain — safe because no middleware
+	// implements WrapToolCall and CallAll replicates the loop's innermost
+	// realToolCall exactly (call-id ctx for progress nesting, per-tool timeout,
+	// unknown-tool guard). If a WrapToolCall middleware is ever added, it must be
 	// routed into the fold too — add an executor hook here rather than calling
 	// the registry directly.
+	//
+	// The EXECUTION gate, by contrast, is re-applied here (the gate parameter):
+	// "not gated" only means the call did not need human input — the interaction
+	// gate suspends solely on deny-with-approval-marker, ask_user, and client
+	// tools, so a HARD-DENIED call (env policy Deny, no approval marker) is an
+	// un-gated sibling too. The loop's dispatch screen would have refused it;
+	// without the re-check the fold would execute it, making one policy's
+	// outcome depend on whether the batch happened to contain an approval-gated
+	// neighbour. Gated calls skip the re-check: the human verdict supersedes
+	// the ask-tier (the env tier is static config, unchanged since suspend).
 	resultMsg := provider.Message{Role: provider.RoleUser}
 	results := make([]toolruntime.Result, len(allCalls))
 	var dispatchIdx []int
@@ -397,6 +410,19 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 		}
 		ap, gated := byCall[c.ID]
 		if !gated {
+			// Re-apply the execution gate to siblings (see the contract above):
+			// a hard-denied call never becomes an interaction, so this is the
+			// only screen it gets on the resume path. Mirrors the loop's
+			// dispatch: the gate only runs for a resolvable tool (the registry's
+			// own guard answers unknown names).
+			if gate != nil {
+				if tool, ok := tools.Get(c.Name); ok {
+					if deny, reason := gate(ctx, tool); deny {
+						results[i] = toolruntime.Result{Content: "permission denied: " + reason, IsError: true}
+						continue
+					}
+				}
+			}
 			dispatchIdx = append(dispatchIdx, i)
 			dispatchCalls = append(dispatchCalls, c)
 			continue
@@ -511,7 +537,7 @@ func suspendedBatchCalls(stored []StoredMessage, runID string, snap SuspendedBat
 // the row decided and, when the batch is complete (the usual case for a single
 // gated call), folds the batch and returns the resume history. When siblings are
 // still pending it returns nil history — the caller must not resume yet.
-func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, result json.RawMessage, tools *toolruntime.Registry) (Interaction, []provider.Message, error) {
+func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, result json.RawMessage, tools *toolruntime.Registry, gate ToolGate) (Interaction, []provider.Message, error) {
 	ap, complete, err := rg.RecordDecision(ctx, approvalID, approve, result)
 	if err != nil {
 		return Interaction{}, nil, err
@@ -519,7 +545,7 @@ func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bo
 	if !complete {
 		return ap, nil, nil
 	}
-	history, err := rg.FoldBatch(ctx, ap.SessionID, ap.RunID, tools)
+	history, err := rg.FoldBatch(ctx, ap.SessionID, ap.RunID, tools, gate)
 	if err != nil {
 		return Interaction{}, nil, err
 	}

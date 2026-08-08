@@ -55,7 +55,7 @@ func TestDecideClientToolValidOutput(t *testing.T) {
 	ap, reg := seedClientToolRun(t, rg, ms, sess)
 
 	result := json.RawMessage(`{"output":{"text":"copied text"}}`)
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestDecideClientToolInvalidOutput(t *testing.T) {
 
 	// Missing the required "text" property.
 	result := json.RawMessage(`{"output":{"wrong":123}}`)
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestDecideClientToolReportedError(t *testing.T) {
 	ap, reg := seedClientToolRun(t, rg, ms, sess)
 
 	result := json.RawMessage(`{"error":"clipboard access denied"}`)
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestDecideUnknownKindErrors(t *testing.T) {
 	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Interaction{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "mystery", Kind: "mystery_kind",
 	})
-	if _, _, err := rg.Decide(context.Background(), ap.ID, true, nil, nil); err == nil {
+	if _, _, err := rg.Decide(context.Background(), ap.ID, true, nil, nil, nil); err == nil {
 		t.Fatal("an unregistered interaction kind should error, not silently fold")
 	}
 }
@@ -129,7 +129,7 @@ func TestRegisterInteractionHandlerOverride(t *testing.T) {
 		return toolruntime.Result{Content: "custom fold for " + in.ToolName}, nil
 	}))
 
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, nil, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}

@@ -100,7 +100,7 @@ func TestRegistryBatchDecisionFlow(t *testing.T) {
 
 	// Fold the whole batch: one user message with BOTH tool_results (approve → the
 	// executed result; reject → an is_error denial), matching the two tool_uses.
-	history, err := rg.FoldBatch(context.Background(), sess.ID, run.ID, loop.Tools())
+	history, err := rg.FoldBatch(context.Background(), sess.ID, run.ID, loop.Tools(), nil)
 	if err != nil {
 		t.Fatalf("FoldBatch: %v", err)
 	}
