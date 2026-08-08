@@ -88,6 +88,11 @@ type AfterRunHook interface {
 // general interrupt) and the execution gate (any other deny blocks dispatch,
 // feeding the reason back to the model). A middleware supplies the policy by
 // exposing GateFuncProvider.
+//
+// The execution gate consults the func from the dispatch fan-out, so the SAME
+// func runs concurrently across a batch's goroutines: it must be safe for
+// concurrent use and carry no per-call mutable state (resolve run-scoped
+// inputs from the ctx, as the permission middleware does).
 type GateFunc func(ctx context.Context, tool toolruntime.Tool) (bool, string)
 
 // GateFuncProvider supplies the tool-authorization policy to the loop. The loop

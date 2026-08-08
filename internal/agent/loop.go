@@ -290,7 +290,8 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	// provider rejects outright. Re-running the repair every iteration is wasted
 	// work — the loop keeps the tail it produces paired by construction (every
 	// tool batch is answered by recordToolResults on every path that continues
-	// the run: dispatch, pre-dispatch cancel, truncation, unreported stop), so
+	// or ends the run: dispatch, pre-dispatch cancel, truncation, unreported
+	// stop, interrupt-emit failure), so
 	// the per-iteration rebuild only re-copied every block without ever
 	// changing anything (O(iterations × messages) over a long agentic run).
 	base := contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), state.Produced...))
@@ -396,7 +397,17 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				_ = emit.Emit(ctx, KindError, stopErr.Error())
 				return state.Produced, stopErr
 			}
-			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", state.Usage.InputTokens, "output_tokens", state.Usage.OutputTokens,
+			// Honour a cancellation that landed while the final answer streamed: the
+		// answer is complete and already durable, but the caller asked to stop —
+		// report the run cancelled, symmetric with the pre-dispatch guard below
+		// and the iteration guard above.
+		if err := ctx.Err(); err != nil {
+			l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
+			l.reportTerminal(ctx, state)
+			_ = emit.Emit(ctx, KindCancelled, nil)
+			return state.Produced, err
+		}
+		slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", state.Usage.InputTokens, "output_tokens", state.Usage.OutputTokens,
 				"cache_read_tokens", state.Usage.CacheReadTokens, "cache_write_tokens", state.Usage.CacheWriteTokens, "cache_hit_pct", cacheHitPct(state.Usage))
 			l.emitStepFinish(ctx, emit, res, "stop", false)
 			l.runAfterRun(ctx, state)
@@ -478,19 +489,28 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			// any emit fails — or the client disconnected — fail the run rather than
 			// ending it "done" with prompts the client can act on but nothing backing
 			// them (which would 404 on resume).
-			// Settle the run like every other failure path — close the step, fire
-			// AfterRun (usage), and surface a terminal error frame — rather than
-			// returning bare. Any Interaction rows the earlier emits already
-			// persisted are voided by the run worker (a failed run never waits on
-			// client input), so the session's pending-interaction gate clears.
-			for _, gate := range gated {
-				if err := emit.Emit(ctx, KindInterrupt, *gate); err != nil {
-					l.emitStepFinish(ctx, emit, res, "error", false)
-					l.runAfterRun(ctx, state)
-					_ = emit.Emit(ctx, KindError, err.Error())
-					return state.Produced, err
-				}
+		// Settle the run like every other failure path — close the step, fire
+		// AfterRun (usage), and surface a terminal error frame — rather than
+		// returning bare. Any Interaction rows the earlier emits already
+		// persisted are voided by the run worker (a failed run never waits on
+		// client input), so the session's pending-interaction gate clears.
+		//
+		// Answer the batch BEFORE failing: the assistant message carrying these
+		// tool_use blocks is already durable (KindMessage above), and the
+		// suspended calls will never be dispatched or verdict-folded now, so
+		// without a recorded tool_result the durable record keeps a permanently
+		// unpaired tool_use and every later send papers over the gap with the
+		// transient EnsurePairing repair (same rationale as the pre-dispatch
+		// cancel guard above).
+		for _, gate := range gated {
+			if err := emit.Emit(ctx, KindInterrupt, *gate); err != nil {
+				l.recordToolResults(ctx, emit, state, res.Calls, interruptFailedCallResults(res.Calls))
+				l.emitStepFinish(ctx, emit, res, "error", false)
+				l.runAfterRun(ctx, state)
+				_ = emit.Emit(ctx, KindError, err.Error())
+				return state.Produced, err
 			}
+		}
 			slog.Info("agent: run ended awaiting client interactions", "batch", len(gated), "first_tool", gated[0].ToolName, "first_kind", gated[0].Kind)
 			l.emitStepFinish(ctx, emit, res, "tool-calls", false)
 			l.runAfterRun(ctx, state)
@@ -1044,6 +1064,22 @@ func unknownStopCallResults(calls []toolruntime.Call) []toolruntime.Result {
 	for i := range results {
 		results[i] = toolruntime.Result{
 			Content: "not executed: the provider closed the stream without reporting a finish reason, so this tool call may be incomplete. Re-issue the call with complete arguments.",
+			IsError: true,
+		}
+	}
+	return results
+}
+
+// interruptFailedCallResults answers every call in a gated batch whose
+// interrupt frame failed to persist/publish: the run ends abnormally and no
+// client verdict will ever arrive, so the durable tool_use must still be
+// paired with a tool_result naming the non-execution — the model reads these
+// on a later turn and must not assume the gated side effects happened.
+func interruptFailedCallResults(calls []toolruntime.Call) []toolruntime.Result {
+	results := make([]toolruntime.Result, len(calls))
+	for i := range results {
+		results[i] = toolruntime.Result{
+			Content: "not executed: the run ended abnormally while requesting client input for this tool call. Re-issue the call to try again.",
 			IsError: true,
 		}
 	}

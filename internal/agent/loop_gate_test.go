@@ -244,7 +244,7 @@ func TestLoopInterruptEmitFailureSettlesRun(t *testing.T) {
 	loop.Use(&PermissionMW{Check: askAll})
 
 	emit := &failNthInterruptEmitter{failOn: 2, err: errors.New("interaction store down")}
-	_, err := loop.Run(context.Background(), nil, emit)
+	produced, err := loop.Run(context.Background(), nil, emit)
 	if err == nil {
 		t.Fatal("a failed interrupt emit must fail the run")
 	}
@@ -262,6 +262,26 @@ func TestLoopInterruptEmitFailureSettlesRun(t *testing.T) {
 	}
 	if len(emit.finishes) != 1 || emit.finishes[0].FinishReason != "error" || emit.finishes[0].IsContinued {
 		t.Errorf("finishes = %+v, want one error/not-continued step finish", emit.finishes)
+	}
+	// Pairing invariant: the assistant tool_use message is already durable by
+	// this point, and the gated calls will never be dispatched or
+	// verdict-folded — the failure path must still record a tool_result for
+	// every call, or the durable record keeps a permanently unpaired tool_use.
+	if got := emit.count(KindToolResult); got != 2 {
+		t.Errorf("KindToolResult = %d, want 2 (both gated calls answered)", got)
+	}
+	if len(produced) != 2 {
+		t.Fatalf("produced %d messages, want [assistant tool_use, tool_result]", len(produced))
+	}
+	res := produced[1]
+	if len(res.Content) != 2 {
+		t.Fatalf("tool_result message = %+v, want 2 blocks", res.Content)
+	}
+	for i, id := range []string{"tu1", "tu2"} {
+		b := res.Content[i]
+		if b.Type != provider.BlockToolResult || b.ToolResultID != id || !b.IsError {
+			t.Errorf("tool_result[%d] = %+v, want an is_error result answering %s", i, b, id)
+		}
 	}
 }
 
