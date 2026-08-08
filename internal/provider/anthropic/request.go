@@ -107,13 +107,21 @@ func buildRequest(r provider.Request) apiRequest {
 		req.ToolChoice = &apiToolChoice{Type: "tool", Name: jr.Name}
 	}
 
-	// Messages.
+	// Messages. Consecutive user messages are merged into one (their content
+	// blocks concatenate): compression summaries and memory injection can both
+	// produce adjacent user-role messages, which Anthropic-compatible endpoints
+	// may reject as a malformed user/assistant alternation. Assistant messages
+	// are never merged — a thinking block must stay the first block of its
+	// message.
 	req.Messages = make([]apiMessage, 0, len(r.Messages))
 	for _, m := range r.Messages {
-		req.Messages = append(req.Messages, apiMessage{
-			Role:    string(m.Role),
-			Content: convertBlocks(m.Content),
-		})
+		role := string(m.Role)
+		blocks := convertBlocks(m.Content)
+		if n := len(req.Messages); n > 0 && role == string(provider.RoleUser) && req.Messages[n-1].Role == role {
+			req.Messages[n-1].Content = append(req.Messages[n-1].Content, blocks...)
+			continue
+		}
+		req.Messages = append(req.Messages, apiMessage{Role: role, Content: blocks})
 	}
 	return req
 }

@@ -157,6 +157,73 @@ func TestOverflowMWPreservesSummaryOnRetry(t *testing.T) {
 	}
 }
 
+// TestOverflowMWAdvancesCompressionCache pins the cache/drop interaction: the
+// rounds the overflow retry drops from an already-compressed view must advance
+// the run's compression cache, or the next iteration's hysteresis rebuild
+// would resurrect them from durable history.
+func TestOverflowMWAdvancesCompressionCache(t *testing.T) {
+	mw := &OverflowMW{MaxRetries: 3}
+	calls := 0
+	handler := func(_ context.Context, c *ModelCall) (ModelResult, error) {
+		calls++
+		if calls < 3 {
+			return ModelResult{}, &provider.ContextOverflowError{StatusCode: 413, Body: "too large"}
+		}
+		return ModelResult{Assistant: provider.TextMessage(provider.RoleAssistant, "ok")}, nil
+	}
+	state := &RunState{compressCache: &contextmgmt.CompressionCache{Covered: 1, CoveredBytes: 1, Summary: "S"}}
+	call := &ModelCall{
+		View: []provider.Message{
+			contextmgmt.SummaryMessage("S"),
+			provider.TextMessage(provider.RoleUser, strings.Repeat("a", 200)),
+			provider.TextMessage(provider.RoleUser, strings.Repeat("b", 200)),
+			provider.TextMessage(provider.RoleUser, strings.Repeat("c", 200)),
+		},
+		State: state,
+	}
+	call.Request.Messages = call.View
+	if _, err := mw.WrapModelCall(context.Background(), call, handler); err != nil {
+		t.Fatalf("overflow should be retried to success: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("handler called %d times, want 3", calls)
+	}
+	// Two rounds dropped across the two retries: coverage 1 → 3.
+	if state.compressCache.Covered != 3 {
+		t.Errorf("cache.Covered = %d, want 3 (1 + 2 dropped rounds)", state.compressCache.Covered)
+	}
+}
+
+// TestOverflowMWInvalidatesCacheWhenSummaryDropped: the last-resort plain drop
+// takes the summary itself — the cache no longer describes the view and must
+// be rebuilt from scratch next iteration.
+func TestOverflowMWInvalidatesCacheWhenSummaryDropped(t *testing.T) {
+	mw := &OverflowMW{MaxRetries: 3}
+	calls := 0
+	handler := func(_ context.Context, c *ModelCall) (ModelResult, error) {
+		calls++
+		if calls < 2 {
+			return ModelResult{}, &provider.ContextOverflowError{StatusCode: 413, Body: "too large"}
+		}
+		return ModelResult{Assistant: provider.TextMessage(provider.RoleAssistant, "ok")}, nil
+	}
+	state := &RunState{compressCache: &contextmgmt.CompressionCache{Covered: 1, CoveredBytes: 1, Summary: "S"}}
+	call := &ModelCall{
+		View: []provider.Message{
+			contextmgmt.SummaryMessage("S"),
+			provider.TextMessage(provider.RoleUser, strings.Repeat("a", 200)),
+		},
+		State: state,
+	}
+	call.Request.Messages = call.View
+	if _, err := mw.WrapModelCall(context.Background(), call, handler); err != nil {
+		t.Fatalf("overflow should be retried to success: %v", err)
+	}
+	if state.compressCache.Covered != 0 || state.compressCache.Summary != "" {
+		t.Errorf("cache = %+v, want invalidated after the summary was dropped", state.compressCache)
+	}
+}
+
 func TestOverflowMWBounded(t *testing.T) {
 	mw := &OverflowMW{MaxRetries: 3}
 	calls := 0
@@ -177,22 +244,20 @@ func TestOverflowMWBounded(t *testing.T) {
 func TestMemoryInjectMWAppendsOnlyToView(t *testing.T) {
 	inj := &fakeInjector{extra: []provider.Message{provider.TextMessage(provider.RoleUser, "[mem] dark mode")}}
 	mw := &MemoryInjectMW{Injector: inj, SessionID: "sess-1"}
-	var got *ModelCall
 	base := []provider.Message{provider.TextMessage(provider.RoleUser, "hello")}
-	call := &ModelCall{View: append([]provider.Message{}, base...)}
-	call.Request.Messages = call.View
+	state := &RunState{View: append([]provider.Message{}, base...)}
 
-	if _, err := mw.WrapModelCall(context.Background(), call, okHandler(&got)); err != nil {
+	if err := mw.BeforeModel(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
 	if !inj.injected || inj.gotSess != "sess-1" {
 		t.Fatalf("injector not called with sess-1: %+v", inj)
 	}
-	if len(got.View) != 2 {
-		t.Fatalf("view = %d msgs, want 2 (base + injected)", len(got.View))
+	if len(state.View) != 2 {
+		t.Fatalf("view = %d msgs, want 2 (base + injected)", len(state.View))
 	}
-	if got.View[len(got.View)-1].Content[0].Text != "[mem] dark mode" {
-		t.Errorf("last view msg = %q, want injected memory", got.View[len(got.View)-1].Content[0].Text)
+	if state.View[len(state.View)-1].Content[0].Text != "[mem] dark mode" {
+		t.Errorf("last view msg = %q, want injected memory", state.View[len(state.View)-1].Content[0].Text)
 	}
 	// The caller's original base slice is untouched (copy-on-write preserved).
 	if len(base) != 1 {
@@ -202,14 +267,12 @@ func TestMemoryInjectMWAppendsOnlyToView(t *testing.T) {
 
 func TestMemoryInjectMWEmptyIsNoop(t *testing.T) {
 	mw := &MemoryInjectMW{Injector: &fakeInjector{extra: nil}, SessionID: "s"}
-	var got *ModelCall
-	call := &ModelCall{View: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}}
-	call.Request.Messages = call.View
-	if _, err := mw.WrapModelCall(context.Background(), call, okHandler(&got)); err != nil {
+	state := &RunState{View: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")}}
+	if err := mw.BeforeModel(context.Background(), state); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.View) != 1 {
-		t.Errorf("empty injection must leave view unchanged, got %d", len(got.View))
+	if len(state.View) != 1 {
+		t.Errorf("empty injection must leave view unchanged, got %d", len(state.View))
 	}
 }
 

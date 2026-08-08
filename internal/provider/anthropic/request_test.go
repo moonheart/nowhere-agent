@@ -21,6 +21,40 @@ func TestBuildRequestBasics(t *testing.T) {
 	}
 }
 
+func TestBuildRequestMergesConsecutiveUserMessages(t *testing.T) {
+	req := buildRequest(provider.Request{
+		Model: "m", MaxTokens: 1,
+		Messages: []provider.Message{
+			provider.TextMessage(provider.RoleUser, "[Earlier conversation summarized]\nS"),
+			provider.TextMessage(provider.RoleUser, "first"),
+			provider.TextMessage(provider.RoleAssistant, "reply"),
+			provider.TextMessage(provider.RoleUser, "second"),
+		},
+	})
+	if len(req.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3 (leading user pair merged): %+v", len(req.Messages), req.Messages)
+	}
+	if req.Messages[0].Role != "user" || len(req.Messages[0].Content) != 2 {
+		t.Errorf("merged user message must carry both text blocks: %+v", req.Messages[0])
+	}
+	if req.Messages[1].Role != "assistant" || req.Messages[2].Role != "user" {
+		t.Errorf("roles = %q/%q/%q, want user/assistant/user",
+			req.Messages[0].Role, req.Messages[1].Role, req.Messages[2].Role)
+	}
+
+	// Assistant messages are never merged (thinking must stay first).
+	two := buildRequest(provider.Request{
+		Model: "m", MaxTokens: 1,
+		Messages: []provider.Message{
+			provider.TextMessage(provider.RoleAssistant, "a"),
+			provider.TextMessage(provider.RoleAssistant, "b"),
+		},
+	})
+	if len(two.Messages) != 2 {
+		t.Errorf("assistant messages = %d, want 2 (never merged)", len(two.Messages))
+	}
+}
+
 func TestBuildRequestSystemCachePoint(t *testing.T) {
 	withCache := buildRequest(provider.Request{
 		Model: "m", MaxTokens: 1, System: "sys", CacheablePrefix: true,

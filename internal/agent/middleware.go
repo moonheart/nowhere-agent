@@ -290,6 +290,22 @@ func (m *OverflowMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 		if !ok {
 			break // nothing safe left to drop
 		}
+		// Keep the compression cache aligned with what is actually sent:
+		// rounds dropped here must not re-enter the view next iteration via
+		// the cache's hysteresis rebuild (which re-derives the view from
+		// durable history). If the summary itself was dropped, the cache no
+		// longer describes the view at all and must be rebuilt from scratch.
+		if c.State != nil && c.State.compressCache != nil && c.State.compressCache.Covered > 0 &&
+			len(c.View) > 0 && contextmgmt.IsSummary(c.View[0]) {
+			cache := c.State.compressCache
+			if len(shrunk) > 0 && contextmgmt.IsSummary(shrunk[0]) {
+				if n := len(c.View) - len(shrunk); n > 0 {
+					cache.Advance(c.View[1 : 1+n])
+				}
+			} else {
+				cache.Invalidate()
+			}
+		}
 		c.View = shrunk
 		c.Request.Messages = shrunk
 		res, err = next(ctx, c)
@@ -298,9 +314,13 @@ func (m *OverflowMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 }
 
 // MemoryInjectMW surfaces newly-created long-term memories into the outgoing
-// view (WrapModelCall). The injected messages append to the transient view
-// copy only — never to the durable record — keeping the durable history
-// append-only and the prompt-caching prefix byte-stable.
+// view (BeforeModel). It runs BEFORE the wrap chain — i.e. before compression —
+// so the injected memories are counted against the context budget instead of
+// inflating the request past it, and so they ride inside the compressed view
+// rather than vanishing when compression rebuilds it. The injected messages
+// append to the per-iteration transient view only — never to the durable
+// record — keeping the durable history append-only and the prompt-caching
+// prefix byte-stable.
 type MemoryInjectMW struct {
 	Injector  MemoryInjector
 	SessionID string
@@ -308,22 +328,21 @@ type MemoryInjectMW struct {
 
 func (m *MemoryInjectMW) MiddlewareName() string { return "memory-inject" }
 
-func (m *MemoryInjectMW) WrapModelCall(ctx context.Context, c *ModelCall, next ModelHandler) (ModelResult, error) {
+func (m *MemoryInjectMW) BeforeModel(ctx context.Context, s *RunState) error {
 	if m.Injector == nil {
-		return next(ctx, c)
+		return nil
 	}
-	extra, err := m.Injector.Inject(ctx, m.SessionID, c.View)
+	extra, err := m.Injector.Inject(ctx, m.SessionID, s.View)
 	if err != nil {
 		slog.Warn("agent: memory injection failed; continuing without it", "err", err)
-		return next(ctx, c)
+		return nil
 	}
 	if len(extra) > 0 {
-		// c.View is already a per-attempt copy, so appending here never touches
-		// the durable record.
-		c.View = append(c.View, extra...)
-		c.Request.Messages = c.View
+		// s.View is rebuilt from the durable record every iteration, so
+		// appending here never touches it.
+		s.View = append(s.View, extra...)
 	}
-	return next(ctx, c)
+	return nil
 }
 
 // ImageMW materializes image blocks (path → base64) before the send
