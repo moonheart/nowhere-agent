@@ -121,9 +121,10 @@ func TestCompressWithCacheExtendsIncrementally(t *testing.T) {
 
 func TestCompressPostCheckDropsOversizedKeptRounds(t *testing.T) {
 	// KeepRecent rounds are themselves over budget: the summary alone cannot
-	// fix that, so the post-check hard-drops oldest rounds — but stops at
-	// summary + newest round rather than strip the only record of the past
-	// (a residual oversize there is the overflow fallback's job).
+	// fix that, so the post-check hard-drops oldest rounds — down to the
+	// summary alone. Handing an over-budget view on would make the overflow
+	// fallback take the summary (the only record of the past), forcing a full
+	// re-summarize next iteration that overflows again.
 	p := Policy{MaxTokens: 20, Threshold: 0.8, KeepRecent: 2}
 	c := &countingCompressor{}
 	h := bigHistory(6, 150) // est 225 > 16; each msg 150 bytes → 37 tokens
@@ -131,14 +132,11 @@ func TestCompressPostCheckDropsOversizedKeptRounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out) != 2 {
-		t.Errorf("view = %d msgs, want 2 (summary + newest round)", len(out))
+	if len(out) != 1 {
+		t.Errorf("view = %d msgs, want 1 (summary alone)", len(out))
 	}
 	if !IsSummary(out[0]) {
 		t.Error("hard-drop must preserve the summary")
-	}
-	if out[1].Content[0].Text != h[5].Content[0].Text {
-		t.Error("the newest round must be kept")
 	}
 }
 
@@ -195,6 +193,37 @@ func TestCompressWithCacheAdvancesPastHardDroppedRounds(t *testing.T) {
 	}
 }
 
+// TestCompressWithCacheReusesSummaryWhenPrefixUnchanged: the cache covers the
+// whole split region and only the kept tail grew past the budget. The summary
+// must be reused without a summarizer call — re-summarizing the byte-identical
+// prefix would cost O(total) for the same text; the post-check drops from the
+// tail instead.
+func TestCompressWithCacheReusesSummaryWhenPrefixUnchanged(t *testing.T) {
+	p := Policy{MaxTokens: 100, Threshold: 0.8, KeepRecent: 2}
+	c := &countingCompressor{}
+	h := bigHistory(6, 400) // est 600 > 80 → compress; splitIdx = 4
+	cache := &CompressionCache{
+		Covered:      4,
+		CoveredBytes: contentBytes(h[:4]),
+		Summary:      "CACHED",
+	}
+	out, err := CompressWithCache(context.Background(), h, p, c, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.calls != 0 {
+		t.Errorf("summarizer called %d times for an unchanged prefix, want 0", c.calls)
+	}
+	if !IsSummary(out[0]) || !strings.Contains(out[0].Content[0].Text, "CACHED") {
+		t.Error("view must lead with the reused cached summary")
+	}
+	// The kept tail (2 msgs of 400 bytes ≈ 200 tokens) busts the budget alone,
+	// so the post-check hard-drops down to the summary.
+	if len(out) != 1 {
+		t.Errorf("view = %d msgs, want 1 (summary alone after tail hard-drop)", len(out))
+	}
+}
+
 func TestCompressionCacheAdvance(t *testing.T) {
 	h := bigHistory(6, 100)
 	cache := &CompressionCache{Covered: 2, CoveredBytes: contentBytes(h[:2]), Summary: "S"}
@@ -208,6 +237,26 @@ func TestCompressionCacheAdvance(t *testing.T) {
 	cache.Invalidate()
 	if cache.Covered != 0 || cache.CoveredBytes != 0 || cache.Summary != "" {
 		t.Error("Invalidate must reset the cache")
+	}
+}
+
+// TestEstimateOverheadCountsSystemAndTools: the fixed request envelope —
+// system prompt and tool schemas — must be estimable so the compression
+// budget can subtract it; without it the trigger ignores everything outside
+// the message view.
+func TestEstimateOverheadCountsSystemAndTools(t *testing.T) {
+	if got := EstimateOverhead("", nil); got != 0 {
+		t.Errorf("empty overhead = %d, want 0", got)
+	}
+	sys := strings.Repeat("s", 4000)
+	tools := []provider.ToolDefinition{{
+		Name:        "write_file",
+		Description: strings.Repeat("d", 400),
+		InputSchema: map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}},
+	}}
+	got := EstimateOverhead(sys, tools)
+	if got < 1100 { // 4000+400+schema bytes ≈ 4500+ chars ≈ 1100+ tokens
+		t.Errorf("overhead = %d, want >= 1100 (system + tool schema must count)", got)
 	}
 }
 

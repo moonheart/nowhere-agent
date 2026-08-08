@@ -122,3 +122,20 @@ func TestLLMCompressorStreamError(t *testing.T) {
 		t.Error("expected mid-stream error to propagate")
 	}
 }
+
+// TestLLMCompressorTruncatedSummaryFails: a summary cut off at max_tokens ends
+// mid-thought (the tail carries "current state and next step"); it must
+// surface as an error — the caller falls back to the uncompressed view —
+// rather than be cached as a complete summary.
+func TestLLMCompressorTruncatedSummaryFails(t *testing.T) {
+	fa := &fakeAdapter{events: []provider.Event{
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "half a sum"},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop, StopReason: provider.StopMaxTokens},
+	}}
+	c := NewLLMCompressor(fa, "m")
+	if _, err := c.Summarize(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "x")}); err == nil {
+		t.Error("truncated summary must surface as an error")
+	}
+}

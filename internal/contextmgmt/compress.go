@@ -27,46 +27,52 @@ type Policy struct {
 	KeepRecent int
 }
 
-// estimateTokens approximates the token count of a message set. ASCII text
-// averages ~4 chars/token, but a non-ASCII rune (CJK, most accented scripts)
-// averages ~1 token — the old flat bytes/4 under-read CJK by ~2-3x, so
-// compression triggered too late and the overflow fallback had to rescue the
-// request by silently dropping rounds.
-func estimateTokens(msgs []provider.Message) int {
-	ascii, nonASCII := 0, 0
-	count := func(s string) {
-		for _, r := range s {
-			if r < utf8.RuneSelf {
-				ascii++
-			} else {
-				nonASCII++
-			}
+// tokenCounter accumulates ASCII/non-ASCII rune counts for the package's
+// token heuristic: ASCII text averages ~4 chars/token, but a non-ASCII rune
+// (CJK, most accented scripts) averages ~1 token — the old flat bytes/4
+// under-read CJK by ~2-3x, so compression triggered too late and the overflow
+// fallback had to rescue the request by silently dropping rounds.
+type tokenCounter struct{ ascii, nonASCII int }
+
+func (c *tokenCounter) add(s string) {
+	for _, r := range s {
+		if r < utf8.RuneSelf {
+			c.ascii++
+		} else {
+			c.nonASCII++
 		}
 	}
+}
+
+func (c *tokenCounter) tokens() int { return c.ascii/4 + c.nonASCII }
+
+// estimateTokens approximates the token count of a message set.
+func estimateTokens(msgs []provider.Message) int {
+	var c tokenCounter
 	for _, m := range msgs {
 		for _, b := range m.Content {
-			count(b.Text)
-			count(b.Thinking)
-			count(b.ToolContent)
-			count(b.ToolName)
-			count(b.ArgsError)
+			c.add(b.Text)
+			c.add(b.Thinking)
+			c.add(b.ToolContent)
+			c.add(b.ToolName)
+			c.add(b.ArgsError)
 			for k, v := range b.ToolInput {
-				count(k)
+				c.add(k)
 				if raw, err := json.Marshal(v); err == nil {
-					ascii += 8 // per-key overhead, mirroring contentBytes
-					count(string(raw))
+					c.ascii += 8 // per-key overhead, mirroring contentBytes
+					c.add(string(raw))
 				}
 			}
 			if b.Type == provider.BlockImage {
 				if len(b.ImageData) > 0 {
-					ascii += len(b.ImageData)
+					c.ascii += len(b.ImageData)
 				} else {
-					ascii += imageRefBytes
+					c.ascii += imageRefBytes
 				}
 			}
 		}
 	}
-	return ascii/4 + nonASCII
+	return c.tokens()
 }
 
 // imageRefBytes is the conservative byte estimate for a path-only image block
@@ -106,6 +112,26 @@ func contentBytes(msgs []provider.Message) int {
 // (design D5) using the same heuristic compression triggers on.
 func EstimateTokens(msgs []provider.Message) int {
 	return estimateTokens(msgs)
+}
+
+// EstimateOverhead approximates the token cost of a request's fixed envelope —
+// the system prompt and the tool schemas — which rides on every provider call
+// but lives outside the message view, so estimateTokens never sees it. The
+// compression budget must subtract it, or an agent whose system+tools eat a
+// large share of the window triggers compression late and the overflow
+// fallback has to rescue the request by dropping rounds.
+func EstimateOverhead(system string, tools []provider.ToolDefinition) int {
+	var c tokenCounter
+	c.add(system)
+	for _, t := range tools {
+		c.add(t.Name)
+		c.add(t.Description)
+		c.ascii += 16 // per-tool JSON envelope
+		if raw, err := json.Marshal(t.InputSchema); err == nil {
+			c.add(string(raw))
+		}
+	}
+	return c.tokens()
 }
 
 // ShouldCompress reports whether the history exceeds the trigger threshold.
@@ -230,18 +256,28 @@ func CompressWithCache(ctx context.Context, history []provider.Message, p Policy
 		}
 	}
 
-	// Incremental extension: summarize the previous summary plus only the
-	// rounds dropped since, instead of re-reading the whole dropped prefix.
-	toSummarize := history[:splitIdx]
-	if cacheValid && cache.Covered < splitIdx {
-		toSummarize = make([]provider.Message, 0, splitIdx-cache.Covered+1)
-		toSummarize = append(toSummarize, SummaryMessage(cache.Summary))
-		toSummarize = append(toSummarize, history[cache.Covered:splitIdx]...)
-	}
+	var summary string
+	if cacheValid && cache.Covered == splitIdx {
+		// The summarized region is byte-identical to what the cache covers and
+		// only the kept tail grew past the budget: re-summarizing the same
+		// prefix costs O(total) for the same text. Reuse the cached summary and
+		// let shrinkToBudget hard-drop from the tail instead.
+		summary = cache.Summary
+	} else {
+		// Incremental extension: summarize the previous summary plus only the
+		// rounds dropped since, instead of re-reading the whole dropped prefix.
+		toSummarize := history[:splitIdx]
+		if cacheValid && cache.Covered < splitIdx {
+			toSummarize = make([]provider.Message, 0, splitIdx-cache.Covered+1)
+			toSummarize = append(toSummarize, SummaryMessage(cache.Summary))
+			toSummarize = append(toSummarize, history[cache.Covered:splitIdx]...)
+		}
 
-	summary, err := c.Summarize(ctx, toSummarize)
-	if err != nil {
-		return nil, err
+		var err error
+		summary, err = c.Summarize(ctx, toSummarize)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if cache != nil {
 		cache.Covered = splitIdx
@@ -253,15 +289,29 @@ func CompressWithCache(ctx context.Context, history []provider.Message, p Policy
 	out = append(out, SummaryMessage(summary))
 	out = append(out, history[splitIdx:]...)
 	out = EnsurePairing(out)
+	return shrinkToBudget(out, history, splitIdx, p, cache), nil
+}
 
-	// Post-check: the kept rounds alone may still exceed the budget (a huge
-	// recent tool result). Hard-drop oldest rounds — summary preserved — until
-	// the view fits or only one round remains.
+// shrinkToBudget enforces the post-compression budget recheck: the kept rounds
+// alone may still exceed the budget (a huge recent tool result), so oldest
+// rounds are hard-dropped — summary preserved — until the view fits or only
+// the summary remains.
+func shrinkToBudget(out, history []provider.Message, splitIdx int, p Policy, cache *CompressionCache) []provider.Message {
 	built := len(out)
 	for ShouldCompress(out, p) {
 		shrunk, ok := DropOldestRoundPreservingSummary(out)
 		if !ok {
-			break
+			// Preserving refused (summary + one round left), but handing the
+			// over-budget view on would make the overflow fallback take the
+			// summary itself — forcing a full re-summarize next iteration,
+			// which overflows again (a summarize → overflow → drop-summary
+			// loop, paying a full summarize plus a wasted provider round-trip
+			// per iteration). Drop the oldest kept round anyway, down to the
+			// summary alone.
+			shrunk, ok = DropOldestKeepingSummary(out)
+			if !ok {
+				break
+			}
 		}
 		out = shrunk
 	}
@@ -277,5 +327,5 @@ func CompressWithCache(ctx context.Context, history []provider.Message, p Policy
 			cache.CoveredBytes = contentBytes(history[:advance])
 		}
 	}
-	return out, nil
+	return out
 }

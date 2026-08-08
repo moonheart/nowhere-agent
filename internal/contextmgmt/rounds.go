@@ -95,6 +95,25 @@ func DropOldestRound(msgs []provider.Message) (out []provider.Message, ok bool) 
 	return EnsurePairing(rest), true
 }
 
+// DropOldestKeepingSummary drops the oldest NON-summary round from a
+// summary-led view even when only the summary and one round remain — the case
+// DropOldestRoundPreservingSummary refuses. Compression's post-check uses it
+// as a last resort so a single huge kept round shrinks down to the summary
+// alone rather than forcing the overflow fallback to take the summary (which
+// would erase the only record of the dropped history and trigger a full
+// re-summarize next iteration). It refuses once nothing but the summary
+// remains, and on views that are not summary-led.
+func DropOldestKeepingSummary(msgs []provider.Message) (out []provider.Message, ok bool) {
+	rounds := groupRounds(msgs)
+	if len(rounds) <= 1 || !IsSummary(msgs[0]) {
+		return msgs, false
+	}
+	rest := make([]provider.Message, 0, len(msgs)-rounds[1].end+1)
+	rest = append(rest, msgs[0])
+	rest = append(rest, msgs[rounds[1].end:]...)
+	return EnsurePairing(rest), true
+}
+
 // DropOldestRoundPreservingSummary is DropOldestRound that never drops a
 // leading compression-summary round while it is the only record of the
 // dropped history: discarding it first (the naive oldest-round choice) would

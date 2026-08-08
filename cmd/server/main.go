@@ -463,6 +463,12 @@ func run() error {
 		// (model falls back to the parent's); the child's tool registry is set by
 		// the spawn tool via WithTools. Closes over the provider so the subagent
 		// package needs no wiring dependency.
+		//
+		// The compression circuit breakers live OUTSIDE the loop factories: a
+		// factory rebuilds the loop and CompressMW every run, so a breaker held
+		// on the middleware instance would reset each run and never trip.
+		subCompressBreaker := &agent.CircuitBreaker{}
+		chatCompressBreaker := &agent.CircuitBreaker{}
 		subStore := agentdef.NewStore()
 		subFactory := func(ctx context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
 			childModel := def.Model
@@ -485,7 +491,7 @@ func run() error {
 			// permission mode.
 			loop.Use(&agent.PermissionMW{Check: permit})
 			if compressionEnabled {
-				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(adapter, childModel), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget})
+				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(adapter, childModel), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget, Breaker: subCompressBreaker})
 			}
 			loop.Use(&agent.OverflowMW{})
 			return loop
@@ -523,7 +529,7 @@ func run() error {
 			// registration covers every session and reacts to the live toggle.
 			loop.Use(&agent.PermissionMW{Check: permit})
 			if compressionEnabled {
-				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callerAdapter, m), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget})
+				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callerAdapter, m), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget, Breaker: chatCompressBreaker})
 			}
 			loop.Use(&agent.OverflowMW{})
 			return loop

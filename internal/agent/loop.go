@@ -301,8 +301,14 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 
 		// Assemble the working view for this turn and repair tool pairing before
 		// every send (a prior cancel or a compression split can leave an unpaired
-		// block, which the provider would reject).
-		state.View = contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), state.Produced...))
+		// block, which the provider would reject). A prefix the overflow fallback
+		// already dropped this run stays dropped (viewDropped), or the next
+		// attempt would overflow on the same rounds again.
+		base := append(append([]provider.Message{}, history...), state.Produced...)
+		if state.viewDropped > 0 && state.viewDropped < len(base) {
+			base = base[state.viewDropped:]
+		}
+		state.View = contextmgmt.EnsurePairing(base)
 
 		// Node hooks: observation before the model call (registration order).
 		for _, h := range l.before {
