@@ -7,6 +7,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -216,7 +217,14 @@ func (l *Loop) Use(mw ...Middleware) *Loop {
 		if h, ok := m.(ToolCallMiddleware); ok {
 			l.toolWrap = append(l.toolWrap, h)
 		}
-		if h, ok := m.(GateFuncProvider); ok && l.gateInteraction == nil {
+		if h, ok := m.(GateFuncProvider); ok {
+			if l.gateInteraction != nil {
+				// First registered wins; a later provider would otherwise be
+				// silently dropped, hiding a wiring mistake.
+				slog.Warn("agent: GateFuncProvider ignored; a policy is already registered",
+					"middleware", m.MiddlewareName())
+				continue
+			}
 			gate := h.GateCheck()
 			l.gateInteraction = gate
 			l.gateExecute = gate
@@ -316,8 +324,17 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		state.View = append(append([]provider.Message{}, base...), state.Produced...)
 
 		// Node hooks: observation before the model call (registration order).
+		// A hook error is logged and skipped, EXCEPT a wrapped ErrAbortRun,
+		// which aborts the run (settled like a provider failure).
 		for _, h := range l.before {
 			if err := h.BeforeModel(ctx, state); err != nil {
+				if errors.Is(err, ErrAbortRun) {
+					slog.Error("agent: BeforeModel hook aborted the run", "iter", iter, "err", err)
+					l.emitStepFinish(ctx, emit, ModelResult{}, "error", false)
+					l.runAfterRun(ctx, state)
+					_ = emit.Emit(ctx, KindError, err.Error())
+					return state.Produced, err
+				}
 				slog.Warn("agent: BeforeModel hook failed", "err", err)
 			}
 		}
@@ -379,8 +396,21 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		_ = emit.Emit(context.WithoutCancel(ctx), KindMessage, MessageWithUsage{Message: res.Assistant, Usage: res.Usage})
 
 		// Node hooks: observation after the model call (reverse order).
+		// ErrAbortRun aborts the run; the assistant message is already durable
+		// (KindMessage above), so its tool batch must be answered first — same
+		// pairing rationale as the pre-dispatch cancel guard below.
 		for i := len(l.afterModel) - 1; i >= 0; i-- {
 			if err := l.afterModel[i].AfterModel(ctx, state); err != nil {
+				if errors.Is(err, ErrAbortRun) {
+					slog.Error("agent: AfterModel hook aborted the run", "iter", iter, "err", err)
+					if len(res.Calls) > 0 {
+						l.recordToolResults(ctx, emit, state, res.Calls, abortedCallResults(res.Calls))
+					}
+					l.emitStepFinish(ctx, emit, res, "error", false)
+					l.runAfterRun(ctx, state)
+					_ = emit.Emit(ctx, KindError, err.Error())
+					return state.Produced, err
+				}
 				slog.Warn("agent: AfterModel hook failed", "err", err)
 			}
 		}
@@ -594,6 +624,12 @@ func (l *Loop) reportTerminal(ctx context.Context, state *RunState) {
 func (l *Loop) runAfterRun(ctx context.Context, state *RunState) {
 	for i := len(l.afterRun) - 1; i >= 0; i-- {
 		if err := l.afterRun[i].AfterRun(ctx, state); err != nil {
+			if errors.Is(err, ErrAbortRun) {
+				// The run is already ending; abort can only stop the
+				// remaining AfterRun hooks.
+				slog.Warn("agent: AfterRun hook requested abort; skipping remaining AfterRun hooks", "err", err)
+				return
+			}
 			slog.Warn("agent: AfterRun hook failed", "err", err)
 		}
 	}
@@ -1151,6 +1187,21 @@ func interruptFailedCallResults(calls []toolruntime.Call) []toolruntime.Result {
 	for i := range results {
 		results[i] = toolruntime.Result{
 			Content: "not executed: the run ended abnormally while requesting client input for this tool call. Re-issue the call to try again.",
+			IsError: true,
+		}
+	}
+	return results
+}
+
+// abortedCallResults answers every call in a batch left undispatched because
+// an AfterModel hook aborted the run (ErrAbortRun). The assistant tool_use is
+// already durable, so each call needs a tool_result naming the non-execution —
+// a later model turn must not assume the side effects happened.
+func abortedCallResults(calls []toolruntime.Call) []toolruntime.Result {
+	results := make([]toolruntime.Result, len(calls))
+	for i := range results {
+		results[i] = toolruntime.Result{
+			Content: "not executed: the run was aborted by middleware before this tool call could be dispatched",
 			IsError: true,
 		}
 	}

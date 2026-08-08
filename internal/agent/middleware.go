@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"nowhere-agent/internal/contextmgmt"
@@ -47,7 +48,21 @@ type RunState struct {
 	// (see CompressMW), so a summary is reused or incrementally extended
 	// instead of re-summarized from scratch every iteration.
 	compressCache *contextmgmt.CompressionCache
+	// compressFailures is the run's consecutive compression-failure count for
+	// CompressMW's circuit breaker. It lives here — not on the middleware — so
+	// one run's failures can never leak into the next run sharing the
+	// middleware instance.
+	compressFailures int
 }
+
+// ErrAbortRun is the sentinel a node-style hook (BeforeModel/AfterModel)
+// returns — wrapped — to abort the run instead of being logged and skipped
+// (LangChain's raise_error switch, as a sentinel). The loop settles the run
+// like any provider failure: the step is closed, AfterRun hooks fire, a
+// terminal KindError frame is emitted, and the error is returned. AfterRun
+// hooks cannot abort (the run is already ending); ErrAbortRun there stops the
+// remaining AfterRun hooks.
+var ErrAbortRun = errors.New("agent: middleware aborted the run")
 
 // Middleware is the marker every middleware satisfies. A concrete middleware
 // implements one or more of the hook interfaces below; Loop type-asserts at
@@ -161,13 +176,21 @@ type ToolCallMiddleware interface {
 // ---- chain assembly ----------------------------------------------------------
 
 // chainModel composes model-call middleware around the innermost real call.
-// middleware[0] becomes the outermost layer.
+// middleware[0] becomes the outermost layer. Each layer is panic-isolated: a
+// panicking middleware surfaces as that layer's error instead of tearing down
+// the run's goroutine (LangChain isolates per handler likewise).
 func chainModel(mw []ModelCallMiddleware, inner ModelHandler) ModelHandler {
 	h := inner
 	for i := len(mw) - 1; i >= 0; i-- {
 		m := mw[i]
 		next := h
-		h = func(ctx context.Context, c *ModelCall) (ModelResult, error) {
+		h = func(ctx context.Context, c *ModelCall) (res ModelResult, err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					res = ModelResult{}
+					err = fmt.Errorf("agent: model-call middleware %q panicked: %v", middlewareName(m), r)
+				}
+			}()
 			return m.WrapModelCall(ctx, c, next)
 		}
 	}
@@ -175,17 +198,37 @@ func chainModel(mw []ModelCallMiddleware, inner ModelHandler) ModelHandler {
 }
 
 // chainTool composes tool-call middleware around the innermost real dispatch.
-// middleware[0] becomes the outermost layer.
+// middleware[0] becomes the outermost layer. Each layer is panic-isolated: a
+// panicking middleware becomes an error tool-result for that call instead of
+// crashing the dispatch fan-out (which runs one goroutine per call).
 func chainTool(mw []ToolCallMiddleware, inner ToolHandler) ToolHandler {
 	h := inner
 	for i := len(mw) - 1; i >= 0; i-- {
 		m := mw[i]
 		next := h
-		h = func(ctx context.Context, c *ToolCall) toolruntime.Result {
+		h = func(ctx context.Context, c *ToolCall) (res toolruntime.Result) {
+			defer func() {
+				if r := recover(); r != nil {
+					res = toolruntime.Result{
+						Content: fmt.Sprintf("tool middleware %q panicked: %v", middlewareName(m), r),
+						IsError: true,
+					}
+				}
+			}()
 			return m.WrapToolCall(ctx, c, next)
 		}
 	}
 	return h
+}
+
+// middlewareName resolves a chain entry's MiddlewareName for diagnostics; all
+// middleware registered via Use satisfies the marker interface, but chain
+// constructors also accept bare hook implementations (tests).
+func middlewareName(m any) string {
+	if n, ok := m.(Middleware); ok {
+		return n.MiddlewareName()
+	}
+	return "unknown"
 }
 
 // ---- built-in middleware -----------------------------------------------------
@@ -200,7 +243,8 @@ func chainTool(mw []ToolCallMiddleware, inner ToolHandler) ToolHandler {
 // (byte-stable prompt prefix) and extended incrementally when it does not,
 // instead of re-summarizing the whole history every iteration. A circuit
 // breaker stops calling a failing summarizer after MaxFailures consecutive
-// failures.
+// failures; the failure count is PER-RUN state (RunState.compressFailures), so
+// the instance is immutable after construction and safe to share across runs.
 type CompressMW struct {
 	Compressor  contextmgmt.Compressor
 	Window      int     // model context window in tokens; <=0 disables
@@ -208,8 +252,6 @@ type CompressMW struct {
 	Threshold   float64 // fraction of usable window that triggers compression
 	KeepRecent  int     // recent rounds kept verbatim
 	MaxFailures int     // circuit breaker; consecutive failures before tripping
-
-	failures int // per-run consecutive failure count
 }
 
 func (m *CompressMW) MiddlewareName() string { return "compress" }
@@ -218,17 +260,24 @@ func (m *CompressMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 	if m.Compressor == nil || m.Window <= 0 {
 		return next(ctx, c)
 	}
-	if m.MaxFailures <= 0 {
-		m.MaxFailures = 3
+	// Resolve defaults into locals: the struct is never written back, so a
+	// shared instance stays immutable (a data race if two runs mutated it).
+	maxFailures := m.MaxFailures
+	if maxFailures <= 0 {
+		maxFailures = 3
 	}
-	if m.Threshold <= 0 {
-		m.Threshold = 0.8
+	threshold := m.Threshold
+	if threshold <= 0 {
+		threshold = 0.8
 	}
-	if m.KeepRecent <= 0 {
-		m.KeepRecent = 2 // recent rounds stay verbatim; older rounds are summarized
+	keepRecent := m.KeepRecent
+	if keepRecent <= 0 {
+		keepRecent = 2 // recent rounds stay verbatim; older rounds are summarized
 	}
-	if m.failures >= m.MaxFailures {
-		// Breaker tripped: don't even call the failing summarizer.
+	// Breaker tripped: don't even call the failing summarizer. Without run
+	// state (a ModelCall built outside a Run) there is no breaker — the
+	// failure count has nowhere per-attempt to live.
+	if c.State != nil && c.State.compressFailures >= maxFailures {
 		return next(ctx, c)
 	}
 	// Usable window reserves room for the model's reply (design D5).
@@ -236,7 +285,7 @@ func (m *CompressMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 	if budget <= 0 {
 		budget = m.Window
 	}
-	policy := contextmgmt.Policy{MaxTokens: budget, Threshold: m.Threshold, KeepRecent: m.KeepRecent}
+	policy := contextmgmt.Policy{MaxTokens: budget, Threshold: threshold, KeepRecent: keepRecent}
 	var cache *contextmgmt.CompressionCache
 	if c.State != nil {
 		if c.State.compressCache == nil {
@@ -246,11 +295,17 @@ func (m *CompressMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 	}
 	compressed, err := contextmgmt.CompressWithCache(ctx, c.View, policy, m.Compressor, cache)
 	if err != nil {
-		m.failures++
-		slog.Warn("agent: compression failed; using uncompressed view", "err", err, "failures", m.failures)
+		failures := 1
+		if c.State != nil {
+			c.State.compressFailures++
+			failures = c.State.compressFailures
+		}
+		slog.Warn("agent: compression failed; using uncompressed view", "err", err, "failures", failures)
 		return next(ctx, c)
 	}
-	m.failures = 0
+	if c.State != nil {
+		c.State.compressFailures = 0
+	}
 	c.View = compressed
 	c.Request.Messages = compressed
 	return next(ctx, c)

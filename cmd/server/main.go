@@ -458,6 +458,22 @@ func run() error {
 			log.Info("dreaming scheduler disabled; manual consolidation still available")
 		}
 
+		// useStandardMiddleware registers the middleware every agent loop gets,
+		// in canonical order — permission gate, context compression (when
+		// enabled), overflow retry. One assembly point so the chat factory and
+		// the subagent factory cannot drift. callAdapter/modelName select the
+		// compressor's summarizer (the caller-resolved adapter and model).
+		useStandardMiddleware := func(loop *agent.Loop, callAdapter provider.Adapter, modelName string) {
+			// Tool authorization gates dispatch. The policy (permit) resolves the
+			// per-session permission mode from the run context at call time, so one
+			// registration covers every session and reacts to the live toggle.
+			loop.Use(&agent.PermissionMW{Check: permit})
+			if compressionEnabled {
+				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callAdapter, modelName), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget})
+			}
+			loop.Use(&agent.OverflowMW{})
+		}
+
 		// Subagent factory (subagent capability): builds a child loop for a
 		// resolved definition. System prompt and model come from the definition
 		// (model falls back to the parent's); the child's tool registry is set by
@@ -483,11 +499,7 @@ func run() error {
 			// The child's permission policy resolves from the spawn context's session
 			// id (set on the run by the registry), so it inherits the parent session's
 			// permission mode.
-			loop.Use(&agent.PermissionMW{Check: permit})
-			if compressionEnabled {
-				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(adapter, childModel), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget})
-			}
-			loop.Use(&agent.OverflowMW{})
+			useStandardMiddleware(loop, adapter, childModel)
 			return loop
 		}
 
@@ -521,11 +533,7 @@ func run() error {
 			// Tool authorization gates dispatch. The policy (permit) resolves the
 			// per-session permission mode from the run context at call time, so one
 			// registration covers every session and reacts to the live toggle.
-			loop.Use(&agent.PermissionMW{Check: permit})
-			if compressionEnabled {
-				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callerAdapter, m), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget})
-			}
-			loop.Use(&agent.OverflowMW{})
+			useStandardMiddleware(loop, callerAdapter, m)
 			return loop
 		}
 		newChatLoop := func(ctx context.Context, system string) *agent.Loop {

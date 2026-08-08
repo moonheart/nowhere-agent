@@ -75,9 +75,11 @@ func TestCompressMWCircuitBreaker(t *testing.T) {
 	okH := func(_ context.Context, _ *ModelCall) (ModelResult, error) {
 		return ModelResult{Assistant: provider.TextMessage(provider.RoleAssistant, "ok")}, nil
 	}
-	// Each call is a fresh over-budget view; the breaker caps summarizer calls.
+	// The breaker count is per-RUN state: the attempts below share one RunState,
+	// as the loop's per-iteration ModelCalls do.
+	state := &RunState{}
 	for i := 0; i < 5; i++ {
-		call := &ModelCall{View: bigConversation(6, 400)}
+		call := &ModelCall{View: bigConversation(6, 400), State: state}
 		call.Request.Messages = call.View
 		if _, err := mw.WrapModelCall(context.Background(), call, okH); err != nil {
 			t.Fatal(err)
@@ -85,6 +87,36 @@ func TestCompressMWCircuitBreaker(t *testing.T) {
 	}
 	if comp.calls > 2 {
 		t.Errorf("compressor called %d times, breaker should cap at 2", comp.calls)
+	}
+	// A fresh run (new RunState) gets a fresh breaker: the middleware carries no
+	// cross-run failure state.
+	comp.calls = 0
+	call := &ModelCall{View: bigConversation(6, 400), State: &RunState{}}
+	call.Request.Messages = call.View
+	if _, err := mw.WrapModelCall(context.Background(), call, okH); err != nil {
+		t.Fatal(err)
+	}
+	if comp.calls != 1 {
+		t.Errorf("fresh run should retry the summarizer once, got %d calls", comp.calls)
+	}
+}
+
+// TestCompressMWDoesNotMutateConfig pins that resolving defaults never writes
+// back to the struct: a shared instance must stay immutable (concurrent runs
+// mutating MaxFailures/Threshold/KeepRecent would race).
+func TestCompressMWDoesNotMutateConfig(t *testing.T) {
+	comp := &stubCompressor{}
+	mw := &CompressMW{Compressor: comp, Window: 200, MaxTokens: 100} // all defaults unset
+	okH := func(_ context.Context, _ *ModelCall) (ModelResult, error) {
+		return ModelResult{Assistant: provider.TextMessage(provider.RoleAssistant, "ok")}, nil
+	}
+	call := &ModelCall{View: bigConversation(6, 400), State: &RunState{}}
+	call.Request.Messages = call.View
+	if _, err := mw.WrapModelCall(context.Background(), call, okH); err != nil {
+		t.Fatal(err)
+	}
+	if mw.MaxFailures != 0 || mw.Threshold != 0 || mw.KeepRecent != 0 {
+		t.Errorf("WrapModelCall mutated config: %+v", mw)
 	}
 }
 
