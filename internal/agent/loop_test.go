@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -363,8 +364,57 @@ func TestLoopToolInputParsed(t *testing.T) {
 	}
 }
 
-func TestLoopCancelBeforeStream(t *testing.T) {
-	// A pre-cancelled context must abort the loop at the iteration guard and
+// cancelOnMessageEmitter cancels the run ctx the moment the assistant message
+// (with its tool_use batch) is emitted — landing the cancellation exactly in
+// the window between message persistence and batch dispatch.
+type cancelOnMessageEmitter struct {
+	memEmitter
+	cancel context.CancelFunc
+}
+
+func (e *cancelOnMessageEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if kind == KindMessage {
+		e.cancel()
+	}
+	return e.memEmitter.Emit(ctx, kind, payload)
+}
+
+func TestLoopCancelBetweenMessageAndBatch(t *testing.T) {
+	// Cancel lands after the assistant tool_use message is produced but before
+	// the tool batch starts. The batch must still be ANSWERED with synthetic
+	// cancelled results — the assistant message is already durable-bound, and
+	// leaving its tool_use unpaired would force every later send to paper over
+	// the gap with the transient EnsurePairing repair.
+	p := &scriptProvider{script: [][]provider.Event{toolUseResponse("tu1", "echo", `{}`)}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	ctx, cancel := context.WithCancel(context.Background())
+	emit := &cancelOnMessageEmitter{cancel: cancel}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(ctx, nil, emit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v want context.Canceled", err)
+	}
+	if emit.count(KindCancelled) != 1 {
+		t.Errorf("expected 1 cancelled event, got %d", emit.count(KindCancelled))
+	}
+	if len(produced) != 2 {
+		t.Fatalf("produced %d messages, want [assistant tool_use, tool_result]", len(produced))
+	}
+	res := produced[1]
+	if len(res.Content) != 1 || res.Content[0].Type != provider.BlockToolResult || res.Content[0].ToolResultID != "tu1" {
+		t.Fatalf("tool_result = %+v, want one block answering tu1", res.Content)
+	}
+	if !res.Content[0].IsError || !strings.Contains(res.Content[0].ToolContent, "cancelled") {
+		t.Errorf("result = %+v, want an is_error 'cancelled' result (the call never ran)", res.Content[0])
+	}
+	if strings.Contains(res.Content[0].ToolContent, "echo-result") {
+		t.Error("the cancelled batch must not have executed")
+	}
+}
+
+func TestLoopCancelBeforeStream(t *testing.T) {	// A pre-cancelled context must abort the loop at the iteration guard and
 	// emit a cancelled event, not a done/error.
 	p := &scriptProvider{script: [][]provider.Event{textResponse("never")}}
 	reg := toolruntime.NewRegistry()

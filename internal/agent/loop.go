@@ -361,8 +361,15 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			return state.Produced, nil
 		}
 
-		// Don't start a tool batch the caller has already cancelled.
+		// Don't start a tool batch the caller has already cancelled. The
+		// assistant message carrying this batch is already produced (persisted
+		// via KindMessage above), so it must still be answered: record synthetic
+		// cancelled results, or the durable record keeps a tool_use batch with
+		// no tool_result and every later send papers over the gap with the
+		// transient EnsurePairing repair while history consumers (and any
+		// durable scan) see the dangling call.
 		if err := ctx.Err(); err != nil {
+			l.recordToolResults(ctx, emit, state, res.Calls, cancelledCallResults(res.Calls))
 			_ = emit.Emit(ctx, KindCancelled, nil)
 			return state.Produced, err
 		}
@@ -809,6 +816,13 @@ func (l *Loop) realToolCall() ToolHandler {
 // a batch that was failed rather than executed must still be a well-formed
 // tool_result for every tool_use, or the next request is unpaired.
 func (l *Loop) recordToolResults(ctx context.Context, emit Emitter, state *RunState, calls []toolruntime.Call, results []toolruntime.Result) {
+	// Recording a batch's results is commit-class: the assistant tool_use is
+	// already durable, so its results must land too — including when the run
+	// was cancelled mid-batch or right before it (a cancelled ctx would make
+	// the persistence emit fail silently and leave the durable record
+	// unpaired). Detach from cancellation; result frames for a departed client
+	// are harmless.
+	ctx = context.WithoutCancel(ctx)
 	for i, r := range results {
 		_ = emit.Emit(ctx, KindToolResult, map[string]any{
 			"tool_use_id": calls[i].ID,
@@ -820,6 +834,21 @@ func (l *Loop) recordToolResults(ctx context.Context, emit Emitter, state *RunSt
 	msg := toolResultMessage(calls, results)
 	state.Produced = append(state.Produced, msg)
 	_ = emit.Emit(ctx, KindMessage, msg)
+}
+
+// cancelledCallResults answers every call in a batch that never dispatched
+// because the run was cancelled between the model's reply and the tool batch.
+// Naming the non-execution explicitly matters: a later model turn reads these
+// results and must not assume the side effects happened.
+func cancelledCallResults(calls []toolruntime.Call) []toolruntime.Result {
+	results := make([]toolruntime.Result, len(calls))
+	for i := range results {
+		results[i] = toolruntime.Result{
+			Content: "not executed: the run was cancelled before this tool call could be dispatched",
+			IsError: true,
+		}
+	}
+	return results
 }
 
 // truncatedCallResults fails every call in a batch that arrived on a message cut
