@@ -176,7 +176,7 @@ export function PlatformQuotasPage() {
               <Label>{scope === "user" ? "Account" : "Team"}</Label>
               <OwnerPicker scope={scope} value={owner} onChange={setOwner} />
             </div>
-            <Button type="submit" variant="outline" size="sm" disabled={busy || !owner}>
+            <Button type="submit" variant="outline" disabled={busy || !owner}>
               <Search />
               {busy ? "Loading…" : "Look up"}
             </Button>
@@ -227,7 +227,6 @@ export function PlatformQuotasPage() {
                 </div>
                 <Button
                   type="submit"
-                  size="sm"
                   disabled={busy || !Number.isFinite(parsedLimit) || parsedLimit <= 0}
                 >
                   {result ? "Update cap" : "Set cap"}
@@ -239,7 +238,7 @@ export function PlatformQuotasPage() {
                     confirmLabel="Clear cap"
                     onConfirm={clear}
                     trigger={
-                      <Button variant="ghost" size="sm" disabled={busy}>
+                      <Button variant="ghost" disabled={busy}>
                         <Trash2 />
                         Clear cap
                       </Button>
