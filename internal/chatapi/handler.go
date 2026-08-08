@@ -24,6 +24,14 @@ import (
 // stay transport-only.
 type LoopFactory func(ctx context.Context, system string) *agent.Loop
 
+// TeamAttributor resolves which team's provider key bills a request from this
+// user (enterprise-readiness P1-3): the team id when a team key applies, ""
+// when the platform key does. The server implements it over the credential
+// resolver so a run is attributed to the team actually paying for it. Nil
+// leaves runs unattributed (tests/dev). An error is treated as "unattributed":
+// a credential-lookup hiccup must not block chat.
+type TeamAttributor func(ctx context.Context, userID string) string
+
 // ToolBinder attaches session-scoped tools to a loop once the session id is
 // known (file-tools D6). The server implements it by ensuring the session's
 // sandbox and registering the file tools bound to it. Nil disables tools.
@@ -67,6 +75,9 @@ type Handler struct {
 	// injector for the run's loop (surfaces new memories into the outgoing view,
 	// never the durable history). Nil disables injection (tests).
 	memInjectorFactory MemoryInjectorFactory
+	// attributor, when set, resolves the team whose provider key bills each run
+	// (enterprise-readiness P1-3). Nil leaves runs unattributed.
+	attributor TeamAttributor
 }
 
 // NewHandler creates a chat Handler.
@@ -117,6 +128,13 @@ func (h *Handler) WithImageStore(is *workspace.ImageStore) *Handler {
 // WithContextBuilder enables memory recall + skill L0 injection into the loop.
 func (h *Handler) WithContextBuilder(cb ContextBuilder) *Handler {
 	h.ctxBuilder = cb
+	return h
+}
+
+// WithTeamAttributor wires run billing attribution (enterprise-readiness P1-3):
+// each submitted run is stamped with the team whose provider key pays for it.
+func (h *Handler) WithTeamAttributor(a TeamAttributor) *Handler {
+	h.attributor = a
 	return h
 }
 
@@ -233,6 +251,14 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	}
 	sessID := s.ID
 
+	// Billing attribution (P1-3): stamp the run with the team whose provider key
+	// pays for it and the model the loop runs, so per-team/per-model cost reports
+	// read the run row directly instead of reconstructing membership at read time.
+	var teamID string
+	if h.attributor != nil {
+		teamID = h.attributor(r.Context(), s.UserID)
+	}
+
 	// Attach this session's sandbox-bound tools (file-tools) now that the
 	// session id is known. The binder ensures the session's sandbox and
 	// registers its file tools into the loop's registry.
@@ -274,7 +300,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history, UserMessage: userMsg})
+	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history, UserMessage: userMsg, TeamID: teamID, Model: loop.Model()})
 	if err != nil {
 		// Single-active-run: a second client submitting while a run is in flight
 		// is rejected (multi-writer prevention), not queued. Checked before any

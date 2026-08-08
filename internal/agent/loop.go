@@ -236,6 +236,10 @@ func (l *Loop) Tools() *toolruntime.Registry {
 	return l.tools
 }
 
+// Model returns the model the loop was configured with, for stamping on the run
+// so usage reports can break down by model (enterprise-readiness P1-3).
+func (l *Loop) Model() string { return l.config.Model }
+
 // RegisterTool adds a tool to the loop's registry for this run. Used to attach
 // client-declared tools (parsed from the request body) after the loop is built.
 func (l *Loop) RegisterTool(t toolruntime.Tool) {

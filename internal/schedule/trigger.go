@@ -35,6 +35,12 @@ type ScopeResolver interface {
 	AccessibleScopes(ctx context.Context, userID string) ([]identity.ScopeRef, error)
 }
 
+// TeamAttributor resolves which team's provider key bills a task owner's runs
+// (enterprise-readiness P1-3): the team id when a team key applies, "" when the
+// platform key does. Nil leaves scheduled runs unattributed; an error is
+// treated as "unattributed" so a lookup hiccup never blocks a firing.
+type TeamAttributor func(ctx context.Context, userID string) string
+
 // DefResolver resolves an agent definition by name across scopes.
 // *agentdef.Store satisfies it.
 type DefResolver interface {
@@ -45,13 +51,14 @@ type DefResolver interface {
 // "unattended chatapi" (design D5). It owns the scan-claim-submit loop; the
 // claim's atomic advance (design D4) makes it safe to run one per instance.
 type Trigger struct {
-	store     Store
-	runtime   *session.Runtime
-	registry  *session.RunRegistry
-	defs      DefResolver
-	identity  ScopeResolver
-	buildLoop LoopBuilder
-	bindTools ToolBinder
+	store      Store
+	runtime    *session.Runtime
+	registry   *session.RunRegistry
+	defs       DefResolver
+	identity   ScopeResolver
+	buildLoop  LoopBuilder
+	bindTools  ToolBinder
+	attributor TeamAttributor
 	// db is used only to tag the sessions a task produces (task_id/source/
 	// metadata) — the session.Store interface pre-dates those columns, so the
 	// trigger writes them directly. Nil disables tagging (tests with no DB).
@@ -73,7 +80,7 @@ func NewTrigger(store Store, rt *session.Runtime, rg *session.RunRegistry, defs 
 	return &Trigger{
 		store: store, runtime: rt, registry: rg, defs: defs, identity: ids,
 		buildLoop: build, db: db, log: slog.Default(),
-		now: func() time.Time { return time.Now().UTC() },
+		now:          func() time.Time { return time.Now().UTC() },
 		scanInterval: scanInterval, fireTimeout: 30 * time.Second,
 	}
 }
@@ -82,6 +89,14 @@ func NewTrigger(store Store, rt *session.Runtime, rg *session.RunRegistry, defs 
 // leaves runs tool-free (tests).
 func (tr *Trigger) WithToolBinder(b ToolBinder) *Trigger {
 	tr.bindTools = b
+	return tr
+}
+
+// WithTeamAttributor wires run billing attribution (P1-3): each fired run is
+// stamped with the team whose provider key pays for it. Nil leaves runs
+// unattributed.
+func (tr *Trigger) WithTeamAttributor(a TeamAttributor) *Trigger {
+	tr.attributor = a
 	return tr
 }
 
@@ -190,10 +205,18 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 		tr.bindTools(ctx, loop, sessID, task.ToolWhitelist)
 	}
 	userMsg := provider.TextMessage(provider.RoleUser, kickoff)
+	// Billing attribution (P1-3): the team whose key pays for this task owner's
+	// run, and the model the loop runs — same stamp a human chat run gets.
+	var teamID string
+	if tr.attributor != nil {
+		teamID = tr.attributor(ctx, task.UserID)
+	}
 	run, err := tr.registry.Submit(ctx, sessID, session.RunWork{
 		Loop:        loop,
 		History:     []provider.Message{userMsg}, // the worker runs History verbatim; it does not merge UserMessage in
 		UserMessage: &userMsg,
+		TeamID:      teamID,
+		Model:       loop.Model(),
 	})
 	if err != nil {
 		if errors.Is(err, session.ErrRunActive) {

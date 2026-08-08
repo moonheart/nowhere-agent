@@ -226,6 +226,17 @@ func (m *MemStore) UpdateRunStatus(_ context.Context, runID string, status RunSt
 }
 
 // SetRunUsage records the run's aggregate token usage. u is nil-safe (a no-op).
+func (m *MemStore) SetRunAttribution(_ context.Context, runID, teamID, model string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r, ok := m.runs[runID]; ok {
+		r.TeamID = teamID
+		r.Model = model
+	}
+	return nil
+}
+
+// SetRunUsage records the run's aggregate token usage. u is nil-safe (a no-op).
 func (m *MemStore) SetRunUsage(_ context.Context, runID string, u *provider.Usage) error {
 	if u == nil {
 		return nil

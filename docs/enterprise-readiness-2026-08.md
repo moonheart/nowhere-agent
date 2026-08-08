@@ -105,9 +105,13 @@
 - Dreaming worker 单次 token 预算 + 按类记忆上限(`internal/dreaming/worker.go:54-55`)。
 - Docker 沙箱资源限额:512 MiB / 1 CPU / 256 PID(`internal/sandbox/docker.go:32-36`)。
 
-**缺失:** 全平台无请求限流(无 limiter 中间件;"429" 仅是 provider 错误处理);**无 per-user/per-team token 预算强制** —— 用量只读,没有任何东西阻止一个用户烧穿团队 key;无成本核算(`internal/usage/store.go:19-21` 明说缺 per-model 成本,`runs` 表无 `model` 列)。
+**缺失(剩余):** 全平台无请求限流(无 limiter 中间件;"429" 仅是 provider 错误处理);**无 per-user/per-team token 预算强制** —— 用量只读,没有任何东西阻止一个用户烧穿团队 key。
 
-> **附带已知问题:** 团队用量是**近似值** —— `runs` 无 `team_id`,按当前成员求和,跨团队成员被重复计数(规格与 UI banner 均已披露)。正解是给 `runs` 加 `team_id`/`model` 列,正好与成本核算一起做。
+> **成本核算 / 精确团队用量:已实现(2026-08-08,P1-3)。** `runs` 加 `team_id`/`model` 两列(migration `000023`),run 提交时按**实际付费的团队 key**(`routing.Resolve(...).TeamID`)与 loop 配置的 model 打戳(`RunWork.TeamID/Model` → `SetRunAttribution`;chat 走 `TeamAttributor`,scheduled run 同样打戳):
+> - **团队用量从近似变精确**:`internal/usage` 的 team 维度改读 `runs.team_id`(直接归属),跨团队成员不再重复计数、离职成员不再带走历史;`team_id` 可空且**不带 FK**,删团队不删历史 run,NULL = 平台 key 付费。
+> - **历史行渐进兼容**:打戳前的旧行(team_id NULL)回退到"按当前成员"的旧近似(单条 OR + EXISTS 子句),随时间精确占比趋近 100%;`TeamOverlapNote` 更新为"新数据精确、旧数据近似"。
+> - **per-model 成本打底**:新增 `usage.Store.ByModel`(按 model 聚合),`runs.model` 使成本核算不再需要猜 model;挂载每模型定价即可把 token 换算成钱(定价属配置,不在 store 内)。
+> - 设计要点:attribution 在**提交时**服务端解析(chat 用 `TeamAttributor` 解析付费团队;error → 平台,绝不阻塞 run),**尽力而为**(打戳失败仅记日志)。
 
 ### 2.5 多租户隔离 —— ◐ PARTIAL
 

@@ -43,6 +43,14 @@ type RunWork struct {
 	// MessageStore is wired, the worker persists it as the run's first message
 	// before driving the loop, so the conversation record includes the user side.
 	UserMessage *provider.Message
+	// TeamID attributes the run to the team whose provider key billed it
+	// (enterprise-readiness P1-3); empty means the platform key. Resolved by the
+	// transport at submit (chat: the team key Resolve returned; scheduled: the
+	// task's team), so exact per-team cost needs no membership join at read time.
+	TeamID string
+	// Model is the model the loop was configured with, stamped on the run so
+	// per-model breakdown and cost estimation need not guess which model ran.
+	Model string
 }
 
 // RunRegistry owns run execution. Where Runtime owns run state (the
@@ -114,6 +122,17 @@ func (rg *RunRegistry) Submit(ctx context.Context, sessionID string, work RunWor
 	run, err := rg.rt.StartRun(ctx, sessionID)
 	if err != nil {
 		return Run{}, err
+	}
+
+	// Stamp billing attribution before the loop starts spending (P1-3). This is
+	// best-effort — a failed attribution write must not abort a run the user is
+	// waiting on — so it logs and continues rather than returning the error.
+	if work.TeamID != "" || work.Model != "" {
+		if err := rg.rt.store.SetRunAttribution(ctx, run.ID, work.TeamID, work.Model); err != nil {
+			slog.Warn("record run attribution", "run", run.ID, "err", err)
+		} else {
+			run.TeamID, run.Model = work.TeamID, work.Model
+		}
 	}
 
 	// The worker's context is deliberately NOT derived from the caller's request

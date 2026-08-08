@@ -76,11 +76,18 @@ func newFixture(t *testing.T, db *sql.DB) *fixture {
 // model looks like.
 func (f *fixture) addRun(t *testing.T, at time.Time, in, out, cacheRead, cacheWrite *int) {
 	t.Helper()
+	f.addRunAttr(t, at, "", "", in, out, cacheRead, cacheWrite)
+}
+
+// addRunAttr inserts a run stamped with a team/model attribution (P1-3). An
+// empty teamID stores NULL (platform-billed / legacy), matching the column.
+func (f *fixture) addRunAttr(t *testing.T, at time.Time, teamID, model string, in, out, cacheRead, cacheWrite *int) {
+	t.Helper()
 	f.seq++
 	_, err := f.db.Exec(`
-		INSERT INTO runs (session_id, seq, status, created_at, usage_input, usage_output, usage_cache_read, usage_cache_write)
-		VALUES ($1, $2, 'done', $3, $4, $5, $6, $7)`,
-		f.SessionID, f.seq, at, npt(in), npt(out), npt(cacheRead), npt(cacheWrite))
+		INSERT INTO runs (session_id, seq, status, created_at, team_id, model, usage_input, usage_output, usage_cache_read, usage_cache_write)
+		VALUES ($1, $2, 'done', $3, NULLIF($4,'')::uuid, NULLIF($5,''), $6, $7, $8, $9)`,
+		f.SessionID, f.seq, at, teamID, model, npt(in), npt(out), npt(cacheRead), npt(cacheWrite))
 	if err != nil {
 		t.Fatalf("insert run: %v", err)
 	}
@@ -366,5 +373,85 @@ func TestTeamOverlapNoteIsStated(t *testing.T) {
 	// an empty constant would silently drop that disclosure from every report.
 	if TeamOverlapNote == "" {
 		t.Fatal("TeamOverlapNote must explain the team-attribution approximation")
+	}
+}
+
+// Since P1-3 a run stamps its attributing team. A user in two teams whose runs
+// are stamped to ONE team must count only toward that team — the exact
+// attribution that replaces the membership approximation.
+func TestStampedRunCountsOnlyTowardItsTeam(t *testing.T) {
+	db := pgTestDB(t)
+	f := newFixture(t, db)
+	store := NewStore(db)
+	teamA := f.joinTeam(t)
+	teamB := f.joinTeam(t)
+	at := time.Now()
+
+	// The run was billed to team A's key even though the user is also in B.
+	f.addRunAttr(t, at, teamA, "m1", ip(50), ip(5), nil, nil)
+	rng := windowAround(at)
+
+	a, err := store.ForTeam(context.Background(), teamA, rng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Input != 50 {
+		t.Errorf("team A input = %d, want 50 (its stamped run)", a.Input)
+	}
+	b, err := store.ForTeam(context.Background(), teamB, rng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Input != 0 || b.Runs != 0 {
+		t.Errorf("team B = %+v, want zero — the run was attributed to A, not shared by membership", b)
+	}
+}
+
+// A stamped run must NOT also be re-attributed by the legacy membership
+// fallback, or it would double-count: once via team_id, once via membership.
+func TestStampedRunNotDoubleCountedWithMembership(t *testing.T) {
+	db := pgTestDB(t)
+	f := newFixture(t, db)
+	store := NewStore(db)
+	teamID := f.joinTeam(t)
+	at := time.Now()
+
+	// Stamped to the team AND a current member — must sum to 100, not 200.
+	f.addRunAttr(t, at, teamID, "m1", ip(100), ip(10), nil, nil)
+
+	got, err := store.ForTeam(context.Background(), teamID, windowAround(at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Input != 100 || got.Runs != 1 {
+		t.Errorf("ForTeam = %+v, want exactly 100 over 1 run (no double count)", got)
+	}
+}
+
+// ByModel is the cost-accounting read: usage grouped by the recorded model,
+// with unrecorded models (legacy rows) in their own bucket.
+func TestByModelGroupsAndLabels(t *testing.T) {
+	db := pgTestDB(t)
+	f := newFixture(t, db)
+	store := NewStore(db)
+	at := time.Now()
+
+	f.addRunAttr(t, at, "", "deepseek-v4-flash", ip(100), ip(10), nil, nil)
+	f.addRunAttr(t, at, "", "deepseek-v4-flash", ip(50), ip(5), nil, nil)
+	f.addRunAttr(t, at, "", "claude-opus-4", ip(7), ip(3), nil, nil)
+
+	rows, err := store.ByModel(context.Background(), windowAround(at), 100)
+	if err != nil {
+		t.Fatalf("ByModel: %v", err)
+	}
+	byModel := map[string]Tokens{}
+	for _, r := range rows {
+		byModel[r.ID] = r.Tokens
+	}
+	if got := byModel["deepseek-v4-flash"]; got.Input != 150 || got.Runs != 2 {
+		t.Errorf("deepseek-v4-flash = %+v, want input 150 over 2 runs", got)
+	}
+	if got := byModel["claude-opus-4"]; got.Input != 7 || got.Runs != 1 {
+		t.Errorf("claude-opus-4 = %+v, want input 7 over 1 run", got)
 	}
 }

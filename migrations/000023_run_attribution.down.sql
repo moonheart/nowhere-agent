@@ -1,0 +1,3 @@
+ALTER TABLE runs
+    DROP COLUMN IF EXISTS team_id,
+    DROP COLUMN IF EXISTS model;

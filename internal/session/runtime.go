@@ -66,6 +66,10 @@ type Store interface {
 
 	CreateRun(ctx context.Context, sessionID string, seq int) (Run, error)
 	UpdateRunStatus(ctx context.Context, runID string, status RunStatus) error
+	// SetRunAttribution stamps the run's billing attribution: the team whose
+	// provider key paid for it (empty = platform key) and the model it ran. Best
+	// called right after CreateRun, before the loop starts spending.
+	SetRunAttribution(ctx context.Context, runID, teamID, model string) error
 	// SetRunUsage records the run's aggregate token usage (across all its LLM
 	// calls) once the run reports it. u is nil-safe (a no-op).
 	SetRunUsage(ctx context.Context, runID string, u *provider.Usage) error

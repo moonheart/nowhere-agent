@@ -80,6 +80,15 @@ type Run struct {
 	Seq       int
 	Status    RunStatus
 	CreatedAt time.Time
+	// TeamID attributes the run to the team whose provider key billed it
+	// (enterprise-readiness P1-3). Empty when the run fell back to the platform
+	// key. It records attribution, not membership, so it survives the team being
+	// deleted and is NOT a foreign key. Nil-vs-empty is not distinguished in
+	// memory; the column is nullable in Postgres only so old rows read NULL.
+	TeamID string
+	// Model is the model the run's loop was configured with, stamped at submit
+	// so per-model breakdown and cost estimation need not guess.
+	Model string
 	// Usage aggregates the run's token consumption across all its LLM calls
 	// (redundant with SUM of its messages' usage, kept for cheap queries). Nil
 	// until the run reports usage. Persisted as the runs.usage_* cols.

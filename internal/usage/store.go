@@ -2,23 +2,20 @@
 // of the accounting the session runtime writes: `runs.usage_*` holds one row per
 // run, and this package aggregates those rows for the management console.
 //
-// Attribution is by ACCOUNT, because that is what the write path records —
-// a run points at a session, and a session at the user who owns it. Team
-// figures are therefore reconstructed as the sum over the team's current
-// members, which has two consequences worth stating plainly rather than
-// discovering later:
+// Attribution is by RUN's stamped `team_id` (enterprise-readiness P1-3): every
+// run submitted after migration 000023 records the team whose provider key
+// billed it, so team figures are an exact partition of spend — no membership
+// join, no double-counting a member of several teams, no departed member taking
+// their history with them. Account figures still come from the session owner.
 //
-//   - an account belonging to several teams counts toward each of them, so
-//     summing every team can exceed the platform total
-//   - a member who leaves a team takes their historical usage with them
+// Runs recorded BEFORE that stamp have team_id NULL and are back-filled into
+// their owner's CURRENT teams as a compatibility approximation (see
+// teamAttributionClause). That fallback only ever touches legacy rows; over
+// time the attributed share grows toward 100% and the approximation fades.
 //
-// TeamOverlapNote states this, and the HTTP layer attaches it to every report
-// grouped by team, so a caller cannot render team figures as an exact partition
-// without ignoring the payload.
-//
-// Reports are in tokens only. There is no `runs.model` column, so per-model
-// breakdown and cost estimation would have to guess which model produced a run;
-// a made-up cost is worse than no cost.
+// Reports are in tokens only. `runs.model` (P1-3) now records which model
+// produced each run, so per-model breakdown is possible; cost estimation still
+// requires per-model pricing, which is config, not something this store owns.
 package usage
 
 import (
@@ -78,9 +75,21 @@ func (r Range) bounds() (time.Time, time.Time) {
 	return from, to
 }
 
-// TeamOverlapNote explains the team-attribution approximation. It rides along
-// on every report grouped by team.
-const TeamOverlapNote = "Team figures sum their current members' usage: runs record the account that owns the session, not a team. An account in several teams counts toward each, so team totals can exceed the platform total, and a member who leaves takes their history with them."
+// TeamOverlapNote explains the residual approximation on legacy rows. Since
+// P1-3, runs stamp their attributing team, so the note only applies to the
+// shrinking set of pre-stamp rows; the HTTP layer still attaches it to team
+// reports so a caller does not read a back-filled legacy figure as exact.
+const TeamOverlapNote = "Team figures are exact for runs recorded since billing attribution was added (each run stamps the team whose provider key paid for it). Older runs are attributed to their owner's current teams, so they can double-count a member of several teams and follow a member who leaves."
+
+// teamAttributionClause scopes a query to one team's runs. Stamped rows match
+// on their recorded team_id; legacy rows (team_id NULL) fall back to their
+// owner's current membership, preserving the pre-P1-3 behaviour for data that
+// predates the stamp. The EXISTS keeps the fallback from multiplying rows when
+// a user belongs to the team through more than one path.
+const teamAttributionClause = `
+	(r.team_id = $1 OR (r.team_id IS NULL AND EXISTS (
+		SELECT 1 FROM team_memberships m
+		WHERE m.team_id = $1 AND m.user_id = s.user_id)))`
 
 // Store aggregates persisted run usage from Postgres.
 type Store struct {
@@ -143,8 +152,9 @@ func (s *Store) ForUser(ctx context.Context, userID string, rng Range) (Tokens, 
 	return t, nil
 }
 
-// ForTeam returns a team's usage over the range: the sum over its current
-// members (see the package comment on what that approximation costs).
+// ForTeam returns a team's usage over the range. Since P1-3 this is an exact
+// sum over the runs stamped with that team; legacy (unstamped) rows fall back
+// to current membership (see the package comment).
 func (s *Store) ForTeam(ctx context.Context, teamID string, rng Range) (Tokens, error) {
 	from, to := rng.bounds()
 	var t Tokens
@@ -152,8 +162,8 @@ func (s *Store) ForTeam(ctx context.Context, teamID string, rng Range) (Tokens, 
 		SELECT `+selectTokens+`
 		FROM runs r
 		JOIN sessions s ON s.id = r.session_id
-		JOIN team_memberships m ON m.user_id = s.user_id
-		WHERE m.team_id = $1 AND r.created_at >= $2 AND r.created_at < $3`,
+		WHERE `+teamAttributionClause+`
+		  AND r.created_at >= $2 AND r.created_at < $3`,
 		teamID, from, to).
 		Scan(&t.Input, &t.Output, &t.CacheRead, &t.CacheWrite, &t.Runs)
 	if identity.IsMalformedID(err) {
@@ -183,7 +193,10 @@ func (s *Store) ByUser(ctx context.Context, rng Range, limit int) ([]Row, error)
 		LIMIT $3`, from, to, limit)
 }
 
-// ByTeam returns per-team usage over the range, heaviest first.
+// ByTeam returns per-team usage over the range, heaviest first. Stamped runs
+// count toward their recorded team; legacy runs toward each of their owner's
+// current teams (the pre-P1-3 approximation). A run attributed to a team that
+// was since deleted is omitted — there is no team row left to label it.
 func (s *Store) ByTeam(ctx context.Context, rng Range, limit int) ([]Row, error) {
 	if limit <= 0 {
 		limit = 100
@@ -193,8 +206,9 @@ func (s *Store) ByTeam(ctx context.Context, rng Range, limit int) ([]Row, error)
 		SELECT t.id, t.name, `+selectTokens+`
 		FROM runs r
 		JOIN sessions s ON s.id = r.session_id
-		JOIN team_memberships m ON m.user_id = s.user_id
-		JOIN teams t ON t.id = m.team_id
+		JOIN teams t ON t.id = r.team_id OR (r.team_id IS NULL AND EXISTS (
+			SELECT 1 FROM team_memberships m
+			WHERE m.team_id = t.id AND m.user_id = s.user_id))
 		WHERE r.created_at >= $1 AND r.created_at < $2
 		GROUP BY t.id, t.name
 		ORDER BY `+orderByTotal+`, t.name
@@ -222,8 +236,10 @@ func (s *Store) DailyForTeam(ctx context.Context, teamID string, rng Range) ([]R
 		       to_char(date_trunc('day', r.created_at), 'YYYY-MM-DD'), `+selectTokens+`
 		FROM runs r
 		JOIN sessions s ON s.id = r.session_id
-		JOIN team_memberships m ON m.user_id = s.user_id
-		WHERE m.team_id = $3 AND r.created_at >= $1 AND r.created_at < $2
+		WHERE (r.team_id = $3 OR (r.team_id IS NULL AND EXISTS (
+			SELECT 1 FROM team_memberships m
+			WHERE m.team_id = $3 AND m.user_id = s.user_id)))
+		  AND r.created_at >= $1 AND r.created_at < $2
 		GROUP BY day
 		ORDER BY day`, from, to, teamID)
 }
@@ -238,6 +254,26 @@ func (s *Store) DailyTotals(ctx context.Context, rng Range) ([]Row, error) {
 		WHERE r.created_at >= $1 AND r.created_at < $2
 		GROUP BY day
 		ORDER BY day`, from, to)
+}
+
+// ByModel returns per-model usage over the range, heaviest first
+// (enterprise-readiness P1-3). This is the cost-accounting read: with the model
+// known per run, a caller can attach per-model pricing and turn tokens into
+// money — which was impossible while the model had to be guessed. Runs with no
+// recorded model (predating the stamp, or a provider that did not report one)
+// group under the empty string; the caller labels that bucket.
+func (s *Store) ByModel(ctx context.Context, rng Range, limit int) ([]Row, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	from, to := rng.bounds()
+	return s.rows(ctx, `
+		SELECT COALESCE(r.model, ''), COALESCE(r.model, '(unrecorded)'), `+selectTokens+`
+		FROM runs r
+		WHERE r.created_at >= $1 AND r.created_at < $2
+		GROUP BY r.model
+		ORDER BY `+orderByTotal+`, r.model
+		LIMIT $3`, from, to, limit)
 }
 
 // rows runs a grouped query whose projection is (id, label, tokens...).

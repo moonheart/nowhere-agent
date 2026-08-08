@@ -253,6 +253,19 @@ func run() error {
 	// branch) fires through it, and it only exists when a provider is configured.
 	var schedTrigger *schedule.Trigger
 
+	// Billing attribution (enterprise-readiness P1-3): a run is stamped with the
+	// team whose provider key pays for it, so per-team cost reports read the run
+	// row directly. Resolution mirrors the credential lookup: a hiccup yields ""
+	// (platform-billed), never a blocked run. Shared by the chat handler and the
+	// scheduled-task trigger, which attributes the same way as a human run.
+	teamAttributor := func(ctx context.Context, userID string) string {
+		creds, err := keyStore.Resolve(ctx, userID, cfg.LLM.Provider)
+		if err != nil {
+			return ""
+		}
+		return creds.TeamID
+	}
+
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter, rawRecorder := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
@@ -581,7 +594,8 @@ func run() error {
 		handler := chatapi.NewHandler(newChatLoop, baseSystem).
 			WithRuntime(sessionRuntime).
 			WithMessageStore(messageStore).
-			WithContextBuilder(ctxBuilder)
+			WithContextBuilder(ctxBuilder).
+			WithTeamAttributor(teamAttributor)
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
 		}
@@ -635,6 +649,7 @@ func run() error {
 			trigger.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string, whitelist []string) {
 				loop.WithTools(buildToolRegistry(ctx, sessionID, whitelist))
 			})
+			trigger.WithTeamAttributor(teamAttributor)
 			trigger.SetLogger(log)
 			go trigger.Start(ctx)
 			schedTrigger = trigger

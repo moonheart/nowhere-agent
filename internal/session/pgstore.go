@@ -324,6 +324,24 @@ func (s *PGStore) UpdateRunStatus(ctx context.Context, runID string, status RunS
 	return nil
 }
 
+// SetRunAttribution stamps the run's billing attribution (enterprise-readiness
+// P1-3): the team whose provider key paid for the run, and the model it ran.
+// An empty teamID stores NULL (platform-billed), so team-grouped reports stay
+// exact rather than absorbing platform spend. Best-effort at submit: a failure
+// here must not block the run, so callers log and continue.
+func (s *PGStore) SetRunAttribution(ctx context.Context, runID, teamID, model string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE runs SET team_id = NULLIF($2, '')::uuid, model = NULLIF($3, '')
+		WHERE id = $1`, runID, teamID, model)
+	if err != nil {
+		return fmt.Errorf("set run attribution: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("run not found: %s", runID)
+	}
+	return nil
+}
+
 // SetRunUsage records the run's aggregate token usage. u is nil-safe (a no-op).
 func (s *PGStore) SetRunUsage(ctx context.Context, runID string, u *provider.Usage) error {
 	if u == nil {
