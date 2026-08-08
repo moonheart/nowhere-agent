@@ -940,6 +940,15 @@ func (l *Loop) interactionGate(ctx context.Context, calls []toolruntime.Call) []
 			continue
 		}
 		tool, registered := l.tools.Get(c.Name)
+		if registered {
+			// Arguments that would fail the dispatch schema screen must not
+			// park an approval / question set / client round-trip: the run
+			// would suspend (and put a card in front of the user) for a call
+			// that can never execute. Dispatch answers the violation inline.
+			if verr := toolruntime.ValidateArgs(tool.Schema(), c.Args); verr != nil {
+				continue
+			}
+		}
 		var in *Interaction
 		switch {
 		// ask_user: the model is explicitly asking the user for structured input.
@@ -966,9 +975,9 @@ func (l *Loop) interactionGate(ctx context.Context, calls []toolruntime.Call) []
 
 // dispatch runs tool calls concurrently, each through the tool-middleware chain.
 // Calls are first screened sequentially — malformed arguments, an unregistered
-// name, or an execution-permission deny become is_error results inline (so the
-// model can self-correct) and never reach the chain. Results stay index-aligned
-// with calls for tool_use/tool_result pairing.
+// name, a schema violation, or an execution-permission deny become is_error
+// results inline (so the model can self-correct) and never reach the chain.
+// Results stay index-aligned with calls for tool_use/tool_result pairing.
 //
 // The loop owns the fan-out rather than delegating to Registry.CallAll, because
 // each call must be wrapped by WrapToolCall middleware and toolruntime cannot
@@ -989,6 +998,14 @@ func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolrun
 		tool, ok := l.tools.Get(c.Name)
 		if !ok {
 			results[i] = toolruntime.Result{Content: fmt.Sprintf("unknown tool: %s", c.Name), IsError: true}
+			continue
+		}
+		// Schema screen (LangChain _parse_input parity): arguments that parsed
+		// but violate the tool's declared input schema (wrong-typed fields,
+		// missing required) never execute — the structured error names the
+		// offending field so the model can re-issue with corrected arguments.
+		if verr := toolruntime.ValidateArgs(tool.Schema(), c.Args); verr != nil {
+			results[i] = toolruntime.Result{Content: "invalid tool arguments: " + verr.Error(), IsError: true}
 			continue
 		}
 		// Execution-permission gate (D10): authorize the call by the tool's risk

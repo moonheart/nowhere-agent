@@ -13,6 +13,17 @@ func ValidateOutput(schema map[string]any, value any) error {
 	return validate(schema, value, "$")
 }
 
+// ValidateArgs checks decoded tool-call arguments against the tool's declared
+// input Schema BEFORE execution, using the same subset validator as
+// ValidateOutput (LangChain's _parse_input / LangGraph's ValidationNode run the
+// equivalent screen). A violation is reported with the offending field path so
+// the caller can feed a structured, self-correctable error back to the model
+// instead of letting the tool choke on wrong-typed input. Returns nil when the
+// arguments conform.
+func ValidateArgs(schema map[string]any, args map[string]any) error {
+	return validate(schema, args, "$")
+}
+
 func validate(schema map[string]any, value any, path string) error {
 	if schema == nil {
 		return nil

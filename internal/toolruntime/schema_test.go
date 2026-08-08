@@ -2,6 +2,7 @@ package toolruntime
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,6 +50,36 @@ func TestValidateOutput(t *testing.T) {
 				t.Errorf("want no error, got %v", err)
 			}
 		})
+	}
+}
+
+// TestValidateArgs pins the pre-execution input screen the agent loop and the
+// suspended-batch fold rely on: the error names the offending field path (so
+// the model can self-correct), and a property the schema never declares is
+// rejected when the schema declares properties but not additionalProperties.
+func TestValidateArgs(t *testing.T) {
+	schema := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"path": map[string]any{"type": "string"}},
+		"required":   []string{"path"},
+	}
+	if err := ValidateArgs(schema, map[string]any{"path": "/tmp/x"}); err != nil {
+		t.Errorf("conforming args rejected: %v", err)
+	}
+	if err := ValidateArgs(nil, map[string]any{"anything": 1.0}); err != nil {
+		t.Errorf("nil schema must accept: %v", err)
+	}
+	err := ValidateArgs(schema, map[string]any{"path": 123.0})
+	if err == nil || !strings.Contains(err.Error(), "$.path") {
+		t.Errorf("wrong-typed arg: err = %v, want it to name $.path", err)
+	}
+	err = ValidateArgs(schema, map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), `"path"`) {
+		t.Errorf("missing required: err = %v, want it to name the property", err)
+	}
+	err = ValidateArgs(schema, map[string]any{"path": "/tmp/x", "extra": true})
+	if err == nil || !strings.Contains(err.Error(), `"extra"`) {
+		t.Errorf("undeclared property: err = %v, want it to name the property", err)
 	}
 }
 

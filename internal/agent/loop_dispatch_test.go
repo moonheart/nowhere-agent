@@ -237,9 +237,124 @@ func TestDispatchScreensBeforeMiddleware(t *testing.T) {
 	}
 }
 
+// schemaArgsTool declares a real input schema (required string field), so the
+// dispatch schema screen has something to check against.
+type schemaArgsTool struct {
+	name   string
+	risk   toolruntime.Risk
+	called *bool
+}
+
+func (s schemaArgsTool) Name() string        { return s.name }
+func (s schemaArgsTool) Description() string { return "schema-bearing tool" }
+func (s schemaArgsTool) Schema() map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"path": map[string]any{"type": "string"}},
+		"required":   []string{"path"},
+	}
+}
+func (s schemaArgsTool) Risk() toolruntime.Risk { return s.risk }
+func (s schemaArgsTool) Timeout() time.Duration { return time.Second }
+func (s schemaArgsTool) Call(context.Context, map[string]any) (toolruntime.Result, error) {
+	*s.called = true
+	return toolruntime.Result{Content: "wrote"}, nil
+}
+
+// TestDispatchValidatesArgsAgainstSchema pins the pre-execution schema screen:
+// a call whose arguments PARSED but violate the tool's declared input schema
+// (wrong field type, missing required) is answered inline with a structured
+// error naming the offending field — the tool never runs and the middleware
+// chain never sees it — while a conforming call in the same batch executes.
+// This mirrors LangChain's _parse_input / LangGraph's ValidationNode screen.
+func TestDispatchValidatesArgsAgainstSchema(t *testing.T) {
+	called := false
+	p := &scriptProvider{script: [][]provider.Event{
+		multiToolUseResponse(provider.StopEndTurn,
+			scriptCall{"tu1", "write", `{"path":123}`},
+			scriptCall{"tu2", "write", `{}`},
+			scriptCall{"tu3", "write", `{"path":"/tmp/x"}`},
+		),
+		textResponse("done"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(schemaArgsTool{name: "write", risk: toolruntime.RiskSandboxWrite, called: &called})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), nil, &memEmitter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called != true {
+		t.Fatal("the conforming call must execute")
+	}
+	blocks := toolResultBlocks(t, produced)
+	if len(blocks) != 3 {
+		t.Fatalf("got %d tool_result blocks, want 3 (one per tool_use)", len(blocks))
+	}
+	for i, want := range []struct {
+		id, contains string
+		isErr        bool
+	}{
+		{"tu1", "$.path", true},
+		{"tu2", `"path"`, true},
+		{"tu3", "wrote", false},
+	} {
+		if blocks[i].ToolResultID != want.id {
+			t.Errorf("block[%d] id = %q, want %q — results must stay index-aligned with calls", i, blocks[i].ToolResultID, want.id)
+		}
+		if !strings.Contains(blocks[i].ToolContent, want.contains) {
+			t.Errorf("block[%d] content = %q, want it to name %q", i, blocks[i].ToolContent, want.contains)
+		}
+		if blocks[i].IsError != want.isErr {
+			t.Errorf("block[%d] isError = %v, want %v", i, blocks[i].IsError, want.isErr)
+		}
+		if want.isErr && !strings.Contains(blocks[i].ToolContent, "invalid tool arguments") {
+			t.Errorf("block[%d] content = %q, want the 'invalid tool arguments' marker", i, blocks[i].ToolContent)
+		}
+	}
+}
+
+// TestSchemaInvalidCallSkipsInteractionGate pins the ordering between the
+// schema screen and the interaction gate: a call whose arguments violate the
+// tool's schema must NOT suspend the run — parking an approval card for a call
+// that can never execute would strand the batch on a meaningless verdict. The
+// dispatch screen answers it inline and the loop continues.
+func TestSchemaInvalidCallSkipsInteractionGate(t *testing.T) {
+	called := false
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "danger", `{"path":123}`),
+		textResponse("re-issued and finished"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(schemaArgsTool{name: "danger", risk: toolruntime.RiskExternalWrite, called: &called})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&PermissionMW{Check: askAll})
+
+	emit := &memEmitter{}
+	produced, err := loop.Run(context.Background(), nil, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Error("a schema-invalid call must not execute")
+	}
+	if loop.PendingInteraction != nil {
+		t.Errorf("run suspended on a schema-invalid call: %+v", loop.PendingInteraction)
+	}
+	if emit.count(KindApprovalRequest) != 0 {
+		t.Error("a schema-invalid call must not raise an approval request")
+	}
+	blocks := toolResultBlocks(t, produced)
+	if !blocks[0].IsError || !strings.Contains(blocks[0].ToolContent, "invalid tool arguments") {
+		t.Errorf("result = %+v, want an inline is_error schema-violation result", blocks[0])
+	}
+	if p.calls != 2 {
+		t.Errorf("provider calls = %d, want 2 — the loop must continue so the model can re-issue", p.calls)
+	}
+}
+
 // barrierTool blocks until every concurrent invocation has arrived, so a serial
-// dispatch cannot complete the batch. Its timeout bounds that failure instead of
-// hanging the test.
 type barrierTool struct {
 	arrived chan struct{}
 	release chan struct{}
