@@ -27,5 +27,9 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src"]
+  "include": ["src"],
+  // shadcn-generated components are checked by the referenced tsconfig.ui.json
+  // (unused-locals off), not re-compiled here under the stricter flags.
+  "exclude": ["src/components/ui"],
+  "references": [{ "path": "./tsconfig.ui.json" }]
 }
