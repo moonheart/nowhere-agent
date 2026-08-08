@@ -264,6 +264,50 @@ func TestTriggerRejectBusySession(t *testing.T) {
 	}
 }
 
+// TestTriggerFireNowLeavesScheduleAlone: a manual run fires the task but does
+// not claim it, so next_run_at/last_run_at stay exactly as the cadence left
+// them — an out-of-band fire must not disturb the cron schedule.
+func TestTriggerFireNowLeavesScheduleAlone(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), validTask(userID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+	before, _ := store.Get(context.Background(), created.ID)
+
+	spy := &loopSpy{}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+	if err := tr.FireNow(context.Background(), created); err != nil {
+		t.Fatalf("firenow: %v", err)
+	}
+	t.Cleanup(func() {
+		ids, _ := store.ListSessions(context.Background(), created.ID)
+		for _, id := range ids {
+			db.Exec(`DELETE FROM sessions WHERE id = $1`, id)
+		}
+	})
+
+	if atomic.LoadInt32(&spy.count) != 1 {
+		t.Fatalf("manual fire should build one loop, got %d", spy.count)
+	}
+	// It produced a session (the run fired).
+	if ids, _ := store.ListSessions(context.Background(), created.ID); len(ids) != 1 {
+		t.Fatalf("expected 1 produced session, got %v", ids)
+	}
+	// But the schedule is untouched: same next_run_at, no last_run_at.
+	after, _ := store.Get(context.Background(), created.ID)
+	if !after.NextRunAt.Equal(before.NextRunAt) {
+		t.Fatalf("manual fire moved next_run_at: %v -> %v", before.NextRunAt, after.NextRunAt)
+	}
+	if after.LastRunAt != nil {
+		t.Fatalf("manual fire stamped last_run_at: %v", after.LastRunAt)
+	}
+}
+
 // TestTriggerKickoffReachesModel is the regression for the empty-messages bug:
 // a fired free-text task must send its kickoff as the opening user turn, not an
 // empty history. The registry runs History verbatim (UserMessage is persisted,

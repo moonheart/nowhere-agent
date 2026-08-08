@@ -146,6 +146,17 @@ func (tr *Trigger) fireOnce(ctx context.Context, task Task) error {
 	return tr.submit(fireCtx, claimed)
 }
 
+// FireNow runs one task immediately, out of band. Unlike a scheduled fire it
+// does NOT claim the task, so next_run_at/cron are untouched — a manual run is
+// independent of the cadence. It goes through the same submit path a due fire
+// does. A busy target under reject/enqueue is a quiet skip, same as a sweep;
+// interrupt cancels the active run first.
+func (tr *Trigger) FireNow(ctx context.Context, task Task) error {
+	fireCtx, cancel := context.WithTimeout(ctx, tr.fireTimeout)
+	defer cancel()
+	return tr.submit(fireCtx, task)
+}
+
 // submit builds the run environment for a claimed task and hands it to the
 // registry. It is the construction half of the "unattended chatapi" (design:
 // run construction).

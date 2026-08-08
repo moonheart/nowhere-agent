@@ -38,11 +38,21 @@ func randSuffix() string {
 }
 
 type env struct {
-	t     *testing.T
-	db    *sql.DB
-	store *schedule.PGStore
-	mux   *http.ServeMux
-	actor identity.User
+	t      *testing.T
+	db     *sql.DB
+	store  *schedule.PGStore
+	mux    *http.ServeMux
+	actor  identity.User
+	runner *fakeRunner
+}
+
+// fakeRunner records the tasks it was asked to fire, standing in for the
+// trigger without a provider or registry.
+type fakeRunner struct{ fired []string }
+
+func (f *fakeRunner) FireNow(ctx context.Context, task schedule.Task) error {
+	f.fired = append(f.fired, task.ID)
+	return nil
 }
 
 func newEnv(t *testing.T) *env {
@@ -59,8 +69,8 @@ func newEnv(t *testing.T) *env {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	e := &env{t: t, db: db, store: schedule.NewPGStore(db)}
-	h := NewHandler(e.store)
+	e := &env{t: t, db: db, store: schedule.NewPGStore(db), runner: &fakeRunner{}}
+	h := NewHandler(e.store).WithRunner(e.runner)
 	e.mux = http.NewServeMux()
 	h.RegisterAuthed(e.mux, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -352,5 +362,68 @@ func TestClearSessionsCrossOwnerDenied(t *testing.T) {
 	rec = e.as(other, "POST", "/api/me/scheduled-tasks/"+id+"/sessions/clear", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("cross-owner clear: expected 404, got %d", rec.Code)
+	}
+}
+
+// TestRunNow: the owner can fire a task immediately; the runner is invoked with
+// that task and the response marks the run started.
+func TestRunNow(t *testing.T) {
+	e := newEnv(t)
+	owner := e.user()
+
+	rec := e.as(owner, "POST", "/api/me/scheduled-tasks", validPayload())
+	id := decodeBody(t, rec)["task"].(map[string]any)["id"].(string)
+	e.cleanupTask(id)
+
+	rec = e.as(owner, "POST", "/api/me/scheduled-tasks/"+id+"/run", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("run-now: status %d body %s", rec.Code, rec.Body)
+	}
+	if len(e.runner.fired) != 1 || e.runner.fired[0] != id {
+		t.Fatalf("runner should have fired %s once, got %v", id, e.runner.fired)
+	}
+}
+
+// TestRunNowCrossOwnerDenied: another user's run attempt reads as not-found and
+// never reaches the runner (no id probing, no firing foreign tasks).
+func TestRunNowCrossOwnerDenied(t *testing.T) {
+	e := newEnv(t)
+	owner := e.user()
+	other := e.user()
+
+	rec := e.as(owner, "POST", "/api/me/scheduled-tasks", validPayload())
+	id := decodeBody(t, rec)["task"].(map[string]any)["id"].(string)
+	e.cleanupTask(id)
+
+	rec = e.as(other, "POST", "/api/me/scheduled-tasks/"+id+"/run", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner run: expected 404, got %d", rec.Code)
+	}
+	if len(e.runner.fired) != 0 {
+		t.Fatalf("cross-owner run must not reach the runner, fired %v", e.runner.fired)
+	}
+}
+
+// TestRunNowNoRunner: with no trigger wired (no LLM configured) run-now answers
+// 503 while the rest of CRUD keeps working.
+func TestRunNowNoRunner(t *testing.T) {
+	e := newEnv(t)
+	owner := e.user()
+	// Rebuild the mux with a runnerless handler.
+	h := NewHandler(e.store)
+	e.mux = http.NewServeMux()
+	h.RegisterAuthed(e.mux, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), e.actor)))
+		})
+	})
+
+	rec := e.as(owner, "POST", "/api/me/scheduled-tasks", validPayload())
+	id := decodeBody(t, rec)["task"].(map[string]any)["id"].(string)
+	e.cleanupTask(id)
+
+	rec = e.as(owner, "POST", "/api/me/scheduled-tasks/"+id+"/run", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("run-now without a runner: expected 503, got %d (%s)", rec.Code, rec.Body)
 	}
 }

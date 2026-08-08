@@ -10,6 +10,7 @@ import {
   CalendarClock,
   Loader2,
   Pencil,
+  Play,
   Plus,
   Rows3,
   Trash2,
@@ -52,6 +53,7 @@ import {
   enableScheduledTask,
   clearTaskSessions,
   listScheduledTasks,
+  runScheduledTask,
   taskSessions,
   updateScheduledTask,
   type MultitaskStrategy,
@@ -117,6 +119,26 @@ export function ScheduledTasksPage() {
     }
   };
 
+  // Ids of tasks currently being fired manually, so the button spins and can't
+  // be double-clicked while a run is being submitted.
+  const [running, setRunning] = useState<Set<string>>(new Set());
+  const runNow = async (t: ScheduledTask) => {
+    setError(null);
+    setRunning((s) => new Set(s).add(t.id));
+    try {
+      await runScheduledTask(t.id);
+      state.reload(); // last_run_at / produced sessions may have changed
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setRunning((s) => {
+        const next = new Set(s);
+        next.delete(t.id);
+        return next;
+      });
+    }
+  };
+
   return (
     <>
       <PageHeader
@@ -170,6 +192,16 @@ export function ScheduledTasksPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label="Run now"
+                          title="Run now (does not change the schedule)"
+                          disabled={running.has(t.id)}
+                          onClick={() => void runNow(t)}
+                        >
+                          {running.has(t.id) ? <Loader2 className="animate-spin" /> : <Play />}
+                        </Button>
                         <TaskSessionsDialog task={t} />
                         <TaskFormDialog task={t} onSaved={state.reload} />
                         <ConfirmButton

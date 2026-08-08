@@ -67,6 +67,13 @@ export const enableScheduledTask = (id: string) =>
 export const disableScheduledTask = (id: string) =>
   api<{ task: ScheduledTask }>(`${BASE}/${enc(id)}/disable`, { method: "POST" });
 
+// runScheduledTask fires a task immediately, out of band — it does not advance
+// the cron schedule. started is false when the target session was busy and the
+// task's strategy skipped the run; session_id is the session the run fired into
+// (a fresh one, or the task's fixed target).
+export const runScheduledTask = (id: string) =>
+  api<{ started: boolean; session_id?: string }>(`${BASE}/${enc(id)}/run`, { method: "POST" });
+
 // taskSessions lists the session ids a task has produced (the fire created one
 // per run when the task has no fixed target session).
 export const taskSessions = (id: string) =>

@@ -211,6 +211,11 @@ func run() error {
 	// provider was configured.
 	var dreamRunner *dreaming.Runner
 
+	// The scheduled-task trigger is declared out here for the same reason: the
+	// run-now route (wired with the CRUD routes below, outside the provider
+	// branch) fires through it, and it only exists when a provider is configured.
+	var schedTrigger *schedule.Trigger
+
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter, rawRecorder := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
@@ -574,9 +579,10 @@ func run() error {
 		// it rebuilds the chat loop with a whitelist-filtered tool registry
 		// (buildToolRegistry) and submits via the handler's shared RunRegistry,
 		// so streaming, persistence, permission, and compression are identical.
-		// The store and CRUD routes are wired below, outside the provider branch,
-		// so task management stays available with no LLM configured; only firing
-		// needs a provider.
+		// The trigger is declared at function scope (above) but built here, inside
+		// the provider branch; the CRUD routes are wired below, outside this
+		// branch, so task management stays available with no LLM configured. Only
+		// firing (scheduled sweep and run-now) needs a provider.
 		if cfg.Schedule.Enabled {
 			schedStore := schedule.NewPGStore(pool)
 			// Loop builder: rebuild the chat loop with the task's system prompt and
@@ -594,6 +600,7 @@ func run() error {
 			})
 			trigger.SetLogger(log)
 			go trigger.Start(ctx)
+			schedTrigger = trigger
 			log.Info("scheduled-task trigger enabled", "scan_interval", cfg.Schedule.ScanInterval)
 		} else {
 			log.Info("scheduled-task trigger disabled; task CRUD still available")
@@ -622,9 +629,9 @@ func run() error {
 
 	// Scheduled-task CRUD (scheduled-tasks): self-service management of recurring
 	// agent runs. Registered outside the provider branch so tasks can be managed
-	// on a deployment with no LLM; only firing needs a provider (see the trigger
-	// wiring inside the provider branch).
-	scheduleapi.NewHandler(schedule.NewPGStore(pool)).RegisterAuthed(mux, identityHandler.RequireAuth)
+	// on a deployment with no LLM; only firing needs a provider, so run-now is
+	// wired to the trigger when one was built above and answers 503 otherwise.
+	scheduleapi.NewHandler(schedule.NewPGStore(pool)).WithRunner(schedTrigger).RegisterAuthed(mux, identityHandler.RequireAuth)
 	log.Info("scheduled-task endpoints enabled (auth required)")
 
 	// Serve the built frontend if present. The console is a client-side route,

@@ -29,9 +29,17 @@ type Store interface {
 	EndSessions(ctx context.Context, taskID string) (int, error)
 }
 
+// Runner fires one task immediately, out of band. *schedule.Trigger satisfies
+// it via FireNow. A nil Runner means no provider is configured, so the run-now
+// route answers 503 while the rest of task CRUD keeps working.
+type Runner interface {
+	FireNow(ctx context.Context, task schedule.Task) error
+}
+
 // Handler serves the scheduled-task management endpoints.
 type Handler struct {
-	store Store
+	store  Store
+	runner Runner
 }
 
 // NewHandler builds the handler. store may be nil; the routes then answer 503
@@ -39,6 +47,13 @@ type Handler struct {
 // rest.
 func NewHandler(store Store) *Handler {
 	return &Handler{store: store}
+}
+
+// WithRunner wires the manual-run path (run-now). Nil leaves the route
+// answering 503 (no LLM configured).
+func (h *Handler) WithRunner(r Runner) *Handler {
+	h.runner = r
+	return h
 }
 
 // RegisterAuthed mounts every route behind the auth middleware, so each handler
@@ -51,6 +66,7 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	route(mux, auth, "DELETE /api/me/scheduled-tasks/{id}", h.remove)
 	route(mux, auth, "POST /api/me/scheduled-tasks/{id}/enable", h.enable)
 	route(mux, auth, "POST /api/me/scheduled-tasks/{id}/disable", h.disable)
+	route(mux, auth, "POST /api/me/scheduled-tasks/{id}/run", h.runNow)
 	route(mux, auth, "GET /api/me/scheduled-tasks/{id}/sessions", h.sessions)
 	route(mux, auth, "POST /api/me/scheduled-tasks/{id}/sessions/clear", h.clearSessions)
 }

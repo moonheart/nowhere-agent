@@ -123,6 +123,43 @@ func (h *Handler) setEnabled(w http.ResponseWriter, r *http.Request, enabled boo
 	writeJSON(w, http.StatusOK, map[string]any{"task": taskDTOOf(t)})
 }
 
+// runNow fires one task immediately, out of band. Ownership is re-verified so a
+// caller can only run their own task. The manual fire does not claim the task,
+// so next_run_at/cron are untouched; a busy target under reject/enqueue is a
+// quiet skip (started=false). Without a runner wired (no LLM) it answers 503.
+func (h *Handler) runNow(w http.ResponseWriter, r *http.Request) {
+	if h.storeUnavailable(w) {
+		return
+	}
+	if h.runner == nil {
+		writeError(w, http.StatusServiceUnavailable, "scheduled firing unavailable: no LLM provider configured")
+		return
+	}
+	t, ok := h.authorizeTask(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if err := h.runner.FireNow(r.Context(), t); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	// The run may already have appended to its target session; report the task's
+	// current produced sessions so the client can surface the newest one.
+	ids, err := h.store.ListSessions(r.Context(), t.ID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	started := t.TargetSessionID != "" || len(ids) > 0
+	var sessionID string
+	if t.TargetSessionID != "" {
+		sessionID = t.TargetSessionID
+	} else if len(ids) > 0 {
+		sessionID = ids[0]
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"started": started, "session_id": sessionID})
+}
+
 // sessions lists the sessions a task produced.
 func (h *Handler) sessions(w http.ResponseWriter, r *http.Request) {
 	if h.storeUnavailable(w) {
