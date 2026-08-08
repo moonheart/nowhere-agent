@@ -41,6 +41,9 @@ type Config struct {
 	// Identity configures the account layer, notably platform-admin bootstrap
 	// (admin-console).
 	Identity Identity
+	// OIDC configures single-sign-on against an external identity provider
+	// (enterprise-readiness P1-2). Disabled unless OIDC_ISSUER is set.
+	OIDC OIDC
 	// Secrets configures encryption-at-rest for stored credentials
 	// (enterprise-readiness P0-2).
 	Secrets Secrets
@@ -244,6 +247,35 @@ type Identity struct {
 	// loses the role.
 	BootstrapAdminEmail string `envconfig:"BOOTSTRAP_ADMIN_EMAIL" default:""`
 }
+
+// OIDC configures single-sign-on via the authorization-code flow against an
+// external identity provider (enterprise-readiness P1-2). Any standard OIDC /
+// OAuth2 provider works; the common Chinese enterprise IdPs (钉钉 / 企业微信 /
+// 飞书) all expose a standard OIDC or OAuth2 authorization-code endpoint, so one
+// generic implementation covers them by setting the issuer/endpoints. Enabled
+// only when Issuer is set — empty keeps password sign-in as the only path.
+type OIDC struct {
+	// Issuer is the IdP's issuer identifier (the OIDC iss). The server fetches
+	// <Issuer>/.well-known/openid-configuration at startup to discover the
+	// authorization/token endpoints and the JWKS used to verify id_tokens.
+	// Empty disables SSO.
+	Issuer string `envconfig:"OIDC_ISSUER" default:""`
+	// ClientID / ClientSecret are the platform's registration at the IdP.
+	ClientID     string `envconfig:"OIDC_CLIENT_ID" default:""`
+	ClientSecret string `envconfig:"OIDC_CLIENT_SECRET" default:""`
+	// RedirectURL is the callback the IdP returns the browser to. It must match
+	// the value registered at the IdP. Defaults to the loopback dev callback;
+	// production must set it to the gateway's public /auth/oidc/callback.
+	RedirectURL string `envconfig:"OIDC_REDIRECT_URL" default:"http://localhost:8080/auth/oidc/callback"`
+	// Scopes requested of the IdP. Defaults to the minimal OIDC profile set;
+	// 企业微信/钉钉 sometimes need an extra scope to return the work email.
+	Scopes string `envconfig:"OIDC_SCOPES" default:"openid profile email"`
+}
+
+// Enabled reports whether SSO is configured. Only Issuer gates it: endpoints
+// and keys are discovered from it, and a public (no-secret) client is valid
+// for some IdPs.
+func (o OIDC) Enabled() bool { return o.Issuer != "" && o.ClientID != "" }
 
 // Workspace configures the per-session workspace storage that backs image
 // payloads referenced by conversation messages (persist-raw-messages).

@@ -1,5 +1,5 @@
-import { useState, type FC, type FormEvent } from "react";
-import { AlertCircle } from "lucide-react";
+import { useEffect, useState, type FC, type FormEvent } from "react";
+import { AlertCircle, KeyRound } from "lucide-react";
 import { login, signup } from "@/lib/auth";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -13,12 +13,38 @@ import {
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 
-export const LoginForm: FC<{ onSuccess: () => void }> = ({ onSuccess }) => {
+// ssoAvailable probes the server for OIDC single-sign-on (P1-2). The route
+// exists only when SSO is configured, so a 404/network error reads as "off" and
+// the SSO button simply does not render — password sign-in is always there.
+async function ssoAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch("/auth/oidc/enabled");
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> = ({
+  onSuccess,
+  ssoError = null,
+}) => {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sso, setSso] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    ssoAvailable().then((ok) => {
+      if (live) setSso(ok);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -49,6 +75,33 @@ export const LoginForm: FC<{ onSuccess: () => void }> = ({ onSuccess }) => {
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {ssoError && (
+            <Alert variant="destructive" className="mb-4">
+              <AlertCircle />
+              <AlertDescription>{ssoError}</AlertDescription>
+            </Alert>
+          )}
+          {sso && (
+            <div className="mb-4">
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                className="w-full"
+                onClick={() => {
+                  window.location.href = "/auth/oidc/login";
+                }}
+              >
+                <KeyRound />
+                Sign in with SSO
+              </Button>
+              <div className="my-4 flex items-center gap-3 text-xs text-muted-foreground">
+                <span className="h-px flex-1 bg-border" />
+                or with email
+                <span className="h-px flex-1 bg-border" />
+              </div>
+            </div>
+          )}
           <form onSubmit={submit}>
             <FieldGroup>
               <Field>

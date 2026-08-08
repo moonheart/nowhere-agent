@@ -26,7 +26,7 @@ import { SessionList } from "@/components/SessionList";
 import { RightPanel } from "@/components/right-panel";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { getToken, logout } from "@/lib/auth";
+import { getToken, logout, consumeSSORedirect } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, activityEpoch, type SubagentSignal } from "@/lib/activity";
@@ -367,12 +367,25 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
 // those paths (see spaHandler) so a deep link loads.
 export default function App() {
   const [token, setToken] = useState<string | null>(() => getToken());
+  // SSO hand-off (P1-2): the OIDC callback returns the browser to /#token=...
+  // (or /#sso_error=...). Consume it once on mount — before the gate below — so
+  // an IdP sign-in lands signed-in and an SSO failure reaches the login form.
+  const [ssoError, setSsoError] = useState<string | null>(null);
+  useEffect(() => {
+    const { token: ssoToken, error } = consumeSSORedirect();
+    if (ssoToken) setToken(ssoToken);
+    if (error) setSsoError(error);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!token) {
     return (
       <div className="flex h-dvh flex-col bg-background text-foreground">
         <div className="min-h-0 flex-1">
-          <LoginForm onSuccess={() => setToken(getToken())} />
+          <LoginForm
+            onSuccess={() => setToken(getToken())}
+            ssoError={ssoError}
+          />
         </div>
       </div>
     );

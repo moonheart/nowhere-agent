@@ -30,7 +30,7 @@
 > **P1 实施进度(2026-08-08 起,进行中):**
 > - [x] **成本核算(§2.4/§2.1,P1-3)** —— 已落地:`runs` 加 `team_id`/`model`(migration `000023`),团队用量从近似变精确,`usage.ByModel` 打底 per-model 成本。
 > - [x] **配额执行 + 请求限流(§2.4,P1-1)** —— 已落地:`internal/quota` + `usage_budgets` 表(migration `000024`),月度 token 预算提交前拦截(429) + per-IP 请求限流中间件(`HTTP_RATE_LIMIT_*`,默认关)。
-> - [ ] **OIDC 登录(§2.1,P1-2)** —— 未做:对接 IdP(钉钉/企业微信/飞书走标准 OIDC/OAuth2)。
+> - [x] **OIDC 登录(§2.1,P1-2)** —— 已落地:`internal/oidc` + `user_identities` 表(migration `000025`),标准 authorization-code flow(钉钉/企业微信/飞书通用),按 email 并入账号 + 发平台 token,登录页 SSO 按钮。
 
 > 标记说明:✅ 已实现 / ◐ 已实现但未接线或仅部分 / ○ 完全缺失。⭐ = 高价值优先。
 
@@ -71,9 +71,17 @@
 - 服务端按路由强制团队 scope(`internal/adminapi/handler.go:70-102` 的 `requireTeamRole`、`guards.go`);资源可见性经 `Service.AccessibleScopes`(用户+团队+系统)过滤(`internal/identity/service.go:95-106`)。
 - 停用账户即吊销 token(`internal/identity/store_admin.go:100-133`);`BOOTSTRAP_ADMIN_EMAIL` 引导管理员。
 
-**缺失:** 无 SSO/OIDC/SAML/OAuth(全树仅 docs 与 go.sum 命中);无 MFA;无密码策略;无面向程序化访问的服务 API key;无 token TTL/scope 配置;无登录节流/锁定。
+> **SSO / OIDC 登录:已实现(2026-08-08,P1-2)。** 此前唯一凭证是本地邮箱+密码;企业接入几乎必然要对接 IdP,现在支持标准 **OIDC authorization-code flow**,一套通用实现覆盖钉钉/企业微信/飞书(均暴露标准 OIDC/OAuth2 授权码端点):
+> - **新包 `internal/oidc`**:启动时从 `OIDC_ISSUER` 拉 `/.well-known/openid-configuration` 发现授权/token 端点与 JWKS(发现 issuer 与配置不一致即拒绝启动,防指错授权方);`Exchange` 服务端换 code 得 id_token,用 `golang-jwt/v5` 对 JWKS 验 **RS256 签名 + iss + aud + exp**(kid 未知时刷新一次 JWKS 应对密钥轮换),验过才信 claim。
+> - **账号对接**:`user_identities` 表(migration `000025`,`(issuer,subject)` 唯一,`user_id` ON DELETE CASCADE)。`ProvisionExternalUser`:已链接→返回原账户(幂等);未链接→**按 IdP 断言的 email 并入既有账户**(员工先密码注册后用 SSO 仍是一个账户),否则新建账户(password_hash 置不可用哨兵,永不能密码登录;空平台首账户仍为 admin)。`(issuer,subject)` 来自验签后的 id_token,绝不取自 query/body。
+> - **CSRF/login-confusion 防护**:login 置一次性 HttpOnly+SameSite=Lax state cookie,callback 校验 echo 一致否则拒绝并清 cookie(单次使用)。
+> - **会话模型不变**:SSO 只是登录**机制**——验完身份后发**平台自己的 bearer token**(`Service.IssueToken`),下游 RequireAuth/团队/配额完全不变;token 经 URL **fragment**(`/#token=...`)交给 SPA(不进服务器日志/浏览器历史),登录页 `consumeSSORedirect` 读取后立即从地址栏抹除。失败重定向 `/#sso_error=...`。
+> - **接线**:仅 `OIDC_ISSUER`+`OIDC_CLIENT_ID` 设置才启用(`config.OIDC.Enabled()`);env `OIDC_CLIENT_SECRET`/`OIDC_REDIRECT_URL`/`OIDC_SCOPES`。路由 `GET /auth/oidc/login`、`GET /auth/oidc/callback`、`GET /auth/oidc/enabled`(前端探测是否渲染 SSO 按钮,404=未启用)。**审计**:SSO 登录记 `auth.login`(detail `method:oidc`;禁用账户/provisioning 失败记 failure,绝不记 id_token 或 client_secret)。登录页在 SSO 启用时显示 "Sign in with SSO" 按钮 + 密码表单并存。
+> - **测试**:fake IdP(httptest + RSA 签名)端到端跑通 discovery→exchange→验签→claims;拒绝错误 aud/iss/过期/伪造签名;handler 测 state-cookie CSRF 防护、成功发放 token、禁用账户不发 token;identity store PG 测试覆盖 provision 幂等/按 email 并入/解析。
 
-> **企业影响:** 内部接入几乎必然要对接 IdP(OIDC/LDAP)。这是 ◐ 而非 ○,因为本地 RBAC 本身做得相当扎实。
+**缺失:** 无 SAML;无 MFA;无密码策略;无面向程序化访问的服务 API key;无 token TTL/scope 配置;无登录节流/锁定(已有 per-IP 请求限流中间件可部分缓解,见 2.4)。
+
+> **企业影响:** 内部接入 IdP(OIDC)已可用。本地 RBAC 扎实 + SSO 登录已通,本项接近 ✅;余下 MFA/密码策略/SAML 为增量。
 
 ### 2.2 审计日志 Audit —— ✅ **已实现(2026-08-08)**
 

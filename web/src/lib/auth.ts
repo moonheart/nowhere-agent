@@ -7,9 +7,34 @@ export function getToken(): string | null {
   return localStorage.getItem(KEY);
 }
 
+export function setToken(token: string): void {
+  localStorage.setItem(KEY, token);
+}
+
 export function clearToken(): void {
   localStorage.removeItem(KEY);
 }
+
+// consumeSSORedirect reads the OIDC callback's URL-fragment hand-off
+// (/#token=... on success, /#sso_error=... on failure), stores a token if one
+// arrived, and strips the fragment from the address bar so the credential does
+// not linger in history or get copied into a shared link. The server delivers
+// the token in a fragment precisely so it never reaches a server log; we honor
+// that by removing it here. Returns the outcome so the caller can render an
+// SSO error or proceed signed-in.
+export function consumeSSORedirect(): { token: string | null; error: string | null } {
+  const hash = window.location.hash;
+  if (!hash) return { token: null, error: null };
+  const params = new URLSearchParams(hash.replace(/^#/, ""));
+  const token = params.get("token");
+  const error = params.get("sso_error");
+  if (!token && !error) return { token: null, error: null };
+  if (token) setToken(token);
+  // Strip the fragment (token or error) without adding a history entry.
+  window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  return { token, error };
+}
+
 
 async function post(path: string, body: unknown): Promise<Response> {
   return fetch(path, {

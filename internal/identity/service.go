@@ -60,6 +60,22 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 	return raw, u, nil
 }
 
+// IssueToken issues a fresh bearer token for an already-authenticated account.
+// Password login authenticates via Login; SSO authenticates via the IdP and
+// reaches the platform only after the identity is verified, so it mints the
+// platform token here rather than re-checking a password the account may not
+// have. The account must already be validated (not disabled) by the caller.
+func (s *Service) IssueToken(ctx context.Context, u User) (string, error) {
+	raw, err := generateToken()
+	if err != nil {
+		return "", err
+	}
+	if err := s.store.CreateToken(ctx, u.ID, hashToken(raw), s.now().Add(tokenTTL)); err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
 // Authenticate resolves a bearer token to its user. Disabling an account
 // revokes its tokens, so this rarely fires — but a token issued in the same
 // instant as the disable would otherwise slip through, and re-checking is one

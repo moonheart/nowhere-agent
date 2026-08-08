@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"nowhere-agent/internal/mcp"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/observability"
+	"nowhere-agent/internal/oidc"
 	"nowhere-agent/internal/permission"
 	"nowhere-agent/internal/platform/db"
 	"nowhere-agent/internal/provider"
@@ -104,6 +106,34 @@ func run() error {
 	// hard dependency, and write failures surface only in the server log.
 	auditLogger := audit.NewLogger(pool, log)
 	identityHandler.WithAudit(auditLogger)
+
+	// Single-sign-on (enterprise-readiness P1-2): when OIDC_ISSUER is set, mount
+	// the authorization-code flow so users sign in via the enterprise IdP (钉钉 /
+	// 企业微信 / 飞书 / any standard OIDC provider) instead of a platform
+	// password. SSO is only a sign-in MECHANISM — it provisions/resolves the
+	// platform account (user_identities links issuer+subject) and issues the
+	// platform's own bearer token, so every downstream concern (RequireAuth,
+	// teams, quotas) is unchanged. A misconfigured issuer fails the boot: better
+	// to refuse to start than to offer a broken SSO button.
+	if cfg.OIDC.Enabled() {
+		oidcProvider, err := oidc.NewProvider(ctx, oidc.Config{
+			Issuer:       cfg.OIDC.Issuer,
+			ClientID:     cfg.OIDC.ClientID,
+			ClientSecret: cfg.OIDC.ClientSecret,
+			RedirectURL:  cfg.OIDC.RedirectURL,
+			Scopes:       strings.Split(cfg.OIDC.Scopes, " "),
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("oidc sso: %w", err)
+		}
+		oidcHandler := oidc.NewHandler(oidcProvider, identityStore,
+			func(ctx context.Context, u identity.User) (string, error) {
+				return identitySvc.IssueToken(ctx, u)
+			}).WithAudit(auditLogger)
+		oidcHandler.Register(mux)
+		mux.Handle("GET /auth/oidc/enabled", oidc.EnabledProbe())
+		log.Info("oidc sso enabled", "issuer", cfg.OIDC.Issuer, "redirect", cfg.OIDC.RedirectURL)
+	}
 
 	// Platform-admin bootstrap (admin-console): the first account to sign up on
 	// an empty database is made an admin automatically, which does nothing for a

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -218,4 +219,102 @@ func (s *Store) IsMember(ctx context.Context, teamID, userID string) (bool, erro
 		return false, err
 	}
 	return true, nil
+}
+
+// UserByExternalIdentity resolves an OIDC (issuer, subject) pair to its platform
+// account (enterprise-readiness P1-2). The pair comes from a verified id_token,
+// never from client input, so it is the trusted external key. Returns
+// ErrUserNotFound when no link exists yet (first SSO sign-in provisions one).
+func (s *Store) UserByExternalIdentity(ctx context.Context, issuer, subject string) (User, error) {
+	u, err := scanUserRow(s.db.QueryRowContext(ctx, `
+		SELECT u.`+strings.ReplaceAll(userColumns, ", ", ", u.")+`
+		FROM users u
+		JOIN user_identities i ON i.user_id = u.id
+		WHERE i.issuer = $1 AND i.subject = $2`, issuer, subject))
+	if errors.Is(err, sql.ErrNoRows) {
+		return User{}, ErrUserNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("resolve external identity: %w", err)
+	}
+	return u, nil
+}
+
+// ProvisionExternalUser links an external identity to an account, creating the
+// account on first sign-in. Provisioning strategy: if an account already holds
+// the email the IdP asserts, link the identity to THAT account (the email is the
+// enterprise's own join key — an employee who first signed up with a password and
+// later signs in via SSO lands on one account, not two); otherwise create a fresh
+// account. The fresh account's password_hash is set to an unusable sentinel so it
+// can never authenticate by password (sign-in is via the IdP only), keeping the
+// NOT NULL column satisfied. Returns the resolved account.
+func (s *Store) ProvisionExternalUser(ctx context.Context, issuer, subject, email, displayName string) (User, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, fmt.Errorf("begin provision: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Serialize concurrent first-sign-ins for the same external identity so two
+	// racing callbacks cannot both create the link/account.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "nowhere.sso:"+issuer+":"+subject); err != nil {
+		return User{}, fmt.Errorf("provision lock: %w", err)
+	}
+
+	// Already linked? Return the existing account (idempotent retry / race loser).
+	var linkedID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT user_id FROM user_identities WHERE issuer = $1 AND subject = $2`, issuer, subject).Scan(&linkedID)
+	if err == nil {
+		if _, uerr := tx.ExecContext(ctx, `
+			UPDATE user_identities SET last_login_at = now(), email = $3 WHERE issuer = $1 AND subject = $2`,
+			issuer, subject, email); uerr != nil {
+			return User{}, fmt.Errorf("touch identity: %w", uerr)
+		}
+		if err := tx.Commit(); err != nil {
+			return User{}, fmt.Errorf("commit provision: %w", err)
+		}
+		return s.UserByID(ctx, linkedID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return User{}, fmt.Errorf("lookup identity: %w", err)
+	}
+
+	// Not linked. Join onto an existing account with the same email when one
+	// exists; otherwise create one (first account on an empty platform is admin,
+	// matching CreateUser's bootstrap so an SSO-first deployment still gets an
+	// administrator).
+	userID := ""
+	if email != "" {
+		_ = tx.QueryRowContext(ctx, `SELECT id FROM users WHERE email = $1`, email).Scan(&userID)
+	}
+	if userID == "" {
+		var existing int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&existing); err != nil {
+			return User{}, fmt.Errorf("count users: %w", err)
+		}
+		role := PlatformRoleUser
+		if existing == 0 {
+			role = PlatformRoleAdmin
+		}
+		// Unusable-password sentinel: not a valid bcrypt hash, so bcrypt compare
+		// always fails; satisfies NOT NULL without allowing password sign-in.
+		err = tx.QueryRowContext(ctx, `
+			INSERT INTO users (email, password_hash, display_name, platform_role)
+			VALUES ($1, '!sso-no-password!', $2, $3) RETURNING id`,
+			email, displayName, string(role)).Scan(&userID)
+		if err != nil {
+			return User{}, fmt.Errorf("create sso user: %w", err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO user_identities (user_id, issuer, subject, email) VALUES ($1, $2, $3, $4)`,
+		userID, issuer, subject, email); err != nil {
+		return User{}, fmt.Errorf("link identity: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, fmt.Errorf("commit provision: %w", err)
+	}
+	return s.UserByID(ctx, userID)
 }
