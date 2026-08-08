@@ -370,6 +370,19 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 	// order in the assistant message). Dispatch the no-interaction calls together
 	// (concurrently, mirroring the loop's dispatch) so a resumed batch of several
 	// plain reads doesn't serialize.
+	//
+	// Execution contract: the fold dispatches through the bare tool registry
+	// (CallAll), NOT the loop's chainTool/gateExecute chain. This is safe today
+	// because no middleware implements WrapToolCall and CallAll replicates the
+	// loop's innermost realToolCall exactly (call-id ctx for progress nesting,
+	// per-tool timeout, unknown-tool guard), and it is semantically right for
+	// gated calls — the human verdict IS the authorization, re-running the
+	// execution gate would second-guess it. Known narrow window: an un-gated
+	// sibling executes under the policy as of suspend time; if the session's
+	// permission mode tightened while the batch hung, the fold does not
+	// re-evaluate it. If a WrapToolCall middleware is ever added, it must be
+	// routed into the fold too — add an executor hook here rather than calling
+	// the registry directly.
 	resultMsg := provider.Message{Role: provider.RoleUser}
 	results := make([]toolruntime.Result, len(allCalls))
 	var dispatchIdx []int
