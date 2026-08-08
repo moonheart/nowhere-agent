@@ -80,6 +80,7 @@
 > - **best-effort 语义**:`LogAndReport` 写失败仅落 server log,绝不影响被审计动作本身 —— 审计轨迹永不成为动作的单点故障。
 > - **埋点**:登录/注册/登出(含失败,记录尝试邮箱而非密码)、改密、token 撤销、平台账户管理(建/改/停/启/重置密码/删/改角色)、团队管理(建/改名/删/成员增删改角色)、**团队 provider key 设/删(只记轮换发生,绝不记密钥材料)**、记忆删/弃用。
 > - **查询**:`GET /api/admin/audit?action=&actor=&from=&to=&limit=&offset=`,仅平台管理员可读。
+> - **控制台查看页**:admin 控制台 Platform 区新增 **Audit trail** 页(`web/src/components/admin/AuditPage.tsx`,路由 `/admin/platform/audit`)—— action 下拉(枚举服务端固定 action 集)/actor id/起止日期筛选 + 分页表格,只读(轨迹本为 append-only,不提供任何变更入口)。typed client 在 `web/src/lib/admin.ts`(`listAudit` + `AuditEntry`/`AUDIT_ACTIONS`)。
 
 **遗留(非阻塞):** 工具执行(tool_execution)类事件未纳入 —— 工具调用由 agent loop 内部派发,纳入需在 loop 层埋点,留作后续增量。聊天内容本身刻意不记(隐私与存储成本)。
 
@@ -135,7 +136,7 @@
 - **团队:** 团队列表/详情多 tab —— 改名、成员增删改角色、团队 provider key(设/删/遮蔽)、团队用量、团队记忆。
 - **平台(admin):** 用户(列/建/改/重置密码/停/删)、团队(列/为属主建)、用量、记忆(删/弃用)、技能。
 
-> **说明:** 这是十项里唯一 ✅ 的。控制台**没有**审计查看、配额配置、部署/运维页 —— 因为对应后端根本不存在(见 2.2/2.4/2.6)。控制台的能力上限由后端决定。
+> **说明:** 控制台的三层管理 UI 与后端一一对应,且**审计查看页已补**(P0-1,`/admin/platform/audit`)。控制台**仍没有**配额配置、部署/运维页 —— 因为对应后端尚不存在(见 2.4/2.6)。控制台的能力上限由后端决定。
 
 ### 2.8 外部集成 Integrations —— ◐ PARTIAL
 

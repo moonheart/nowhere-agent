@@ -287,3 +287,65 @@ export const adminDeprecateMemory = (id: string) =>
   api<void>(`/api/admin/memories/${encodeURIComponent(id)}/deprecate`, {
     method: "POST",
   });
+
+// ---- audit trail ----
+
+// AuditEntry mirrors the server's audit.Entry. actor_email is a snapshot kept
+// even after the account is deleted, so it is the display name; actor_id may be
+// empty for events with no authenticated actor (a failed login names no one).
+export type AuditEntry = {
+  id: number;
+  created_at: string;
+  actor_id?: string;
+  actor_email?: string;
+  action: string;
+  outcome: string;
+  target_type?: string;
+  target_id?: string;
+  ip?: string;
+  ua?: string;
+  detail?: unknown;
+};
+
+// The audit filters pass dates as YYYY-MM-DD, which the server parses as a day
+// boundary; DateRange (from/to) is the shared shape the range pickers produce.
+export type AuditQuery = {
+  action?: string;
+  actor?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+};
+
+// The action set is fixed server-side; listing it here lets the filter offer a
+// dropdown of meaningful values instead of a free-text field nobody can guess.
+export const AUDIT_ACTIONS = [
+  "auth.signup",
+  "auth.login",
+  "auth.logout",
+  "me.password.change",
+  "me.token.revoke",
+  "admin.user.create",
+  "admin.user.update",
+  "admin.user.disable",
+  "admin.user.enable",
+  "admin.user.reset_password",
+  "admin.user.delete",
+  "admin.user.set_role",
+  "team.create",
+  "team.rename",
+  "team.delete",
+  "team.member.add",
+  "team.member.remove",
+  "team.member.set_role",
+  "team.key.set",
+  "team.key.delete",
+  "memory.delete",
+  "memory.deprecate",
+] as const;
+
+export const listAudit = (params: AuditQuery) =>
+  api<{ entries: AuditEntry[]; total: number; limit: number; offset: number }>(
+    `/api/admin/audit${qs(params)}`,
+  );

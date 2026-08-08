@@ -18,6 +18,7 @@ import {
   MySkillsPage,
   PlatformSkillsPage,
 } from "@/components/admin/SkillsPages";
+import { PlatformAuditPage } from "@/components/admin/AuditPage";
 import { ScheduledTasksPage } from "@/components/admin/ScheduledTasksPage";
 import { Thread } from "@/components/thread";
 import { LoginForm } from "@/components/login";
@@ -393,6 +394,7 @@ export default function App() {
         <Route path="platform/usage" element={<PlatformUsagePage />} />
         <Route path="platform/memories" element={<PlatformMemoriesPage />} />
         <Route path="platform/skills" element={<PlatformSkillsPage />} />
+        <Route path="platform/audit" element={<PlatformAuditPage />} />
       </Route>
       {/* Anything else falls back to the chat view rather than a blank page. */}
       <Route path="*" element={<ChatApp onSignedOut={() => setToken(null)} />} />

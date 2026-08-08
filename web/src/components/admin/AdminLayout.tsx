@@ -12,6 +12,7 @@ import {
   CalendarClock,
   ChartNoAxesColumn,
   Loader2,
+  ScrollText,
   ShieldCheck,
   Sparkles,
   UserRound,
@@ -181,6 +182,9 @@ export function AdminLayout() {
                 </NavItem>
                 <NavItem to="/admin/platform/skills" icon={<Sparkles />}>
                   Skills
+                </NavItem>
+                <NavItem to="/admin/platform/audit" icon={<ScrollText />}>
+                  Audit trail
                 </NavItem>
               </>
             )}
