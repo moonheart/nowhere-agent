@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/usage"
 )
@@ -87,6 +88,7 @@ func (h *Handler) createTeam(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionTeamCreate).Target("team", team.ID).Detail(map[string]any{"name": team.Name}))
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"team": teamDTO{ID: team.ID, Name: team.Name, Role: string(identity.RoleOwner), CreatedAt: team.CreatedAt},
 	})
@@ -123,6 +125,7 @@ func (h *Handler) renameTeam(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionTeamRename).Target("team", r.PathValue("id")).Detail(map[string]any{"name": name}))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -131,6 +134,7 @@ func (h *Handler) deleteTeam(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionTeamDelete).Target("team", r.PathValue("id")))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -169,6 +173,7 @@ func (h *Handler) addMember(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionTeamMemberAdd).Target("team", r.PathValue("id")).Detail(map[string]any{"user_id": member.UserID, "email": member.Email, "role": string(role)}))
 	writeJSON(w, http.StatusCreated, map[string]any{"member": memberDTOs([]identity.TeamMember{member})[0]})
 }
 
@@ -195,6 +200,7 @@ func (h *Handler) changeMemberRole(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionTeamMemberRole).Target("team", r.PathValue("id")).Detail(map[string]any{"user_id": r.PathValue("userId"), "role": req.Role}))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -217,6 +223,7 @@ func (h *Handler) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionTeamMemberRemove).Target("team", teamID).Detail(map[string]any{"user_id": targetID, "self": targetID == u.ID}))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -274,6 +281,9 @@ func (h *Handler) putKey(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	// The audit detail names the provider and team but NEVER the key material —
+	// the trail records that a rotation happened, not the credential itself.
+	h.record(r, audit.Success(audit.ActionTeamKeySet).Target("team", r.PathValue("id")).Detail(map[string]any{"provider": provider}))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"key": teamKeyDTO{Provider: k.Provider, Masked: k.Masked, CreatedAt: k.CreatedAt, UpdatedAt: k.UpdatedAt},
 	})
@@ -293,6 +303,7 @@ func (h *Handler) deleteKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no key configured for that provider")
 		return
 	}
+	h.record(r, audit.Success(audit.ActionTeamKeyDelete).Target("team", r.PathValue("id")).Detail(map[string]any{"provider": r.PathValue("provider")}))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -366,6 +377,7 @@ func (h *Handler) deleteTeamMemory(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionMemoryDelete).Target("memory", mid).Detail(map[string]any{"team_id": r.PathValue("id")}))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -382,5 +394,6 @@ func (h *Handler) deprecateTeamMemory(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionMemoryDeprecate).Target("memory", mid).Detail(map[string]any{"team_id": r.PathValue("id")}))
 	w.WriteHeader(http.StatusNoContent)
 }

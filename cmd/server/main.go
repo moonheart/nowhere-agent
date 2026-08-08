@@ -18,6 +18,7 @@ import (
 	"nowhere-agent/internal/adminapi"
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/agentdef"
+	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/chatapi"
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/contextmgmt"
@@ -81,6 +82,14 @@ func run() error {
 	identitySvc := identity.NewService(identityStore)
 	identityHandler := identity.NewHandler(identitySvc)
 	identityHandler.Register(mux)
+
+	// Audit trail (enterprise-readiness P0): one append-only logger shared by the
+	// identity handler (auth events) and the admin console (administrative and
+	// credential actions). Recording is best-effort — a broken sink must never
+	// take a login or an admin action down — so it is wired as an option, not a
+	// hard dependency, and write failures surface only in the server log.
+	auditLogger := audit.NewLogger(pool, log)
+	identityHandler.WithAudit(auditLogger)
 
 	// Platform-admin bootstrap (admin-console): the first account to sign up on
 	// an empty database is made an admin automatically, which does nothing for a
@@ -618,7 +627,8 @@ func run() error {
 	// registered outside the provider branch so the console stays reachable on
 	// a deployment with no LLM configured.
 	adminHandler := adminapi.NewHandler(identitySvc, keyStore, usage.NewStore(pool), memPort).
-		WithDreaming(dreamRunner)
+		WithDreaming(dreamRunner).
+		WithAudit(auditLogger)
 	adminHandler.RegisterAuthed(mux, identityHandler.RequireAuth)
 	log.Info("admin console endpoints enabled (auth required)")
 

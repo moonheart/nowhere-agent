@@ -14,6 +14,7 @@ package adminapi
 import (
 	"net/http"
 
+	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/dreaming"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
@@ -28,6 +29,8 @@ type Handler struct {
 	usage    *usage.Store
 	memories memory.Port
 	dreaming *dreaming.Runner
+	// audit records administrative actions; nil disables recording.
+	audit *audit.Logger
 }
 
 // NewHandler builds the console handler. keys, usage, and memories may be nil;
@@ -35,6 +38,13 @@ type Handler struct {
 // a deployment without a memory port or provider keys serving the rest.
 func NewHandler(id *identity.Service, keys *routing.PGKeyStore, u *usage.Store, mem memory.Port) *Handler {
 	return &Handler{identity: id, keys: keys, usage: u, memories: mem}
+}
+
+// WithAudit wires the audit trail so administrative actions are recorded.
+// Recording is best-effort and never changes a response (see record).
+func (h *Handler) WithAudit(l *audit.Logger) *Handler {
+	h.audit = l
+	return h
 }
 
 // WithDreaming wires the consolidation runner, enabling the manual trigger.
@@ -100,9 +110,22 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	route(mux, auth, "GET /api/admin/memories", h.requireAdmin(h.adminMemories))
 	route(mux, auth, "DELETE /api/admin/memories/{id}", h.requireAdmin(h.adminDeleteMemory))
 	route(mux, auth, "POST /api/admin/memories/{id}/deprecate", h.requireAdmin(h.adminDeprecateMemory))
+	route(mux, auth, "GET /api/admin/audit", h.requireAdmin(h.listAudit))
 }
 
 // route mounts one pattern behind the auth middleware.
 func route(mux *http.ServeMux, auth func(http.Handler) http.Handler, pattern string, h http.HandlerFunc) {
 	mux.Handle(pattern, auth(h))
+}
+
+// record writes one event to the audit trail when one is wired, attributing it
+// to the request's authenticated caller. It is a no-op when no trail is wired,
+// and never affects the response — LogAndReport swallows the error, so a broken
+// audit sink cannot turn a successful admin action into a failed one.
+func (h *Handler) record(r *http.Request, e audit.Event) {
+	if h.audit == nil {
+		return
+	}
+	u := caller(r)
+	h.audit.LogAndReport(r.Context(), e.FromRequest(r).Actor(u.ID, u.Email))
 }

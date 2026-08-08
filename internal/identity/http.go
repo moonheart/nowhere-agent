@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"nowhere-agent/internal/audit"
 )
 
 // contextKey is the type for identity values stored on the request context.
@@ -28,9 +30,20 @@ func NewContextWithUser(ctx context.Context, u User) context.Context {
 // Handler exposes identity endpoints over HTTP.
 type Handler struct {
 	svc *Service
+	// audit records authentication events (signup/login/logout); nil disables
+	// recording while the handler keeps serving normally.
+	audit *audit.Logger
 }
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+
+// WithAudit wires the audit trail so authentication events are recorded.
+// Recording is best-effort: a write failure is logged, never surfaced to the
+// client, so the trail can never become a login's single point of failure.
+func (h *Handler) WithAudit(l *audit.Logger) *Handler {
+	h.audit = l
+	return h
+}
 
 // Register mounts identity routes on the mux.
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -55,7 +68,7 @@ type credentialsRequest struct {
 }
 
 type authResponse struct {
-	Token string `json:"token"`
+	Token string  `json:"token"`
 	User  userDTO `json:"user"`
 }
 
@@ -111,13 +124,16 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := h.svc.Signup(r.Context(), req.Email, req.Password, req.DisplayName)
 	if errors.Is(err, ErrUserExists) {
+		h.record(audit.Failure(audit.ActionAuthSignup).FromRequest(r).Detail(map[string]any{"reason": "email_taken"}))
 		writeError(w, http.StatusConflict, "user already exists")
 		return
 	}
 	if err != nil {
+		h.record(audit.Failure(audit.ActionAuthSignup).FromRequest(r).Detail(map[string]any{"reason": "internal"}))
 		writeError(w, http.StatusInternalServerError, "signup failed")
 		return
 	}
+	h.record(audit.Success(audit.ActionAuthSignup).FromRequest(r).Actor(u.ID, u.Email).Target("user", u.ID))
 	writeJSON(w, http.StatusCreated, map[string]any{"user": toDTO(u)})
 }
 
@@ -129,17 +145,24 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token, u, err := h.svc.Login(r.Context(), req.Email, req.Password)
 	if errors.Is(err, ErrInvalidCredentials) {
+		// Record the attempted email but no actor id: a failed login has no
+		// authenticated identity, and logging the address (not the password) is
+		// what a credential-stuffing review needs.
+		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"email": req.Email, "reason": "invalid_credentials"}))
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 	if errors.Is(err, ErrUserDisabled) {
+		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).Detail(map[string]any{"reason": "account_disabled"}))
 		writeError(w, http.StatusForbidden, "account is disabled")
 		return
 	}
 	if err != nil {
+		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"email": req.Email, "reason": "internal"}))
 		writeError(w, http.StatusInternalServerError, "login failed")
 		return
 	}
+	h.record(audit.Success(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).Target("user", u.ID))
 	writeJSON(w, http.StatusOK, authResponse{Token: token, User: toDTO(u)})
 }
 
@@ -147,8 +170,19 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	token := bearerToken(r)
 	if token != "" {
 		_ = h.svc.Logout(r.Context(), token)
+		if u, ok := UserFromContext(r.Context()); ok {
+			h.record(audit.Success(audit.ActionAuthLogout).FromRequest(r).Actor(u.ID, u.Email))
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// record writes one event to the audit trail when one is wired. It is a no-op
+// otherwise, and never affects the response — LogAndReport swallows the error.
+func (h *Handler) record(e audit.Event) {
+	if h.audit != nil {
+		h.audit.LogAndReport(context.Background(), e)
+	}
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/usage"
 )
@@ -74,6 +75,7 @@ func (h *Handler) createUser(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionAdminUserCreate).Target("user", u.ID).Detail(map[string]any{"email": u.Email}))
 	writeJSON(w, http.StatusCreated, map[string]any{"user": userDTOOf(u)})
 }
 
@@ -101,18 +103,25 @@ func (h *Handler) patchUser(w http.ResponseWriter, r *http.Request) {
 			writeServiceError(w, err)
 			return
 		}
+		h.record(r, audit.Success(audit.ActionAdminUserUpdate).Target("user", targetID).Detail(map[string]any{"field": "display_name"}))
 	}
 	if req.PlatformRole != nil {
 		if err := h.identity.SetPlatformRole(r.Context(), actor.ID, targetID, identity.PlatformRole(*req.PlatformRole)); err != nil {
 			writeServiceError(w, err)
 			return
 		}
+		h.record(r, audit.Success(audit.ActionAdminUserSetRole).Target("user", targetID).Detail(map[string]any{"platform_role": *req.PlatformRole}))
 	}
 	if req.Disabled != nil {
 		if err := h.identity.SetUserDisabled(r.Context(), actor.ID, targetID, *req.Disabled); err != nil {
 			writeServiceError(w, err)
 			return
 		}
+		action := audit.ActionAdminUserDisable
+		if !*req.Disabled {
+			action = audit.ActionAdminUserEnable
+		}
+		h.record(r, audit.Success(action).Target("user", targetID))
 	}
 
 	fresh, err := h.identity.UserByID(r.Context(), targetID)
@@ -140,15 +149,18 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionAdminUserResetPassword).Target("user", r.PathValue("id")))
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	actor := caller(r)
-	if err := h.identity.DeleteAccount(r.Context(), actor.ID, r.PathValue("id")); err != nil {
+	targetID := r.PathValue("id")
+	if err := h.identity.DeleteAccount(r.Context(), actor.ID, targetID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionAdminUserDelete).Target("user", targetID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -201,6 +213,7 @@ func (h *Handler) createTeamForOwner(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionTeamCreate).Target("team", team.ID).Detail(map[string]any{"name": team.Name, "owner_user_id": ownerID}))
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"team": teamDTO{ID: team.ID, Name: team.Name, Members: 1, CreatedAt: team.CreatedAt},
 	})
@@ -312,6 +325,7 @@ func (h *Handler) adminDeleteMemory(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionMemoryDelete).Target("memory", r.PathValue("id")))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -328,5 +342,6 @@ func (h *Handler) adminDeprecateMemory(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionMemoryDeprecate).Target("memory", r.PathValue("id")))
 	w.WriteHeader(http.StatusNoContent)
 }

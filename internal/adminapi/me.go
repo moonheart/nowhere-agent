@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/usage"
@@ -63,6 +64,7 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionMePasswordChange).Target("user", u.ID))
 	// Every token was revoked, including this request's — say so, so the client
 	// signs the user back in instead of silently 401-ing on the next call.
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -121,6 +123,7 @@ func (h *Handler) deleteMyMemory(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionMemoryDelete).Target("memory", r.PathValue("id")))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -182,6 +185,7 @@ func (h *Handler) revokeToken(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionMeTokenRevoke).Target("user", u.ID).Detail(map[string]any{"token_id": r.PathValue("id"), "scope": "single"}))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -192,6 +196,7 @@ func (h *Handler) revokeOtherTokens(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
+	h.record(r, audit.Success(audit.ActionMeTokenRevoke).Target("user", u.ID).Detail(map[string]any{"revoked": n, "scope": "others"}))
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": n})
 }
 
