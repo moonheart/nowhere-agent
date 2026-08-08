@@ -93,7 +93,11 @@ const (
 	// tool-result message. It is a persistence signal, not a render frame.
 	KindMessage EventKind = "message"
 	// KindCancelled marks a run stopped early (client Stop / server cancel). It
-	// is persisted so replay/history can tell a cancelled run from a finished one.
+	// is persisted so replay/history can tell a cancelled run from a finished
+	// one. The loop emits it detached from the cancelled ctx (emitCancelled),
+	// so the frame itself lands rather than relying on a downstream
+	// compensation; the session registry re-publishes only if that emit was
+	// dropped.
 	KindCancelled EventKind = "cancelled"
 	// KindUser marks a persisted user message. It is not emitted by the loop
 	// itself; the transport writes it so replay reconstructs the user side.
@@ -286,6 +290,14 @@ func (l *Loop) toolDefs() []provider.ToolDefinition {
 // emitter. It returns the final assembled assistant messages produced. The
 // history is the short-term memory; it is not persisted to long-term memory.
 //
+// The returned tail is NOT guaranteed provider-sendable on every path: when
+// the run ends on the interaction gate, the last produced message is the
+// assistant message carrying the unanswered tool_use batch — its tool_results
+// arrive only when a later run folds the resolved interactions back into
+// history. Callers reusing the return value as a sendable history must run it
+// through contextmgmt.EnsurePairing first (the registry, the primary caller,
+// discards it and rebuilds history from the durable record).
+//
 // The loop works over a working view of the conversation (history + what it
 // produces). Cross-cutting concerns (compression, memory injection, image
 // materialization, overflow retry, usage) run as middleware around each model
@@ -309,7 +321,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// Honour cancellation between iterations (e.g. after a tool batch).
 		if err := ctx.Err(); err != nil {
 			l.reportTerminal(ctx, state)
-			_ = emit.Emit(ctx, KindCancelled, nil)
+			l.emitCancelled(ctx, emit)
 			return state.Produced, err
 		}
 		// Open a new step for every iteration after the first, so the transport can
@@ -354,10 +366,10 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				// Detach from the cancelled ctx so the frame survives the
 				// emitter's ctx guard (same rationale as reportTerminal);
 				// "other" is the reason the transport maps cancellation to.
-				l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
-				l.reportTerminal(ctx, state)
-				_ = emit.Emit(ctx, KindCancelled, nil)
-				return state.Produced, ctx.Err()
+			l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
+			l.reportTerminal(ctx, state)
+			l.emitCancelled(ctx, emit)
+			return state.Produced, ctx.Err()
 			}
 			slog.Error("agent: provider attempt failed; run aborting", "iter", iter, "err", err, "view_msgs", len(state.View))
 			// Close the step before the terminal error frame, symmetric with
@@ -373,6 +385,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			state.Usage.CacheReadTokens += res.Usage.CacheReadTokens
 			state.Usage.CacheWriteTokens += res.Usage.CacheWriteTokens
 		}
+		// Drop content blocks that carry nothing (an empty text block, or a
+		// thinking block with neither text nor signature): one serializes as an
+		// empty block, which providers reject with a 400 on the next send — and
+		// a turn whose ONLY block is empty would slip past the 0-length
+		// empty-response guard below and persist as a hollow assistant message.
+		res.Assistant.Content = dropEmptyBlocks(res.Assistant.Content)
 		// Empty-response guard: a turn with no content blocks and no tool calls
 		// carries nothing — no answer to show, no call to answer. Persisting it
 		// would write an assistant message with empty content, which
@@ -467,12 +485,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// answer is complete and already durable, but the caller asked to stop —
 		// report the run cancelled, symmetric with the pre-dispatch guard below
 		// and the iteration guard above.
-		if err := ctx.Err(); err != nil {
-			l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
-			l.reportTerminal(ctx, state)
-			_ = emit.Emit(ctx, KindCancelled, nil)
-			return state.Produced, err
-		}
+	if err := ctx.Err(); err != nil {
+		l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
+		l.reportTerminal(ctx, state)
+		l.emitCancelled(ctx, emit)
+		return state.Produced, err
+	}
 		slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", state.Usage.InputTokens, "output_tokens", state.Usage.OutputTokens,
 				"cache_read_tokens", state.Usage.CacheReadTokens, "cache_write_tokens", state.Usage.CacheWriteTokens, "cache_hit_pct", cacheHitPct(state.Usage))
 			l.emitStepFinish(ctx, emit, res, "stop", false)
@@ -489,12 +507,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// transient EnsurePairing repair while history consumers (and any
 		// durable scan) see the dangling call.
 		if err := ctx.Err(); err != nil {
-			l.recordToolResults(ctx, emit, state, res.Calls, cancelledCallResults(res.Calls))
-			// Close the step opened at iter>0, symmetric with every other exit.
-			l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
-			l.reportTerminal(ctx, state)
-			_ = emit.Emit(ctx, KindCancelled, nil)
-			return state.Produced, err
+		l.recordToolResults(ctx, emit, state, res.Calls, cancelledCallResults(res.Calls))
+		// Close the step opened at iter>0, symmetric with every other exit.
+		l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
+		l.reportTerminal(ctx, state)
+		l.emitCancelled(ctx, emit)
+		return state.Produced, err
 		}
 
 		// Truncation guard (capability-gap L1, tool-call half). Reaching here with
@@ -624,6 +642,16 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 // emitter's ctx guard would silently drop a usage report sent on the dead ctx.
 func (l *Loop) reportTerminal(ctx context.Context, state *RunState) {
 	l.runAfterRun(context.WithoutCancel(ctx), state)
+}
+
+// emitCancelled emits the run's terminal KindCancelled frame, detached from
+// the cancelled ctx for the same commit-class reason as reportTerminal: the
+// frame must land in the durable log and reach attached clients even though
+// the run ctx is dead (an emitter with a ctx guard would drop it otherwise).
+// The session registry keeps an idempotent compensation for the narrow case
+// where a cancellation lands on a path that never reaches this emit.
+func (l *Loop) emitCancelled(ctx context.Context, emit Emitter) {
+	_ = emit.Emit(context.WithoutCancel(ctx), KindCancelled, nil)
 }
 
 // runAfterRun fires AfterRun hooks once (reverse registration order).
@@ -1189,6 +1217,34 @@ func earlyStopCallResults(calls []toolruntime.Call, stop provider.StopReason) []
 		results[i] = toolruntime.Result{Content: content, IsError: true}
 	}
 	return results
+}
+
+// dropEmptyBlocks removes content blocks that carry no payload: a text block
+// with no text, or a thinking block with neither thinking text nor a
+// signature (the signature must round-trip, so a signed block is kept even
+// when its text is empty). Cache-point blocks are kept regardless — dropping
+// one would move the byte-stable caching boundary. All other block types
+// (tool_use, image, tool_result) always carry content by construction.
+func dropEmptyBlocks(blocks []provider.Block) []provider.Block {
+	kept := blocks[:0]
+	for _, b := range blocks {
+		if b.CachePoint {
+			kept = append(kept, b)
+			continue
+		}
+		switch b.Type {
+		case provider.BlockText:
+			if b.Text == "" {
+				continue
+			}
+		case provider.BlockThinking:
+			if b.Thinking == "" && b.ThinkingSignature == "" {
+				continue
+			}
+		}
+		kept = append(kept, b)
+	}
+	return kept
 }
 
 // stopReasonText renders a stop reason for error messages, naming the

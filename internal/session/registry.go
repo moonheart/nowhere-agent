@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/contextmgmt"
@@ -255,13 +256,16 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 	// a row that isn't committed yet and get a 404. Persisting here, after Run()
 	// returned, left that resume race open; it now lives on the emit path.
 
-	// The loop persists its own terminal content event (KindDone / KindError) on
-	// the live run context. The one exception is cancellation: the loop emits
-	// KindCancelled on the cancelled runCtx, where the emitter's ctx guard drops
-	// it — so the registry re-publishes it on a live context to guarantee the
-	// durable log and every attached client see the run end cancelled. This is
-	// persisted BEFORE CompleteRun settles the run (D5), closing the race where an
-	// attacher saw the run inactive but no terminal event.
+	// The loop emits its terminal content event (KindDone / KindError /
+	// KindCancelled) itself — on a cancellation-detached context for the
+	// cancelled frame (agent emitCancelled), so the emitter's ctx guard no
+	// longer drops it. The registry keeps a compensation for the narrow window
+	// where a cancellation lands on a path that never emitted the frame (e.g.
+	// racing an error path); it fires only when the emitter did NOT land the
+	// cancelled frame, keeping the durable log single-written. Either way the
+	// terminal event is persisted BEFORE CompleteRun settles the run (D5),
+	// closing the race where an attacher saw the run inactive but no terminal
+	// event.
 	bg := context.Background()
 	// A run that did not end cleanly never waits on client input. If it failed
 	// (or was cancelled) mid-way through emitting a gated batch — a KindInterrupt
@@ -272,7 +276,7 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 	if runErr != nil {
 		rg.voidPendingInteractions(bg, run.ID)
 	}
-	if status == RunCancelled {
+	if status == RunCancelled && !emit.cancelledPersisted.Load() {
 		// The terminal event must land: if it fails to persist, attached clients
 		// would never see the run end cancelled. Retry once on the same live
 		// context; AppendEvent continues the offset from the durable log.
@@ -691,6 +695,11 @@ type registryEmitter struct {
 	rg        *RunRegistry
 	sessionID string
 	runID     string
+	// cancelledPersisted records that this emitter landed the terminal
+	// KindCancelled frame, so the run worker's compensation (which covers the
+	// paths that never emitted it) stays single-written rather than
+	// duplicating the frame in the durable log.
+	cancelledPersisted atomic.Bool
 }
 
 // Emit persists the event (and fans it out). It honours ctx cancellation so a
@@ -722,6 +731,15 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 	// nil-safe and best-effort); the event still flows to the durable log below.
 	if kind == agent.KindUsage {
 		e.persistRunUsage(payload)
+	}
+	// The terminal cancelled frame must be KNOWN-landed: the run worker
+	// compensates only when this persist failed, so record a successful append
+	// to keep the durable log single-written.
+	if kind == agent.KindCancelled {
+		if err := e.rg.appendEvent(ctx, e.sessionID, e.runID, kind, payload); err == nil {
+			e.cancelledPersisted.Store(true)
+		}
+		return nil
 	}
 	e.rg.append(ctx, e.sessionID, e.runID, kind, payload)
 	return nil
