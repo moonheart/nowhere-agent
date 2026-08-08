@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -136,5 +137,71 @@ func TestRegistryBatchDecisionFlow(t *testing.T) {
 				t.Errorf("EnsurePairing synthesized an interrupted result for %s — batch was not complete", b.ToolResultID)
 			}
 		}
+	}
+}
+
+// failBatchStore wraps MemStore and fails CreateInteractionBatch once it has
+// succeeded failAfter times — a durable write dying mid-way through a gated
+// batch's interrupt frames (earlier rows already persisted).
+type failBatchStore struct {
+	*MemStore
+	failAfter int
+	calls     int
+}
+
+func (s *failBatchStore) CreateInteractionBatch(ctx context.Context, batch SuspendedBatch, in Interaction) (Interaction, error) {
+	s.calls++
+	if s.calls > s.failAfter {
+		return Interaction{}, errors.New("interaction store down")
+	}
+	return s.MemStore.CreateInteractionBatch(ctx, batch, in)
+}
+
+// TestRegistryVoidsLeftoverInteractionsOnFailedRun pins the deadlock fix: when
+// the second interrupt frame of a gated batch fails to persist, the run fails —
+// but the FIRST row is already durable. The worker must void that leftover, or
+// the session's pending-interaction gate would reject every later submission
+// (a permanent 409 no client can resolve).
+func TestRegistryVoidsLeftoverInteractionsOnFailedRun(t *testing.T) {
+	store := &failBatchStore{MemStore: NewMemStore(), failAfter: 1}
+	rt := NewRuntime(store).WithBus(NewMemBus())
+	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(NewMemMessageStore())
+	sess, err := rt.CreateSession(context.Background(), "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loop := agent.New(&twoGatedProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100})
+	loop.RegisterTool(gatedTool{name: "edit_a"})
+	loop.RegisterTool(gatedTool{name: "edit_b"})
+	loop.Use(&agent.PermissionMW{Check: func(context.Context, toolruntime.Tool) (bool, string) {
+		return true, agent.ApprovalReasonPrefix + "ask"
+	}})
+
+	run, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunFailed {
+		t.Fatalf("run status = %v, want failed (the second interrupt write failed)", got)
+	}
+
+	// The leftover row (persisted before the failure) was voided: nothing stays
+	// pending for the session, so the pending-interaction gate clears.
+	pending, err := rg.PendingApprovalsForSession(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending queue = %+v, want empty — a leftover row would 409 every later submission", pending)
+	}
+	// And it is resolved (rejected by the void), not deleted: the audit trail
+	// of the attempted batch survives.
+	all, err := store.ApprovalsForRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].Status != InteractionRejected {
+		t.Errorf("run interactions = %+v, want the one persisted row rejected", all)
 	}
 }

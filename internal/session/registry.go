@@ -205,6 +205,7 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 		if p := recover(); p != nil {
 			slog.Error("run worker panicked", "session", sessionID, "run", run.ID, "panic", p, "stack", string(debug.Stack()))
 			bg := context.Background()
+			rg.voidPendingInteractions(bg, run.ID)
 			_ = rg.appendEvent(bg, sessionID, run.ID, agent.KindError, fmt.Sprintf("internal error: %v", p))
 			_ = rg.rt.CompleteRun(bg, sessionID, RunFailed)
 		}
@@ -262,6 +263,15 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 	// persisted BEFORE CompleteRun settles the run (D5), closing the race where an
 	// attacher saw the run inactive but no terminal event.
 	bg := context.Background()
+	// A run that did not end cleanly never waits on client input. If it failed
+	// (or was cancelled) mid-way through emitting a gated batch — a KindInterrupt
+	// emit error — the rows persisted by the earlier emits would stay pending
+	// with no run behind them, and the session's pending-interaction gate would
+	// reject every later submission (a permanent 409 no client can resolve).
+	// Void the leftovers so the gate clears.
+	if runErr != nil {
+		rg.voidPendingInteractions(bg, run.ID)
+	}
 	if status == RunCancelled {
 		// The terminal event must land: if it fails to persist, attached clients
 		// would never see the run end cancelled. Retry once on the same live
@@ -282,6 +292,31 @@ func (rg *RunRegistry) appendEvent(ctx context.Context, sessionID, runID string,
 		Kind:      string(kind),
 		Payload:   marshalPayload(payload),
 	})
+}
+
+// voidPendingInteractions force-resolves (rejects) every still-pending
+// interaction a failed or cancelled run left behind. Interactions are persisted
+// synchronously on the KindInterrupt emit, so a mid-batch emit failure parks the
+// earlier rows with no live run awaiting their verdict — and the session's
+// pending-interaction gate would then reject all later submissions. A row
+// already decided by a racing client verdict is left as-is.
+func (rg *RunRegistry) voidPendingInteractions(ctx context.Context, runID string) {
+	pending, err := rg.rt.store.PendingApprovalsForRun(ctx, runID)
+	if err != nil {
+		slog.Warn("run ended abnormally; could not list leftover pending interactions", "run", runID, "err", err)
+		return
+	}
+	for _, in := range pending {
+		if _, err := rg.rt.store.DecideApproval(ctx, in.ID, false, nil); err != nil {
+			if errors.Is(err, ErrNoPendingApproval) {
+				continue // a client verdict raced us; the row is already resolved
+			}
+			slog.Warn("run ended abnormally; could not void leftover pending interaction", "run", runID, "interaction", in.ID, "err", err)
+		}
+	}
+	if len(pending) > 0 {
+		slog.Info("voided leftover pending interactions of an abnormally-ended run", "run", runID, "count", len(pending))
+	}
 }
 
 // RecordDecision applies the client's verdict to ONE pending interaction and

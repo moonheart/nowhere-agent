@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -81,7 +82,7 @@ func TestLoopGatedBatchEmitsEveryInterrupt(t *testing.T) {
 		{Type: provider.EventBlockStart, Index: 2, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu3", ToolName: "edit3", ToolInput: map[string]any{}}},
 		{Type: provider.EventBlockDelta, Index: 2, Delta: `{}`},
 		{Type: provider.EventBlockStop, Index: 2},
-		{Type: provider.EventMessageStop},
+		{Type: provider.EventMessageStop, StopReason: provider.StopToolUse},
 	}
 	p := &scriptProvider{script: [][]provider.Event{turn}}
 	reg := toolruntime.NewRegistry()
@@ -196,6 +197,71 @@ func TestLoopEndsOnClientTool(t *testing.T) {
 	}
 	if emit.count(KindInterrupt) == 0 {
 		t.Errorf("no KindInterrupt emitted; events=%v", emit.events)
+	}
+}
+
+// failNthInterruptEmitter fails the n-th KindInterrupt emit, simulating the
+// run worker's durable-Interaction write failing mid-batch (the earlier rows
+// are already persisted at that point).
+type failNthInterruptEmitter struct {
+	stepCapture
+	failOn int
+	seen   int
+	err    error
+}
+
+func (e *failNthInterruptEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if kind == KindInterrupt {
+		e.seen++
+		if e.seen == e.failOn {
+			return e.err
+		}
+	}
+	return e.stepCapture.Emit(ctx, kind, payload)
+}
+
+// TestLoopInterruptEmitFailureSettlesRun pins that a mid-batch KindInterrupt
+// emit failure settles the run like every other failure path: the step closes,
+// AfterRun fires (usage is reported), and a terminal KindError goes out —
+// instead of the old bare return that left the client with no terminal frame,
+// usage unrecorded, and the already-persisted interaction rows orphaned.
+func TestLoopInterruptEmitFailureSettlesRun(t *testing.T) {
+	turn := []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "edit1", ToolInput: map[string]any{}}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: `{}`},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventBlockStart, Index: 1, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu2", ToolName: "edit2", ToolInput: map[string]any{}}},
+		{Type: provider.EventBlockDelta, Index: 1, Delta: `{}`},
+		{Type: provider.EventBlockStop, Index: 1},
+		{Type: provider.EventMessageStop, StopReason: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 9, OutputTokens: 4}},
+	}
+	p := &scriptProvider{script: [][]provider.Event{turn}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(riskTool{name: "edit1", risk: toolruntime.RiskExternalWrite})
+	reg.Register(riskTool{name: "edit2", risk: toolruntime.RiskExternalWrite})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&PermissionMW{Check: askAll})
+
+	emit := &failNthInterruptEmitter{failOn: 2, err: errors.New("interaction store down")}
+	_, err := loop.Run(context.Background(), nil, emit)
+	if err == nil {
+		t.Fatal("a failed interrupt emit must fail the run")
+	}
+	if got := emit.count(KindInterrupt); got != 1 {
+		t.Errorf("KindInterrupt = %d, want 1 (the second emit failed)", got)
+	}
+	if got := emit.count(KindError); got != 1 {
+		t.Errorf("KindError = %d, want 1 (a terminal error frame must accompany the failure)", got)
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("a failed run must not emit done")
+	}
+	if got := emit.count(KindUsage); got != 1 {
+		t.Errorf("KindUsage = %d, want 1 (AfterRun must fire so the run's usage is recorded)", got)
+	}
+	if len(emit.finishes) != 1 || emit.finishes[0].FinishReason != "error" || emit.finishes[0].IsContinued {
+		t.Errorf("finishes = %+v, want one error/not-continued step finish", emit.finishes)
 	}
 }
 
