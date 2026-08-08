@@ -1,6 +1,11 @@
 package sandbox
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
 
 // TestOrderForHostWindowsPrefersRealPython: on Windows the Store `python3` shim
 // sits on PATH but does nothing, so the `py` launcher and a real `python` must
@@ -37,14 +42,37 @@ func TestOrderForHostLeavesNonPythonAlone(t *testing.T) {
 	}
 }
 
+// makeFakeExe writes an executable named name into dir so exec.LookPath finds
+// it when dir is prepended to PATH.
+func makeFakeExe(t *testing.T, dir, name string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+		if err := os.WriteFile(path, []byte("@echo off\r\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestResolveInterpreterPicksAvailable: the local backend probes the host and
-// returns a candidate that exists. sh (Git Bash on Windows) is always present in
-// the dev environment, so it resolves to a non-empty answer.
+// returns a candidate that exists. A fake interpreter on PATH makes the test
+// hermetic instead of depending on sh/Git Bash being present on the host.
 func TestResolveInterpreterPicksAvailable(t *testing.T) {
+	bin := t.TempDir()
+	makeFakeExe(t, bin, "sh")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	p := NewLocalPort(t.TempDir())
 	if got := p.ResolveInterpreter([]string{"definitely-not-a-real-interp-xyz", "sh"}); got != "sh" {
 		t.Errorf("ResolveInterpreter = %q, want sh (first available candidate)", got)
 	}
+
+	t.Setenv("PATH", bin)
 	if got := p.ResolveInterpreter([]string{"definitely-not-a-real-interp-xyz"}); got != "" {
 		t.Errorf("ResolveInterpreter with no usable candidate = %q, want \"\"", got)
 	}
