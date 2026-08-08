@@ -1,0 +1,67 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+> Note: this file is also served as `AGENTS.md`; `CLAUDE.md` re-exports it via `@AGENTS.md`. Keep all guidance here, not in `CLAUDE.md`.
+
+## 项目规则 (Project Rules)
+
+1. 禁止修改 shadcn 组件 `web/src/components/ui` 目录下的文件 (Never hand-edit files under `web/src/components/ui` — they are shadcn-generated; regenerate instead).
+
+## What this is
+
+nowhere-agent is a self-hosted, multi-tenant streaming AI agent platform: a Go gateway (`cmd/server`) plus a React SPA (`web`). A single Postgres holds all durable state; an optional Redis fans live output across instances. The core is a hand-built think→tool→think agent loop that streams the AI SDK v6 ui-message-stream protocol to the browser.
+
+## Build / test / run
+
+Backend (Go 1.26, module `nowhere-agent`):
+
+```bash
+go build ./...                # build everything
+go test ./...                 # full suite (REQUIRED before commit — see memory)
+go vet ./...                  # vet (must stay clean)
+go test ./internal/skill/     # one package
+go test ./internal/chatapi/ -run TestName -count=1   # one test
+go run ./cmd/migrate          # apply DB migrations (golang-migrate, migrations/)
+go run ./cmd/server           # run the gateway (needs env, see below)
+go run ./cmd/mockllm          # fake LLM server for local dev / e2e
+```
+
+Frontend (`web/`, React 19 + Vite 8 + TypeScript ~6, Tailwind 4, shadcn on Base UI):
+
+```bash
+cd web
+pnpm dev                      # vite dev server (HMR)
+pnpm build                    # tsc -b && vite build -> web/dist
+pnpm lint                     # oxlint
+npx tsc --noEmit -p tsconfig.app.json   # type-check only (fast)
+```
+
+Serve the SPA from Go by setting `WEB_DIR=web/dist`; Go's `spaHandler` falls back to `index.html` for client routes. React Compiler is enabled (babel-plugin-react-compiler).
+
+## Runtime configuration
+
+Everything is env-driven via `internal/config` (envconfig + optional `.env`; real env wins over `.env`). Key vars: `DB_DSN` (Postgres), `LLM_PROVIDER`/`LLM_API_KEY`/`LLM_MODEL` (`anthropic`|`openai`; unset disables the chat endpoint but the admin/skill consoles still boot), `LLM_CONTEXT_WINDOW` (enables in-loop compression), `STREAM_BROKER=mem|redis` + `REDIS_ADDR`, `SANDBOX_BACKEND=off|local|docker`, `SKILLS_DIR`, `WORKSPACE_DIR`, `DREAMING_ENABLED`, `SCHEDULE_ENABLED` (scheduled-task trigger; CRUD works with it off), `BOOTSTRAP_ADMIN_EMAIL`, `PERMISSION_*`. Defaults are documented on each struct in `internal/config/config.go`.
+
+## Big-picture architecture
+
+The design is strict **ports & adapters** — every boundary is a Go interface with a symmetric in-memory and PG/Redis implementation: `session.Store`/`MessageStore`, `session.StreamBroker`/`EventBus`, `sandbox.Port`, `memory.Port`, `skill.Store`, `provider.Adapter`, `identity.Store`. `cmd/server/main.go` is the single wiring point that picks implementations from config and registers HTTP routes; read it first to see what is actually reachable (openspec specs describe intent, not runtime truth).
+
+Request flow, end to end:
+
+1. **chatapi** (`internal/chatapi`) — the HTTP/SSE transport. Builds an agent loop per request, streams frames in ui-message-stream format (`data: <json>\n\n` + `data: [DONE]`), handles attach/resume/history. Emission must stay conformant with `assistant-stream` chunk-types; there is a conformance decoder test (`uimessage_stream_conformance_test.go`) that pins this.
+2. **agent loop** (`internal/agent/loop.go`) — orchestration. Drives a `provider.Adapter`, dispatches tool calls, emits canonical `EventKind` events (text/thinking/tool_use/tool_result/message/step/error/done/...). Step frames (`KindStepStart`/`KindStepFinish`) carry per-iteration `finishReason`/`usage`/`isContinued`.
+3. **session runtime** (`internal/session`) — durable runs. Two tracks that must stay cleanly separated: **live content** deltas go to the broker (hot path, never persisted), **assembled messages** go to `messages`, **lifecycle** to `run_events`. `RunRegistry` decouples a run from its submitting connection (run ctx derives from `context.Background()`), so submitters and later attachers share one symmetric `attach` path with offset-high-watermark dedup. Terminal events persist before `CompleteRun` to close the "inactive but no terminal frame" race.
+4. **provider** (`internal/provider`, `anthropic`/`openai`) — neutral block model (thinking+signature round-trip, cache points, lazy image materialization). Team-scoped credentials resolve per request (`routing.PGKeyStore`); any resolution failure degrades to the platform key rather than failing chat.
+
+Supporting subsystems, all feeding the loop's system prompt / tool registry per run: **identity** (users/teams, bcrypt+token auth, `RequireAuth`), **permission** (risk-based tool gate; `Ask` suspends via the `ApprovalReasonPrefix` marker), **toolruntime/builtin** (file tools, run_command, ask_user, plan_write) bound per session, **skill** (L0/L1/L2 progressive-disclosure skills, three scope tiers user>team>system, two-table versioning), **memory** (PG+vector recall; `recall_memory` tool) and **dreaming** (offline consolidation of episodes→long-term memory on a scheduler), **subagent** (`spawn_agent` tool; children draw from a scoped view of the parent's registry), **mcp** (SearXNG over Streamable HTTP, reconnect-in-background), **sandbox** (local/docker isolation for tools), **contextmgmt** (LLM compression near the window), **schedule** (scheduled tasks — recurring agent runs; a trigger claims due rows atomically and fires each through the same `RunRegistry.Submit` path a human chat uses, binding a whitelist-filtered tool registry), **scheduleapi** (self-service task CRUD) and **adminapi/skillapi** (management consoles, all behind the same auth).
+
+Frontend: `useDataStreamRuntime` (assistant-ui) consumes the ui-message-stream; `web/src/lib/*` are typed clients for the HTTP APIs; admin console + skill editor live under `web/src/components/admin`.
+
+## Conventions worth knowing
+
+- **Go tests**: write `*_test.go` for all new Go code; `go test ./...` must be green before committing. PG tests (`internal/skill`, `internal/skillapi`, etc.) run against the **real dev Postgres** — use unique random names and delete only rows you created, by ID; never an unscoped `DELETE`/`UPDATE`.
+- **`run_events` is deprecated** for new features — record via slog or the `messages`/`sessions` tables instead.
+- **Commits**: no Co-Authored-By / Claude attribution trailer.
+- **openspec** (`openspec/specs`, `openspec/changes`) holds capability specs; treat as design intent. The trustworthy source for "what is wired" is `cmd/server/main.go`.
+- `docs/` has architecture reviews (Chinese) useful for deep context, but they age — verify against current code.
