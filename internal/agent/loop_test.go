@@ -589,6 +589,62 @@ func TestLoopUnknownStopReasonFailsRun(t *testing.T) {
 	}
 }
 
+func TestLoopEarlyStopReasonFailsRun(t *testing.T) {
+	// A no-tool-calls turn that ends on any reason other than end_turn —
+	// stop_sequence here; content_filter and provider passthroughs behave the
+	// same — ended before the model chose to stop. Completing the run would
+	// pass a cut-off answer off as done: the same silent-truncation class the
+	// max_tokens and unreported-reason guards catch.
+	p := &scriptProvider{script: [][]provider.Event{{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "cut off at the stop token"},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop, StopReason: provider.StopStopSequence},
+	}}}
+	emit := &memEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	_, err := loop.Run(context.Background(), nil, emit)
+	if err == nil || !strings.Contains(err.Error(), "stop_sequence") {
+		t.Fatalf("err = %v, want an early-end error naming the stop reason", err)
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("an early-end stop reason must not complete the run")
+	}
+	if emit.count(KindError) != 1 {
+		t.Errorf("expected 1 error event, got %d", emit.count(KindError))
+	}
+}
+
+func TestLoopEmptyResponseFailsRun(t *testing.T) {
+	// A turn that reports end_turn but assembled zero content blocks and no
+	// tool calls carries nothing. Persisting it would write an assistant
+	// message with empty content, which OpenAI-compatible gateways reject with
+	// a 400 on the next send — the EnsurePairing repair patches the send view,
+	// but the empty row stays durable. Fail loudly instead.
+	p := &scriptProvider{script: [][]provider.Event{{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn},
+	}}}
+	emit := &memEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), nil, emit)
+	if err == nil || !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("err = %v, want an empty-response error", err)
+	}
+	if len(produced) != 0 {
+		t.Errorf("produced %d messages, want 0 — an empty assistant message must not be recorded", len(produced))
+	}
+	if emit.count(KindMessage) != 0 {
+		t.Errorf("KindMessage = %d, want 0 — an empty assistant message must not be persisted", emit.count(KindMessage))
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("an empty response must not complete the run")
+	}
+}
+
 func TestLoopFinalizesUnclosedBlocksInStreamOrder(t *testing.T) {
 	// A provider that closes the stream WITHOUT block-stop events: the open
 	// blocks must be finalized in provider index order. The natural-close
