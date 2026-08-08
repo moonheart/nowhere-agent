@@ -234,6 +234,15 @@ type sseEmitter struct {
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
+	// Preflight streamability: every path below ends in an SSE stream, and a
+	// non-flushable writer must fail BEFORE any side effect (a submitted run
+	// executes headlessly; a recorded decision consumes the verdict) — not
+	// after, which is how a wrapped ResponseWriter once 500'd while the run
+	// went on to suspend with no client attached.
+	if _, ok := w.(http.Flusher); !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
 	var req dataStreamRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)

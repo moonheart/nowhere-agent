@@ -136,6 +136,27 @@ func TestMetricsUnmatchedRouteCollapsed(t *testing.T) {
 	}
 }
 
+// TestMetricsPreservesFlusher pins the SSE regression: the status recorder must
+// satisfy http.Flusher, because streaming endpoints assert it directly (a type
+// assertion does not traverse Unwrap) and 500 "streaming unsupported" AFTER the
+// run already started server-side.
+func TestMetricsPreservesFlusher(t *testing.T) {
+	var flushed bool
+	h := NewMetrics().Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("wrapped writer lost http.Flusher")
+			return
+		}
+		f.Flush()
+		flushed = true
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
+	if !flushed {
+		t.Error("flush through the recorder never reached the underlying writer")
+	}
+}
+
 func scrape(t *testing.T, m *Metrics) string {
 	t.Helper()
 	rec := httptest.NewRecorder()

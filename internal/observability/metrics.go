@@ -124,6 +124,16 @@ func (s *statusRecorder) WriteHeader(code int) {
 // flushing), which the middleware would otherwise hide.
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
+// Flush implements http.Flusher by forwarding to the underlying writer. SSE
+// endpoints assert http.Flusher directly (a type assertion does NOT traverse
+// Unwrap), so without this the recorder would 500 every stream with
+// "streaming unsupported" — after the run already started server-side.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // RequestID adopts the incoming X-Request-Id if present and well-formed, else
 // generates one. It echoes the id on the response and injects both the id and a
 // request-scoped logger (carrying request_id, method, path) into the context, so
