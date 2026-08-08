@@ -12,6 +12,7 @@ import (
 	"nowhere-agent/internal/agentdef"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/quota"
 	"nowhere-agent/internal/session"
 )
 
@@ -41,6 +42,11 @@ type ScopeResolver interface {
 // treated as "unattributed" so a lookup hiccup never blocks a firing.
 type TeamAttributor func(ctx context.Context, userID string) string
 
+// BudgetChecker reports whether a task owner's run (billed to teamID, or the
+// platform when "") may proceed under the monthly token budget
+// (enterprise-readiness P1-1). Nil leaves scheduled runs ungated.
+type BudgetChecker func(ctx context.Context, userID, teamID string) error
+
 // DefResolver resolves an agent definition by name across scopes.
 // *agentdef.Store satisfies it.
 type DefResolver interface {
@@ -59,6 +65,9 @@ type Trigger struct {
 	buildLoop  LoopBuilder
 	bindTools  ToolBinder
 	attributor TeamAttributor
+	// budgetGate, when set, enforces the monthly token budget before a firing
+	// starts spending (P1-1). Nil leaves scheduled runs ungated.
+	budgetGate BudgetChecker
 	// db is used only to tag the sessions a task produces (task_id/source/
 	// metadata) — the session.Store interface pre-dates those columns, so the
 	// trigger writes them directly. Nil disables tagging (tests with no DB).
@@ -97,6 +106,16 @@ func (tr *Trigger) WithToolBinder(b ToolBinder) *Trigger {
 // unattributed.
 func (tr *Trigger) WithTeamAttributor(a TeamAttributor) *Trigger {
 	tr.attributor = a
+	return tr
+}
+
+// WithBudgetGate wires monthly token-budget enforcement (P1-1): before a firing
+// starts spending, the gate checks the task owner's (and billing team's)
+// current-month usage and skips over-budget firings. A skipped firing is logged
+// and left due so it retries on the next scan once the window rolls or the
+// budget is raised — it is not a hard failure of the trigger.
+func (tr *Trigger) WithBudgetGate(g BudgetChecker) *Trigger {
+	tr.budgetGate = g
 	return tr
 }
 
@@ -210,6 +229,21 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 	var teamID string
 	if tr.attributor != nil {
 		teamID = tr.attributor(ctx, task.UserID)
+	}
+	// Budget gate (P1-1): skip this firing when the owner's (or billing team's)
+	// monthly budget is met. Fail-open inside the checker means an error here is
+	// a real limit, so we leave the task due (it retries next scan) rather than
+	// error the sweep — one over-budget task must not stall the others.
+	if tr.budgetGate != nil {
+		if err := tr.budgetGate(ctx, task.UserID, teamID); err != nil {
+			if errors.Is(err, quota.ErrBudgetExceeded) {
+				tr.log.Warn("schedule: budget exceeded, skipping firing", "task", task.ID, "user", task.UserID, "team", teamID, "err", err)
+				tr.cleanupFreshSession(ctx, task, sessID)
+				return nil
+			}
+			tr.cleanupFreshSession(ctx, task, sessID)
+			return err
+		}
 	}
 	run, err := tr.registry.Submit(ctx, sessID, session.RunWork{
 		Loop:        loop,

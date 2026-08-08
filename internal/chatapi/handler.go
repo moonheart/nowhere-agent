@@ -13,6 +13,7 @@ import (
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/quota"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/toolruntime/builtin"
 	"nowhere-agent/internal/workspace"
@@ -31,6 +32,12 @@ type LoopFactory func(ctx context.Context, system string) *agent.Loop
 // leaves runs unattributed (tests/dev). An error is treated as "unattributed":
 // a credential-lookup hiccup must not block chat.
 type TeamAttributor func(ctx context.Context, userID string) string
+
+// BudgetChecker reports whether a run by userID (billed to teamID, or the
+// platform when "") may proceed under the monthly token budget
+// (enterprise-readiness P1-1). The server implements it over the quota checker;
+// the handler maps a quota.ErrBudgetExceeded to 429. Nil leaves runs ungated.
+type BudgetChecker func(ctx context.Context, userID, teamID string) error
 
 // ToolBinder attaches session-scoped tools to a loop once the session id is
 // known (file-tools D6). The server implements it by ensuring the session's
@@ -78,6 +85,9 @@ type Handler struct {
 	// attributor, when set, resolves the team whose provider key bills each run
 	// (enterprise-readiness P1-3). Nil leaves runs unattributed.
 	attributor TeamAttributor
+	// budgetGate, when set, enforces the monthly token budget before a run
+	// starts spending (enterprise-readiness P1-1). Nil leaves runs ungated.
+	budgetGate BudgetChecker
 }
 
 // NewHandler creates a chat Handler.
@@ -135,6 +145,15 @@ func (h *Handler) WithContextBuilder(cb ContextBuilder) *Handler {
 // each submitted run is stamped with the team whose provider key pays for it.
 func (h *Handler) WithTeamAttributor(a TeamAttributor) *Handler {
 	h.attributor = a
+	return h
+}
+
+// WithBudgetGate wires monthly token-budget enforcement (enterprise-readiness
+// P1-1): before a run starts spending, the gate checks the caller's (and billing
+// team's) current-month usage against its budget and rejects over-budget runs
+// with 429. Nil leaves runs ungated.
+func (h *Handler) WithBudgetGate(g BudgetChecker) *Handler {
+	h.budgetGate = g
 	return h
 }
 
@@ -257,6 +276,22 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	var teamID string
 	if h.attributor != nil {
 		teamID = h.attributor(r.Context(), s.UserID)
+	}
+
+	// Budget gate (P1-1): reject before any model spend once this caller's (or
+	// the billing team's) monthly budget is met. Fail-open inside the checker, so
+	// reaching here with an over-budget error means a real limit, not an
+	// infrastructure hiccup — answer 429 with a Retry-After hint.
+	if h.budgetGate != nil {
+		if err := h.budgetGate(r.Context(), s.UserID, teamID); err != nil {
+			if errors.Is(err, quota.ErrBudgetExceeded) {
+				w.Header().Set("Retry-After", "3600")
+				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusTooManyRequests)
+				return
+			}
+			writeSSEError(w, err.Error())
+			return
+		}
 	}
 
 	// Attach this session's sandbox-bound tools (file-tools) now that the

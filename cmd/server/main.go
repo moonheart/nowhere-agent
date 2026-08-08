@@ -33,6 +33,7 @@ import (
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/provider/anthropic"
 	"nowhere-agent/internal/provider/openai"
+	"nowhere-agent/internal/quota"
 	"nowhere-agent/internal/routing"
 	"nowhere-agent/internal/sandbox"
 	"nowhere-agent/internal/schedule"
@@ -265,6 +266,25 @@ func run() error {
 		}
 		return creds.TeamID
 	}
+
+	// Budget enforcement (enterprise-readiness P1-1): the platform records token
+	// usage; this is what makes a monthly limit bite. A quota.Checker compares the
+	// caller's (and billing team's) current-month billable tokens against the rows
+	// in usage_budgets and rejects at submit, before any model spend. Spend lookups
+	// are thin adapters over the usage store (billable = input+output, the pair
+	// providers price). Fail-open inside the checker: a usage/budget DB hiccup
+	// never blocks a run. Shared by the chat handler and the scheduled-task trigger.
+	usageStore := usage.NewStore(pool)
+	budgetChecker := quota.NewChecker(quota.NewStore(pool),
+		func(ctx context.Context, userID string, from, to time.Time) (int64, error) {
+			t, err := usageStore.ForUser(ctx, userID, usage.Range{From: from, To: to})
+			return t.Total(), err
+		},
+		func(ctx context.Context, teamID string, from, to time.Time) (int64, error) {
+			t, err := usageStore.ForTeam(ctx, teamID, usage.Range{From: from, To: to})
+			return t.Total(), err
+		})
+	budgetGate := budgetChecker.Check
 
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter, rawRecorder := buildProvider(cfg, log); adapter != nil {
@@ -595,7 +615,8 @@ func run() error {
 			WithRuntime(sessionRuntime).
 			WithMessageStore(messageStore).
 			WithContextBuilder(ctxBuilder).
-			WithTeamAttributor(teamAttributor)
+			WithTeamAttributor(teamAttributor).
+			WithBudgetGate(chatapi.BudgetChecker(budgetGate))
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
 		}
@@ -650,6 +671,7 @@ func run() error {
 				loop.WithTools(buildToolRegistry(ctx, sessionID, whitelist))
 			})
 			trigger.WithTeamAttributor(teamAttributor)
+			trigger.WithBudgetGate(schedule.BudgetChecker(budgetGate))
 			trigger.SetLogger(log)
 			go trigger.Start(ctx)
 			schedTrigger = trigger
@@ -697,7 +719,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:         cfg.HTTP.Addr,
-		Handler:      observability.RequestID(log)(metrics.Middleware(mux)),
+		Handler:      httpHandler(cfg, log, metrics, mux),
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 	}
@@ -817,6 +839,25 @@ func spaHandler(dir string) http.Handler {
 		}
 		http.ServeFile(w, r, index)
 	})
+}
+
+// httpHandler composes the inbound middleware stack around the mux, outermost
+// first: rate-limit (P1-1, reject a flood before any per-request work or metric
+// is spent on it) → request-id (so every logged/served request carries an id) →
+// metrics (count what actually serves) → mux. Health and metrics probes are
+// opted out of rate limiting so monitoring stays up during a flood. Limiting is
+// disabled unless both HTTP_RATE_LIMIT_RPS and _BURST are set.
+func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Metrics, mux *http.ServeMux) http.Handler {
+	inner := observability.RequestID(log)(metrics.Middleware(mux))
+	limiter := quota.NewRateLimiter(cfg.HTTP.RateLimitRPS, cfg.HTTP.RateLimitBurst,
+		func(r *http.Request) string {
+			// Never throttle probes: a flooded API must not blind the operator.
+			if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
+				return ""
+			}
+			return quota.ClientIPKey(r)
+		})
+	return limiter.Middleware(inner)
 }
 
 // buildEncryptor constructs the secret encryptor from config, or nil when no

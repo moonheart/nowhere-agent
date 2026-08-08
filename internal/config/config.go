@@ -259,6 +259,12 @@ type HTTP struct {
 	ReadTimeout     time.Duration `envconfig:"HTTP_READ_TIMEOUT" default:"30s"`
 	WriteTimeout    time.Duration `envconfig:"HTTP_WRITE_TIMEOUT" default:"60s"`
 	ShutdownTimeout time.Duration `envconfig:"HTTP_SHUTDOWN_TIMEOUT" default:"15s"`
+	// RateLimitRPS / RateLimitBurst bound the inbound HTTP request rate per
+	// client (enterprise-readiness P1-1), smoothing bursts so one caller cannot
+	// starve others of concurrency or hammer the model. 0 disables limiting
+	// (the default), keeping local/dev unrestricted; set both to enable.
+	RateLimitRPS   float64 `envconfig:"HTTP_RATE_LIMIT_RPS" default:"0"`
+	RateLimitBurst int     `envconfig:"HTTP_RATE_LIMIT_BURST" default:"0"`
 }
 
 // DB configures Postgres.

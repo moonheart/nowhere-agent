@@ -22,10 +22,15 @@
 - **🟠 P1 规模化** —— 多团队/多租户一上来立刻撞墙(配额执行、SSO、部署交付)。
 - **🟡 P2 健壮性/集成** —— 影响信任边界与外部协同(隔离、通用集成、数据治理、多实例)。
 
-> **P0 实施进度(2026-08-08 起,进行中):**
-> - [x] **审计日志(§2.2)** —— 已落地:migration `000022` + `internal/audit` + 认证/管理/凭据埋点 + `GET /api/admin/audit`。
+> **P0 实施进度(2026-08-08 起,已完成):**
+> - [x] **审计日志(§2.2)** —— 已落地:migration `000022` + `internal/audit` + 认证/管理/凭据埋点 + `GET /api/admin/audit`(控制台查看页 `/admin/platform/audit`)。
 > - [x] **密钥静态加密(§2.10/§2.5)** —— 已落地:`internal/secrets`(AES-256-GCM)+ `SECRETS_MASTER_KEY` + 渐进迁移 + 轮换。
 > - [x] **可观测性 metrics + request-id(§2.3)** —— 已落地:`internal/observability`(/metrics + request-id 关联中间件 + /healthz 依赖探测)。
+>
+> **P1 实施进度(2026-08-08 起,进行中):**
+> - [x] **成本核算(§2.4/§2.1,P1-3)** —— 已落地:`runs` 加 `team_id`/`model`(migration `000023`),团队用量从近似变精确,`usage.ByModel` 打底 per-model 成本。
+> - [x] **配额执行 + 请求限流(§2.4,P1-1)** —— 已落地:`internal/quota` + `usage_budgets` 表(migration `000024`),月度 token 预算提交前拦截(429) + per-IP 请求限流中间件(`HTTP_RATE_LIMIT_*`,默认关)。
+> - [ ] **OIDC 登录(§2.1,P1-2)** —— 未做:对接 IdP(钉钉/企业微信/飞书走标准 OIDC/OAuth2)。
 
 > 标记说明:✅ 已实现 / ◐ 已实现但未接线或仅部分 / ○ 完全缺失。⭐ = 高价值优先。
 
@@ -105,7 +110,12 @@
 - Dreaming worker 单次 token 预算 + 按类记忆上限(`internal/dreaming/worker.go:54-55`)。
 - Docker 沙箱资源限额:512 MiB / 1 CPU / 256 PID(`internal/sandbox/docker.go:32-36`)。
 
-**缺失(剩余):** 全平台无请求限流(无 limiter 中间件;"429" 仅是 provider 错误处理);**无 per-user/per-team token 预算强制** —— 用量只读,没有任何东西阻止一个用户烧穿团队 key。
+> **配额执行 / 请求限流:已实现(2026-08-08,P1-1)。** 此前用量"只记账零执行",一个账户可以烧穿共享团队 key;现在两道口子都会咬人,且都 **fail-open**(配额库/限流器出问题绝不拖垮 chat):
+> - **月度 token 预算拦截**:`internal/quota` + `usage_budgets` 表(migration `000024`,scope=user/team、`owner_id` TEXT 无 FK、`monthly_tokens>0`,PK `(scope,owner_id)`)。`quota.Checker` 在 **run 提交前**(任何模型调用之前)比对"本月可计费 token(input+output) ≥ 月度上限",命中即拒绝:chat 路径返回 **HTTP 429 + Retry-After**(`WithBudgetGate`,映射 `quota.ErrBudgetExceeded`);scheduled run 同样拦截(命中则**跳过本次触发、保持 due** 下个扫描重试,记 warn 日志而非报错整个 sweep)。预算按**自然月**(UTC 月初边界,`monthWindow`,中国企业对账按月结)窗口;用户预算与付费团队预算双重检查,任一命中即拒。spend 走 `usage.Store.ForUser/ForTeam` 的薄 adapter(billable=`Tokens.Total()`),enforcement 与读侧报表解耦(`SpendFunc`/`BudgetReader` 接口)。
+> - **请求限流**:`quota.RateLimiter`(per-key 令牌桶,`golang.org/x/time/rate`),挂为最外层中间件(`httpHandler`,在 request-id/metrics **之前**——拒绝洪流时不为一个将被 429 的请求浪费任何 per-request 工作或 metric);429 + `Retry-After: 1`。key 默认按客户端 IP(`ClientIPKey`,取 X-Forwarded-For 首跳、剥离源端口),`/healthz`/`/metrics` 探测**豁免**(洪流时监控不能瞎)。env `HTTP_RATE_LIMIT_RPS`/`HTTP_RATE_LIMIT_BURST` 控制,默认 0=**关闭**(本地/dev 不受限),两者皆设才启用;空桶后台 sweeper 回收(TTL 10min)。
+> - 设计要点:配额是**保护预算**的手段,绝不让平台因配额库抖动而 429 自己;预算执行在提交时 fail-open,真正超支才 429。预算的**配置 UI**(控制台配额页)尚未补——后端 CRUD(`Store.Set/Get/Clear`)已就绪。
+
+**缺失(剩余):** 配额的**管理面**(控制台配额配置页)未补;无 per-route/分级限流。
 
 > **成本核算 / 精确团队用量:已实现(2026-08-08,P1-3)。** `runs` 加 `team_id`/`model` 两列(migration `000023`),run 提交时按**实际付费的团队 key**(`routing.Resolve(...).TeamID`)与 loop 配置的 model 打戳(`RunWork.TeamID/Model` → `SetRunAttribution`;chat 走 `TeamAttributor`,scheduled run 同样打戳):
 > - **团队用量从近似变精确**:`internal/usage` 的 team 维度改读 `runs.team_id`(直接归属),跨团队成员不再重复计数、离职成员不再带走历史;`team_id` 可空且**不带 FK**,删团队不删历史 run,NULL = 平台 key 付费。
