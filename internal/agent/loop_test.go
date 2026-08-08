@@ -46,7 +46,7 @@ func textResponse(text string) []provider.Event {
 		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
 		{Type: provider.EventBlockDelta, Index: 0, Delta: text},
 		{Type: provider.EventBlockStop, Index: 0},
-		{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: 1, OutputTokens: 1}},
+		{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 1, OutputTokens: 1}},
 	}
 }
 
@@ -57,7 +57,7 @@ func toolUseResponse(id, name, jsonArgs string) []provider.Event {
 		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: id, ToolName: name, ToolInput: map[string]any{}}},
 		{Type: provider.EventBlockDelta, Index: 0, Delta: jsonArgs},
 		{Type: provider.EventBlockStop, Index: 0},
-		{Type: provider.EventMessageStop},
+		{Type: provider.EventMessageStop, StopReason: provider.StopToolUse},
 	}
 }
 
@@ -314,7 +314,7 @@ func thinkingWithSignatureResponse(think, sig, text string) []provider.Event {
 		{Type: provider.EventBlockStart, Index: 1, Block: &provider.Block{Type: provider.BlockText}},
 		{Type: provider.EventBlockDelta, Index: 1, Delta: text},
 		{Type: provider.EventBlockStop, Index: 1},
-		{Type: provider.EventMessageStop},
+		{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn},
 	}
 }
 
@@ -507,7 +507,66 @@ func TestLoopCancelRacingAssistantPersistKeepsPairing(t *testing.T) {
 	}
 }
 
-func TestLoopCancelBeforeStream(t *testing.T) {	// A pre-cancelled context must abort the loop at the iteration guard and	// emit a cancelled event, not a done/error.
+// mutateViewMW rewrites a block in place on the per-attempt view, the way
+// image materialization fills ImageData.
+type mutateViewMW struct{}
+
+func (mutateViewMW) MiddlewareName() string { return "mutate-view" }
+
+func (mutateViewMW) WrapModelCall(ctx context.Context, c *ModelCall, next ModelHandler) (ModelResult, error) {
+	if len(c.View) > 0 && len(c.View[0].Content) > 0 {
+		c.View[0].Content[0].Text = "MUTATED"
+	}
+	return next(ctx, c)
+}
+
+func TestAttemptViewCopyShieldsDurableHistory(t *testing.T) {
+	// The per-attempt view is a block-granularity copy: middleware mutating a
+	// block in place must not reach the caller's (durable) history, whose
+	// messages otherwise share Content slices with the view.
+	p := &scriptProvider{script: [][]provider.Event{textResponse("hi")}}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	loop.Use(mutateViewMW{})
+
+	history := []provider.Message{{Role: provider.RoleUser, Content: []provider.Block{{Type: provider.BlockText, Text: "original"}}}}
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	if history[0].Content[0].Text != "original" {
+		t.Errorf("durable history mutated by middleware: got %q, want %q", history[0].Content[0].Text, "original")
+	}
+}
+
+func TestLoopUnknownStopReasonFailsRun(t *testing.T) {
+	// A no-tool-calls turn whose stream closes without a finish reason is
+	// indistinguishable from a truncation the adapter failed to flag: the run
+	// must fail loudly, not complete silently (which would defeat the
+	// max_tokens truncation guard).
+	p := &scriptProvider{script: [][]provider.Event{{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "maybe truncated"},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop}, // no StopReason reported
+	}}}
+	emit := &memEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	_, err := loop.Run(context.Background(), nil, emit)
+	if err == nil || !strings.Contains(err.Error(), "finish reason") {
+		t.Fatalf("err = %v, want an unreported-finish-reason error", err)
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("an unreported stop reason must not complete the run")
+	}
+	if emit.count(KindError) != 1 {
+		t.Errorf("expected 1 error event, got %d", emit.count(KindError))
+	}
+}
+
+func TestLoopCancelBeforeStream(t *testing.T) {
+	// A pre-cancelled context must abort the loop at the iteration guard and
+	// emit a cancelled event, not a done/error.
 	p := &scriptProvider{script: [][]provider.Event{textResponse("never")}}
 	reg := toolruntime.NewRegistry()
 	emit := &memEmitter{}
@@ -726,7 +785,7 @@ func usageTextResponse(text string, in, out int) []provider.Event {
 		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
 		{Type: provider.EventBlockDelta, Index: 0, Delta: text},
 		{Type: provider.EventBlockStop, Index: 0},
-		{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: in, OutputTokens: out}},
+		{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: in, OutputTokens: out}},
 	}
 }
 

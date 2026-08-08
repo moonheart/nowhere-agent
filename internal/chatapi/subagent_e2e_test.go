@@ -34,13 +34,13 @@ func (p *spawnParentProvider) Stream(_ context.Context, _ provider.Request) (<-c
 		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "sp1", ToolName: subagent.ToolName, ToolInput: map[string]any{}}}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: `{"prompt":"research X","description":"do research"}`}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopToolUse}
 	} else {
 		ch <- provider.Event{Type: provider.EventMessageStart}
 		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "parent answer"}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn}
 	}
 	close(ch)
 	return ch, nil
@@ -56,7 +56,7 @@ func (p subChildProvider) Stream(_ context.Context, _ provider.Request) (<-chan 
 	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
 	ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: p.text}
 	ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-	ch <- provider.Event{Type: provider.EventMessageStop}
+	ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn}
 	close(ch)
 	return ch, nil
 }

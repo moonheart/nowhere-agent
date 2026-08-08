@@ -40,14 +40,14 @@ func (p *clientToolScriptProvider) Stream(_ context.Context, req provider.Reques
 		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "get_clipboard", ToolInput: map[string]any{}}}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: `{}`}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopToolUse}
 	} else {
 		// After resume: echo the clipboard text the client returned.
 		ch <- provider.Event{Type: provider.EventMessageStart}
 		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "clipboard was: " + clipboard}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn}
 	}
 	close(ch)
 	return ch, nil

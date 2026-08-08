@@ -35,7 +35,7 @@ func (p *toolScriptProvider) Stream(_ context.Context, req provider.Request) (<-
 		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: id, ToolName: name, ToolInput: map[string]any{}}}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: args}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopToolUse}
 	}
 	switch p.calls {
 	case 1:
@@ -47,7 +47,7 @@ func (p *toolScriptProvider) Stream(_ context.Context, req provider.Request) (<-
 		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "all done"}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn}
 	}
 	close(ch)
 	return ch, nil

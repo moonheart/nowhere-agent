@@ -235,13 +235,13 @@ func (p *scriptToolProvider) Stream(_ context.Context, _ provider.Request) (<-ch
 		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "echo", ToolInput: map[string]any{}}}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: `{"x":1}`}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 3}}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopToolUse, Usage: &provider.Usage{InputTokens: 5, OutputTokens: 3}}
 	} else {
 		ch <- provider.Event{Type: provider.EventMessageStart}
 		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "done"}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: 8, OutputTokens: 2}}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 8, OutputTokens: 2}}
 	}
 	close(ch)
 	return ch, nil

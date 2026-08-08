@@ -351,9 +351,10 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		}
 
 		// No tool calls → the turn is final. But distinguish a natural finish from
-		// a max_tokens truncation: a truncated turn is a cut-off answer, not a
-		// clean completion, so surface it as an error instead of a silent done
-		// (capability-gap L1). Without this the loop treats truncation as success.
+		// two failure shapes: a max_tokens truncation and an unreported stop reason
+		// (a cut-off answer or an unverifiable one, not a clean completion), so
+		// surface both as errors instead of a silent done (capability-gap L1).
+		// Without this the loop treats truncation as success.
 		if len(res.Calls) == 0 {
 			if res.Stop == provider.StopMaxTokens {
 				truncErr := fmt.Errorf("response truncated: hit the max_tokens limit (%d)", l.config.MaxTokens)
@@ -361,6 +362,19 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				l.runAfterRun(ctx, state)
 				_ = emit.Emit(ctx, KindError, truncErr.Error())
 				return state.Produced, truncErr
+			}
+			if res.Stop == provider.StopUnknown {
+				// The provider closed the stream without reporting a finish
+				// reason: a natural end is indistinguishable from a truncation
+				// the adapter failed to flag, which would silently defeat the
+				// max_tokens guard above. Fail loudly rather than pass a
+				// possibly cut-off answer off as complete. Both shipped
+				// adapters always report a reason.
+				stopErr := fmt.Errorf("provider closed the stream without a finish reason; the response may be incomplete")
+				l.emitStepFinish(ctx, emit, res, "error", false)
+				l.runAfterRun(ctx, state)
+				_ = emit.Emit(ctx, KindError, stopErr.Error())
+				return state.Produced, stopErr
 			}
 			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", state.Usage.InputTokens, "output_tokens", state.Usage.OutputTokens,
 				"cache_read_tokens", state.Usage.CacheReadTokens, "cache_write_tokens", state.Usage.CacheWriteTokens, "cache_hit_pct", cacheHitPct(state.Usage))
@@ -474,8 +488,8 @@ func (l *Loop) runAfterRun(ctx context.Context, state *RunState) {
 
 // emitStepFinish emits the KindStepFinish event closing one think→tool step.
 // reason is the ui-message-stream step finish reason ("stop" | "length" |
-// "tool-calls"); continued is true when the loop iterates again (tool calls were
-// dispatched). Emit failures are ignored — step frames are render hints, and the
+// "tool-calls" | "error"); continued is true when the loop iterates again (tool
+// calls were dispatched). Emit failures are ignored — step frames are render hints, and the
 // run must not abort on a broker hiccup.
 func (l *Loop) emitStepFinish(ctx context.Context, emit Emitter, res ModelResult, reason string, continued bool) {
 	_ = emit.Emit(ctx, KindStepFinish, StepEvent{FinishReason: reason, Usage: res.Usage, IsContinued: continued})
@@ -486,20 +500,40 @@ func (l *Loop) emitStepFinish(ctx context.Context, emit Emitter, res ModelResult
 // so the caller can distinguish a retriable context-overflow from a fatal
 // failure.
 func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (ModelResult, error) {
+	// Per-attempt copy down to block granularity: middleware (compression,
+	// memory injection, image materialization) rewrites the transient view —
+	// image materialization mutates block structs IN PLACE (filling ImageData)
+	// — and none of that may reach the durable record, whose messages share
+	// Content slices with this view. Nested reference values inside a block
+	// (ToolInput maps) stay shared; middleware must treat them as read-only.
+	messages := copyMessageContents(view)
 	call := &ModelCall{
 		Request: provider.Request{
 			Model:           l.config.Model,
 			System:          l.config.System,
-			Messages:        view,
+			Messages:        messages,
 			Tools:           l.toolDefs(),
 			MaxTokens:       l.config.MaxTokens,
 			CacheablePrefix: l.config.CacheablePrefix,
 		},
-		// Per-attempt copy: middleware (compression, memory injection, image
-		// materialization) rewrites this without touching the durable record.
-		View: append([]provider.Message{}, view...),
+		View: messages,
 	}
 	return chainModel(l.modelWrap, l.realAttempt(emit))(ctx, call)
+}
+
+// copyMessageContents copies messages down to block granularity: the message
+// structs and their Content slices are fresh, so in-place block mutation
+// touches only the copy. Nested reference values inside a block (ToolInput
+// maps, byte slices) are still shared with the source.
+func copyMessageContents(msgs []provider.Message) []provider.Message {
+	out := make([]provider.Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = m
+		if m.Content != nil {
+			out[i].Content = append([]provider.Block{}, m.Content...)
+		}
+	}
+	return out
 }
 
 // realAttempt is the innermost model-call handler: it streams the request and
@@ -549,9 +583,10 @@ type MessageWithUsage struct {
 
 // StepEvent is the KindStepFinish payload: how one think→tool step ended.
 // FinishReason is a ui-message-stream finish reason for the step ("stop" |
-// "length" | "tool-calls"); Usage is the per-LLM-call usage (nil if unreported);
-// IsContinued is true when another step follows in this run (tool calls were
-// dispatched, so the loop iterates again) and false at a run-terminal step.
+// "length" | "tool-calls" | "error"); Usage is the per-LLM-call usage (nil if
+// unreported); IsContinued is true when another step follows in this run (tool
+// calls were dispatched, so the loop iterates again) and false at a
+// run-terminal step.
 type StepEvent struct {
 	FinishReason string          `json:"finish_reason"`
 	Usage        *provider.Usage `json:"usage,omitempty"`

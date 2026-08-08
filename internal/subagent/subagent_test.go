@@ -76,7 +76,7 @@ func textEvents(text string) []provider.Event {
 		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
 		{Type: provider.EventBlockDelta, Index: 0, Delta: text},
 		{Type: provider.EventBlockStop, Index: 0},
-		{Type: provider.EventMessageStop, Usage: &provider.Usage{InputTokens: 1, OutputTokens: 1}},
+		{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn, Usage: &provider.Usage{InputTokens: 1, OutputTokens: 1}},
 	}
 }
 
@@ -86,7 +86,7 @@ func toolUseEvents(id, name, jsonArgs string) []provider.Event {
 		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: id, ToolName: name, ToolInput: map[string]any{}}},
 		{Type: provider.EventBlockDelta, Index: 0, Delta: jsonArgs},
 		{Type: provider.EventBlockStop, Index: 0},
-		{Type: provider.EventMessageStop},
+		{Type: provider.EventMessageStop, StopReason: provider.StopToolUse},
 	}
 }
 

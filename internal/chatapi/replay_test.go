@@ -32,7 +32,7 @@ func (thinkingStub) Stream(context.Context, provider.Request) (<-chan provider.E
 	ch <- provider.Event{Type: provider.EventBlockDelta, Index: 1, Delta: "Doudou "}
 	ch <- provider.Event{Type: provider.EventBlockDelta, Index: 1, Delta: "is your cat"}
 	ch <- provider.Event{Type: provider.EventBlockStop, Index: 1}
-	ch <- provider.Event{Type: provider.EventMessageStop}
+	ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn}
 	close(ch)
 	return ch, nil
 }

@@ -22,7 +22,7 @@ func (p *clientToolCallProvider) Stream(_ context.Context, _ provider.Request) (
 	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: p.callID, ToolName: p.toolName, ToolInput: map[string]any{}}}
 	ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: `{}`}
 	ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-	ch <- provider.Event{Type: provider.EventMessageStop}
+	ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopToolUse}
 	close(ch)
 	return ch, nil
 }

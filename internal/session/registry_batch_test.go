@@ -27,7 +27,7 @@ func (p *twoGatedProvider) Stream(_ context.Context, _ provider.Request) (<-chan
 	ch <- provider.Event{Type: provider.EventMessageStart}
 	mk(0, "tu1", "edit_a")
 	mk(1, "tu2", "edit_b")
-	ch <- provider.Event{Type: provider.EventMessageStop}
+	ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopToolUse}
 	close(ch)
 	return ch, nil
 }

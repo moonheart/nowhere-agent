@@ -39,7 +39,7 @@ func (p *stubProvider) Stream(ctx context.Context, _ provider.Request) (<-chan p
 		}
 		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "ok"}
 		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-		ch <- provider.Event{Type: provider.EventMessageStop}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn}
 	}()
 	return ch, nil
 }

@@ -36,7 +36,7 @@ func (p *recordingProvider) Stream(_ context.Context, req provider.Request) (<-c
 	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
 	ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "ok"}
 	ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
-	ch <- provider.Event{Type: provider.EventMessageStop}
+	ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn}
 	close(ch)
 	return ch, nil
 }

@@ -101,7 +101,9 @@ type ModelCall struct {
 	Request provider.Request
 	// View is the transient working view backing Request.Messages. Middleware
 	// that rewrites it (compression, memory injection) must keep
-	// Request.Messages consistent. View is a per-attempt copy: NEVER persisted.
+	// Request.Messages consistent. View is a per-attempt copy (down to block
+	// granularity, so in-place block mutation is safe; nested reference values
+	// inside a block are shared and read-only): NEVER persisted.
 	View []provider.Message
 }
 
