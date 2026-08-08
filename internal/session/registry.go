@@ -432,13 +432,16 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 	// routed into the fold too — add an executor hook here rather than calling
 	// the registry directly.
 	//
-	// The EXECUTION gate, by contrast, is re-applied here (the gate parameter):
-	// "not gated" only means the call did not need human input — the interaction
-	// gate suspends solely on deny-with-approval-marker, ask_user, and client
-	// tools, so a HARD-DENIED call (env policy Deny, no approval marker) is an
-	// un-gated sibling too. The loop's dispatch screen would have refused it;
-	// without the re-check the fold would execute it, making one policy's
-	// outcome depend on whether the batch happened to contain an approval-gated
+	// The loop's other dispatch screens are re-applied here for the same
+	// reason: the input-SCHEMA screen (below, alongside the gate) refuses
+	// arguments that violate the tool's declared schema, and the EXECUTION
+	// gate (the gate parameter) refuses hard-denied calls. "Not gated" only
+	// means the call did not need human input — the interaction gate suspends
+	// solely on deny-with-approval-marker, ask_user, and client tools, so a
+	// HARD-DENIED call (env policy Deny, no approval marker) is an un-gated
+	// sibling too. The loop's dispatch screen would have refused it; without
+	// the re-check the fold would execute it, making one policy's outcome
+	// depend on whether the batch happened to contain an approval-gated
 	// neighbour. Gated calls skip the re-check: the human verdict supersedes
 	// the ask-tier (the env tier is static config, unchanged since suspend).
 	resultMsg := provider.Message{Role: provider.RoleUser}
@@ -455,13 +458,21 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 		}
 		ap, gated := byCall[c.ID]
 		if !gated {
-			// Re-apply the execution gate to siblings (see the contract above):
-			// a hard-denied call never becomes an interaction, so this is the
-			// only screen it gets on the resume path. Mirrors the loop's
-			// dispatch: the gate only runs for a resolvable tool (the registry's
-			// own guard answers unknown names).
-			if gate != nil {
-				if tool, ok := tools.Get(c.Name); ok {
+			if tool, ok := tools.Get(c.Name); ok {
+				// Mirror the loop's dispatch schema screen: arguments that
+				// parsed but violate the tool's declared input schema must not
+				// execute at fold either — answer with the same structured
+				// error dispatch would have produced.
+				if verr := toolruntime.ValidateArgs(tool.Schema(), c.Args); verr != nil {
+					results[i] = toolruntime.Result{Content: "invalid tool arguments: " + verr.Error(), IsError: true}
+					continue
+				}
+				// Re-apply the execution gate to siblings (see the contract
+				// above): a hard-denied call never becomes an interaction, so
+				// this is the only screen it gets on the resume path. Mirrors
+				// the loop's dispatch: the gate only runs for a resolvable tool
+				// (the registry's own guard answers unknown names).
+				if gate != nil {
 					if deny, reason := gate(ctx, tool); deny {
 						results[i] = toolruntime.Result{Content: "permission denied: " + reason, IsError: true}
 						continue
