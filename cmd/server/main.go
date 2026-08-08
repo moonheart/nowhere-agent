@@ -33,6 +33,8 @@ import (
 	"nowhere-agent/internal/provider/openai"
 	"nowhere-agent/internal/routing"
 	"nowhere-agent/internal/sandbox"
+	"nowhere-agent/internal/schedule"
+	"nowhere-agent/internal/scheduleapi"
 	"nowhere-agent/internal/scheduler"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
@@ -383,11 +385,18 @@ func run() error {
 		// its own provider key gets its calls billed to that key instead of the
 		// platform one. Resolution failure falls back to the boot adapter —
 		// chat must not go down because a key lookup hiccuped.
-		newChatLoop := func(ctx context.Context, system string) *agent.Loop {
+		// newChatLoopWithModel builds the chat loop for an explicit model. It is
+		// the core both the chat path and the scheduled-task trigger use; the
+		// trigger passes the task's model (falling back to the chat default).
+		newChatLoopWithModel := func(ctx context.Context, system, modelOverride string) *agent.Loop {
+			m := model
+			if modelOverride != "" {
+				m = modelOverride
+			}
 			loop := agent.New(
 				adapterForCaller(ctx, cfg, rawRecorder, keyStore, adapter, log),
 				toolruntime.NewRegistry(), agent.Config{
-					Model:           model,
+					Model:           m,
 					System:          system,
 					MaxTokens:       65536,
 					MaxIterations:   25,
@@ -403,8 +412,16 @@ func run() error {
 			loop.Use(&agent.OverflowMW{})
 			return loop
 		}
-		bindChatTools := func(ctx context.Context, loop *agent.Loop, sessionID string) {
-			reg := toolruntime.NewRegistry()
+		newChatLoop := func(ctx context.Context, system string) *agent.Loop {
+			return newChatLoopWithModel(ctx, system, "")
+		}
+		// buildToolRegistry assembles the full tool registry for a session, then
+		// narrows it to whitelist when that is non-empty (scheduled-tasks D3): a
+		// tool not on the whitelist is never registered into the loop, so the
+		// model cannot call it. A nil whitelist keeps the full set (chat).
+		buildToolRegistry := func(ctx context.Context, sessionID string, whitelist []string) *toolruntime.Registry {
+			full := toolruntime.NewRegistry()
+			reg := full
 			// Structured user questions (capability O-ask): the model asks 1–4
 			// questions; the loop suspends the run on this tool and the user's
 			// answer arrives as its result on resume. Always available (sandbox-
@@ -494,7 +511,29 @@ func run() error {
 				reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, cfg.Subagent.MaxDepth).
 					WithBudget(cfg.Subagent.MaxTotal, cfg.Subagent.MaxConcurrent))
 			}
-			loop.WithTools(reg)
+			// Whitelist filter (scheduled-tasks D3): narrow the registry to the
+			// task's granted tools. Nil whitelist = the full set (chat). Unknown
+			// whitelist names are dropped silently (the tool simply isn't bound).
+			if whitelist != nil {
+				allow := map[string]bool{}
+				for _, n := range whitelist {
+					allow[n] = true
+				}
+				filtered := toolruntime.NewRegistry()
+				for _, t := range full.All() {
+					if allow[t.Name()] {
+						filtered.Register(t)
+					}
+				}
+				return filtered
+			}
+			return reg
+		}
+		// bindChatTools attaches session-scoped tools to a chat run's loop. It
+		// delegates to buildToolRegistry (the full tool set) so the same builder
+		// can serve the scheduled-task trigger with a whitelist filter applied.
+		bindChatTools := func(ctx context.Context, loop *agent.Loop, sessionID string) {
+			loop.WithTools(buildToolRegistry(ctx, sessionID, nil))
 		}
 
 		handler := chatapi.NewHandler(newChatLoop, baseSystem).
@@ -529,6 +568,36 @@ func run() error {
 			}
 		}
 		handler.RegisterAuthed(mux, identityHandler.RequireAuth)
+
+		// Scheduled tasks (scheduled-tasks capability): the trigger scans for
+		// due tasks and fires each through the SAME run path a human chat uses —
+		// it rebuilds the chat loop with a whitelist-filtered tool registry
+		// (buildToolRegistry) and submits via the handler's shared RunRegistry,
+		// so streaming, persistence, permission, and compression are identical.
+		// The store and CRUD routes are wired below, outside the provider branch,
+		// so task management stays available with no LLM configured; only firing
+		// needs a provider.
+		if cfg.Schedule.Enabled {
+			schedStore := schedule.NewPGStore(pool)
+			// Loop builder: rebuild the chat loop with the task's system prompt and
+			// model (modelOverride "" = the chat default). Tools are NOT bound here
+			// — the target session is not yet known — but via WithToolBinder once
+			// the trigger resolves it.
+			buildSchedLoop := func(ctx context.Context, task schedule.Task, system, modelOverride string) *agent.Loop {
+				return newChatLoopWithModel(ctx, system, modelOverride)
+			}
+			trigger := schedule.NewTrigger(schedStore, sessionRuntime, handler.Registry(), subStore, identitySvc, buildSchedLoop, pool, cfg.Schedule.ScanInterval)
+			// Tool binder: narrow the session's tool registry to the task's
+			// whitelist (D3) once the trigger has resolved the session id.
+			trigger.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string, whitelist []string) {
+				loop.WithTools(buildToolRegistry(ctx, sessionID, whitelist))
+			})
+			trigger.SetLogger(log)
+			go trigger.Start(ctx)
+			log.Info("scheduled-task trigger enabled", "scan_interval", cfg.Schedule.ScanInterval)
+		} else {
+			log.Info("scheduled-task trigger disabled; task CRUD still available")
+		}
 		if compressor != nil {
 			log.Info("context compression enabled", "window", cfg.LLM.ContextWindow)
 		}
@@ -550,6 +619,13 @@ func run() error {
 	// behind the same auth middleware. Registered alongside the admin console.
 	skillapi.NewHandler(identitySvc, skillStore).RegisterAuthed(mux, identityHandler.RequireAuth)
 	log.Info("skill management endpoints enabled (auth required)")
+
+	// Scheduled-task CRUD (scheduled-tasks): self-service management of recurring
+	// agent runs. Registered outside the provider branch so tasks can be managed
+	// on a deployment with no LLM; only firing needs a provider (see the trigger
+	// wiring inside the provider branch).
+	scheduleapi.NewHandler(schedule.NewPGStore(pool)).RegisterAuthed(mux, identityHandler.RequireAuth)
+	log.Info("scheduled-task endpoints enabled (auth required)")
 
 	// Serve the built frontend if present. The console is a client-side route,
 	// so a deep link like /admin/users has no file behind it — spaHandler falls

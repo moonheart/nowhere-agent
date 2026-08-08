@@ -13,6 +13,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/redis/go-redis/v9 v9.21.0
+	github.com/robfig/cron/v3 v3.0.1
 	golang.org/x/crypto v0.54.0
 )
 

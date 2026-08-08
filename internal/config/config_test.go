@@ -149,6 +149,35 @@ func TestDreamingFromEnv(t *testing.T) {
 	}
 }
 
+func TestScheduleDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Schedule.Enabled {
+		t.Error("schedule trigger should default to enabled")
+	}
+	if cfg.Schedule.ScanInterval != 30*time.Second {
+		t.Errorf("got schedule scan interval %v, want 30s", cfg.Schedule.ScanInterval)
+	}
+}
+
+func TestScheduleFromEnv(t *testing.T) {
+	t.Setenv("SCHEDULE_ENABLED", "false")
+	t.Setenv("SCHEDULE_SCAN_INTERVAL", "1m")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Schedule.Enabled {
+		t.Error("schedule trigger should be disabled from SCHEDULE_ENABLED=false")
+	}
+	if cfg.Schedule.ScanInterval != time.Minute {
+		t.Errorf("got schedule scan interval %v, want 1m", cfg.Schedule.ScanInterval)
+	}
+}
+
 func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("HTTP_ADDR", ":9999")
 	t.Setenv("LOG_LEVEL", "warn")

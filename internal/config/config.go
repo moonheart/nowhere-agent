@@ -33,6 +33,9 @@ type Config struct {
 	// Dreaming configures the offline dreaming worker and the scheduler that
 	// drives it (capability-gaps K1+K2).
 	Dreaming Dreaming
+	// Schedule configures the scheduled-task trigger (scheduled-tasks
+	// capability): recurring agent runs fired through the chat run path.
+	Schedule Schedule
 	// Skills configures the skill runtime (capability-gap K3a).
 	Skills Skills
 	// Identity configures the account layer, notably platform-admin bootstrap
@@ -68,6 +71,16 @@ type MCP struct {
 // enabled, the server starts a scheduler that runs the worker every Interval,
 // consolidating ended sessions' episodes into long-term memory, bounded by
 // MaxTokens per pass.
+// Schedule configures the scheduled-task trigger (scheduled-tasks capability).
+// Enabled gates only the trigger loop — task CRUD stays available with it off,
+// mirroring how DREAMING_ENABLED gates the schedule but not manual consolidation.
+// ScanInterval is how often the trigger looks for due tasks; sub-minute cron
+// resolution is not supported, so the default 30s is finer than any real schedule.
+type Schedule struct {
+	Enabled      bool          `envconfig:"SCHEDULE_ENABLED" default:"true"`
+	ScanInterval time.Duration `envconfig:"SCHEDULE_SCAN_INTERVAL" default:"30s"`
+}
+
 type Dreaming struct {
 	Enabled   bool          `envconfig:"DREAMING_ENABLED" default:"false"`
 	Interval  time.Duration `envconfig:"DREAMING_INTERVAL" default:"1h"`
