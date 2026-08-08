@@ -67,6 +67,10 @@ True atomicity of "record final decision + persist tool_result message" is impos
 - Crash between final decision and fold commit → the next resume attempt re-folds. Approved tools may re-execute: at-least-once, identical to LangGraph's node-replay semantics; documented for tool authors.
 - The resume endpoint must not strand this recovery: `RecordDecision` on an already-decided row returns ErrNoPendingApproval, and a naive 409 there would deadlock (the retry never reaches the idempotent fold). serveChatResume therefore consults `BatchFoldState`: decided-but-not-folded falls through to the fold; decided-AND-folded keeps the 409. Concurrent fold retries converge via a `SELECT ... FOR UPDATE` claim on the batch row — the loser gets ErrBatchAlreadyFolded and rebuilds history (idempotent success).
 
+### D4: Malformed-args calls never execute — including at fold
+
+A call whose arguments failed to parse is refused by the loop's dispatch screen ("invalid tool arguments") and gets no interaction row. The parse failure is persisted on the tool_use block (`args_error`) — without it, a nil `ToolInput` is ambiguous with a legitimate no-args call. The fold screens such calls exactly like the loop does: it never dispatches them and folds an `is_error: "invalid tool arguments: ..."` tool_result, while gated siblings still execute per their verdicts.
+
 ### D4: Pending-interaction submission gate (durable)
 
 - `serveChat` (chat submit path) checks `PendingInteractionsForSession(sessionID)` against the STORE (PG — an in-memory check would be wrong in multi-instance deployments where instance B doesn't know instance A's pending cards) before `Submit`. Any pending → 409 with a typed error body (`{"error":"pending_interaction"}`), so the frontend can point at the unresolved card instead of showing a generic conflict.

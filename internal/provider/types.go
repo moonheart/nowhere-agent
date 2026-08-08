@@ -41,6 +41,12 @@ type Block struct {
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	ToolName  string         `json:"tool_name,omitempty"`
 	ToolInput map[string]any `json:"tool_input,omitempty"`
+	// ArgsError, when non-empty, records that the model's arguments for this
+	// tool call could not be parsed (the loop refused to execute it). Persisted
+	// so a later suspended-batch fold can distinguish a malformed-args call
+	// (never execute, fold as an is_error result) from a legitimate no-args
+	// call — both otherwise appear as a nil ToolInput.
+	ArgsError string `json:"args_error,omitempty"`
 
 	// Tool result (BlockToolResult) — the result fed back to the model.
 	ToolResultID string `json:"tool_result_id,omitempty"` // matches the ToolUseID it answers

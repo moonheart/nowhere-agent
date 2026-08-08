@@ -661,6 +661,12 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 // stream-close path and EventBlockStop so both handle malformed args the same.
 func (l *Loop) appendFinalized(ctx context.Context, acc *accumulator, assistant *provider.Message, calls *[]toolruntime.Call, emit Emitter) {
 	blk, argErr := acc.finalize()
+	if argErr != nil {
+		// Persist the parse failure on the block itself: a suspended-batch fold
+		// later rebuilds calls from the durable message and must still know this
+		// call was never meant to execute.
+		blk.ArgsError = argErr.Error()
+	}
 	assistant.Content = append(assistant.Content, blk)
 	if blk.Type != provider.BlockToolUse {
 		return

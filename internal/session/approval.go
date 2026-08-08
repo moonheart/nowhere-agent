@@ -118,7 +118,11 @@ func (m *MemStore) PendingApprovalForSession(_ context.Context, sessionID string
 	var head *Interaction
 	for _, a := range m.approvals {
 		if a.SessionID == sessionID && a.Status == InteractionPending {
-			if head == nil || a.CreatedAt.Before(head.CreatedAt) {
+			// CreatedAt ties (a batch created in one tick) must still pick the
+			// queue head deterministically: seq is the insertion counter, the
+			// same tie-break sortInteractions uses.
+			if head == nil || a.CreatedAt.Before(head.CreatedAt) ||
+				(a.CreatedAt.Equal(head.CreatedAt) && a.seq < head.seq) {
 				head = a
 			}
 		}

@@ -375,6 +375,13 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 	var dispatchIdx []int
 	var dispatchCalls []toolruntime.Call
 	for i, c := range allCalls {
+		if c.ArgsError != "" {
+			// Mirror the loop's dispatch screen: a call whose arguments never
+			// parsed was refused at the gate too (no interaction row), and it
+			// must not execute at fold either — its ToolInput is nil/partial.
+			results[i] = toolruntime.Result{Content: "invalid tool arguments: " + c.ArgsError, IsError: true}
+			continue
+		}
 		ap, gated := byCall[c.ID]
 		if !gated {
 			dispatchIdx = append(dispatchIdx, i)
@@ -470,8 +477,8 @@ func suspendedBatchCalls(stored []StoredMessage, runID string, snap SuspendedBat
 			if b.Type != provider.BlockToolUse || b.ToolUseID == "" {
 				continue
 			}
-			ids = append(ids, b.ToolUseID)
-			calls = append(calls, toolruntime.Call{ID: b.ToolUseID, Name: b.ToolName, Args: b.ToolInput})
+		ids = append(ids, b.ToolUseID)
+		calls = append(calls, toolruntime.Call{ID: b.ToolUseID, Name: b.ToolName, Args: b.ToolInput, ArgsError: b.ArgsError})
 		}
 		if len(calls) == 0 {
 			continue

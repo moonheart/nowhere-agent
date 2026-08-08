@@ -186,6 +186,58 @@ func TestFoldBatchMissingSnapshot(t *testing.T) {
 	}
 }
 
+// TestFoldBatchArgsErrorNeverExecutes: a sibling whose arguments never parsed
+// (the loop refused it, no interaction row) must not execute at fold time
+// either — the durable ArgsError marker folds it as an is_error result, while
+// its gated sibling still executes per the verdict.
+func TestFoldBatchArgsErrorNeverExecutes(t *testing.T) {
+	rg, ms, sess := newDecideRegistry(t)
+	ctx := context.Background()
+	run, _ := rg.rt.store.CreateRun(ctx, sess.ID, 1)
+	_, _ = ms.AppendMessage(ctx, StoredMessage{
+		SessionID: sess.ID, RunID: run.ID, Role: provider.RoleUser,
+		Content: []provider.Block{{Type: provider.BlockText, Text: "turn"}},
+	})
+	_, _ = ms.AppendMessage(ctx, StoredMessage{
+		SessionID: sess.ID, RunID: run.ID, Role: provider.RoleAssistant,
+		Content: []provider.Block{
+			{Type: provider.BlockToolUse, ToolUseID: "tu_g", ToolName: "danger", ToolInput: map[string]any{}},
+			// The malformed-args sibling: ToolInput nil (parse failed), the
+			// parse failure persisted on the block by appendFinalized.
+			{Type: provider.BlockToolUse, ToolUseID: "tu_bad", ToolName: "write_file", ArgsError: "tool arguments are not valid JSON: unexpected end"},
+		},
+	})
+	ap := createSuspendedInteraction(t, rg, []string{"tu_g", "tu_bad"}, Interaction{
+		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu_g", ToolName: "danger", Kind: KindToolApproval,
+	})
+
+	dangerRuns, writeRuns := 0, 0
+	reg := toolruntime.NewRegistry()
+	reg.Register(countTool{name: "danger", runs: &dangerRuns})
+	reg.Register(countTool{name: "write_file", runs: &writeRuns})
+
+	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg)
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	if dangerRuns != 1 {
+		t.Errorf("danger executed %d times, want 1 (the approved gated call)", dangerRuns)
+	}
+	if writeRuns != 0 {
+		t.Errorf("write_file executed %d times, want 0 — a malformed-args call must never execute at fold", writeRuns)
+	}
+	last := history[len(history)-1]
+	if len(last.Content) != 2 {
+		t.Fatalf("folded results = %+v, want [tu_g tu_bad]", last.Content)
+	}
+	if !last.Content[1].IsError || !strings.Contains(last.Content[1].ToolContent, "invalid tool arguments") {
+		t.Errorf("tu_bad result = %+v, want an is_error 'invalid tool arguments' result", last.Content[1])
+	}
+	if last.Content[0].IsError {
+		t.Errorf("tu_g result = %+v, want success (approved)", last.Content[0])
+	}
+}
+
 // TestFoldBatchIdempotentRetry: a retried resume after a committed fold
 // re-executes nothing and persists no duplicate.
 func TestFoldBatchIdempotentRetry(t *testing.T) {
