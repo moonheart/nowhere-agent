@@ -26,6 +26,7 @@ type Store interface {
 	SetEnabled(ctx context.Context, id string, enabled bool) error
 	ListForUser(ctx context.Context, userID string) ([]schedule.Task, error)
 	ListSessions(ctx context.Context, taskID string) ([]string, error)
+	ListProducedSessions(ctx context.Context, taskID string) ([]schedule.ProducedSession, error)
 	EndSessions(ctx context.Context, taskID string) (int, error)
 }
 

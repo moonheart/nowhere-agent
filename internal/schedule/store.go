@@ -19,6 +19,14 @@ import (
 // including malformed ids (see identity.IsMalformedID).
 var ErrNotFound = errors.New("schedule: not found")
 
+// ProducedSession is one session a task created, with the display fields the
+// console renders (the internal ListSessions returns bare ids).
+type ProducedSession struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // Store persists scheduled tasks. PG and in-memory implementations share the
 // contract so the trigger and HTTP layer are backend-agnostic (ports &
 // adapters). Times are stored and compared in absolute instants; the cron
@@ -249,6 +257,31 @@ func (s *PGStore) ListSessions(ctx context.Context, taskID string) ([]string, er
 			return nil, err
 		}
 		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ListProducedSessions is ListSessions with the display columns (title, created
+// time) the console needs to render each session by name. Same visibility rule:
+// active only, newest first.
+func (s *PGStore) ListProducedSessions(ctx context.Context, taskID string) ([]ProducedSession, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, title, created_at FROM sessions WHERE task_id = $1 AND status = $2 ORDER BY created_at DESC`,
+		taskID, string(session.SessionActive))
+	if err != nil {
+		if identity.IsMalformedID(err) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("list task session infos: %w", err)
+	}
+	defer rows.Close()
+	out := []ProducedSession{} // non-nil so JSON is []
+	for rows.Next() {
+		var ps ProducedSession
+		if err := rows.Scan(&ps.ID, &ps.Title, &ps.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ps)
 	}
 	return out, rows.Err()
 }

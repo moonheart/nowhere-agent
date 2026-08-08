@@ -160,7 +160,8 @@ func (h *Handler) runNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"started": started, "session_id": sessionID})
 }
 
-// sessions lists the sessions a task produced.
+// sessions lists the sessions a task produced, with the title and created time
+// the console renders. Each entry links into the chat view by id.
 func (h *Handler) sessions(w http.ResponseWriter, r *http.Request) {
 	if h.storeUnavailable(w) {
 		return
@@ -168,12 +169,12 @@ func (h *Handler) sessions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.authorizeTask(w, r, r.PathValue("id")); !ok {
 		return
 	}
-	ids, err := h.store.ListSessions(r.Context(), r.PathValue("id"))
+	infos, err := h.store.ListProducedSessions(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": ids})
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": infos})
 }
 
 // clearSessions soft-deletes every session a task produced, returning how many

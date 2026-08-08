@@ -272,9 +272,10 @@ func TestSessionsEndpoint(t *testing.T) {
 	id := decodeBody(t, rec)["task"].(map[string]any)["id"].(string)
 	e.cleanupTask(id)
 
-	// Tag a session to the task directly (mirroring what the trigger writes).
+	// Tag a session to the task directly (mirroring what the trigger writes),
+	// with a title so the endpoint returns a name to render.
 	var sessID string
-	e.db.QueryRow(`INSERT INTO sessions (user_id, title, task_id, source) VALUES ($1,'s',$2,'scheduled') RETURNING id`, owner.ID, id).Scan(&sessID)
+	e.db.QueryRow(`INSERT INTO sessions (user_id, title, task_id, source) VALUES ($1,'daily summary',$2,'scheduled') RETURNING id`, owner.ID, id).Scan(&sessID)
 	e.t.Cleanup(func() { e.db.Exec(`DELETE FROM sessions WHERE id = $1`, sessID) })
 
 	rec = e.as(owner, "GET", "/api/me/scheduled-tasks/"+id+"/sessions", nil)
@@ -282,8 +283,12 @@ func TestSessionsEndpoint(t *testing.T) {
 		t.Fatalf("sessions: status %d", rec.Code)
 	}
 	sessions := decodeBody(t, rec)["sessions"].([]any)
-	if len(sessions) != 1 || sessions[0] != sessID {
-		t.Fatalf("expected [%s], got %v", sessID, sessions)
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 session, got %v", sessions)
+	}
+	entry := sessions[0].(map[string]any)
+	if entry["id"] != sessID || entry["title"] != "daily summary" {
+		t.Fatalf("session entry = %v, want id %s titled 'daily summary'", entry, sessID)
 	}
 }
 

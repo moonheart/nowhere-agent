@@ -74,10 +74,18 @@ export const disableScheduledTask = (id: string) =>
 export const runScheduledTask = (id: string) =>
   api<{ started: boolean; session_id?: string }>(`${BASE}/${enc(id)}/run`, { method: "POST" });
 
-// taskSessions lists the session ids a task has produced (the fire created one
-// per run when the task has no fixed target session).
+// ProducedSession is one session a task created, rendered by name in the
+// console and linked into the chat view by id.
+export type ProducedSession = {
+  id: string;
+  title: string;
+  created_at: string;
+};
+
+// taskSessions lists the sessions a task has produced (the fire created one
+// per run when the task has no fixed target session), newest first.
 export const taskSessions = (id: string) =>
-  api<{ sessions: string[] }>(`${BASE}/${enc(id)}/sessions`);
+  api<{ sessions: ProducedSession[] }>(`${BASE}/${enc(id)}/sessions`);
 
 // clearTaskSessions soft-deletes every session a task produced (they leave the
 // sidebar but their rows stay for audit). Returns how many were cleared.

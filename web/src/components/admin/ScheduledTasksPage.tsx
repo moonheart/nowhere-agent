@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   CalendarClock,
+  ExternalLink,
   Loader2,
   Pencil,
   Play,
@@ -58,6 +59,7 @@ import {
   updateScheduledTask,
   type MultitaskStrategy,
   type OnRunCompleted,
+  type ProducedSession,
   type ScheduledTask,
   type ScheduledTaskInput,
 } from "@/lib/scheduled-tasks";
@@ -538,7 +540,7 @@ function TaskSessionsDialog({ task }: { task: ScheduledTask }) {
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const state = useAsync(
-    () => (open ? taskSessions(task.id) : Promise.resolve({ sessions: [] as string[] })),
+    () => (open ? taskSessions(task.id) : Promise.resolve({ sessions: [] as ProducedSession[] })),
     [open, task.id],
   );
 
@@ -568,7 +570,7 @@ function TaskSessionsDialog({ task }: { task: ScheduledTask }) {
             Produced sessions
           </DialogTitle>
           <DialogDescription>
-            Sessions this task created. Open one to read the run.
+            Sessions this task created. Open one in a new tab to read the run.
           </DialogDescription>
         </DialogHeader>
         {error && <ErrorNotice message={error} />}
@@ -600,14 +602,23 @@ function TaskSessionsDialog({ task }: { task: ScheduledTask }) {
                     />
                   </div>
                   <ul className="max-h-80 space-y-1 overflow-y-auto">
-                    {(data.sessions ?? []).map((id) => (
-                      <li key={id}>
+                    {(data.sessions ?? []).map((s) => (
+                      <li key={s.id}>
                         <Link
-                          to={`/?session=${encodeURIComponent(id)}`}
-                          className="flex items-center justify-between rounded-lg px-3 py-2 font-mono text-xs hover:bg-muted/60"
+                          to={`/?session=${encodeURIComponent(s.id)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center justify-between gap-3 rounded-lg px-3 py-2 hover:bg-muted/60"
                         >
-                          <span className="truncate">{id}</span>
-                          {state.loading && <Loader2 className="size-3 animate-spin" />}
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-sm font-medium">
+                              {s.title?.trim() || "Untitled session"}
+                            </span>
+                            <ExternalLink className="size-3.5 shrink-0 text-muted-foreground" />
+                          </span>
+                          <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+                            {formatDateTime(s.created_at)}
+                          </span>
                         </Link>
                       </li>
                     ))}
