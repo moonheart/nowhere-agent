@@ -645,6 +645,54 @@ func TestLoopEmptyResponseFailsRun(t *testing.T) {
 	}
 }
 
+func TestLoopEmptyTextBlockFailsRun(t *testing.T) {
+	// A turn that reports end_turn with a single text block that streamed ZERO
+	// deltas is the empty-response case wearing a 1-block disguise: the block
+	// assembles to Text:"" — content the provider rejects with a 400 on the
+	// next send. The empty-response guard must still fire (dropEmptyBlocks
+	// strips the hollow block before the 0-length check).
+	p := &scriptProvider{script: [][]provider.Event{{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn},
+	}}}
+	emit := &memEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), nil, emit)
+	if err == nil || !strings.Contains(err.Error(), "empty response") {
+		t.Fatalf("err = %v, want an empty-response error", err)
+	}
+	if len(produced) != 0 {
+		t.Errorf("produced %d messages, want 0 — a hollow assistant message must not be recorded", len(produced))
+	}
+	if emit.count(KindMessage) != 0 {
+		t.Errorf("KindMessage = %d, want 0 — a hollow assistant message must not be persisted", emit.count(KindMessage))
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("an empty-text-block response must not complete the run")
+	}
+}
+
+func TestDropEmptyBlocks(t *testing.T) {
+	blocks := []provider.Block{
+		{Type: provider.BlockText, Text: ""},                                    // hollow: drop
+		{Type: provider.BlockThinking},                                          // hollow: drop
+		{Type: provider.BlockThinking, ThinkingSignature: "sig"},                // signed: keep (round-trip)
+		{Type: provider.BlockText, CachePoint: true},                            // cache boundary: keep
+		{Type: provider.BlockText, Text: "hi"},                                  // content: keep
+		{Type: provider.BlockToolUse, ToolUseID: "t1", ToolName: "echo"},        // tool call: keep
+	}
+	kept := dropEmptyBlocks(blocks)
+	if len(kept) != 4 {
+		t.Fatalf("kept %d blocks, want 4: %+v", len(kept), kept)
+	}
+	if kept[0].ThinkingSignature != "sig" || !kept[1].CachePoint || kept[2].Text != "hi" || kept[3].ToolUseID != "t1" {
+		t.Errorf("kept the wrong blocks: %+v", kept)
+	}
+}
+
 func TestLoopFinalizesUnclosedBlocksInStreamOrder(t *testing.T) {
 	// A provider that closes the stream WITHOUT block-stop events: the open
 	// blocks must be finalized in provider index order. The natural-close
