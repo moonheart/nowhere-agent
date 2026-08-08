@@ -160,23 +160,36 @@ export function PlatformQuotasPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <form onSubmit={lookup} className="flex flex-wrap items-end gap-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="quota-scope">Scope</Label>
-              <NativeSelect
-                id="quota-scope"
-                value={scope}
-                onChange={(e) => changeScope(e.target.value as Scope)}
-              >
-                <NativeSelectOption value="user">Account</NativeSelectOption>
-                <NativeSelectOption value="team">Team</NativeSelectOption>
-              </NativeSelect>
-            </div>
-            <div className="space-y-1.5">
-              <Label>{scope === "user" ? "Account" : "Team"}</Label>
-              <OwnerPicker scope={scope} value={owner} onChange={setOwner} />
-            </div>
-            <Button type="submit" variant="outline" disabled={busy || !owner}>
+          {/* Two-row grid: row 1 holds the labels, row 2 the controls. Pinning
+              by row (instead of flex items-end over uneven label heights) keeps
+              the Scope and Account labels on one baseline and the three controls
+              flush on the next. */}
+          <form
+            onSubmit={lookup}
+            className="grid grid-cols-[max-content_max-content_max-content] items-end justify-start gap-x-2 gap-y-1.5"
+          >
+            <Label htmlFor="quota-scope" className="self-start">
+              Scope
+            </Label>
+            <Label className="self-start">
+              {scope === "user" ? "Account" : "Team"}
+            </Label>
+            <span aria-hidden />
+            <NativeSelect
+              id="quota-scope"
+              value={scope}
+              onChange={(e) => changeScope(e.target.value as Scope)}
+            >
+              <NativeSelectOption value="user">Account</NativeSelectOption>
+              <NativeSelectOption value="team">Team</NativeSelectOption>
+            </NativeSelect>
+            <OwnerPicker scope={scope} value={owner} onChange={setOwner} />
+            <Button
+              type="submit"
+              variant="outline"
+              disabled={busy || !owner}
+              className="justify-self-start"
+            >
               <Search />
               {busy ? "Loading…" : "Look up"}
             </Button>
