@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
@@ -48,11 +49,11 @@ type RunState struct {
 	// (see CompressMW), so a summary is reused or incrementally extended
 	// instead of re-summarized from scratch every iteration.
 	compressCache *contextmgmt.CompressionCache
-	// compressFailures is the run's consecutive compression-failure count for
-	// CompressMW's circuit breaker. It lives here — not on the middleware — so
-	// one run's failures can never leak into the next run sharing the
-	// middleware instance.
-	compressFailures int
+	// viewDropped counts leading history messages the overflow fallback dropped
+	// with no compression cache to carry the drop (compression disabled). The
+	// loop's view rebuild skips them, or every iteration would re-overflow on
+	// the same prefix and burn the retry budget again.
+	viewDropped int
 }
 
 // ErrAbortRun is the sentinel a node-style hook (BeforeModel/AfterModel)
@@ -236,6 +237,35 @@ func middlewareName(m any) string {
 // middleware. They live in the agent package so Loop can reference them without
 // an import cycle; optional/third-party middleware can live elsewhere.
 
+// CircuitBreaker carries the compressor failure count. Production rebuilds the
+// loop — and CompressMW — per run, so a count held on the middleware instance
+// resets every run and never trips; one breaker shared across instances (wired
+// at the server) keeps a persistently failing summarizer tripped.
+type CircuitBreaker struct {
+	mu       sync.Mutex
+	failures int
+}
+
+// tripped reports whether consecutive failures reached max.
+func (b *CircuitBreaker) tripped(max int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.failures >= max
+}
+
+// record folds one compression outcome into the count and returns the new
+// consecutive-failure total (for logging).
+func (b *CircuitBreaker) record(failed bool) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if failed {
+		b.failures++
+	} else {
+		b.failures = 0
+	}
+	return b.failures
+}
+
 // CompressMW compresses the working view when it crosses the context budget
 // (WrapModelCall). Only the transient view is rewritten — the durable record is
 // never touched (D1). The summary is carried across iterations via the run's
@@ -243,8 +273,10 @@ func middlewareName(m any) string {
 // (byte-stable prompt prefix) and extended incrementally when it does not,
 // instead of re-summarizing the whole history every iteration. A circuit
 // breaker stops calling a failing summarizer after MaxFailures consecutive
-// failures; the failure count is PER-RUN state (RunState.compressFailures), so
-// the instance is immutable after construction and safe to share across runs.
+// failures; the failure count lives in a CircuitBreaker shared across runs
+// (wired at the server), so a persistently failing summarizer stays tripped.
+// The instance itself is never written back — defaults resolve into locals — so
+// it stays immutable and safe to share across concurrent runs.
 type CompressMW struct {
 	Compressor  contextmgmt.Compressor
 	Window      int     // model context window in tokens; <=0 disables
@@ -252,6 +284,11 @@ type CompressMW struct {
 	Threshold   float64 // fraction of usable window that triggers compression
 	KeepRecent  int     // recent rounds kept verbatim
 	MaxFailures int     // circuit breaker; consecutive failures before tripping
+	// Breaker, when non-nil, carries the failure count across runs. Nil uses a
+	// lazily-created per-instance breaker (single-loop use, tests).
+	Breaker *CircuitBreaker
+
+	breaker *CircuitBreaker // lazy per-instance breaker
 }
 
 func (m *CompressMW) MiddlewareName() string { return "compress" }
@@ -274,16 +311,29 @@ func (m *CompressMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 	if keepRecent <= 0 {
 		keepRecent = 2 // recent rounds stay verbatim; older rounds are summarized
 	}
-	// Breaker tripped: don't even call the failing summarizer. Without run
-	// state (a ModelCall built outside a Run) there is no breaker — the
-	// failure count has nowhere per-attempt to live.
-	if c.State != nil && c.State.compressFailures >= maxFailures {
+	br := m.Breaker
+	if br == nil {
+		if m.breaker == nil {
+			m.breaker = &CircuitBreaker{}
+		}
+		br = m.breaker
+	}
+	if br.tripped(maxFailures) {
+		// Breaker tripped: don't even call the failing summarizer.
 		return next(ctx, c)
 	}
 	// Usable window reserves room for the model's reply (design D5).
 	budget := m.Window - m.MaxTokens
 	if budget <= 0 {
 		budget = m.Window
+	}
+	// The system prompt and tool schemas ride on every request but live
+	// outside the message view the estimator sees; without subtracting them
+	// the trigger fires late and the overflow fallback has to rescue the
+	// request by dropping rounds. If the envelope alone busts the budget there
+	// is nothing compression can do — keep the full budget and let it pass.
+	if overhead := contextmgmt.EstimateOverhead(c.Request.System, c.Request.Tools); overhead < budget {
+		budget -= overhead
 	}
 	policy := contextmgmt.Policy{MaxTokens: budget, Threshold: threshold, KeepRecent: keepRecent}
 	var cache *contextmgmt.CompressionCache
@@ -295,17 +345,11 @@ func (m *CompressMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 	}
 	compressed, err := contextmgmt.CompressWithCache(ctx, c.View, policy, m.Compressor, cache)
 	if err != nil {
-		failures := 1
-		if c.State != nil {
-			c.State.compressFailures++
-			failures = c.State.compressFailures
-		}
-		slog.Warn("agent: compression failed; using uncompressed view", "err", err, "failures", failures)
+		n := br.record(true)
+		slog.Warn("agent: compression failed; using uncompressed view", "err", err, "failures", n)
 		return next(ctx, c)
 	}
-	if c.State != nil {
-		c.State.compressFailures = 0
-	}
+	br.record(false)
 	c.View = compressed
 	c.Request.Messages = compressed
 	return next(ctx, c)
@@ -360,6 +404,16 @@ func (m *OverflowMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 			} else {
 				cache.Invalidate()
 			}
+		}
+		// With no compression cache to carry the drop (compression disabled or
+		// absent), record the dropped prefix on the run state: the view is
+		// rebuilt from durable history every iteration, so without this the
+		// dropped rounds would return next iteration and overflow again. When a
+		// cache exists the Advance/Invalidate above already accounts for it —
+		// recording here too would double-drop against its history-relative
+		// coverage.
+		if c.State != nil && c.State.compressCache == nil {
+			c.State.viewDropped += len(c.View) - len(shrunk)
 		}
 		c.View = shrunk
 		c.Request.Messages = shrunk

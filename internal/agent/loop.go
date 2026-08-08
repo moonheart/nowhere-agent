@@ -320,8 +320,14 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 
 		// Assemble the working view for this turn: the once-repaired base plus
 		// the tail this run produced (paired by construction, per the invariant
-		// above).
-		state.View = append(append([]provider.Message{}, base...), state.Produced...)
+		// above). A prefix the overflow fallback already dropped this run stays
+		// dropped (viewDropped), or the next attempt would overflow on the
+		// same rounds again.
+		view := append(append([]provider.Message{}, base...), state.Produced...)
+		if state.viewDropped > 0 && state.viewDropped < len(view) {
+			view = view[state.viewDropped:]
+		}
+		state.View = view
 
 		// Node hooks: observation before the model call (registration order).
 		// A hook error is logged and skipped, EXCEPT a wrapped ErrAbortRun,

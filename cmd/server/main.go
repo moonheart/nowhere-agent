@@ -463,13 +463,13 @@ func run() error {
 		// enabled), overflow retry. One assembly point so the chat factory and
 		// the subagent factory cannot drift. callAdapter/modelName select the
 		// compressor's summarizer (the caller-resolved adapter and model).
-		useStandardMiddleware := func(loop *agent.Loop, callAdapter provider.Adapter, modelName string) {
+		useStandardMiddleware := func(loop *agent.Loop, callAdapter provider.Adapter, modelName string, breaker *agent.CircuitBreaker) {
 			// Tool authorization gates dispatch. The policy (permit) resolves the
 			// per-session permission mode from the run context at call time, so one
 			// registration covers every session and reacts to the live toggle.
 			loop.Use(&agent.PermissionMW{Check: permit})
 			if compressionEnabled {
-				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callAdapter, modelName), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget})
+				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callAdapter, modelName), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget, Breaker: breaker})
 			}
 			loop.Use(&agent.OverflowMW{})
 		}
@@ -479,6 +479,12 @@ func run() error {
 		// (model falls back to the parent's); the child's tool registry is set by
 		// the spawn tool via WithTools. Closes over the provider so the subagent
 		// package needs no wiring dependency.
+		//
+		// The compression circuit breakers live OUTSIDE the loop factories: a
+		// factory rebuilds the loop and CompressMW every run, so a breaker held
+		// on the middleware instance would reset each run and never trip.
+		subCompressBreaker := &agent.CircuitBreaker{}
+		chatCompressBreaker := &agent.CircuitBreaker{}
 		subStore := agentdef.NewStore()
 		subFactory := func(ctx context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
 			childModel := def.Model
@@ -499,7 +505,7 @@ func run() error {
 			// The child's permission policy resolves from the spawn context's session
 			// id (set on the run by the registry), so it inherits the parent session's
 			// permission mode.
-			useStandardMiddleware(loop, adapter, childModel)
+			useStandardMiddleware(loop, adapter, childModel, subCompressBreaker)
 			return loop
 		}
 
@@ -533,7 +539,7 @@ func run() error {
 			// Tool authorization gates dispatch. The policy (permit) resolves the
 			// per-session permission mode from the run context at call time, so one
 			// registration covers every session and reacts to the live toggle.
-			useStandardMiddleware(loop, callerAdapter, m)
+			useStandardMiddleware(loop, callerAdapter, m, chatCompressBreaker)
 			return loop
 		}
 		newChatLoop := func(ctx context.Context, system string) *agent.Loop {

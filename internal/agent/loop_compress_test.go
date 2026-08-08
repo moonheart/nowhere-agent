@@ -118,44 +118,28 @@ func TestLoopSkipsCompressionWhenUnconfigured(t *testing.T) {
 }
 
 func TestLoopCompressionCircuitBreaker(t *testing.T) {
-	// One run, four model calls (3 tool iterations + final answer), compressor
-	// down throughout: the breaker (MaxFailures=2) caps summarizer calls at 2
-	// for the run, and later iterations skip it entirely.
-	sp := &scriptProvider{script: [][]provider.Event{
-		toolUseResponse("t1", "echo", "{}"),
-		toolUseResponse("t2", "echo", "{}"),
-		toolUseResponse("t3", "echo", "{}"),
-		textResponse("done"),
-	}}
+	rp := &recordingProvider{reply: "final"}
 	comp := &stubCompressor{err: errors.New("summarizer down")}
-	reg := toolruntime.NewRegistry()
-	reg.Register(echoTool{})
-	loop := New(sp, reg, Config{Model: "m", MaxTokens: 100})
+	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
 	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100, MaxFailures: 2})
 
 	history := bigConversation(6, 400)
-	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
-		t.Fatal(err)
+	// Drive several iterations worth of compress attempts: each Run does one
+	// iteration (text reply ends the loop), so call Run repeatedly.
+	for i := 0; i < 5; i++ {
+		if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if sp.calls != 4 {
-		t.Fatalf("provider calls = %d, want 4 (3 tool iterations + final)", sp.calls)
+	// Compressor attempted at most MaxCompressFailures times before the breaker
+	// stopped further attempts. (compressFailures persists across Runs here
+	// because they share the Loop — the breaker is per-Loop-lifetime.)
+	if comp.calls > 2 {
+		t.Errorf("compressor called %d times, breaker should cap at 2", comp.calls)
 	}
-	if comp.calls != 2 {
-		t.Errorf("compressor called %d times, breaker should cap at 2 within a run", comp.calls)
-	}
-
-	// The breaker is per-RUN: a fresh run on the same Loop gets a fresh count
-	// and tries the summarizer again (no cross-run failure leak).
-	sp2 := &scriptProvider{script: [][]provider.Event{
-		toolUseResponse("t4", "echo", "{}"),
-		textResponse("done"),
-	}}
-	loop.provider = sp2
-	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
-		t.Fatal(err)
-	}
-	if comp.calls != 4 {
-		t.Errorf("compressor calls = %d, want 4 (2 more attempts in the fresh run)", comp.calls)
+	// The run still completed (compression failure didn't abort it).
+	if len(rp.requests) == 0 {
+		t.Error("runs should complete despite compression failure")
 	}
 }
 
@@ -206,10 +190,12 @@ func TestLoopCompressionExtendsSummaryIncrementally(t *testing.T) {
 	reg := toolruntime.NewRegistry()
 	reg.Register(echoTool{})
 	loop := New(sp, reg, Config{Model: "m", MaxTokens: 100})
-	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100})
+	// Budget = 400-280-overhead(~12) ≈ 108: the initial summary + kept rounds
+	// (~74 tokens) fits, but the reuse candidate with the big tool-call args
+	// appended in iter 1 (~187) does not → one incremental extension.
+	loop.Use(&CompressMW{Compressor: comp, Window: 400, MaxTokens: 280})
 
-	// est 360 > 80 → compress; the big tool-call args appended in iter 1 push
-	// the reuse candidate past the full 100 budget by iter 2.
+	// est 360 > 86 → compress.
 	history := bigConversation(6, 120)
 	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
 		t.Fatal(err)
@@ -219,6 +205,69 @@ func TestLoopCompressionExtendsSummaryIncrementally(t *testing.T) {
 	}
 	if len(comp.got) < 2 || len(comp.got[1]) == 0 || !contextmgmt.IsSummary(comp.got[1][0]) {
 		t.Error("incremental re-summarization must lead with the previous summary")
+	}
+}
+
+// overflowThenProvider fails the first Stream call with a context overflow,
+// then follows the script, recording every request it receives.
+type overflowThenProvider struct {
+	script   [][]provider.Event
+	calls    int
+	requests []provider.Request
+}
+
+func (p *overflowThenProvider) Name() string { return "overflow-then" }
+
+func (p *overflowThenProvider) Stream(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
+	p.requests = append(p.requests, req)
+	if p.calls == 0 {
+		p.calls++
+		return nil, &provider.ContextOverflowError{StatusCode: 413, Body: "too large"}
+	}
+	evs := p.script[p.calls-1]
+	p.calls++
+	ch := make(chan provider.Event, len(evs))
+	for _, e := range evs {
+		ch <- e
+	}
+	close(ch)
+	return ch, nil
+}
+
+// TestLoopOverflowDropPersistsAcrossIterations pins the compression-disabled
+// overflow path: the fallback drops the oldest round from the attempt copy,
+// but the view is rebuilt from durable history every iteration — without
+// carrying the drop on the run state, the dropped round would return next
+// iteration and overflow again, burning the retry budget every step.
+func TestLoopOverflowDropPersistsAcrossIterations(t *testing.T) {
+	p := &overflowThenProvider{script: [][]provider.Event{
+		toolUseResponse("t1", "echo", "{}"),
+		textResponse("done"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&OverflowMW{}) // no CompressMW: compression disabled
+
+	history := bigConversation(8, 50) // 16 single-message rounds
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	if p.calls != 3 {
+		t.Fatalf("provider calls = %d, want 3 (overflow + retry + next iteration)", p.calls)
+	}
+	if got := len(p.requests[1].Messages); got != 15 {
+		t.Errorf("retry request = %d msgs, want 15 (oldest round dropped)", got)
+	}
+	// Iteration 2: 16 history + 2 produced, minus the round that must STAY
+	// dropped = 17, still leading with history[1].
+	if got := len(p.requests[2].Messages); got != 17 {
+		t.Errorf("iteration-2 request = %d msgs, want 17 (dropped round must not return)", got)
+	}
+	first := p.requests[2].Messages[0]
+	if first.Content[0].Text != history[1].Content[0].Text {
+		t.Errorf("iteration-2 request leads with %q, want history[1] (the dropped prefix stays dropped)",
+			first.Content[0].Text)
 	}
 }
 

@@ -97,7 +97,7 @@ func TestCompressKeepsRecentRoundVerbatim(t *testing.T) {
 		toolUse("t9", "lookup"),
 		toolResult("t9"),
 	}
-	p := Policy{MaxTokens: 10, Threshold: 0.8, KeepRecent: 2}
+	p := Policy{MaxTokens: 100, Threshold: 0.8, KeepRecent: 2}
 	c := &stubCompressor{}
 	out, err := Compress(context.Background(), msgs, p, c)
 	if err != nil {
@@ -105,7 +105,9 @@ func TestCompressKeepsRecentRoundVerbatim(t *testing.T) {
 	}
 	assertPaired(t, out)
 	// KeepRecent=2 rounds: [recent question] + [toolUse+result]. The kept
-	// tool_use must survive verbatim (not summarized).
+	// tool_use must survive verbatim (not summarized). The budget is large
+	// enough that the post-check hard-drop does not trigger — this test pins
+	// the split boundary, not the oversize fallback.
 	foundToolUse := false
 	for _, m := range out {
 		for _, b := range m.Content {
@@ -157,6 +159,40 @@ func TestDropOldestRoundPreservingSummaryRefusesAtSummaryPlusOne(t *testing.T) {
 	out, ok := DropOldestRound(msgs)
 	if !ok || len(out) != 1 || IsSummary(out[0]) {
 		t.Errorf("last-resort drop should take the summary: ok=%v out=%v", ok, out)
+	}
+}
+
+func TestDropOldestKeepingSummaryDropsDownToSummaryAlone(t *testing.T) {
+	msgs := []provider.Message{
+		SummaryMessage("old stuff"),
+		provider.TextMessage(provider.RoleUser, "u1"),
+		provider.TextMessage(provider.RoleAssistant, "a1"),
+	}
+	out, ok := DropOldestKeepingSummary(msgs)
+	if !ok {
+		t.Fatal("should drop the oldest kept round")
+	}
+	if len(out) != 2 || !IsSummary(out[0]) || out[1].Content[0].Text != "a1" {
+		t.Errorf("out = %v, want summary + newest round", out)
+	}
+	// At summary+1 round — where DropOldestRoundPreservingSummary refuses —
+	// it drops the last real round, leaving the summary alone.
+	out2, ok := DropOldestKeepingSummary(out)
+	if !ok {
+		t.Fatal("should drop down to the summary alone")
+	}
+	if len(out2) != 1 || !IsSummary(out2[0]) {
+		t.Errorf("out = %v, want the summary alone", out2)
+	}
+	// Nothing but the summary remains: refuse. Non-summary-led: refuse.
+	if _, ok := DropOldestKeepingSummary(out2); ok {
+		t.Error("must refuse when only the summary remains")
+	}
+	if _, ok := DropOldestKeepingSummary([]provider.Message{
+		provider.TextMessage(provider.RoleUser, "u1"),
+		provider.TextMessage(provider.RoleAssistant, "a1"),
+	}); ok {
+		t.Error("must refuse on a view with no leading summary")
 	}
 }
 

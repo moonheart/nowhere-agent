@@ -2,6 +2,7 @@ package contextmgmt
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"nowhere-agent/internal/provider"
@@ -42,13 +43,26 @@ func (c *LLMCompressor) Summarize(ctx context.Context, dropped []provider.Messag
 		return "", err
 	}
 	var sb strings.Builder
+	var stop provider.StopReason
 	for ev := range events {
 		switch ev.Type {
 		case provider.EventBlockDelta:
 			sb.WriteString(ev.Delta)
+		case provider.EventMessageStop:
+			if ev.StopReason != provider.StopUnknown {
+				stop = ev.StopReason
+			}
 		case provider.EventError:
 			return "", ev.Err
 		}
+	}
+	if stop == provider.StopMaxTokens {
+		// A truncated summary ends mid-thought — and per the summarize prompt
+		// the tail carries "current state and next step", the part the
+		// continuation needs most. Fail so the caller falls back to the
+		// uncompressed view (and the circuit breaker counts it) instead of
+		// caching a cut-off summary as if it were complete.
+		return "", fmt.Errorf("summary truncated at the max_tokens limit (%d)", c.MaxTokens)
 	}
 	return stripAnalysis(sb.String()), nil
 }

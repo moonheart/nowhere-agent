@@ -75,11 +75,9 @@ func TestCompressMWCircuitBreaker(t *testing.T) {
 	okH := func(_ context.Context, _ *ModelCall) (ModelResult, error) {
 		return ModelResult{Assistant: provider.TextMessage(provider.RoleAssistant, "ok")}, nil
 	}
-	// The breaker count is per-RUN state: the attempts below share one RunState,
-	// as the loop's per-iteration ModelCalls do.
-	state := &RunState{}
+	// Each call is a fresh over-budget view; the breaker caps summarizer calls.
 	for i := 0; i < 5; i++ {
-		call := &ModelCall{View: bigConversation(6, 400), State: state}
+		call := &ModelCall{View: bigConversation(6, 400)}
 		call.Request.Messages = call.View
 		if _, err := mw.WrapModelCall(context.Background(), call, okH); err != nil {
 			t.Fatal(err)
@@ -87,17 +85,6 @@ func TestCompressMWCircuitBreaker(t *testing.T) {
 	}
 	if comp.calls > 2 {
 		t.Errorf("compressor called %d times, breaker should cap at 2", comp.calls)
-	}
-	// A fresh run (new RunState) gets a fresh breaker: the middleware carries no
-	// cross-run failure state.
-	comp.calls = 0
-	call := &ModelCall{View: bigConversation(6, 400), State: &RunState{}}
-	call.Request.Messages = call.View
-	if _, err := mw.WrapModelCall(context.Background(), call, okH); err != nil {
-		t.Fatal(err)
-	}
-	if comp.calls != 1 {
-		t.Errorf("fresh run should retry the summarizer once, got %d calls", comp.calls)
 	}
 }
 
@@ -118,6 +105,68 @@ func TestCompressMWDoesNotMutateConfig(t *testing.T) {
 	if mw.MaxFailures != 0 || mw.Threshold != 0 || mw.KeepRecent != 0 {
 		t.Errorf("WrapModelCall mutated config: %+v", mw)
 	}
+}
+
+// TestCompressMWSharedBreakerTripsAcrossInstances mirrors production wiring:
+// the loop (and its CompressMW) is rebuilt per run, so a per-instance failure
+// count would reset every run and never trip. A shared CircuitBreaker keeps a
+// persistently failing summarizer tripped across instances.
+func TestCompressMWSharedBreakerTripsAcrossInstances(t *testing.T) {
+	comp := &stubCompressor{err: errors.New("down")}
+	br := &CircuitBreaker{}
+	okH := func(_ context.Context, _ *ModelCall) (ModelResult, error) {
+		return ModelResult{Assistant: provider.TextMessage(provider.RoleAssistant, "ok")}, nil
+	}
+	// Five "runs", each with a FRESH CompressMW instance sharing one breaker.
+	for i := 0; i < 5; i++ {
+		mw := &CompressMW{Compressor: comp, Window: 200, MaxTokens: 100, MaxFailures: 2, Breaker: br}
+		call := &ModelCall{View: bigConversation(6, 400)}
+		call.Request.Messages = call.View
+		if _, err := mw.WrapModelCall(context.Background(), call, okH); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if comp.calls > 2 {
+		t.Errorf("compressor called %d times across instances, shared breaker should cap at 2", comp.calls)
+	}
+}
+
+// TestCompressMWCountsSystemAndToolsAgainstBudget: the request envelope
+// (system prompt + tool schemas) rides on every provider call but lives
+// outside the message view; it must shrink the compression budget so the
+// trigger fires when the envelope + view approach the window.
+func TestCompressMWCountsSystemAndToolsAgainstBudget(t *testing.T) {
+	comp := &stubCompressor{}
+	// Budget = 200-100 = 100; a ~300-char system prompt (~75 tokens) leaves
+	// ~25. A 24-token view fits 100 but not 25, so compression must fire ONLY
+	// when the envelope is present.
+	mkCall := func(withEnvelope bool) *ModelCall {
+		call := &ModelCall{View: bigConversation(4, 12)} // est ≈ 24 tokens
+		call.Request.Messages = call.View
+		if withEnvelope {
+			call.Request.System = strings.Repeat("s", 300)
+		}
+		return call
+	}
+	okH := func(_ context.Context, _ *ModelCall) (ModelResult, error) {
+		return ModelResult{Assistant: provider.TextMessage(provider.RoleAssistant, "ok")}, nil
+	}
+	if _, err := compMW(comp).WrapModelCall(context.Background(), mkCall(false), okH); err != nil {
+		t.Fatal(err)
+	}
+	if comp.calls != 0 {
+		t.Fatalf("no envelope: compressor called %d times, want 0 (view fits the full budget)", comp.calls)
+	}
+	if _, err := compMW(comp).WrapModelCall(context.Background(), mkCall(true), okH); err != nil {
+		t.Fatal(err)
+	}
+	if comp.calls != 1 {
+		t.Errorf("with envelope: compressor called %d times, want 1 (system counts against the budget)", comp.calls)
+	}
+}
+
+func compMW(comp *stubCompressor) *CompressMW {
+	return &CompressMW{Compressor: comp, Window: 200, MaxTokens: 100}
 }
 
 func TestOverflowMWDropsRoundAndRetries(t *testing.T) {
