@@ -397,10 +397,20 @@ func run() error {
 		}
 		// Context compression (context-compression): the loop compresses its
 		// working view as it approaches the model's context window, using a
-		// no-tools summarize call over the same adapter (LLMCompressor).
-		var compressor contextmgmt.Compressor
-		if cfg.LLM.ContextWindow > 0 {
-			compressor = contextmgmt.NewLLMCompressor(adapter, model)
+		// no-tools summarize call (LLMCompressor). The compressor is built
+		// per-loop below, over the CALLER's adapter and model, so team-scoped
+		// keys and model overrides apply to summarize calls exactly as they do
+		// to chat calls.
+		compressionEnabled := cfg.LLM.ContextWindow > 0
+
+		// replyBudget reserves response space inside the context window. With a
+		// small window configured, the 64k default would exceed it (the
+		// provider can reject max_tokens beyond the window) and leave the
+		// compression budget (window - reply) negative, so it is clamped to a
+		// quarter of the window.
+		replyBudget := 65536
+		if cfg.LLM.ContextWindow > 0 && cfg.LLM.ContextWindow/4 < replyBudget {
+			replyBudget = cfg.LLM.ContextWindow / 4
 		}
 
 		// Dreaming worker + the scheduler that drives it (capability-gaps K1+K2).
@@ -466,7 +476,7 @@ func run() error {
 			loop := agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
 				Model:           childModel,
 				System:          def.System,
-				MaxTokens:       65536,
+				MaxTokens:       replyBudget,
 				MaxIterations:   maxIter,
 				CacheablePrefix: true,
 			})
@@ -474,8 +484,8 @@ func run() error {
 			// id (set on the run by the registry), so it inherits the parent session's
 			// permission mode.
 			loop.Use(&agent.PermissionMW{Check: permit})
-			if compressor != nil {
-				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 65536})
+			if compressionEnabled {
+				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(adapter, childModel), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget})
 			}
 			loop.Use(&agent.OverflowMW{})
 			return loop
@@ -498,12 +508,13 @@ func run() error {
 			if modelOverride != "" {
 				m = modelOverride
 			}
+			callerAdapter := adapterForCaller(ctx, cfg, rawRecorder, keyStore, adapter, log)
 			loop := agent.New(
-				adapterForCaller(ctx, cfg, rawRecorder, keyStore, adapter, log),
+				callerAdapter,
 				toolruntime.NewRegistry(), agent.Config{
 					Model:           m,
 					System:          system,
-					MaxTokens:       65536,
+					MaxTokens:       replyBudget,
 					MaxIterations:   25,
 					CacheablePrefix: true,
 				})
@@ -511,8 +522,8 @@ func run() error {
 			// per-session permission mode from the run context at call time, so one
 			// registration covers every session and reacts to the live toggle.
 			loop.Use(&agent.PermissionMW{Check: permit})
-			if compressor != nil {
-				loop.Use(&agent.CompressMW{Compressor: compressor, Window: cfg.LLM.ContextWindow, MaxTokens: 65536})
+			if compressionEnabled {
+				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callerAdapter, m), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget})
 			}
 			loop.Use(&agent.OverflowMW{})
 			return loop
@@ -709,7 +720,7 @@ func run() error {
 		} else {
 			log.Info("scheduled-task trigger disabled; task CRUD still available")
 		}
-		if compressor != nil {
+		if compressionEnabled {
 			log.Info("context compression enabled", "window", cfg.LLM.ContextWindow)
 		}
 		log.Info("chat endpoint enabled (auth required)", "provider", adapter.Name(), "model", model)

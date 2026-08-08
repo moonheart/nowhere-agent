@@ -183,7 +183,7 @@ func TestLoopCompressionReusesSummaryAcrossIterations(t *testing.T) {
 // previous summary plus only the newly dropped rounds, not the whole prefix.
 func TestLoopCompressionExtendsSummaryIncrementally(t *testing.T) {
 	sp := &scriptProvider{script: [][]provider.Event{
-		toolUseResponse("t1", "echo", "{}"),
+		toolUseResponse("t1", "echo", `{"payload":"`+strings.Repeat("x", 400)+`"}`),
 		textResponse("done"),
 	}}
 	comp := &stubCompressor{}
@@ -192,7 +192,9 @@ func TestLoopCompressionExtendsSummaryIncrementally(t *testing.T) {
 	loop := New(sp, reg, Config{Model: "m", MaxTokens: 100})
 	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100})
 
-	history := bigConversation(6, 200) // est 600; reuse candidate outgrows the 100 budget by iter 2
+	// est 360 > 80 → compress; the big tool-call args appended in iter 1 push
+	// the reuse candidate past the full 100 budget by iter 2.
+	history := bigConversation(6, 120)
 	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
 		t.Fatal(err)
 	}

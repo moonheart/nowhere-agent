@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"unicode/utf8"
 
 	"nowhere-agent/internal/provider"
 )
@@ -26,14 +27,46 @@ type Policy struct {
 	KeepRecent int
 }
 
-// DefaultPolicy returns a sensible default.
-func DefaultPolicy() Policy {
-	return Policy{MaxTokens: 100_000, Threshold: 0.8, KeepRecent: 6}
-}
-
-// estimateTokens approximates token count for a message set (~4 chars/token).
+// estimateTokens approximates the token count of a message set. ASCII text
+// averages ~4 chars/token, but a non-ASCII rune (CJK, most accented scripts)
+// averages ~1 token — the old flat bytes/4 under-read CJK by ~2-3x, so
+// compression triggered too late and the overflow fallback had to rescue the
+// request by silently dropping rounds.
 func estimateTokens(msgs []provider.Message) int {
-	return contentBytes(msgs) / 4
+	ascii, nonASCII := 0, 0
+	count := func(s string) {
+		for _, r := range s {
+			if r < utf8.RuneSelf {
+				ascii++
+			} else {
+				nonASCII++
+			}
+		}
+	}
+	for _, m := range msgs {
+		for _, b := range m.Content {
+			count(b.Text)
+			count(b.Thinking)
+			count(b.ToolContent)
+			count(b.ToolName)
+			count(b.ArgsError)
+			for k, v := range b.ToolInput {
+				count(k)
+				if raw, err := json.Marshal(v); err == nil {
+					ascii += 8 // per-key overhead, mirroring contentBytes
+					count(string(raw))
+				}
+			}
+			if b.Type == provider.BlockImage {
+				if len(b.ImageData) > 0 {
+					ascii += len(b.ImageData)
+				} else {
+					ascii += imageRefBytes
+				}
+			}
+		}
+	}
+	return ascii/4 + nonASCII
 }
 
 // imageRefBytes is the conservative byte estimate for a path-only image block
@@ -110,6 +143,24 @@ type CompressionCache struct {
 	CoveredBytes int
 	// Summary is the summarized text for the covered region.
 	Summary string
+}
+
+// Advance moves the cache's coverage forward past messages a caller dropped
+// from the already-compressed view (the overflow fallback's round drops). The
+// dropped messages are the view's own, whose bytes match the underlying
+// history, so the byte fingerprint stays aligned with history[:Covered].
+func (c *CompressionCache) Advance(dropped []provider.Message) {
+	if c == nil || c.Covered == 0 {
+		return
+	}
+	c.Covered += len(dropped)
+	c.CoveredBytes += contentBytes(dropped)
+}
+
+// Invalidate resets the cache: the summary it carried is gone from the view,
+// so the next iteration must re-summarize the full dropped prefix.
+func (c *CompressionCache) Invalidate() {
+	c.Covered, c.CoveredBytes, c.Summary = 0, 0, ""
 }
 
 // Compressor summarizes dropped history. Implemented by an LLM caller or a
@@ -206,12 +257,25 @@ func CompressWithCache(ctx context.Context, history []provider.Message, p Policy
 	// Post-check: the kept rounds alone may still exceed the budget (a huge
 	// recent tool result). Hard-drop oldest rounds — summary preserved — until
 	// the view fits or only one round remains.
+	built := len(out)
 	for ShouldCompress(out, p) {
 		shrunk, ok := DropOldestRoundPreservingSummary(out)
 		if !ok {
 			break
 		}
 		out = shrunk
+	}
+	// Keep the cache honest about what was actually sent: rounds hard-dropped
+	// above are gone from the view, so coverage must advance past them.
+	// Otherwise the next iteration's hysteresis rebuild (summary + everything
+	// appended since, from durable history) would resurrect the dropped rounds
+	// verbatim — undoing the drop — and the dropped content would oscillate in
+	// and out of the view across iterations.
+	if cache != nil && len(out) < built {
+		if advance := splitIdx + (built - len(out)); advance <= len(history) {
+			cache.Covered = advance
+			cache.CoveredBytes = contentBytes(history[:advance])
+		}
 	}
 	return out, nil
 }

@@ -98,10 +98,10 @@ func (h *Handler) WithMemoryInjector(f MemoryInjectorFactory) *Handler {
 
 // bindSessionMiddleware attaches the session-scoped middleware to the loop once
 // the session id is known: memory injection (recalled memories into the
-// transient view) and image materialization (BlockImage path → base64). Both
-// run as WrapModelCall around each provider call; registration order is
-// memory → image so materialization is innermost. Compression is registered at
-// loop construction (it is session-independent) and stays outermost.
+// transient view) and image materialization (BlockImage path → base64). Memory
+// injection runs as a BeforeModel hook, BEFORE compression, so injected
+// memories count against the context budget; image materialization stays a
+// WrapModelCall, innermost, so base64 payloads never enter the durable record.
 func (h *Handler) bindSessionMiddleware(loop *agent.Loop, r *http.Request, sessID string, query string) {
 	if h.memInjectorFactory != nil {
 		if user, ok := identity.UserFromContext(r.Context()); ok {
