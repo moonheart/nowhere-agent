@@ -27,6 +27,7 @@ import (
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/mcp"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/observability"
 	"nowhere-agent/internal/permission"
 	"nowhere-agent/internal/platform/db"
 	"nowhere-agent/internal/provider"
@@ -73,11 +74,22 @@ func run() error {
 	defer pool.Close()
 	log.Info("connected to database")
 
+	// Health probe (enterprise-readiness P0-3): /healthz reports liveness as the
+	// AND of registered dependency probes, so an orchestrator can tell "process
+	// alive but database dead" apart from healthy. Probes are added as each
+	// dependency comes up below; Postgres is the first.
+	health := observability.NewHealthz(0)
+	health.Add("postgres", func(context.Context) error { return pool.Ping() })
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+	mux.Handle("GET /healthz", health.Handler())
+
+	// Metrics (enterprise-readiness P0-3): per-route request counts and latency,
+	// served at /metrics for Prometheus/VictoriaMetrics to scrape. The route
+	// label is the ServeMux pattern (r.Pattern), not the raw path, so
+	// /api/users/{id} stays one series regardless of how many ids exist.
+	metrics := observability.NewMetrics()
+	mux.Handle("GET /metrics", metrics.Handler())
 
 	identityStore := identity.NewStore(pool)
 	identitySvc := identity.NewService(identityStore)
@@ -153,6 +165,9 @@ func run() error {
 		broker := session.NewRedisBroker(cfg.Stream.RedisAddr, 0, 0)
 		eventBus := session.NewRedisEventBus(cfg.Stream.RedisAddr)
 		sessionRuntime = sessionRuntime.WithBroker(broker).WithBus(eventBus)
+		health.Add("redis", func(ctx context.Context) error {
+			return session.PingRedis(ctx, cfg.Stream.RedisAddr)
+		})
 		log.Info("live delivery: redis streams (content) + redis pub/sub (lifecycle)", "addr", cfg.Stream.RedisAddr)
 	} else {
 		log.Info("live delivery: in-memory (single instance)")
@@ -667,7 +682,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:         cfg.HTTP.Addr,
-		Handler:      mux,
+		Handler:      observability.RequestID(log)(metrics.Middleware(mux)),
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 	}

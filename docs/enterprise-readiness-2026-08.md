@@ -25,7 +25,7 @@
 > **P0 实施进度(2026-08-08 起,进行中):**
 > - [x] **审计日志(§2.2)** —— 已落地:migration `000022` + `internal/audit` + 认证/管理/凭据埋点 + `GET /api/admin/audit`。
 > - [x] **密钥静态加密(§2.10/§2.5)** —— 已落地:`internal/secrets`(AES-256-GCM)+ `SECRETS_MASTER_KEY` + 渐进迁移 + 轮换。
-> - [ ] **可观测性 metrics + request-id(§2.3)** —— 待做。
+> - [x] **可观测性 metrics + request-id(§2.3)** —— 已落地:`internal/observability`(/metrics + request-id 关联中间件 + /healthz 依赖探测)。
 
 > 标记说明:✅ 已实现 / ◐ 已实现但未接线或仅部分 / ○ 完全缺失。⭐ = 高价值优先。
 
@@ -83,16 +83,18 @@
 
 **遗留(非阻塞):** 工具执行(tool_execution)类事件未纳入 —— 工具调用由 agent loop 内部派发,纳入需在 loop 层埋点,留作后续增量。聊天内容本身刻意不记(隐私与存储成本)。
 
-### 2.3 可观测性 Observability —— ◐ PARTIAL ⭐
+### 2.3 可观测性 Observability —— ✅ **已实现(2026-08-08,P0-3)**
 
-**已有:**
-- 结构化日志:slog,JSON/text 双格式、级别可配(`internal/logging/logging.go`),各子系统接受 logger。
-- 健康端点 `GET /healthz`(`cmd/server/main.go:75-78`)—— 静态 "ok",**不探测 DB/Redis**。
-- 启动时 reconciliation 记录搁浅 run(`cmd/server/main.go:114-118`)。
+> **状态更新:已由缺口转为落地。** `internal/observability`(Prometheus metrics + request-id 关联中间件 + 真实健康探测)+ 接线于 `cmd/server/main.go`。
+>
+> **已实现:**
+> - **Metrics**:`internal/observability.Metrics` 持独立 `prometheus.Registry`(不污染全局,测试/多次构造不冲突);`GET /metrics` 暴露 `nowhere_http_requests_total{route,method,status}`、`nowhere_http_request_duration_seconds{route,method}` 直方图、`nowhere_http_inflight_requests` 表。基数有界:route 标签取 ServeMux 模式 `r.Pattern` 而非裸路径 —— `/api/users/{id}` 无论多少 id 都并成一条序列,未匹配路径归 `unmatched`,`metrics.Middleware` 包住整个 mux(最外层之下)。
+> - **Request-id 关联**:`observability.RequestID` 为最外层中间件;采信外部 `X-Request-Id`(仅当短且可打印,拒绝注入控制字符)否则 crypto/rand 生成 128-bit hex;回写响应头 + 注入 `FromContext`/`LoggerFromContext`(请求级 logger 自动带 request_id/method/path,下游链路日志免费带关联)。
+> - **真实健康探测**:`observability.Healthz`,`/healthz` 只在所有依赖探针通过时回 200(取代原先无条件 "ok");探针并发执行、各受 2s 超时约束,挂起依赖不会拖垮健康检查;任一失败回 503 并点名依赖。接线:启动即挂 postgres(`pool.Ping`),选 redis broker 时挂 redis。
+>
+> **仍缺(非阻塞,后续批次):** tracing(`go.opentelemetry.io/otel` 仍是间接依赖,源码未 import)、pprof。架构留有挂点:`Metrics` 已预留 `nowhere_runs_total`/`nowhere_llm_tokens_total` 计数器,待 run 生命周期与 usage 记账埋点后启用。
 
-**缺失:** 无 Prometheus/metrics 端点(全树零命中,无 `/metrics`);无 tracing(`go.opentelemetry.io/otel` 仅是 `go.mod:50` 的**间接**依赖,源码从未 import);无 request-id/关联中间件;无 pprof。
-
-> **注意:** `openspec/specs/observability/spec.md` 与 `docs/claude-code-comparison/observability.md` 均为**纯设计文档,零实现**。规格存在 ≠ 已接线,这正是本评估反复强调的一点。
+> **注意:** `openspec/specs/observability/spec.md` 与 `docs/claude-code-comparison/observability.md` 仍为**纯设计文档**;本次实现独立于它们,以 `internal/observability` 为运行真相。
 
 ### 2.4 配额 / 限流 / 成本控制 —— ◐ PARTIAL ⭐
 
@@ -174,7 +176,7 @@
 |---|---|---|---|
 | 1 | 认证授权 | ◐ | 本地 RBAC 扎实;无 SSO/MFA/服务 API key |
 | 2 | 审计日志 | ✅ | 已落地(migration `000022` + `internal/audit` + 埋点 + 查询 API) |
-| 3 | 可观测 | ◐ ⭐ | slog + 浅层 /healthz;无 metrics/tracing |
+| 3 | 可观测 | ✅ | 已落地(/metrics + request-id 关联 + /healthz 依赖探测);tracing/pprof 仍缺 |
 | 4 | 配额限流 | ◐ ⭐ | 只记账零执行;无成本核算 |
 | 5 | 多租户 | ◐ | 仅应用层 scoping;无 RLS;~~团队 key 明文~~(已加密,P0-2) |
 | 6 | 部署交付 | ◐ ⭐ | 迁移+优雅退出+CI 测试;无容器/k8s 产物 |
@@ -183,7 +185,7 @@
 | 9 | 数据治理 | ◐ | 记忆 TTL + 硬删;无导出、对话无保留策略 |
 | 10 | 韧性/机密 | ◐ ⭐ | 沙箱分档与故障降级好;~~无静态机密加密~~(已加密,P0-2)、无备份 |
 
-**最大的企业级缺口:** 审计轨迹(2)、SSO(1)、metrics/tracing(3)、配额执行(4)、所存 provider key 的静态加密(5/10)、任何可部署产物(6)。
+**最大的企业级缺口:** ~~审计轨迹(2)~~、SSO(1)、~~metrics/tracing(3)~~、配额执行(4)、~~所存 provider key 的静态加密(5/10)~~、任何可部署产物(6)。(P0 三项均已落地;剩余为 P1 起。)
 
 ---
 
