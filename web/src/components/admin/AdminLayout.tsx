@@ -9,6 +9,7 @@ import {
   ArrowLeft,
   Brain,
   Building2,
+  CalendarClock,
   ChartNoAxesColumn,
   Loader2,
   ShieldCheck,
@@ -134,6 +135,9 @@ export function AdminLayout() {
             </NavItem>
             <NavItem to="/admin/skills" icon={<Sparkles />}>
               My skills
+            </NavItem>
+            <NavItem to="/admin/scheduled-tasks" icon={<CalendarClock />}>
+              Scheduled tasks
             </NavItem>
 
             <SectionLabel>Teams</SectionLabel>
