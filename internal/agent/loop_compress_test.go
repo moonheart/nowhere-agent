@@ -118,28 +118,44 @@ func TestLoopSkipsCompressionWhenUnconfigured(t *testing.T) {
 }
 
 func TestLoopCompressionCircuitBreaker(t *testing.T) {
-	rp := &recordingProvider{reply: "final"}
+	// One run, four model calls (3 tool iterations + final answer), compressor
+	// down throughout: the breaker (MaxFailures=2) caps summarizer calls at 2
+	// for the run, and later iterations skip it entirely.
+	sp := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("t1", "echo", "{}"),
+		toolUseResponse("t2", "echo", "{}"),
+		toolUseResponse("t3", "echo", "{}"),
+		textResponse("done"),
+	}}
 	comp := &stubCompressor{err: errors.New("summarizer down")}
-	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(sp, reg, Config{Model: "m", MaxTokens: 100})
 	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100, MaxFailures: 2})
 
 	history := bigConversation(6, 400)
-	// Drive several iterations worth of compress attempts: each Run does one
-	// iteration (text reply ends the loop), so call Run repeatedly.
-	for i := 0; i < 5; i++ {
-		if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
 	}
-	// Compressor attempted at most MaxCompressFailures times before the breaker
-	// stopped further attempts. (compressFailures persists across Runs here
-	// because they share the Loop — the breaker is per-Loop-lifetime.)
-	if comp.calls > 2 {
-		t.Errorf("compressor called %d times, breaker should cap at 2", comp.calls)
+	if sp.calls != 4 {
+		t.Fatalf("provider calls = %d, want 4 (3 tool iterations + final)", sp.calls)
 	}
-	// The run still completed (compression failure didn't abort it).
-	if len(rp.requests) == 0 {
-		t.Error("runs should complete despite compression failure")
+	if comp.calls != 2 {
+		t.Errorf("compressor called %d times, breaker should cap at 2 within a run", comp.calls)
+	}
+
+	// The breaker is per-RUN: a fresh run on the same Loop gets a fresh count
+	// and tries the summarizer again (no cross-run failure leak).
+	sp2 := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("t4", "echo", "{}"),
+		textResponse("done"),
+	}}
+	loop.provider = sp2
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	if comp.calls != 4 {
+		t.Errorf("compressor calls = %d, want 4 (2 more attempts in the fresh run)", comp.calls)
 	}
 }
 

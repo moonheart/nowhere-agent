@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"nowhere-agent/internal/provider"
@@ -168,5 +170,209 @@ func assertOrder(t *testing.T, want, got []string) {
 		if got[i] != want[i] {
 			t.Fatalf("order[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+// TestChainModelPanicIsolation pins that a panicking model-call middleware is
+// converted to an error at its own layer instead of crashing the run.
+func TestChainModelPanicIsolation(t *testing.T) {
+	boom := wrapFunc(func(context.Context, *ModelCall, ModelHandler) (ModelResult, error) {
+		panic("kaboom")
+	})
+	innerCalled := false
+	inner := func(context.Context, *ModelCall) (ModelResult, error) {
+		innerCalled = true
+		return ModelResult{}, nil
+	}
+	h := chainModel([]ModelCallMiddleware{boom}, inner)
+	if _, err := h(context.Background(), &ModelCall{}); err == nil ||
+		!strings.Contains(err.Error(), "kaboom") || !strings.Contains(err.Error(), "wrapFunc") {
+		t.Fatalf("panic should surface as a named layer error, got %v", err)
+	}
+	if innerCalled {
+		t.Fatal("inner handler must not run when the outer layer panics before next")
+	}
+}
+
+// TestChainToolPanicIsolation pins that a panicking tool-call middleware
+// becomes an error tool-result for that call (the dispatch fan-out runs one
+// goroutine per call — an unrecovered panic would kill the process).
+func TestChainToolPanicIsolation(t *testing.T) {
+	boom := panicToolWrap{}
+	inner := func(context.Context, *ToolCall) toolruntime.Result {
+		return toolruntime.Result{Content: "done"}
+	}
+	h := chainTool([]ToolCallMiddleware{boom}, inner)
+	res := h(context.Background(), &ToolCall{})
+	if !res.IsError || !strings.Contains(res.Content, "kaboom") || !strings.Contains(res.Content, "panicTool") {
+		t.Fatalf("panic should become a named error result, got %+v", res)
+	}
+}
+
+// panicToolWrap is a ToolCallMiddleware that always panics (test helper).
+type panicToolWrap struct{}
+
+func (panicToolWrap) MiddlewareName() string { return "panicTool" }
+func (panicToolWrap) WrapToolCall(context.Context, *ToolCall, ToolHandler) toolruntime.Result {
+	panic("kaboom")
+}
+
+// TestUsePartitionStability pins the Use partition contract: a middleware lands
+// in exactly the chains whose hook interfaces it implements, once per chain.
+func TestUsePartitionStability(t *testing.T) {
+	loop := New(&recordingProvider{reply: "x"}, toolruntime.NewRegistry(), Config{Model: "m"})
+	var log []string
+	loop.Use(recordingMW{name: "multi", log: &log})
+	if len(loop.before) != 1 {
+		t.Errorf("before chain = %d, want 1", len(loop.before))
+	}
+	if len(loop.afterModel) != 1 {
+		t.Errorf("afterModel chain = %d, want 1", len(loop.afterModel))
+	}
+	if len(loop.modelWrap) != 1 {
+		t.Errorf("modelWrap chain = %d, want 1", len(loop.modelWrap))
+	}
+	if len(loop.toolWrap) != 0 {
+		t.Errorf("toolWrap chain = %d, want 0 (recordingMW has no tool hook)", len(loop.toolWrap))
+	}
+	// New() registers UsageMW, an AfterRun hook.
+	if len(loop.afterRun) != 1 {
+		t.Errorf("afterRun chain = %d, want 1 (UsageMW only)", len(loop.afterRun))
+	}
+	if loop.gateInteraction != nil {
+		t.Error("gate should be nil when no GateFuncProvider is registered")
+	}
+}
+
+// TestUseGateFirstRegisteredWins pins that the first GateFuncProvider supplies
+// the policy and a later one is ignored (with a warning, not silent reuse).
+func TestUseGateFirstRegisteredWins(t *testing.T) {
+	loop := New(&recordingProvider{reply: "x"}, toolruntime.NewRegistry(), Config{Model: "m"})
+	loop.Use(
+		&PermissionMW{Check: func(context.Context, toolruntime.Tool) (bool, string) { return true, "first" }},
+		&PermissionMW{Check: func(context.Context, toolruntime.Tool) (bool, string) { return true, "second" }},
+	)
+	if loop.Gate() == nil {
+		t.Fatal("gate should be registered")
+	}
+	_, reason := loop.Gate()(context.Background(), echoTool{})
+	if reason != "first" {
+		t.Errorf("gate reason = %q, want %q (first registered wins)", reason, "first")
+	}
+}
+
+// beforeHookFunc/afterModelHookFunc/afterRunHookFunc adapt closures to the
+// node-hook interfaces (test helpers).
+type beforeHookFunc func(context.Context, *RunState) error
+
+func (f beforeHookFunc) MiddlewareName() string { return "beforeHook" }
+func (f beforeHookFunc) BeforeModel(ctx context.Context, s *RunState) error {
+	return f(ctx, s)
+}
+
+type afterModelHookFunc func(context.Context, *RunState) error
+
+func (f afterModelHookFunc) MiddlewareName() string { return "afterModelHook" }
+func (f afterModelHookFunc) AfterModel(ctx context.Context, s *RunState) error {
+	return f(ctx, s)
+}
+
+type afterRunHookFunc func(context.Context, *RunState) error
+
+func (f afterRunHookFunc) MiddlewareName() string { return "afterRunHook" }
+func (f afterRunHookFunc) AfterRun(ctx context.Context, s *RunState) error {
+	return f(ctx, s)
+}
+
+// TestBeforeModelAbortRun pins the ErrAbortRun sentinel: a BeforeModel hook
+// returning it (wrapped) aborts the run before the provider is called, with a
+// terminal KindError frame.
+func TestBeforeModelAbortRun(t *testing.T) {
+	rp := &recordingProvider{reply: "hi"}
+	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m"})
+	loop.Use(beforeHookFunc(func(context.Context, *RunState) error {
+		return fmt.Errorf("policy breach: %w", ErrAbortRun)
+	}))
+	emit := &memEmitter{}
+	if _, err := loop.Run(context.Background(), nil, emit); !errors.Is(err, ErrAbortRun) {
+		t.Fatalf("run error = %v, want wrapped ErrAbortRun", err)
+	}
+	if len(rp.requests) != 0 {
+		t.Error("provider must not be called when BeforeModel aborts")
+	}
+	if emit.count(KindError) != 1 {
+		t.Errorf("KindError frames = %d, want 1", emit.count(KindError))
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("an aborted run must not emit KindDone")
+	}
+}
+
+// TestBeforeModelPlainErrorDoesNotAbort pins that a non-sentinel hook error is
+// still logged and skipped — the run completes.
+func TestBeforeModelPlainErrorDoesNotAbort(t *testing.T) {
+	rp := &recordingProvider{reply: "hi"}
+	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m"})
+	loop.Use(beforeHookFunc(func(context.Context, *RunState) error {
+		return errors.New("transient observer failure")
+	}))
+	emit := &memEmitter{}
+	if _, err := loop.Run(context.Background(), nil, emit); err != nil {
+		t.Fatalf("plain hook error must not abort the run: %v", err)
+	}
+	if emit.count(KindDone) != 1 {
+		t.Errorf("KindDone frames = %d, want 1", emit.count(KindDone))
+	}
+}
+
+// TestAfterModelAbortRun pins that an AfterModel abort answers the already-
+// durable tool batch before failing the run (no unpaired tool_use), and the
+// batch is never dispatched.
+func TestAfterModelAbortRun(t *testing.T) {
+	sp := &scriptProvider{script: [][]provider.Event{toolUseResponse("t1", "echo", "{}")}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(sp, reg, Config{Model: "m"})
+	loop.Use(afterModelHookFunc(func(context.Context, *RunState) error {
+		return fmt.Errorf("halt: %w", ErrAbortRun)
+	}))
+	emit := &memEmitter{}
+	if _, err := loop.Run(context.Background(), nil, emit); !errors.Is(err, ErrAbortRun) {
+		t.Fatalf("run error = %v, want wrapped ErrAbortRun", err)
+	}
+	if sp.calls != 1 {
+		t.Errorf("provider calls = %d, want 1 (no iteration after abort)", sp.calls)
+	}
+	if emit.count(KindToolResult) != 1 {
+		t.Errorf("KindToolResult frames = %d, want 1 (batch answered synthetically)", emit.count(KindToolResult))
+	}
+	if emit.count(KindError) != 1 || emit.count(KindDone) != 0 {
+		t.Errorf("terminal frames: error=%d done=%d, want 1/0", emit.count(KindError), emit.count(KindDone))
+	}
+}
+
+// TestAfterRunAbortSkipsRemaining pins that ErrAbortRun from an AfterRun hook
+// stops the remaining AfterRun hooks (the run itself is already ending) but
+// does not fail an otherwise successful run.
+func TestAfterRunAbortSkipsRemaining(t *testing.T) {
+	rp := &recordingProvider{reply: "hi"}
+	loop := New(rp, toolruntime.NewRegistry(), Config{Model: "m"})
+	var fired []string
+	loop.Use(afterRunHookFunc(func(context.Context, *RunState) error {
+		fired = append(fired, "early")
+		return nil
+	}))
+	loop.Use(afterRunHookFunc(func(context.Context, *RunState) error {
+		fired = append(fired, "late")
+		return ErrAbortRun
+	}))
+	emit := &memEmitter{}
+	if _, err := loop.Run(context.Background(), nil, emit); err != nil {
+		t.Fatalf("AfterRun abort must not fail a completed run: %v", err)
+	}
+	// Reverse order: "late" fires first and aborts; "early" is skipped.
+	assertOrder(t, []string{"late"}, fired)
+	if emit.count(KindDone) != 1 {
+		t.Errorf("KindDone frames = %d, want 1", emit.count(KindDone))
 	}
 }
