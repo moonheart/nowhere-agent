@@ -919,6 +919,245 @@ func (p *payloadEmitter) Emit(ctx context.Context, kind EventKind, payload any) 
 	return p.memEmitter.Emit(ctx, kind, payload)
 }
 
+// cancelOnStepStartEmitter cancels the run ctx when the iter>0 KindStepStart
+// frame goes out, landing the cancellation inside the NEXT provider attempt —
+// the mid-stream cancel path.
+type cancelOnStepStartEmitter struct {
+	stepCapture
+	cancel context.CancelFunc
+}
+
+func (e *cancelOnStepStartEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if kind == KindStepStart {
+		e.cancel()
+	}
+	return e.stepCapture.Emit(ctx, kind, payload)
+}
+
+func TestLoopCancelMidStreamClosesStep(t *testing.T) {
+	// A step opened at iter>0 must not dangle when the run is cancelled
+	// mid-attempt: the cancel path closes it (reason "other", the transport's
+	// cancelled mapping) before the terminal cancelled frame, symmetric with
+	// the error path.
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "echo", `{}`),
+		textResponse("never reached"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	ctx, cancel := context.WithCancel(context.Background())
+	emit := &cancelOnStepStartEmitter{cancel: cancel}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	_, err := loop.Run(ctx, nil, emit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v want context.Canceled", err)
+	}
+	if emit.count(KindStepStart) != 1 {
+		t.Errorf("KindStepStart = %d, want 1", emit.count(KindStepStart))
+	}
+	if len(emit.finishes) != 2 {
+		t.Fatalf("KindStepFinish = %d, want 2 (one per opened step): %+v", len(emit.finishes), emit.finishes)
+	}
+	if emit.finishes[0].FinishReason != "tool-calls" || !emit.finishes[0].IsContinued {
+		t.Errorf("step0 = %+v, want tool-calls/continued", emit.finishes[0])
+	}
+	if emit.finishes[1].FinishReason != "other" || emit.finishes[1].IsContinued {
+		t.Errorf("step1 = %+v, want other/not-continued (the step opened at iter 1 must close)", emit.finishes[1])
+	}
+	if emit.count(KindCancelled) != 1 {
+		t.Errorf("KindCancelled = %d, want 1", emit.count(KindCancelled))
+	}
+}
+
+// cancelOnNthAssistantEmitter cancels the run ctx when the n-th assembled
+// assistant message (MessageWithUsage payload) is emitted — landing the
+// cancellation in the window between message persistence and batch dispatch.
+type cancelOnNthAssistantEmitter struct {
+	stepCapture
+	cancel context.CancelFunc
+	n      int
+	seen   int
+}
+
+func (e *cancelOnNthAssistantEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if kind == KindMessage {
+		if _, ok := payload.(MessageWithUsage); ok {
+			e.seen++
+			if e.seen == e.n {
+				e.cancel()
+			}
+		}
+	}
+	return e.stepCapture.Emit(ctx, kind, payload)
+}
+
+func TestLoopCancelBeforeBatchClosesStep(t *testing.T) {
+	// The pre-dispatch cancel path at iter>0 must also close the step it
+	// opened: record the synthetic cancelled results, close the step
+	// ("other"), then emit the terminal cancelled frame.
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "echo", `{}`),
+		toolUseResponse("tu2", "echo", `{}`),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	ctx, cancel := context.WithCancel(context.Background())
+	emit := &cancelOnNthAssistantEmitter{cancel: cancel, n: 2}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(ctx, nil, emit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v want context.Canceled", err)
+	}
+	if len(emit.finishes) != 2 {
+		t.Fatalf("KindStepFinish = %d, want 2: %+v", len(emit.finishes), emit.finishes)
+	}
+	if emit.finishes[1].FinishReason != "other" || emit.finishes[1].IsContinued {
+		t.Errorf("step1 = %+v, want other/not-continued", emit.finishes[1])
+	}
+	if emit.count(KindCancelled) != 1 {
+		t.Errorf("KindCancelled = %d, want 1", emit.count(KindCancelled))
+	}
+	// Both batches answered: [assistant, tool_result, assistant, tool_result].
+	if len(produced) != 4 {
+		t.Fatalf("produced %d messages, want 4", len(produced))
+	}
+	last := produced[3]
+	if len(last.Content) != 1 || last.Content[0].Type != provider.BlockToolResult ||
+		!last.Content[0].IsError || !strings.Contains(last.Content[0].ToolContent, "cancelled") {
+		t.Errorf("last tool_result = %+v, want an is_error 'cancelled' result", last.Content)
+	}
+}
+
+func TestLoopUnknownStopReasonWithToolCallsFailsBatch(t *testing.T) {
+	// A tool-call turn whose stream closes WITHOUT a finish reason gets the
+	// same treatment as a max_tokens truncation: the batch may be incomplete,
+	// so every call fails for re-issue (not dispatched) and the loop continues.
+	called := false
+	turn := []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "echo", ToolInput: map[string]any{}}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: `{}`},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop}, // no StopReason reported
+	}
+	p := &scriptProvider{script: [][]provider.Event{turn, textResponse("done")}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(riskTool{name: "echo", risk: toolruntime.RiskReadOnly, called: &called})
+	emit := &stepCapture{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), nil, emit)
+	if err != nil {
+		t.Fatalf("the run must continue after a re-issued batch, got %v", err)
+	}
+	if called {
+		t.Error("a possibly-truncated batch must NOT be dispatched")
+	}
+	if p.calls != 2 {
+		t.Errorf("provider calls = %d, want 2 (batch failed, model re-issued)", p.calls)
+	}
+	if emit.count(KindDone) != 1 {
+		t.Errorf("KindDone = %d, want 1", emit.count(KindDone))
+	}
+	if len(emit.finishes) == 0 || emit.finishes[0].FinishReason != "error" || !emit.finishes[0].IsContinued {
+		t.Errorf("step0 = %+v, want error/continued", emit.finishes)
+	}
+	// The failed batch is answered with an explanatory is_error result.
+	if len(produced) < 2 {
+		t.Fatalf("produced = %d messages, want at least [assistant, tool_result]", len(produced))
+	}
+	res := produced[1]
+	if len(res.Content) != 1 || !res.Content[0].IsError || !strings.Contains(res.Content[0].ToolContent, "finish reason") {
+		t.Errorf("tool_result = %+v, want is_error naming the missing finish reason", res.Content)
+	}
+}
+
+func TestLoopDuplicateBlockStartFails(t *testing.T) {
+	// Adapter contract violation: a second block start on an open index would
+	// silently discard the deltas already accumulated. The loop must fail
+	// loudly instead of truncating output without a trace.
+	p := &scriptProvider{script: [][]provider.Event{{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "partial"},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}, // duplicate
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "other"},
+		{Type: provider.EventBlockStop, Index: 0},
+		{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn},
+	}}}
+	emit := &memEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	_, err := loop.Run(context.Background(), nil, emit)
+	if err == nil || !strings.Contains(err.Error(), "contract violation") {
+		t.Fatalf("err = %v, want a contract-violation error", err)
+	}
+	if emit.count(KindError) != 1 || emit.count(KindDone) != 0 {
+		t.Errorf("events: KindError = %d (want 1), KindDone = %d (want 0)", emit.count(KindError), emit.count(KindDone))
+	}
+}
+
+func TestLoopDeltaAtUnopenedIndexFails(t *testing.T) {
+	// Adapter contract violation: a delta for a block that never started would
+	// be silently dropped. Fail loudly.
+	p := &scriptProvider{script: [][]provider.Event{{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockDelta, Index: 1, Delta: "orphan"},
+		{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn},
+	}}}
+	emit := &memEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	_, err := loop.Run(context.Background(), nil, emit)
+	if err == nil || !strings.Contains(err.Error(), "contract violation") {
+		t.Fatalf("err = %v, want a contract-violation error", err)
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("a contract-violating stream must not complete the run")
+	}
+}
+
+func TestLoopRepairsUnpairedHistoryAcrossIterations(t *testing.T) {
+	// Pairing repair happens once on the incoming history; the repaired view
+	// must stay the base of EVERY provider request across iterations (the
+	// loop's own produced tail is paired by construction).
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu-new", "echo", `{}`),
+		textResponse("done"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	// History left unpaired by a prior run: an assistant tool_use with no
+	// tool_result following it.
+	history := []provider.Message{
+		provider.TextMessage(provider.RoleUser, "hi"),
+		{Role: provider.RoleAssistant, Content: []provider.Block{{Type: provider.BlockToolUse, ToolUseID: "tu-old", ToolName: "echo", ToolInput: map[string]any{}}}},
+	}
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(p.requests))
+	}
+	for i, req := range p.requests {
+		var found bool
+		for _, m := range req.Messages {
+			for _, b := range m.Content {
+				if b.Type == provider.BlockToolResult && b.ToolResultID == "tu-old" {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Errorf("request %d lacks the synthesized result answering tu-old — the repaired pairing did not reach the provider", i)
+		}
+	}
+}
+
 // TestLoopEmitsAssistantUsageWithMessage verifies each assistant KindMessage
 // carries the usage of the single LLM call that produced it (MessageWithUsage),
 // so the persistence path can record per-call usage on that row.

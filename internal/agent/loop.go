@@ -285,6 +285,16 @@ func (l *Loop) toolDefs() []provider.ToolDefinition {
 func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter) ([]provider.Message, error) {
 	state := &RunState{Emit: emit}
 
+	// Repair tool pairing ONCE, up front: a prior run's cancel or a persisted
+	// compression split can leave history with an unpaired block, which the
+	// provider rejects outright. Re-running the repair every iteration is wasted
+	// work — the loop keeps the tail it produces paired by construction (every
+	// tool batch is answered by recordToolResults on every path that continues
+	// the run: dispatch, pre-dispatch cancel, truncation, unreported stop), so
+	// the per-iteration rebuild only re-copied every block without ever
+	// changing anything (O(iterations × messages) over a long agentic run).
+	base := contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), state.Produced...))
+
 	for iter := 0; iter < l.config.MaxIterations; iter++ {
 		state.Iteration = iter
 		// Honour cancellation between iterations (e.g. after a tool batch).
@@ -299,10 +309,10 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			_ = emit.Emit(ctx, KindStepStart, nil)
 		}
 
-		// Assemble the working view for this turn and repair tool pairing before
-		// every send (a prior cancel or a compression split can leave an unpaired
-		// block, which the provider would reject).
-		state.View = contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), state.Produced...))
+		// Assemble the working view for this turn: the once-repaired base plus
+		// the tail this run produced (paired by construction, per the invariant
+		// above).
+		state.View = append(append([]provider.Message{}, base...), state.Produced...)
 
 		// Node hooks: observation before the model call (registration order).
 		for _, h := range l.before {
@@ -315,6 +325,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		if err != nil {
 			if ctx.Err() != nil {
 				slog.Info("agent: run cancelled", "iter", iter, "ctx_err", ctx.Err(), "attempt_err", err)
+				// Close the step opened at iter>0 before the terminal frame,
+				// symmetric with the error path below: a step must not dangle.
+				// Detach from the cancelled ctx so the frame survives the
+				// emitter's ctx guard (same rationale as reportTerminal);
+				// "other" is the reason the transport maps cancellation to.
+				l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
 				l.reportTerminal(ctx, state)
 				_ = emit.Emit(ctx, KindCancelled, nil)
 				return state.Produced, ctx.Err()
@@ -361,7 +377,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// Without this the loop treats truncation as success.
 		if len(res.Calls) == 0 {
 			if res.Stop == provider.StopMaxTokens {
-				truncErr := fmt.Errorf("response truncated: hit the max_tokens limit (%d)", l.config.MaxTokens)
+				truncErr := fmt.Errorf("response truncated: hit %s", maxTokensLimitText(l.config.MaxTokens))
 				l.emitStepFinish(ctx, emit, res, "length", false)
 				l.runAfterRun(ctx, state)
 				_ = emit.Emit(ctx, KindError, truncErr.Error())
@@ -397,6 +413,8 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// durable scan) see the dangling call.
 		if err := ctx.Err(); err != nil {
 			l.recordToolResults(ctx, emit, state, res.Calls, cancelledCallResults(res.Calls))
+			// Close the step opened at iter>0, symmetric with every other exit.
+			l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
 			l.reportTerminal(ctx, state)
 			_ = emit.Emit(ctx, KindCancelled, nil)
 			return state.Produced, err
@@ -428,6 +446,20 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			continue
 		}
 
+		// Unreported stop reason with tool calls: the same signal the no-calls
+		// case fails the run on above. The stream closed without saying why, so
+		// this batch may be truncated without the adapter flagging it — dispatch
+		// would execute a possibly half-written plan. Fail every call for
+		// re-issue, exactly like the max_tokens case, and let the loop continue
+		// (MaxIterations bounds a provider that never reports a reason).
+		if res.Stop == provider.StopUnknown {
+			slog.Warn("agent: provider reported no stop reason for a tool batch; failing the batch for re-issue",
+				"iter", iter, "calls", len(res.Calls))
+			l.recordToolResults(ctx, emit, state, res.Calls, unknownStopCallResults(res.Calls))
+			l.emitStepFinish(ctx, emit, res, "error", true)
+			continue
+		}
+
 		// Unified suspend point (general interrupt): if any call needs the client
 		// before the run can continue — a permission approval, an ask_user question
 		// set, or a client-side tool — do NOT dispatch it. Emit one interrupt frame
@@ -446,8 +478,16 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			// any emit fails — or the client disconnected — fail the run rather than
 			// ending it "done" with prompts the client can act on but nothing backing
 			// them (which would 404 on resume).
+			// Settle the run like every other failure path — close the step, fire
+			// AfterRun (usage), and surface a terminal error frame — rather than
+			// returning bare. Any Interaction rows the earlier emits already
+			// persisted are voided by the run worker (a failed run never waits on
+			// client input), so the session's pending-interaction gate clears.
 			for _, gate := range gated {
 				if err := emit.Emit(ctx, KindInterrupt, *gate); err != nil {
+					l.emitStepFinish(ctx, emit, res, "error", false)
+					l.runAfterRun(ctx, state)
+					_ = emit.Emit(ctx, KindError, err.Error())
 					return state.Produced, err
 				}
 			}
@@ -704,6 +744,14 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 
 			case provider.EventBlockStart:
 				if ev.Block != nil {
+					if _, dup := open[ev.Index]; dup {
+						// Adapter contract violation: a second block start on an
+						// open index would silently discard the deltas already
+						// accumulated for it. Fail loudly.
+						err := fmt.Errorf("provider stream contract violation: duplicate block start at index %d", ev.Index)
+						slog.Warn("agent: "+err.Error())
+						return assistant, calls, end, err
+					}
 					open[ev.Index] = &accumulator{block: *ev.Block}
 					// A tool_use block starts with its id/name already known (both
 					// adapters supply them at block start), so surface the call —
@@ -719,37 +767,48 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 				}
 
 			case provider.EventBlockDelta:
-				if acc, ok := open[ev.Index]; ok {
-					acc.append(ev.Delta)
-					acc.appendSignature(ev.SignatureDelta)
-					// Stream text/thinking out incrementally. An emit failure
-					// (e.g. client disconnected) aborts the run so the loop
-					// unwinds and the run settles instead of leaking.
-					var emitErr error
-					switch acc.block.Type {
-					case provider.BlockText:
-						emitErr = emit.Emit(ctx, KindText, ev.Delta)
-					case provider.BlockThinking:
-						emitErr = emit.Emit(ctx, KindThinking, ev.Delta)
-					case provider.BlockToolUse:
-						// Stream the argument fragment too, so a large tool input
-						// renders as it generates rather than appearing whole at
-						// block-stop. An empty provider delta carries no args.
-						if ev.Delta != "" {
-							emitErr = emit.Emit(ctx, KindToolArgs, map[string]any{
-								"id": acc.block.ToolUseID, "name": acc.block.ToolName, "delta": ev.Delta,
-							})
-						}
+				acc, ok := open[ev.Index]
+				if !ok {
+					// Adapter contract violation: a delta for a block that never
+					// started (or already stopped) would be silently dropped,
+					// truncating the output with no trace. Fail loudly.
+					err := fmt.Errorf("provider stream contract violation: block delta at unopened index %d", ev.Index)
+					slog.Warn("agent: "+err.Error())
+					return assistant, calls, end, err
+				}
+				acc.append(ev.Delta)
+				acc.appendSignature(ev.SignatureDelta)
+				// Stream text/thinking out incrementally. An emit failure
+				// (e.g. client disconnected) aborts the run so the loop
+				// unwinds and the run settles instead of leaking.
+				var emitErr error
+				switch acc.block.Type {
+				case provider.BlockText:
+					emitErr = emit.Emit(ctx, KindText, ev.Delta)
+				case provider.BlockThinking:
+					emitErr = emit.Emit(ctx, KindThinking, ev.Delta)
+				case provider.BlockToolUse:
+					// Stream the argument fragment too, so a large tool input
+					// renders as it generates rather than appearing whole at
+					// block-stop. An empty provider delta carries no args.
+					if ev.Delta != "" {
+						emitErr = emit.Emit(ctx, KindToolArgs, map[string]any{
+							"id": acc.block.ToolUseID, "name": acc.block.ToolName, "delta": ev.Delta,
+						})
 					}
-					if emitErr != nil {
-						return assistant, calls, end, emitErr
-					}
+				}
+				if emitErr != nil {
+					return assistant, calls, end, emitErr
 				}
 
 			case provider.EventBlockStop:
 				if acc, ok := open[ev.Index]; ok {
 					l.appendFinalized(ctx, acc, &assistant, &calls, emit)
 					delete(open, ev.Index)
+				} else {
+					// A stop for a block that never started loses no data, but
+					// it is a contract violation worth a trace.
+					slog.Warn("agent: provider stream contract violation: block stop at unopened index", "index", ev.Index)
 				}
 
 			case provider.EventMessageStop:
@@ -958,11 +1017,35 @@ func cancelledCallResults(calls []toolruntime.Call) []toolruntime.Result {
 // re-issuing the obvious next move.
 func truncatedCallResults(calls []toolruntime.Call, maxTokens int) []toolruntime.Result {
 	content := fmt.Sprintf(
-		"not executed: the response hit the max_tokens limit (%d) while this tool call was being written, so its arguments may be incomplete. Re-issue the call with complete arguments, keeping the response shorter.",
-		maxTokens)
+		"not executed: the response hit %s while this tool call was being written, so its arguments may be incomplete. Re-issue the call with complete arguments, keeping the response shorter.",
+		maxTokensLimitText(maxTokens))
 	results := make([]toolruntime.Result, len(calls))
 	for i := range results {
 		results[i] = toolruntime.Result{Content: content, IsError: true}
+	}
+	return results
+}
+
+// maxTokensLimitText renders the configured output-token limit for truncation
+// messages, tolerating an unset (0) config — "limit (0)" would read as nonsense.
+func maxTokensLimitText(maxTokens int) string {
+	if maxTokens <= 0 {
+		return "the max_tokens limit"
+	}
+	return fmt.Sprintf("the max_tokens limit (%d)", maxTokens)
+}
+
+// unknownStopCallResults fails every call in a batch whose stream closed without
+// a reported finish reason: the batch may be truncated without the adapter
+// flagging it, so — as with the max_tokens cut — the safe move is re-issue, not
+// executing a possibly half-written plan.
+func unknownStopCallResults(calls []toolruntime.Call) []toolruntime.Result {
+	results := make([]toolruntime.Result, len(calls))
+	for i := range results {
+		results[i] = toolruntime.Result{
+			Content: "not executed: the provider closed the stream without reporting a finish reason, so this tool call may be incomplete. Re-issue the call with complete arguments.",
+			IsError: true,
+		}
 	}
 	return results
 }
