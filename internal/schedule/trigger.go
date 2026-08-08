@@ -181,7 +181,7 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 	userMsg := provider.TextMessage(provider.RoleUser, kickoff)
 	run, err := tr.registry.Submit(ctx, sessID, session.RunWork{
 		Loop:        loop,
-		History:     nil, // fresh turn; authoritative history is rebuilt by the worker when set
+		History:     []provider.Message{userMsg}, // the worker runs History verbatim; it does not merge UserMessage in
 		UserMessage: &userMsg,
 	})
 	if err != nil {

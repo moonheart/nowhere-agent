@@ -44,6 +44,21 @@ func (p *stubProvider) Stream(ctx context.Context, _ provider.Request) (<-chan p
 	return ch, nil
 }
 
+// captureProvider records the messages of the first Stream request it sees, so
+// a test can assert what the fired run actually sent to the model.
+type captureProvider struct {
+	stubProvider
+	seen chan []provider.Message
+}
+
+func (p *captureProvider) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	select {
+	case p.seen <- req.Messages:
+	default:
+	}
+	return p.stubProvider.Stream(ctx, req)
+}
+
 type fakeScopes struct{ scopes []identity.ScopeRef }
 
 func (f fakeScopes) AccessibleScopes(ctx context.Context, userID string) ([]identity.ScopeRef, error) {
@@ -246,6 +261,56 @@ func TestTriggerRejectBusySession(t *testing.T) {
 	}
 	if atomic.LoadInt32(&spy.count) != 0 {
 		t.Fatalf("busy session under reject must not build a loop, got %d", spy.count)
+	}
+}
+
+// TestTriggerKickoffReachesModel is the regression for the empty-messages bug:
+// a fired free-text task must send its kickoff as the opening user turn, not an
+// empty history. The registry runs History verbatim (UserMessage is persisted,
+// not merged in), so History must carry the kickoff.
+func TestTriggerKickoffReachesModel(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	store := NewPGStore(db)
+	task := validTask(userID)
+	task.Prompt = "summarize yesterday"
+	created, err := store.Create(context.Background(), task)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	now := time.Now()
+	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
+
+	cap := &captureProvider{seen: make(chan []provider.Message, 1)}
+	build := func(ctx context.Context, task Task, system, model string) *agent.Loop {
+		return agent.New(cap, toolruntime.NewRegistry(), agent.Config{System: system, Model: model, MaxTokens: 100})
+	}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, build, db, time.Hour)
+	tr.fireOnce(context.Background(), created)
+	t.Cleanup(func() {
+		ids, _ := store.ListSessions(context.Background(), created.ID)
+		for _, id := range ids {
+			db.Exec(`DELETE FROM sessions WHERE id = $1`, id)
+		}
+	})
+
+	select {
+	case msgs := <-cap.seen:
+		if len(msgs) != 1 || msgs[0].Role != provider.RoleUser {
+			t.Fatalf("first request should carry exactly the kickoff user turn, got %d msgs: %+v", len(msgs), msgs)
+		}
+		var text string
+		for _, b := range msgs[0].Content {
+			text += b.Text
+		}
+		if text != "summarize yesterday" {
+			t.Fatalf("kickoff text = %q, want the task prompt", text)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no Stream request reached the provider")
 	}
 }
 
