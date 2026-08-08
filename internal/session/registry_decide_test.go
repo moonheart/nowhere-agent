@@ -42,6 +42,20 @@ func seedGatedConversation(t *testing.T, rg *RunRegistry, ms MessageStore, sessi
 	})
 }
 
+// createSuspendedInteraction persists a pending interaction together with the
+// suspended-batch snapshot the fold path requires (capability
+// suspend-batch-snapshot). batchIDs is the full batch in tool_use order.
+func createSuspendedInteraction(t *testing.T, rg *RunRegistry, batchIDs []string, in Interaction) Interaction {
+	t.Helper()
+	ap, err := rg.rt.store.CreateInteractionBatch(context.Background(), SuspendedBatch{
+		RunID: in.RunID, SessionID: in.SessionID, ToolCallIDs: batchIDs,
+	}, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ap
+}
+
 func newDecideRegistry(t *testing.T) (*RunRegistry, MessageStore, Session) {
 	t.Helper()
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
@@ -62,13 +76,10 @@ func TestDecideApprovedExecutesTool(t *testing.T) {
 	rg, ms, sess := newDecideRegistry(t)
 	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
 	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "danger", map[string]any{"path": "/etc"})
-	ap, err := rg.rt.store.CreateApproval(context.Background(), Approval{
+	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Approval{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "danger",
 		Payload: json.RawMessage(`{"path":"/etc"}`), Kind: "approval",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	ran := false
 	reg := toolruntime.NewRegistry()
@@ -104,7 +115,7 @@ func TestDecideRejectedInjectsDenial(t *testing.T) {
 	rg, ms, sess := newDecideRegistry(t)
 	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
 	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "danger", map[string]any{})
-	ap, _ := rg.rt.store.CreateApproval(context.Background(), Approval{
+	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Approval{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "danger", Kind: "approval",
 	})
 
@@ -131,7 +142,7 @@ func TestDecideAskUserAnswer(t *testing.T) {
 	rg, ms, sess := newDecideRegistry(t)
 	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
 	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "ask_user", map[string]any{"questions": []any{}})
-	ap, _ := rg.rt.store.CreateApproval(context.Background(), Approval{
+	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Approval{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "ask_user", Kind: "ask_user",
 	})
 
@@ -150,7 +161,7 @@ func TestDecideAskUserSkipped(t *testing.T) {
 	rg, ms, sess := newDecideRegistry(t)
 	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
 	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "ask_user", map[string]any{})
-	ap, _ := rg.rt.store.CreateApproval(context.Background(), Approval{
+	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Approval{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "ask_user", Kind: "ask_user",
 	})
 
@@ -166,9 +177,10 @@ func TestDecideAskUserSkipped(t *testing.T) {
 
 // TestDecideUnknownOrDecided: an unknown or already-decided approval errors.
 func TestDecideUnknownOrDecided(t *testing.T) {
-	rg, _, sess := newDecideRegistry(t)
+	rg, ms, sess := newDecideRegistry(t)
 	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
-	ap, _ := rg.rt.store.CreateApproval(context.Background(), Approval{
+	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "danger", map[string]any{})
+	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Approval{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "danger", Kind: "approval",
 	})
 	if _, _, err := rg.Decide(context.Background(), "no-such", true, nil, nil); !errors.Is(err, ErrNoPendingApproval) {
@@ -217,13 +229,10 @@ func TestDecideParallelBatchResumesUngatedCall(t *testing.T) {
 			{Type: provider.BlockToolUse, ToolUseID: "tu2", ToolName: "danger", ToolInput: map[string]any{"path": "/etc"}},
 		},
 	})
-	ap, err := rg.rt.store.CreateApproval(context.Background(), Approval{
+	ap := createSuspendedInteraction(t, rg, []string{"tu1", "tu2"}, Approval{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu2", ToolName: "danger",
 		Payload: json.RawMessage(`{"path":"/etc"}`), Kind: "approval",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	readRan, dangerRan := false, false
 	reg := toolruntime.NewRegistry()

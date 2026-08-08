@@ -33,6 +33,9 @@ type MemStore struct {
 	// queue order independent of wall-clock timestamp ties (CreatedAt can collide
 	// for a batch created in the same tick). Stamped on each new Approval.
 	approvalSeq int64
+	// batches is the in-memory analogue of the suspended_batches table
+	// (migration 000019): runID -> suspended-batch snapshot.
+	batches map[string]*SuspendedBatch
 }
 
 // NewMemStore creates an empty in-memory Store.
@@ -45,6 +48,7 @@ func NewMemStore() *MemStore {
 		dreamedSeq:       map[string]int64{},
 		memoryInjectedAt: map[string]time.Time{},
 		approvals:        map[string]*Approval{},
+		batches:          map[string]*SuspendedBatch{},
 	}
 }
 

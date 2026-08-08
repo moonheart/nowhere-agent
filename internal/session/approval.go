@@ -109,16 +109,7 @@ func (m *MemStore) CreateApproval(_ context.Context, a Interaction) (Interaction
 	defer m.mu.Unlock()
 	// Multiple pending interactions per session are allowed (multi-approval
 	// queue): a gated batch parks one interaction per gated call.
-	if a.ID == "" {
-		a.ID = uuid.NewString()
-	}
-	a.Status = InteractionPending
-	a.CreatedAt = time.Now()
-	m.approvalSeq++
-	a.seq = m.approvalSeq
-	cp := a
-	m.approvals[a.ID] = &cp
-	return a, nil
+	return m.createApprovalLocked(a), nil
 }
 
 func (m *MemStore) PendingApprovalForSession(_ context.Context, sessionID string) (Interaction, bool, error) {

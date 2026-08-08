@@ -11,6 +11,7 @@ import { ToolCall } from "@/components/tool-call";
 import { MarkdownText } from "@/components/markdown-text";
 import { UsageFooter } from "@/components/usage-footer";
 import { PlanPanel } from "@/components/plan-panel";
+import { PendingNotice } from "@/components/pending-notice";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import {
@@ -28,6 +29,7 @@ export const Thread: FC<{ sessionId: string | null }> = ({ sessionId }) => {
   return (
     <ThreadPrimitive.Root className="flex h-full flex-col bg-background">
       <PlanPanel />
+      <PendingNotice />
       {/* This wrapper exists only so the scroll-to-bottom button can be
           positioned against the viewport without living inside it — a child of
           the scroller would scroll away with the messages. min-h-0 because the

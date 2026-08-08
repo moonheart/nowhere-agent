@@ -279,6 +279,17 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	}
 	sessID := s.ID
 
+	// Pending-interaction gate (capability suspend-batch-snapshot): a session
+	// with undecided interactions rejects new submissions, so a suspended batch
+	// can never be buried under newer turns. Durable store check — correct
+	// across gateway instances. Fail-open on a store error (auxiliary check,
+	// mirrors the budget gate): a genuine race still trips the single-active-run
+	// lock below.
+	if pending, err := h.registry.PendingApprovalsForSession(r.Context(), sessID); err == nil && len(pending) > 0 {
+		http.Error(w, `{"error":"pending_interaction"}`, http.StatusConflict)
+		return
+	}
+
 	// Billing attribution (P1-3): stamp the run with the team whose provider key
 	// pays for it and the model the loop runs, so per-team/per-model cost reports
 	// read the run row directly instead of reconstructing membership at read time.

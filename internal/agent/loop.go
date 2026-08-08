@@ -52,6 +52,11 @@ type Interaction struct {
 	ToolCallID string
 	ToolName   string
 	Input      map[string]any
+	// Batch is the FULL tool-call batch this interaction belongs to (gated and
+	// ungated siblings alike), in assistant-message block order. The run worker
+	// persists it as the suspended-batch snapshot, so a later fold resolves the
+	// batch from durable state rather than re-deriving it from history.
+	Batch []toolruntime.Call
 }
 
 // ApprovalRequest is retained as an alias of Interaction for source
@@ -690,18 +695,25 @@ func (l *Loop) interactionGate(ctx context.Context, calls []toolruntime.Call) []
 			continue
 		}
 		tool, registered := l.tools.Get(c.Name)
+		var in *Interaction
 		switch {
 		// ask_user: the model is explicitly asking the user for structured input.
 		case c.Name == AskUserToolName:
-			gated = append(gated, &Interaction{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args})
+			in = &Interaction{ID: uuid.NewString(), Kind: "ask_user", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 		// Client-side tool: executes in the client, not the server — suspend.
 		case registered && toolruntime.IsClientTool(tool):
-			gated = append(gated, &Interaction{ID: uuid.NewString(), Kind: "client_tool", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args})
+			in = &Interaction{ID: uuid.NewString(), Kind: "client_tool", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 		// Permission approval: a dangerous call the policy gates for a yes/no.
 		case registered && l.gateInteraction != nil:
 			if deny, reason := l.gateInteraction(ctx, tool); deny && IsApprovalReason(reason) {
-				gated = append(gated, &Interaction{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args})
+				in = &Interaction{ID: uuid.NewString(), Kind: "approval", ToolCallID: c.ID, ToolName: c.Name, Input: c.Args}
 			}
+		}
+		if in != nil {
+			// Every gated interaction carries the full batch so the run worker
+			// can persist the suspended-batch snapshot with the first row.
+			in.Batch = calls
+			gated = append(gated, in)
 		}
 	}
 	return gated

@@ -31,7 +31,8 @@ import { getToken, logout, consumeSSORedirect } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, activityEpoch, type SubagentSignal } from "@/lib/activity";
-import { reportInteraction, resetApprovals, registerDecisionFollower, type Interaction } from "@/lib/approval";
+import { reportInteraction, resetApprovals, registerDecisionFollower, hasPendingInteractions, type Interaction } from "@/lib/approval";
+import { clearNotice, reportNotice } from "@/lib/notice";
 import { clientToolDeclarations } from "@/lib/client-tools";
 import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
 import {
@@ -108,7 +109,20 @@ function Chat({
       if (id) void cancelSession(id);
     },
     adapters: { history: threadHistory },
-    onError: (e) => console.error("chat error", e),
+    onError: (e) => {
+      // A send rejected by the pending-interaction gate (409): point at the
+      // parked card instead of a bare console error. The typed error body
+      // doesn't reach this callback, so detect the condition client-side — a
+      // failed send while cards hang is this gate in practice. The rejected
+      // message stays in the thread, so nothing typed is lost.
+      if (hasPendingInteractions()) {
+        reportNotice(
+          "An approval or question is still pending — resolve the card in the conversation before sending a new message.",
+        );
+        return;
+      }
+      console.error("chat error", e);
+    },
   });
 
   // A decided approval/ask_user starts a FRESH run on the backend (run-stateless
@@ -235,6 +249,7 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
       resetApprovals();
       resetPlan();
       resetPermissionMode();
+      clearNotice();
       setConversationKey((k) => k + 1);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -260,6 +275,7 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
     resetActivity();
     resetApprovals();
     resetPlan();
+    clearNotice();
     // Do NOT resetPermissionMode here: a draft 完全允许 picked on this blank
     // thread is a one-off for the session the first message creates; clearing it
     // now would discard that choice. Once the session exists its own mode takes
@@ -281,6 +297,7 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
     resetApprovals();
     resetPlan();
     resetPermissionMode();
+    clearNotice();
     setConversationKey((k) => k + 1);
   };
 

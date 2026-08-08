@@ -217,6 +217,17 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 		return err
 	}
 
+	// Pending-interaction gate (capability suspend-batch-snapshot): a session
+	// with undecided interactions rejects new submissions — a scheduled firing
+	// must not bury a human's pending approval either. Skip this firing; the
+	// task stays due and retries on the next scan. Fail-open on a store error,
+	// mirroring the budget gate.
+	if pending, err := tr.registry.PendingApprovalsForSession(ctx, sessID); err == nil && len(pending) > 0 {
+		tr.log.Info("schedule: session has pending interactions, skipping firing", "task", task.ID, "session", sessID, "pending", len(pending))
+		tr.cleanupFreshSession(ctx, task, sessID)
+		return nil
+	}
+
 	// Build the whitelisted loop and submit through the shared registry — from
 	// here on it is byte-identical to a human chat run.
 	loop := tr.buildLoop(ctx, task, system, model)

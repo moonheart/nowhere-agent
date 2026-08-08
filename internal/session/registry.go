@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 
@@ -312,9 +313,20 @@ func (rg *RunRegistry) RecordDecision(ctx context.Context, approvalID string, ap
 //   - ask_user answered → the structured answers; skipped → a "skipped" note;
 //   - client_tool → the client's output (validated) or an is_error.
 //
+// The batch is resolved from the run's durable suspended-batch snapshot
+// (capability suspend-batch-snapshot), NEVER from a session-wide history scan:
+// the suspending assistant message is located by run ID and its tool_use ID set
+// must equal the snapshot's, or the fold fails without executing anything. The
+// fold commits atomically (FoldCommitter) and is idempotent — an already-folded
+// batch re-executes nothing and returns the rebuilt history.
+//
 // tools may be nil only when no fold can require execution (all rejected /
 // ask_user / skipped).
 func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, tools *toolruntime.Registry) ([]provider.Message, error) {
+	snap, err := rg.rt.store.SuspendedBatchForRun(ctx, runID)
+	if err != nil {
+		return nil, fmt.Errorf("fold batch: %w", err)
+	}
 	batch, err := rg.rt.store.ApprovalsForRun(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("read batch: %w", err)
@@ -322,27 +334,32 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 	if len(batch) == 0 {
 		return nil, fmt.Errorf("no interactions for run %s", runID)
 	}
+	if rg.msgStore == nil {
+		return nil, fmt.Errorf("fold batch: a message store is required")
+	}
+	stored, err := rg.msgStore.MessagesFor(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("rebuild history: %w", err)
+	}
+	history := StoredMessagesToProvider(stored)
 
-	// Rebuild the durable conversation (full blocks, including the suspended
-	// tool_use batch that ended the prior run). The verdicts' tool_results are NOT
-	// yet in the store; they are appended below so the fresh run sees them.
-	var history []provider.Message
-	if rg.msgStore != nil {
-		stored, err := rg.msgStore.MessagesFor(ctx, sessionID)
-		if err != nil {
-			return nil, fmt.Errorf("rebuild history: %w", err)
-		}
-		history = StoredMessagesToProvider(stored)
+	// Idempotent resume: a committed fold (tool_result message persisted, marker
+	// set in the same transaction) never re-executes — a retried resume just
+	// returns the rebuilt history.
+	if snap.FoldedSeq != nil {
+		return history, nil
 	}
 
 	// Fold the WHOLE suspended tool_use batch, not just the calls that parked an
 	// interaction. The run ended on the unified gate the moment ANY call was gated
 	// (agent loop), so its sibling calls in the same batch — the ones that needed no
-	// approval — were never dispatched and have no tool_result. Rebuild that full
-	// batch from the suspended assistant message and answer every call: a call with
-	// an interaction folds its verdict; a call without one (no approval row) is
+	// approval — were never dispatched and have no tool_result. Answer every call:
+	// a call with an interaction folds its verdict; a call without one is
 	// dispatched now, so the model never sees a dangling tool_use.
-	allCalls := suspendedToolUses(history)
+	allCalls, err := suspendedBatchCalls(stored, runID, snap)
+	if err != nil {
+		return nil, err
+	}
 	byCall := make(map[string]Interaction, len(batch))
 	for _, ap := range batch {
 		byCall[ap.ToolCallID] = ap
@@ -392,19 +409,30 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 		})
 	}
 
-	// Persist the folded tool_results to the durable record. The suspended run
-	// recorded the assistant tool_use batch but never its results (it ended at the
-	// gate); FoldBatch supplies those missing results, and they belong in the
-	// durable history so the next resume / history rebuild sees every call
-	// answered, not dangling. Best-effort: a failure leaves the in-memory history
-	// correct for THIS resume.
-	if rg.msgStore != nil {
-		_, _ = rg.msgStore.AppendMessage(context.Background(), StoredMessage{
-			SessionID: sessionID,
-			RunID:     runID,
-			Role:      resultMsg.Role,
-			Content:   contextmgmt.TruncateBlocksForPersistence(resultMsg.Content),
-		})
+	// Commit the fold: the suspended run recorded the assistant tool_use batch
+	// but never its results (it ended at the gate). Persist the folded
+	// tool_results and mark the batch folded — atomically where the store
+	// supports it (PG), sequentially otherwise (mem, tests/dev). A failure is
+	// returned so the client retries the resume; the folded_seq marker keeps a
+	// retry from re-executing once the commit did land.
+	storedMsg := StoredMessage{
+		SessionID: sessionID,
+		RunID:     runID,
+		Role:      resultMsg.Role,
+		Content:   contextmgmt.TruncateBlocksForPersistence(resultMsg.Content),
+	}
+	if fc, ok := rg.rt.store.(FoldCommitter); ok {
+		if _, err := fc.CommitFold(context.Background(), runID, storedMsg); err != nil {
+			return nil, fmt.Errorf("commit fold: %w", err)
+		}
+	} else {
+		appended, err := rg.msgStore.AppendMessage(context.Background(), storedMsg)
+		if err != nil {
+			return nil, fmt.Errorf("persist fold message: %w", err)
+		}
+		if err := rg.rt.store.MarkBatchFolded(context.Background(), runID, appended.Seq); err != nil {
+			return nil, fmt.Errorf("mark batch folded: %w", err)
+		}
 	}
 	history = append(history, resultMsg)
 	return history, nil
@@ -414,30 +442,36 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 // empty, so the serialized tool message always carries a non-empty content field.
 const emptyToolResultPlaceholder = "(no output)"
 
-// suspendedToolUses walks a rebuilt history and returns the tool_use calls of the
-// most recent assistant message that carries any, in block order. That message is
-// the suspended batch: the run ended the moment one of its calls gated, so its
-// tool_use blocks are the calls that still need answering. Earlier assistant
-// messages with tool_use already have their tool_result folded, so only the LAST
-// tool_use-bearing message is returned.
-func suspendedToolUses(history []provider.Message) []toolruntime.Call {
-	for i := len(history) - 1; i >= 0; i-- {
-		m := history[i]
-		if m.Role != provider.RoleAssistant {
+// suspendedBatchCalls resolves the suspended batch's calls from the durable
+// record: the last tool_use-bearing assistant message persisted under runID
+// (scoping by run makes cross-run pollution structurally impossible), validated
+// against the snapshot — the message's tool_use IDs, in block order, MUST equal
+// the snapshot's recorded IDs. Any mismatch fails the fold loudly: nothing
+// executes, nothing persists.
+func suspendedBatchCalls(stored []StoredMessage, runID string, snap SuspendedBatch) ([]toolruntime.Call, error) {
+	for i := len(stored) - 1; i >= 0; i-- {
+		m := stored[i]
+		if m.Role != provider.RoleAssistant || m.RunID != runID {
 			continue
 		}
 		var calls []toolruntime.Call
+		var ids []string
 		for _, b := range m.Content {
 			if b.Type != provider.BlockToolUse || b.ToolUseID == "" {
 				continue
 			}
+			ids = append(ids, b.ToolUseID)
 			calls = append(calls, toolruntime.Call{ID: b.ToolUseID, Name: b.ToolName, Args: b.ToolInput})
 		}
-		if len(calls) > 0 {
-			return calls
+		if len(calls) == 0 {
+			continue
 		}
+		if !slices.Equal(ids, snap.ToolCallIDs) {
+			return nil, fmt.Errorf("fold batch: suspended message tool_use IDs %v do not match the snapshot %v (run %s)", ids, snap.ToolCallIDs, runID)
+		}
+		return calls, nil
 	}
-	return nil
+	return nil, fmt.Errorf("fold batch: no tool_use-bearing assistant message for run %s", runID)
 }
 
 // Decide applies the client's resolution of a pending Interaction and returns
@@ -589,7 +623,22 @@ func (e *registryEmitter) persistInteraction(payload any) error {
 	if kind == "" {
 		kind = "approval"
 	}
-	ap, err := e.rg.rt.store.CreateApproval(context.Background(), Interaction{
+	// The suspended-batch snapshot: the full ordered batch the gate suspended on,
+	// persisted in the same transaction as the first interaction row (idempotent
+	// across the batch's frames). A hand-constructed payload without Batch
+	// degenerates to the single gated call.
+	batchIDs := make([]string, 0, len(in.Batch))
+	for _, c := range in.Batch {
+		if c.ID != "" {
+			batchIDs = append(batchIDs, c.ID)
+		}
+	}
+	if len(batchIDs) == 0 && in.ToolCallID != "" {
+		batchIDs = []string{in.ToolCallID}
+	}
+	ap, err := e.rg.rt.store.CreateInteractionBatch(context.Background(), SuspendedBatch{
+		RunID: e.runID, SessionID: e.sessionID, ToolCallIDs: batchIDs,
+	}, Interaction{
 		ID: in.ID, RunID: e.runID, SessionID: e.sessionID,
 		ToolCallID: in.ToolCallID, ToolName: in.ToolName,
 		Payload: input, Kind: kind,

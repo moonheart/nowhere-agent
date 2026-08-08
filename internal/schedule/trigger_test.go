@@ -264,6 +264,63 @@ func TestTriggerRejectBusySession(t *testing.T) {
 	}
 }
 
+// TestTriggerSkipsPendingInteraction: a fire against a session with an
+// undecided interaction is skipped (capability suspend-batch-snapshot) — a
+// scheduled run must not bury a human's pending approval under newer turns.
+func TestTriggerSkipsPendingInteraction(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+	sessStore := session.NewPGStore(db)
+
+	sess, err := rt.CreateSession(context.Background(), userID, "pending target")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID) })
+	run, err := sessStore.CreateRun(context.Background(), sess.ID, 1)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	if _, err := sessStore.CreateApproval(context.Background(), session.Interaction{
+		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "danger", Kind: session.KindToolApproval,
+	}); err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	// The suspended run settles done; only the pending interaction remains.
+	if err := sessStore.UpdateRunStatus(context.Background(), run.ID, session.RunDone); err != nil {
+		t.Fatalf("settle run: %v", err)
+	}
+
+	task := validTask(userID)
+	task.TargetSessionID = sess.ID
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), task)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	spy := &loopSpy{}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+
+	now := time.Now()
+	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
+	claimed, err := store.Claim(context.Background(), created.ID, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := tr.submit(context.Background(), claimed); err != nil {
+		t.Fatalf("submit should skip cleanly, got %v", err)
+	}
+	if atomic.LoadInt32(&spy.count) != 0 {
+		t.Fatalf("a session with a pending interaction must not build a loop, got %d", spy.count)
+	}
+	runs, err := sessStore.RunsForSession(context.Background(), sess.ID)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("a skipped firing must not start a run; runs = %d, want 1", len(runs))
+	}
+}
+
 // TestTriggerFireNowLeavesScheduleAlone: a manual run fires the task but does
 // not claim it, so next_run_at/last_run_at stay exactly as the cadence left
 // them — an out-of-band fire must not disturb the cron schedule.

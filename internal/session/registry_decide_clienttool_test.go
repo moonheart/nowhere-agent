@@ -39,13 +39,10 @@ func seedClientToolRun(t *testing.T, rg *RunRegistry, ms MessageStore, sess Sess
 	t.Helper()
 	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
 	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "get_clipboard", map[string]any{})
-	ap, err := rg.rt.store.CreateApproval(context.Background(), Interaction{
+	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Interaction{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "get_clipboard",
 		Kind: KindClientTool,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	reg := toolruntime.NewRegistry()
 	reg.Register(clientSideTool{name: "get_clipboard"})
 	return ap, reg
@@ -110,12 +107,9 @@ func TestDecideUnknownKindErrors(t *testing.T) {
 	rg, ms, sess := newDecideRegistry(t)
 	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
 	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "mystery", map[string]any{})
-	ap, err := rg.rt.store.CreateApproval(context.Background(), Interaction{
+	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Interaction{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "mystery", Kind: "mystery_kind",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, _, err := rg.Decide(context.Background(), ap.ID, true, nil, nil); err == nil {
 		t.Fatal("an unregistered interaction kind should error, not silently fold")
 	}
@@ -127,7 +121,7 @@ func TestRegisterInteractionHandlerOverride(t *testing.T) {
 	rg, ms, sess := newDecideRegistry(t)
 	run, _ := rg.rt.store.CreateRun(context.Background(), sess.ID, 1)
 	seedGatedConversation(t, rg, ms, sess.ID, run.ID, "tu1", "ask_user", map[string]any{})
-	ap, _ := rg.rt.store.CreateApproval(context.Background(), Interaction{
+	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Interaction{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "ask_user", Kind: KindAskUser,
 	})
 

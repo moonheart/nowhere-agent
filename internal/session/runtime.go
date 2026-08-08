@@ -110,6 +110,17 @@ type Store interface {
 	// DecideApproval resolves a pending approval, or ErrNoPendingApproval. answer
 	// is the user's structured response for ask_user (nil for a permission approval).
 	DecideApproval(ctx context.Context, id string, approve bool, answer json.RawMessage) (Approval, error)
+
+	// Suspended-batch snapshots (capability suspend-batch-snapshot, migration
+	// 000019): the durable identity of a suspended tool batch.
+	// CreateInteractionBatch persists the batch snapshot (idempotent per run) and
+	// one interaction row in a single transaction.
+	CreateInteractionBatch(ctx context.Context, batch SuspendedBatch, in Interaction) (Interaction, error)
+	// SuspendedBatchForRun returns a run's suspended-batch snapshot, or
+	// ErrNoSuspendedBatch.
+	SuspendedBatchForRun(ctx context.Context, runID string) (SuspendedBatch, error)
+	// MarkBatchFolded records the seq of the batch's folded tool_result message.
+	MarkBatchFolded(ctx context.Context, runID string, foldedSeq int) error
 }
 
 // Runtime coordinates run lifecycle, the single-active-run lock, and event
