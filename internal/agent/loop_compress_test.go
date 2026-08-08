@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/toolruntime"
 )
@@ -43,10 +44,12 @@ func (p *recordingProvider) last() provider.Request {
 type stubCompressor struct {
 	calls int
 	err   error
+	got   [][]provider.Message
 }
 
-func (s *stubCompressor) Summarize(_ context.Context, _ []provider.Message) (string, error) {
+func (s *stubCompressor) Summarize(_ context.Context, dropped []provider.Message) (string, error) {
 	s.calls++
+	s.got = append(s.got, dropped)
 	if s.err != nil {
 		return "", s.err
 	}
@@ -137,6 +140,67 @@ func TestLoopCompressionCircuitBreaker(t *testing.T) {
 	// The run still completed (compression failure didn't abort it).
 	if len(rp.requests) == 0 {
 		t.Error("runs should complete despite compression failure")
+	}
+}
+
+// TestLoopCompressionReusesSummaryAcrossIterations drives a multi-iteration
+// tool loop over an over-budget history: the summary must be computed ONCE and
+// reused (byte-stably) while the growing tail still fits the budget, instead of
+// re-summarizing the whole history every iteration.
+func TestLoopCompressionReusesSummaryAcrossIterations(t *testing.T) {
+	sp := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("t1", "echo", "{}"),
+		toolUseResponse("t2", "echo", "{}"),
+		textResponse("done"),
+	}}
+	comp := &stubCompressor{}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(sp, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100})
+
+	// 12 small msgs: est 120 > (200-100)*0.8 = 80 → compress; the compressed
+	// view and its growing tail stay under the 100 budget across iterations.
+	history := bigConversation(6, 40)
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	if sp.calls != 3 {
+		t.Fatalf("provider calls = %d, want 3 (2 tool iterations + final)", sp.calls)
+	}
+	if comp.calls != 1 {
+		t.Errorf("summarizer calls = %d, want 1 (summary reused across iterations)", comp.calls)
+	}
+	for i, req := range sp.requests {
+		if len(req.Messages) == 0 || !contextmgmt.IsSummary(req.Messages[0]) {
+			t.Errorf("request %d must lead with the compression summary", i)
+		}
+	}
+}
+
+// TestLoopCompressionExtendsSummaryIncrementally: once the growing tail pushes
+// the reused view past the full budget, the summarizer runs again — but on the
+// previous summary plus only the newly dropped rounds, not the whole prefix.
+func TestLoopCompressionExtendsSummaryIncrementally(t *testing.T) {
+	sp := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("t1", "echo", "{}"),
+		textResponse("done"),
+	}}
+	comp := &stubCompressor{}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(sp, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100})
+
+	history := bigConversation(6, 200) // est 600; reuse candidate outgrows the 100 budget by iter 2
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	if comp.calls != 2 {
+		t.Fatalf("summarizer calls = %d, want 2 (initial + one incremental extension)", comp.calls)
+	}
+	if len(comp.got) < 2 || len(comp.got[1]) == 0 || !contextmgmt.IsSummary(comp.got[1][0]) {
+		t.Error("incremental re-summarization must lead with the previous summary")
 	}
 }
 

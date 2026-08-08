@@ -94,3 +94,28 @@ func DropOldestRound(msgs []provider.Message) (out []provider.Message, ok bool) 
 	rest := msgs[rounds[0].end:]
 	return EnsurePairing(rest), true
 }
+
+// DropOldestRoundPreservingSummary is DropOldestRound that never drops a
+// leading compression-summary round while it is the only record of the
+// dropped history: discarding it first (the naive oldest-round choice) would
+// silently erase everything the conversation already forgot while keeping
+// verbatim what could be re-dropped. It refuses once only the summary and one
+// round remain; callers that must shrink further (the overflow fallback) can
+// then fall back to plain DropOldestRound as a last resort.
+func DropOldestRoundPreservingSummary(msgs []provider.Message) (out []provider.Message, ok bool) {
+	rounds := groupRounds(msgs)
+	if len(rounds) <= 1 {
+		return msgs, false
+	}
+	if IsSummary(msgs[0]) {
+		if len(rounds) <= 2 {
+			return msgs, false
+		}
+		rest := make([]provider.Message, 0, len(msgs)-rounds[1].end+1)
+		rest = append(rest, msgs[0])
+		rest = append(rest, msgs[rounds[1].end:]...)
+		return EnsurePairing(rest), true
+	}
+	rest := msgs[rounds[0].end:]
+	return EnsurePairing(rest), true
+}

@@ -57,7 +57,9 @@ func TestCompressNoOpUnderThreshold(t *testing.T) {
 }
 
 func TestCompressKeepsRecentAndSummarizes(t *testing.T) {
-	p := Policy{MaxTokens: 10, Threshold: 0.8, KeepRecent: 2}
+	// Budget fits the summary plus both kept rounds, so the post-compression
+	// budget recheck does not trigger further dropping.
+	p := Policy{MaxTokens: 100, Threshold: 0.8, KeepRecent: 2}
 	h := bigHistory(6, 100)
 	c := &stubCompressor{}
 	out, err := Compress(context.Background(), h, p, c)

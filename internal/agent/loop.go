@@ -311,7 +311,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			}
 		}
 
-		res, err := l.attempt(ctx, state.View, emit)
+		res, err := l.attempt(ctx, state, emit)
 		if err != nil {
 			if ctx.Err() != nil {
 				slog.Info("agent: run cancelled", "iter", iter, "ctx_err", ctx.Err(), "attempt_err", err)
@@ -505,14 +505,14 @@ func (l *Loop) emitStepFinish(ctx context.Context, emit Emitter, res ModelResult
 // assembled result. It returns the provider error verbatim (no KindError emit)
 // so the caller can distinguish a retriable context-overflow from a fatal
 // failure.
-func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitter) (ModelResult, error) {
+func (l *Loop) attempt(ctx context.Context, state *RunState, emit Emitter) (ModelResult, error) {
 	// Per-attempt copy down to block granularity: middleware (compression,
 	// memory injection, image materialization) rewrites the transient view —
 	// image materialization mutates block structs IN PLACE (filling ImageData)
 	// — and none of that may reach the durable record, whose messages share
 	// Content slices with this view. Nested reference values inside a block
 	// (ToolInput maps) stay shared; middleware must treat them as read-only.
-	messages := copyMessageContents(view)
+	messages := copyMessageContents(state.View)
 	call := &ModelCall{
 		Request: provider.Request{
 			Model:           l.config.Model,
@@ -522,7 +522,8 @@ func (l *Loop) attempt(ctx context.Context, view []provider.Message, emit Emitte
 			MaxTokens:       l.config.MaxTokens,
 			CacheablePrefix: l.config.CacheablePrefix,
 		},
-		View: messages,
+		View:  messages,
+		State: state,
 	}
 	return chainModel(l.modelWrap, l.realAttempt(emit))(ctx, call)
 }

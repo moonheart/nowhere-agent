@@ -95,14 +95,19 @@ func renderTranscript(msgs []provider.Message) string {
 
 // stripAnalysis removes a leading <analysis>...</analysis> scratch block and
 // unwraps a <summary>...</summary> wrapper, returning just the summary body.
-// If the model emitted neither tag, the text is returned as-is.
+// Both tags are anchored at the start so literal tag strings inside the
+// summary body itself are never mistaken for the wrapper. If the model
+// emitted neither tag, the text is returned as-is.
 func stripAnalysis(s string) string {
-	if i := strings.Index(s, "</analysis>"); i >= 0 {
-		s = s[i+len("</analysis>"):]
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "<analysis>") {
+		if i := strings.Index(s, "</analysis>"); i >= 0 {
+			s = strings.TrimSpace(s[i+len("</analysis>"):])
+		}
 	}
-	if i := strings.Index(s, "<summary>"); i >= 0 {
-		s = s[i+len("<summary>"):]
-		if j := strings.Index(s, "</summary>"); j >= 0 {
+	if strings.HasPrefix(s, "<summary>") {
+		s = s[len("<summary>"):]
+		if j := strings.LastIndex(s, "</summary>"); j >= 0 {
 			s = s[:j]
 		}
 	}

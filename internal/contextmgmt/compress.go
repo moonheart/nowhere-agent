@@ -6,6 +6,8 @@ package contextmgmt
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 
 	"nowhere-agent/internal/provider"
 )
@@ -31,17 +33,39 @@ func DefaultPolicy() Policy {
 
 // estimateTokens approximates token count for a message set (~4 chars/token).
 func estimateTokens(msgs []provider.Message) int {
+	return contentBytes(msgs) / 4
+}
+
+// imageRefBytes is the conservative byte estimate for a path-only image block
+// whose payload size is unknown until materialization (~1000 tokens).
+const imageRefBytes = 4000
+
+// contentBytes approximates the serialized byte size of a message set. Tool
+// input VALUES are counted (a write_file's whole file body lives there) and
+// images contribute their base64 payload once materialized, or a flat
+// estimate while they are still path references. Doubling as the compression
+// cache's fingerprint, it is deterministic (map iteration order-independent).
+func contentBytes(msgs []provider.Message) int {
 	total := 0
 	for _, m := range msgs {
 		for _, b := range m.Content {
-			total += len(b.Text) + len(b.Thinking) + len(b.ToolContent)
+			total += len(b.Text) + len(b.Thinking) + len(b.ToolContent) + len(b.ToolName) + len(b.ArgsError)
 			for k, v := range b.ToolInput {
 				total += len(k) + 8
-				_ = v
+				if raw, err := json.Marshal(v); err == nil {
+					total += len(raw)
+				}
+			}
+			if b.Type == provider.BlockImage {
+				if len(b.ImageData) > 0 {
+					total += len(b.ImageData)
+				} else {
+					total += imageRefBytes
+				}
 			}
 		}
 	}
-	return total / 4
+	return total
 }
 
 // EstimateTokens exposes the approximate token count of a message set, so the
@@ -59,6 +83,35 @@ func ShouldCompress(history []provider.Message, p Policy) bool {
 	return estimateTokens(history) > int(float64(p.MaxTokens)*p.Threshold)
 }
 
+// SummaryPrefix marks the text block carrying a compression summary, so the
+// overflow fallback can recognize (and preserve) it.
+const SummaryPrefix = "[Earlier conversation summarized]\n"
+
+// SummaryMessage builds the user-role message that replaces the summarized
+// portion of the conversation.
+func SummaryMessage(summary string) provider.Message {
+	return provider.TextMessage(provider.RoleUser, SummaryPrefix+summary)
+}
+
+// IsSummary reports whether m is a compression-summary message.
+func IsSummary(m provider.Message) bool {
+	return m.Role == provider.RoleUser && len(m.Content) > 0 &&
+		m.Content[0].Type == provider.BlockText && strings.HasPrefix(m.Content[0].Text, SummaryPrefix)
+}
+
+// CompressionCache carries one run's compression summary across loop
+// iterations. The working view is append-only within a run, so a cached
+// summary stays valid as long as the region it covers is unchanged; the byte
+// fingerprint guards against same-length-different-content collisions.
+type CompressionCache struct {
+	// Covered is how many leading view messages Summary replaces.
+	Covered int
+	// CoveredBytes is the contentBytes fingerprint of the covered region.
+	CoveredBytes int
+	// Summary is the summarized text for the covered region.
+	Summary string
+}
+
 // Compressor summarizes dropped history. Implemented by an LLM caller or a
 // simple heuristic. It must NOT write to long-term memory. The ctx honours
 // cancellation: a cancelled run aborts an in-flight summarize.
@@ -73,6 +126,24 @@ type Compressor interface {
 // unpaired tool_use/tool_result. If under threshold, history is returned
 // unchanged.
 func Compress(ctx context.Context, history []provider.Message, p Policy, c Compressor) ([]provider.Message, error) {
+	return CompressWithCache(ctx, history, p, c, nil)
+}
+
+// CompressWithCache is Compress with a per-run cache. Within a run the view
+// only grows by appends, so:
+//
+//   - If the cached summary plus everything appended since still fits the full
+//     budget, it is reused verbatim — no summarizer call and a byte-stable
+//     prompt prefix across iterations (hysteresis: compression triggers at
+//     Threshold but is re-done only when the tail threatens the budget).
+//   - Otherwise the summary is extended incrementally: the summarizer receives
+//     the previous summary plus only the newly dropped rounds, never re-reading
+//     the whole dropped prefix (O(new) per call instead of O(total)).
+//
+// After summarizing, the result is rechecked against the budget; if the kept
+// rounds alone still exceed it, oldest rounds are hard-dropped (summary
+// preserved) until the view fits or nothing safe remains to drop.
+func CompressWithCache(ctx context.Context, history []provider.Message, p Policy, c Compressor, cache *CompressionCache) ([]provider.Message, error) {
 	if !ShouldCompress(history, p) {
 		return history, nil
 	}
@@ -92,18 +163,55 @@ func Compress(ctx context.Context, history []provider.Message, p Policy, c Compr
 	if keep == 0 {
 		splitIdx = len(history)
 	}
-	dropped := history[:splitIdx]
-	recent := history[splitIdx:]
 
-	summary, err := c.Summarize(ctx, dropped)
+	cacheValid := cache != nil && cache.Covered > 0 && cache.Covered <= splitIdx &&
+		cache.CoveredBytes == contentBytes(history[:cache.Covered])
+
+	// Hysteresis reuse: cached summary + everything appended since fits the
+	// full budget — send it unchanged.
+	if cacheValid {
+		candidate := make([]provider.Message, 0, len(history)-cache.Covered+1)
+		candidate = append(candidate, SummaryMessage(cache.Summary))
+		candidate = append(candidate, history[cache.Covered:]...)
+		candidate = EnsurePairing(candidate)
+		if estimateTokens(candidate) <= p.MaxTokens {
+			return candidate, nil
+		}
+	}
+
+	// Incremental extension: summarize the previous summary plus only the
+	// rounds dropped since, instead of re-reading the whole dropped prefix.
+	toSummarize := history[:splitIdx]
+	if cacheValid && cache.Covered < splitIdx {
+		toSummarize = make([]provider.Message, 0, splitIdx-cache.Covered+1)
+		toSummarize = append(toSummarize, SummaryMessage(cache.Summary))
+		toSummarize = append(toSummarize, history[cache.Covered:splitIdx]...)
+	}
+
+	summary, err := c.Summarize(ctx, toSummarize)
 	if err != nil {
 		return nil, err
 	}
+	if cache != nil {
+		cache.Covered = splitIdx
+		cache.CoveredBytes = contentBytes(history[:splitIdx])
+		cache.Summary = summary
+	}
 
-	summaryMsg := provider.TextMessage(provider.RoleUser,
-		"[Earlier conversation summarized]\n"+summary)
-	out := make([]provider.Message, 0, len(recent)+1)
-	out = append(out, summaryMsg)
-	out = append(out, recent...)
-	return EnsurePairing(out), nil
+	out := make([]provider.Message, 0, len(history)-splitIdx+1)
+	out = append(out, SummaryMessage(summary))
+	out = append(out, history[splitIdx:]...)
+	out = EnsurePairing(out)
+
+	// Post-check: the kept rounds alone may still exceed the budget (a huge
+	// recent tool result). Hard-drop oldest rounds — summary preserved — until
+	// the view fits or only one round remains.
+	for ShouldCompress(out, p) {
+		shrunk, ok := DropOldestRoundPreservingSummary(out)
+		if !ok {
+			break
+		}
+		out = shrunk
+	}
+	return out, nil
 }

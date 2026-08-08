@@ -43,6 +43,10 @@ type RunState struct {
 	// Emit is the run's event emitter, exposed so AfterRun middleware can report
 	// terminal signals (e.g. UsageMW emitting KindUsage).
 	Emit Emitter
+	// compressCache carries the run's compression summary across iterations
+	// (see CompressMW), so a summary is reused or incrementally extended
+	// instead of re-summarized from scratch every iteration.
+	compressCache *contextmgmt.CompressionCache
 }
 
 // Middleware is the marker every middleware satisfies. A concrete middleware
@@ -106,6 +110,10 @@ type ModelCall struct {
 	// granularity, so in-place block mutation is safe; nested reference values
 	// inside a block are shared and read-only): NEVER persisted.
 	View []provider.Message
+	// State is the run's bookkeeping, exposed so wrap middleware can carry
+	// run-scoped state across iterations (CompressMW's summary cache). Nil
+	// when a ModelCall is constructed outside a Run (tests).
+	State *RunState
 }
 
 // ModelResult is the assembled outcome of one provider call.
@@ -182,8 +190,12 @@ func chainTool(mw []ToolCallMiddleware, inner ToolHandler) ToolHandler {
 
 // CompressMW compresses the working view when it crosses the context budget
 // (WrapModelCall). Only the transient view is rewritten — the durable record is
-// never touched (D1). A circuit breaker stops calling a failing summarizer
-// after MaxFailures consecutive failures.
+// never touched (D1). The summary is carried across iterations via the run's
+// CompressionCache: reused while the growing tail still fits the budget
+// (byte-stable prompt prefix) and extended incrementally when it does not,
+// instead of re-summarizing the whole history every iteration. A circuit
+// breaker stops calling a failing summarizer after MaxFailures consecutive
+// failures.
 type CompressMW struct {
 	Compressor  contextmgmt.Compressor
 	Window      int     // model context window in tokens; <=0 disables
@@ -220,7 +232,14 @@ func (m *CompressMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 		budget = m.Window
 	}
 	policy := contextmgmt.Policy{MaxTokens: budget, Threshold: m.Threshold, KeepRecent: m.KeepRecent}
-	compressed, err := contextmgmt.Compress(ctx, c.View, policy, m.Compressor)
+	var cache *contextmgmt.CompressionCache
+	if c.State != nil {
+		if c.State.compressCache == nil {
+			c.State.compressCache = &contextmgmt.CompressionCache{}
+		}
+		cache = c.State.compressCache
+	}
+	compressed, err := contextmgmt.CompressWithCache(ctx, c.View, policy, m.Compressor, cache)
 	if err != nil {
 		m.failures++
 		slog.Warn("agent: compression failed; using uncompressed view", "err", err, "failures", m.failures)
@@ -255,7 +274,14 @@ func (m *OverflowMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 			// the run rather than duplicate output.
 			break
 		}
-		shrunk, ok := contextmgmt.DropOldestRound(c.View)
+		// Preserve a leading compression summary: it is the only record of the
+		// already-dropped history, so dropping it first would silently erase
+		// the oldest context while keeping verbatim what could be re-dropped.
+		// Only when nothing else remains does the plain drop take the summary.
+		shrunk, ok := contextmgmt.DropOldestRoundPreservingSummary(c.View)
+		if !ok {
+			shrunk, ok = contextmgmt.DropOldestRound(c.View)
+		}
 		if !ok {
 			break // nothing safe left to drop
 		}

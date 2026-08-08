@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/toolruntime"
 )
@@ -115,6 +116,44 @@ func TestOverflowMWDropsRoundAndRetries(t *testing.T) {
 		if sizes[i] >= sizes[i-1] {
 			t.Errorf("view should shrink between retries: %v", sizes)
 		}
+	}
+}
+
+func TestOverflowMWPreservesSummaryOnRetry(t *testing.T) {
+	mw := &OverflowMW{MaxRetries: 3}
+	calls := 0
+	var views [][]provider.Message
+	handler := func(_ context.Context, c *ModelCall) (ModelResult, error) {
+		calls++
+		views = append(views, append([]provider.Message{}, c.View...))
+		if calls < 3 {
+			return ModelResult{}, &provider.ContextOverflowError{StatusCode: 413, Body: "too large"}
+		}
+		return ModelResult{Assistant: provider.TextMessage(provider.RoleAssistant, "ok")}, nil
+	}
+	// A compressed view: summary + 3 verbatim rounds. The retries must shrink
+	// by dropping the oldest REAL round, never the summary.
+	call := &ModelCall{View: []provider.Message{
+		contextmgmt.SummaryMessage("old context"),
+		provider.TextMessage(provider.RoleUser, strings.Repeat("a", 200)),
+		provider.TextMessage(provider.RoleUser, strings.Repeat("b", 200)),
+		provider.TextMessage(provider.RoleUser, strings.Repeat("c", 200)),
+	}}
+	call.Request.Messages = call.View
+	if _, err := mw.WrapModelCall(context.Background(), call, handler); err != nil {
+		t.Fatalf("overflow should be retried to success: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("handler called %d times, want 3", calls)
+	}
+	for i, v := range views {
+		if len(v) == 0 || !contextmgmt.IsSummary(v[0]) {
+			t.Errorf("attempt %d: summary must survive overflow retries", i)
+		}
+	}
+	if len(views[1]) != 3 || len(views[2]) != 2 {
+		t.Errorf("view sizes = %d/%d/%d, want 4/3/2 (one real round dropped per retry)",
+			len(views[0]), len(views[1]), len(views[2]))
 	}
 }
 

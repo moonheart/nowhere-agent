@@ -119,6 +119,47 @@ func TestCompressKeepsRecentRoundVerbatim(t *testing.T) {
 	}
 }
 
+func TestDropOldestRoundPreservingSummaryKeepsSummary(t *testing.T) {
+	msgs := []provider.Message{
+		SummaryMessage("old stuff"),
+		provider.TextMessage(provider.RoleUser, "u1"),
+		provider.TextMessage(provider.RoleAssistant, "a1"),
+		provider.TextMessage(provider.RoleUser, "u2"),
+	}
+	out, ok := DropOldestRoundPreservingSummary(msgs)
+	if !ok {
+		t.Fatal("should drop a round")
+	}
+	if !IsSummary(out[0]) {
+		t.Error("summary must be preserved")
+	}
+	if len(out) != 3 {
+		t.Errorf("out = %d msgs, want 3 (summary kept, oldest real round dropped)", len(out))
+	}
+	for _, m := range out {
+		for _, b := range m.Content {
+			if b.Text == "u1" {
+				t.Error("the oldest real round should have been dropped")
+			}
+		}
+	}
+}
+
+func TestDropOldestRoundPreservingSummaryRefusesAtSummaryPlusOne(t *testing.T) {
+	msgs := []provider.Message{
+		SummaryMessage("old stuff"),
+		provider.TextMessage(provider.RoleUser, "u2"),
+	}
+	if _, ok := DropOldestRoundPreservingSummary(msgs); ok {
+		t.Error("must refuse to drop the summary when it is the last shrinkable context")
+	}
+	// Plain DropOldestRound remains the last-resort escape.
+	out, ok := DropOldestRound(msgs)
+	if !ok || len(out) != 1 || IsSummary(out[0]) {
+		t.Errorf("last-resort drop should take the summary: ok=%v out=%v", ok, out)
+	}
+}
+
 // assertPaired fails the test if any tool_use lacks a result or vice versa.
 func assertPaired(t *testing.T, msgs []provider.Message) {
 	t.Helper()
