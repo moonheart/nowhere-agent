@@ -356,7 +356,11 @@ function OwnerPicker({
       <ComboboxInput
         placeholder={scope === "user" ? "Search accounts…" : "Search teams…"}
         showClear
-        className="w-80"
+        // The trigger/clear addon's default py-1.5 (24px button + 12px padding)
+        // makes it 36px — taller than the h-8 group, so the field hung 4px below
+        // the scope select beside it. Strip that vertical padding and clip the
+        // overflow so the control is exactly h-8 like its row-mates.
+        className="w-80 overflow-hidden [&_[data-slot=input-group-addon]]:py-0"
       />
       <ComboboxContent>
         <ComboboxPrimitive.Status className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground data-empty:hidden">
