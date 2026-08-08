@@ -291,7 +291,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	// work — the loop keeps the tail it produces paired by construction (every
 	// tool batch is answered by recordToolResults on every path that continues
 	// or ends the run: dispatch, pre-dispatch cancel, truncation, unreported
-	// stop, interrupt-emit failure), so
+	// stop, early-end stop, interrupt-emit failure), so
 	// the per-iteration rebuild only re-copied every block without ever
 	// changing anything (O(iterations × messages) over a long agentic run).
 	base := contextmgmt.EnsurePairing(append(append([]provider.Message{}, history...), state.Produced...))
@@ -350,6 +350,20 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			state.Usage.CacheReadTokens += res.Usage.CacheReadTokens
 			state.Usage.CacheWriteTokens += res.Usage.CacheWriteTokens
 		}
+		// Empty-response guard: a turn with no content blocks and no tool calls
+		// carries nothing — no answer to show, no call to answer. Persisting it
+		// would write an assistant message with empty content, which
+		// OpenAI-compatible gateways reject with a 400 on the next send (the
+		// up-front EnsurePairing repair patches the send view, but the empty row
+		// stays durable). Fail loudly instead, same philosophy as the stop-reason
+		// guards below.
+		if len(res.Calls) == 0 && len(res.Assistant.Content) == 0 {
+			emptyErr := fmt.Errorf("provider returned an empty response: no content, no tool calls (stop reason: %s)", stopReasonText(res.Stop))
+			l.emitStepFinish(ctx, emit, res, "error", false)
+			l.runAfterRun(ctx, state)
+			_ = emit.Emit(ctx, KindError, emptyErr.Error())
+			return state.Produced, emptyErr
+		}
 		state.Produced = append(state.Produced, res.Assistant)
 		// Expose the assembled assistant message for full-block persistence
 		// (persist-raw-messages), paired with the usage of the LLM call that
@@ -371,11 +385,14 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			}
 		}
 
-		// No tool calls → the turn is final. But distinguish a natural finish from
-		// two failure shapes: a max_tokens truncation and an unreported stop reason
-		// (a cut-off answer or an unverifiable one, not a clean completion), so
-		// surface both as errors instead of a silent done (capability-gap L1).
-		// Without this the loop treats truncation as success.
+		// No tool calls → the turn is final ONLY on a natural end_turn. Every
+		// other stop reason is a failure shape: a max_tokens truncation, an
+		// unreported stop reason (a cut-off answer or an unverifiable one), or
+		// any other early end — stop_sequence, content_filter, pause_turn,
+		// refusal, provider passthroughs — whose output likewise ended before
+		// the model chose to stop. Surface all of them as errors instead of a
+		// silent done (capability-gap L1): without this the loop treats
+		// truncation as success.
 		if len(res.Calls) == 0 {
 			if res.Stop == provider.StopMaxTokens {
 				truncErr := fmt.Errorf("response truncated: hit %s", maxTokensLimitText(l.config.MaxTokens))
@@ -392,6 +409,19 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				// possibly cut-off answer off as complete. Both shipped
 				// adapters always report a reason.
 				stopErr := fmt.Errorf("provider closed the stream without a finish reason; the response may be incomplete")
+				l.emitStepFinish(ctx, emit, res, "error", false)
+				l.runAfterRun(ctx, state)
+				_ = emit.Emit(ctx, KindError, stopErr.Error())
+				return state.Produced, stopErr
+			}
+			if res.Stop != provider.StopEndTurn {
+				// Any other reported reason means the output ended early
+				// (stop_sequence truncates at the stop token; content_filter
+				// cuts the answer; pause_turn/refusal are not completions).
+				// Treating it as done would pass a cut-off answer off as
+				// complete — the same silent-truncation class the two guards
+				// above exist to catch.
+				stopErr := fmt.Errorf("response ended early (stop reason: %s); the output may be incomplete", res.Stop)
 				l.emitStepFinish(ctx, emit, res, "error", false)
 				l.runAfterRun(ctx, state)
 				_ = emit.Emit(ctx, KindError, stopErr.Error())
@@ -467,6 +497,23 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			slog.Warn("agent: provider reported no stop reason for a tool batch; failing the batch for re-issue",
 				"iter", iter, "calls", len(res.Calls))
 			l.recordToolResults(ctx, emit, state, res.Calls, unknownStopCallResults(res.Calls))
+			l.emitStepFinish(ctx, emit, res, "error", true)
+			continue
+		}
+
+		// Any other early-end reason with tool calls (stop_sequence,
+		// content_filter, provider passthroughs) is the same truncation class as
+		// the two guards above: the message ended before the model chose to
+		// stop, so this batch may be only part of the plan — a cut right after a
+		// complete tool_use block leaves arguments that parse cleanly, and only
+		// the stop reason reveals the turn was truncated. Fail every call for
+		// re-issue rather than executing a possibly half-written plan.
+		// Tool-call turns legitimately report StopToolUse (or StopEndTurn from
+		// providers that don't distinguish), so those two pass to dispatch.
+		if res.Stop != provider.StopEndTurn && res.Stop != provider.StopToolUse {
+			slog.Warn("agent: tool batch ended on an early-end stop reason; failing the batch for re-issue",
+				"iter", iter, "calls", len(res.Calls), "stop", res.Stop)
+			l.recordToolResults(ctx, emit, state, res.Calls, earlyStopCallResults(res.Calls, res.Stop))
 			l.emitStepFinish(ctx, emit, res, "error", true)
 			continue
 		}
@@ -1068,6 +1115,30 @@ func unknownStopCallResults(calls []toolruntime.Call) []toolruntime.Result {
 		}
 	}
 	return results
+}
+
+// earlyStopCallResults fails every call in a batch whose message ended on an
+// early-end stop reason (stop_sequence, content_filter, provider passthroughs):
+// the same truncation class as max_tokens — the batch may be only part of the
+// plan, so re-issue, don't dispatch.
+func earlyStopCallResults(calls []toolruntime.Call, stop provider.StopReason) []toolruntime.Result {
+	content := fmt.Sprintf(
+		"not executed: the response ended early (stop reason: %s) while these tool calls were being written, so the batch may be incomplete. Re-issue the call with complete arguments.",
+		stopReasonText(stop))
+	results := make([]toolruntime.Result, len(calls))
+	for i := range results {
+		results[i] = toolruntime.Result{Content: content, IsError: true}
+	}
+	return results
+}
+
+// stopReasonText renders a stop reason for error messages, naming the
+// no-reason case explicitly so "stop reason: " never reads as a blank.
+func stopReasonText(stop provider.StopReason) string {
+	if stop == provider.StopUnknown {
+		return "none reported"
+	}
+	return string(stop)
 }
 
 // interruptFailedCallResults answers every call in a gated batch whose

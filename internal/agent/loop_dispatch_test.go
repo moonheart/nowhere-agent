@@ -355,6 +355,50 @@ func TestLoopTruncatedToolBatchNotDispatched(t *testing.T) {
 	}
 }
 
+// TestLoopEarlyStopToolBatchNotDispatched extends the truncation guard to every
+// early-end stop reason: a tool batch whose message ended on stop_sequence (or
+// content_filter, or a provider passthrough) ended before the model chose to
+// stop, so the batch may be only part of the plan — every call fails for
+// re-issue instead of dispatching, exactly like the max_tokens cut.
+func TestLoopEarlyStopToolBatchNotDispatched(t *testing.T) {
+	called := false
+	p := &scriptProvider{script: [][]provider.Event{
+		multiToolUseResponse(provider.StopStopSequence, scriptCall{id: "tu1", name: "danger", args: `{"path":"/etc"}`}),
+		textResponse("re-issued and finished"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(riskTool{name: "danger", risk: toolruntime.RiskReadOnly, called: &called})
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 4096})
+
+	produced, err := loop.Run(context.Background(), nil, emit)
+	if err != nil {
+		t.Fatalf("an early-ended batch is recoverable, not fatal: %v", err)
+	}
+	if called {
+		t.Error("a tool call from an early-ended message must not execute")
+	}
+	blocks := toolResultBlocks(t, produced)
+	if len(blocks) != 1 {
+		t.Fatalf("got %d tool_result blocks, want 1 — every tool_use needs a paired result", len(blocks))
+	}
+	if !blocks[0].IsError {
+		t.Error("an early-ended call's result must be an error")
+	}
+	if !strings.Contains(blocks[0].ToolContent, "stop_sequence") {
+		t.Errorf("result = %q, want it to name the early-end stop reason as the cause", blocks[0].ToolContent)
+	}
+	if p.calls != 2 {
+		t.Errorf("provider calls = %d, want 2 — the model must get a chance to re-issue", p.calls)
+	}
+	if emit.count(KindDone) != 1 {
+		t.Errorf("KindDone = %d, want 1", emit.count(KindDone))
+	}
+	if emit.count(KindError) != 0 {
+		t.Errorf("KindError = %d, want 0 — a re-issuable early end is not a run failure", emit.count(KindError))
+	}
+}
+
 // TestLoopTruncatedBatchSkipsInteractionGate pins the ordering that makes the
 // guard safe: the truncation check runs BEFORE the interaction gate. Otherwise a
 // truncated ask_user or client-side tool call would suspend the run — parking a
