@@ -414,6 +414,31 @@ func TestLoopCancelBetweenMessageAndBatch(t *testing.T) {
 	}
 }
 
+func TestLoopCancelOnFinalAnswerReportsCancelled(t *testing.T) {
+	// Cancel lands after the final assistant message (no tool calls) is
+	// persisted but before the terminal done frame. The run must report
+	// cancelled — symmetric with the pre-dispatch cancel guard — not done.
+	p := &scriptProvider{script: [][]provider.Event{textResponse("final answer")}}
+	reg := toolruntime.NewRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	emit := &cancelOnMessageEmitter{cancel: cancel}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(ctx, nil, emit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v want context.Canceled", err)
+	}
+	if emit.count(KindCancelled) != 1 {
+		t.Errorf("expected 1 cancelled event, got %d", emit.count(KindCancelled))
+	}
+	if emit.count(KindDone) != 0 {
+		t.Error("a run cancelled before its terminal frame must not emit done")
+	}
+	if len(produced) != 1 || produced[0].Content[0].Text != "final answer" {
+		t.Errorf("produced = %+v, want the completed assistant message (it is durable)", produced)
+	}
+}
+
 // cancelOnMessageUsageEmitter cancels the run ctx when the assistant message
 // is emitted, and captures the terminal KindUsage payload.
 type cancelOnMessageUsageEmitter struct {
