@@ -414,8 +414,100 @@ func TestLoopCancelBetweenMessageAndBatch(t *testing.T) {
 	}
 }
 
-func TestLoopCancelBeforeStream(t *testing.T) {	// A pre-cancelled context must abort the loop at the iteration guard and
-	// emit a cancelled event, not a done/error.
+// cancelOnMessageUsageEmitter cancels the run ctx when the assistant message
+// is emitted, and captures the terminal KindUsage payload.
+type cancelOnMessageUsageEmitter struct {
+	usageEmitter
+	cancel context.CancelFunc
+}
+
+func (e *cancelOnMessageUsageEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if kind == KindMessage {
+		e.cancel()
+	}
+	return e.usageEmitter.Emit(ctx, kind, payload)
+}
+
+func TestLoopCancelBetweenMessageAndBatchReportsUsage(t *testing.T) {
+	// A cancelled run still consumed tokens: the usage accumulated up to the
+	// cancellation must be reported (KindUsage → the runs-row usage record),
+	// not silently dropped with the run.
+	p := &scriptProvider{script: [][]provider.Event{toolUseResponseUsage("tu1", "echo", `{}`, 12, 5)}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	ctx, cancel := context.WithCancel(context.Background())
+	emit := &cancelOnMessageUsageEmitter{cancel: cancel}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	_, err := loop.Run(ctx, nil, emit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v want context.Canceled", err)
+	}
+	if emit.count(KindUsage) != 1 {
+		t.Fatalf("KindUsage count = %d, want 1 (cancelled runs still report usage)", emit.count(KindUsage))
+	}
+	if emit.usage == nil || emit.usage.InputTokens != 12 || emit.usage.OutputTokens != 5 {
+		t.Errorf("usage = %+v, want {12 5}", emit.usage)
+	}
+}
+
+// guardedEmitter mimics the registry emitter's write path: an emit on a
+// cancelled ctx is dropped (its ctx.Err() guard), so a persistence emit must
+// arrive on a live ctx to land.
+type guardedEmitter struct {
+	memEmitter
+}
+
+func (e *guardedEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return e.memEmitter.Emit(ctx, kind, payload)
+}
+
+// cancelBeforeAssistantEmitter cancels the run ctx the instant the assistant
+// KindMessage arrives — BEFORE the guarded write path checks the ctx —
+// simulating a cancel that races into the window between the provider stream
+// ending and the assistant message being persisted.
+type cancelBeforeAssistantEmitter struct {
+	guardedEmitter
+	cancel context.CancelFunc
+}
+
+func (e *cancelBeforeAssistantEmitter) Emit(ctx context.Context, kind EventKind, payload any) error {
+	if kind == KindMessage {
+		if _, ok := payload.(MessageWithUsage); ok {
+			e.cancel()
+		}
+	}
+	return e.guardedEmitter.Emit(ctx, kind, payload)
+}
+
+func TestLoopCancelRacingAssistantPersistKeepsPairing(t *testing.T) {
+	// Regression: the assistant KindMessage used to go out on the live ctx, so
+	// a cancel landing in this window dropped it while the batch's synthetic
+	// cancelled tool_results (detached ctx) still persisted — leaving orphaned
+	// tool_results in the durable record. Both must now land.
+	p := &scriptProvider{script: [][]provider.Event{toolUseResponse("tu1", "echo", `{}`)}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	ctx, cancel := context.WithCancel(context.Background())
+	emit := &cancelBeforeAssistantEmitter{cancel: cancel}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(ctx, nil, emit)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v want context.Canceled", err)
+	}
+	if emit.count(KindMessage) != 2 {
+		t.Fatalf("persisted messages = %d, want 2 (assistant tool_use + tool_result); a dropped assistant message orphans the tool_result", emit.count(KindMessage))
+	}
+	if len(produced) != 2 {
+		t.Fatalf("produced %d messages, want [assistant tool_use, tool_result]", len(produced))
+	}
+}
+
+func TestLoopCancelBeforeStream(t *testing.T) {	// A pre-cancelled context must abort the loop at the iteration guard and	// emit a cancelled event, not a done/error.
 	p := &scriptProvider{script: [][]provider.Event{textResponse("never")}}
 	reg := toolruntime.NewRegistry()
 	emit := &memEmitter{}

@@ -288,6 +288,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		state.Iteration = iter
 		// Honour cancellation between iterations (e.g. after a tool batch).
 		if err := ctx.Err(); err != nil {
+			l.reportTerminal(ctx, state)
 			_ = emit.Emit(ctx, KindCancelled, nil)
 			return state.Produced, err
 		}
@@ -313,6 +314,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		if err != nil {
 			if ctx.Err() != nil {
 				slog.Info("agent: run cancelled", "iter", iter, "ctx_err", ctx.Err(), "attempt_err", err)
+				l.reportTerminal(ctx, state)
 				_ = emit.Emit(ctx, KindCancelled, nil)
 				return state.Produced, ctx.Err()
 			}
@@ -332,7 +334,14 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// (persist-raw-messages), paired with the usage of the LLM call that
 		// produced it. Emit failures here don't abort the run — the persistence
 		// listener drops them — so ignore the error.
-		_ = emit.Emit(ctx, KindMessage, MessageWithUsage{Message: res.Assistant, Usage: res.Usage})
+		//
+		// This emit is commit-class: once the model's reply is assembled, the
+		// tool_use blocks it carries WILL be answered (a cancel before the batch
+		// records synthetic cancelled results — see the guard below), so the
+		// assistant message must land too or the durable record keeps orphaned
+		// tool_results. Detach from cancellation, symmetric with
+		// recordToolResults.
+		_ = emit.Emit(context.WithoutCancel(ctx), KindMessage, MessageWithUsage{Message: res.Assistant, Usage: res.Usage})
 
 		// Node hooks: observation after the model call (reverse order).
 		for i := len(l.afterModel) - 1; i >= 0; i-- {
@@ -370,6 +379,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// durable scan) see the dangling call.
 		if err := ctx.Err(); err != nil {
 			l.recordToolResults(ctx, emit, state, res.Calls, cancelledCallResults(res.Calls))
+			l.reportTerminal(ctx, state)
 			_ = emit.Emit(ctx, KindCancelled, nil)
 			return state.Produced, err
 		}
@@ -443,6 +453,14 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	l.runAfterRun(ctx, state)
 	_ = emit.Emit(ctx, KindError, err.Error())
 	return state.Produced, err
+}
+
+// reportTerminal fires AfterRun hooks on the cancellation paths, detached from
+// the cancelled ctx: terminal signals (UsageMW's KindUsage → the runs-row usage
+// record) are commit-class — a cancelled run still consumed tokens, and the
+// emitter's ctx guard would silently drop a usage report sent on the dead ctx.
+func (l *Loop) reportTerminal(ctx context.Context, state *RunState) {
+	l.runAfterRun(context.WithoutCancel(ctx), state)
 }
 
 // runAfterRun fires AfterRun hooks once (reverse registration order).
