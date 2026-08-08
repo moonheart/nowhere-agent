@@ -32,6 +32,11 @@ type SuspendedBatch struct {
 // no suspended-batch snapshot.
 var ErrNoSuspendedBatch = errors.New("no suspended batch for run")
 
+// ErrBatchAlreadyFolded is returned by a fold commit that lost the race to a
+// concurrent fold of the same batch. Callers treat it as idempotent success:
+// the fold's tool_result message is already persisted.
+var ErrBatchAlreadyFolded = errors.New("batch already folded")
+
 // FoldCommitter is the optional store capability for committing a fold — the
 // tool_result message plus the folded marker — atomically. PGStore implements
 // it; stores that don't (MemStore) use the registry's sequential fallback.
@@ -197,6 +202,23 @@ func (s *PGStore) CommitFold(ctx context.Context, runID string, msg StoredMessag
 		return StoredMessage{}, fmt.Errorf("begin fold commit: %w", err)
 	}
 	defer tx.Rollback()
+	// Claim the fold inside the transaction: a concurrent fold of the same
+	// batch (two resume retries racing) must converge to ONE commit, not two
+	// tool executions' messages. The row lock serializes the contenders; the
+	// loser sees folded_seq set and reports ErrBatchAlreadyFolded.
+	var foldedSeq sql.NullInt64
+	err = tx.QueryRowContext(ctx, `
+		SELECT folded_seq FROM suspended_batches WHERE run_id = $1 FOR UPDATE`,
+		runID).Scan(&foldedSeq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return StoredMessage{}, ErrNoSuspendedBatch
+	}
+	if err != nil {
+		return StoredMessage{}, fmt.Errorf("lock suspended batch: %w", err)
+	}
+	if foldedSeq.Valid {
+		return StoredMessage{}, ErrBatchAlreadyFolded
+	}
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO messages (session_id, run_id, seq, role, content)
 		VALUES ($1, $2,
@@ -208,14 +230,10 @@ func (s *PGStore) CommitFold(ctx context.Context, runID string, msg StoredMessag
 	if err != nil {
 		return StoredMessage{}, fmt.Errorf("append fold message: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE suspended_batches SET folded_seq = $2 WHERE run_id = $1`,
-		runID, msg.Seq)
-	if err != nil {
+		runID, msg.Seq); err != nil {
 		return StoredMessage{}, fmt.Errorf("mark batch folded: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return StoredMessage{}, ErrNoSuspendedBatch
 	}
 	if err := tx.Commit(); err != nil {
 		return StoredMessage{}, fmt.Errorf("commit fold: %w", err)

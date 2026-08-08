@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -423,6 +424,15 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 	}
 	if fc, ok := rg.rt.store.(FoldCommitter); ok {
 		if _, err := fc.CommitFold(context.Background(), runID, storedMsg); err != nil {
+			if errors.Is(err, ErrBatchAlreadyFolded) {
+				// A concurrent fold of this batch committed first; treat as
+				// idempotent success (the tool_result message is persisted).
+				stored, rerr := rg.msgStore.MessagesFor(ctx, sessionID)
+				if rerr != nil {
+					return nil, fmt.Errorf("rebuild history after concurrent fold: %w", rerr)
+				}
+				return StoredMessagesToProvider(stored), nil
+			}
 			return nil, fmt.Errorf("commit fold: %w", err)
 		}
 	} else {
@@ -538,6 +548,26 @@ func (rg *RunRegistry) PendingApprovalForSession(ctx context.Context, sessionID 
 // reloading client re-renders every card from this list, not just the head.
 func (rg *RunRegistry) PendingApprovalsForSession(ctx context.Context, sessionID string) ([]Interaction, error) {
 	return rg.rt.store.PendingApprovalsForSession(ctx, sessionID)
+}
+
+// BatchFoldState reports the recovery state of a run's suspended batch for the
+// resume endpoint: whether the fold committed, and how many of the batch's
+// interactions are still pending. The combination distinguishes "already
+// decided AND folded" (a plain duplicate verdict — reject it) from "decided
+// but NOT folded" (a crash/failure between decision and fold — retriable).
+func (rg *RunRegistry) BatchFoldState(ctx context.Context, runID string) (folded bool, pending int, err error) {
+	snap, err := rg.rt.store.SuspendedBatchForRun(ctx, runID)
+	if err != nil && !errors.Is(err, ErrNoSuspendedBatch) {
+		return false, 0, err
+	}
+	// A missing snapshot (pre-snapshot rows) reads as unfolded: the fold will
+	// fail loudly downstream, which is the honest answer.
+	folded = err == nil && snap.FoldedSeq != nil
+	pend, err := rg.rt.store.PendingApprovalsForRun(ctx, runID)
+	if err != nil {
+		return false, 0, err
+	}
+	return folded, len(pend), nil
 }
 
 // append persists an event through the Runtime (which fans it out to subscribers

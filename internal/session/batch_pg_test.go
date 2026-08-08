@@ -126,3 +126,34 @@ func TestPGCommitFoldAtomic(t *testing.T) {
 		t.Fatalf("after failed commit MessagesFor = %+v err %v, want only the first fold message", msgs, err)
 	}
 }
+
+// TestPGCommitFoldConcurrentLoser: a second fold commit for an already-folded
+// batch reports ErrBatchAlreadyFolded (idempotent-success sentinel) and writes
+// no duplicate message — two racing resume retries converge to ONE commit.
+func TestPGCommitFoldConcurrentLoser(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ms := NewPGMessageStore(db)
+	ctx := context.Background()
+	sessID, runID := setupMessageSession(t, ctx, db, store)
+
+	if _, err := store.CreateInteractionBatch(ctx, SuspendedBatch{RunID: runID, SessionID: sessID, ToolCallIDs: []string{"tu1"}}, Interaction{
+		RunID: runID, SessionID: sessID, ToolCallID: "tu1", ToolName: "danger", Kind: KindToolApproval,
+	}); err != nil {
+		t.Fatalf("CreateInteractionBatch: %v", err)
+	}
+	foldMsg := StoredMessage{
+		SessionID: sessID, RunID: runID, Role: provider.RoleUser,
+		Content: []provider.Block{{Type: provider.BlockToolResult, ToolResultID: "tu1", ToolContent: "done"}},
+	}
+	if _, err := store.CommitFold(ctx, runID, foldMsg); err != nil {
+		t.Fatalf("first CommitFold: %v", err)
+	}
+	if _, err := store.CommitFold(ctx, runID, foldMsg); !errors.Is(err, ErrBatchAlreadyFolded) {
+		t.Fatalf("second CommitFold = %v, want ErrBatchAlreadyFolded", err)
+	}
+	msgs, err := ms.MessagesFor(ctx, sessID)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("MessagesFor = %+v err %v, want exactly one fold message (no duplicate)", msgs, err)
+	}
+}

@@ -20,6 +20,7 @@
 - [x] 3.2 Delete `suspendedToolUses` and its call sites/tests
 - [x] 3.3 Idempotent fold: `folded_seq` set → skip execution, rebuild and return history; otherwise execute/dispatch, then append tool_result message + `MarkBatchFolded` in one transaction
 - [x] 3.4 Regression tests for the original race: new run appends tool_use messages while interaction pending → resume folds the OLD batch correctly; new run's own calls are never re-dispatched; mismatched snapshot errors; fold retry after simulated crash does not re-execute
+- [x] 3.5 Resume-endpoint recovery: a retried verdict after a fold failure (decision committed, fold not) must reach the idempotent fold, not 409 — `BatchFoldState` distinguishes decided-not-folded (recover) from decided-and-folded (keep 409); `CommitFold` claims the batch `FOR UPDATE` so concurrent folds converge to one commit (`ErrBatchAlreadyFolded` = idempotent success)
 
 ## 4. Submission gate
 

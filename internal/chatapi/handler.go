@@ -444,13 +444,29 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	}
 
 	ap2, complete, err := h.registry.RecordDecision(r.Context(), av.ApprovalID, av.Approved, av.Answer)
-	if err != nil {
-		switch {
-		case errors.Is(err, session.ErrNoPendingApproval):
-			http.Error(w, `{"error":"approval already decided"}`, http.StatusConflict)
-		default:
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+	if errors.Is(err, session.ErrNoPendingApproval) {
+		// The row exists (ApprovalByID resolved it above) but is already
+		// decided. Two cases: (a) a plain duplicate verdict — the batch folded
+		// already, keep the 409; (b) the decision committed but the fold did
+		// NOT (a failure/crash between RecordDecision and the fold commit), in
+		// which case a retry must fall through to the idempotent fold rather
+		// than deadlocking on 409 — otherwise the approved call's side effects
+		// never run and its tool_use dangles forever.
+		ap2 = ap
+		folded, pending, serr := h.registry.BatchFoldState(r.Context(), ap.RunID)
+		if serr != nil {
+			http.Error(w, `{"error":"`+serr.Error()+`"}`, http.StatusInternalServerError)
+			return
 		}
+		if folded {
+			http.Error(w, `{"error":"approval already decided"}`, http.StatusConflict)
+			return
+		}
+		complete = pending == 0
+		err = nil
+	}
+	if err != nil {
+		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
 

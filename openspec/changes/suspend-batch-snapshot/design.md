@@ -65,6 +65,7 @@ True atomicity of "record final decision + persist tool_result message" is impos
 - After executing/dispatching all calls, commit in ONE transaction: append the tool_result message + set `suspended_batches.folded_seq`.
 - `FoldBatch` first checks `folded_seq`: already folded → skip execution entirely, rebuild and return history (idempotent resume retry).
 - Crash between final decision and fold commit → the next resume attempt re-folds. Approved tools may re-execute: at-least-once, identical to LangGraph's node-replay semantics; documented for tool authors.
+- The resume endpoint must not strand this recovery: `RecordDecision` on an already-decided row returns ErrNoPendingApproval, and a naive 409 there would deadlock (the retry never reaches the idempotent fold). serveChatResume therefore consults `BatchFoldState`: decided-but-not-folded falls through to the fold; decided-AND-folded keeps the 409. Concurrent fold retries converge via a `SELECT ... FOR UPDATE` claim on the batch row — the loser gets ErrBatchAlreadyFolded and rebuilds history (idempotent success).
 
 ### D4: Pending-interaction submission gate (durable)
 
