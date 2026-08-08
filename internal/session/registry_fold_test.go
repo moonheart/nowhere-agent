@@ -309,6 +309,78 @@ func TestFoldBatchHardDeniedSiblingNeverExecutes(t *testing.T) {
 	}
 }
 
+// ctxSensitiveTool fails when its context is cancelled, so a test can prove
+// the fold executed it on a live (detached) context.
+type ctxSensitiveTool struct {
+	name string
+	runs *int
+}
+
+func (c ctxSensitiveTool) Name() string           { return c.name }
+func (c ctxSensitiveTool) Description() string    { return "ctx-sensitive" }
+func (c ctxSensitiveTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (c ctxSensitiveTool) Risk() toolruntime.Risk { return toolruntime.RiskExternalWrite }
+func (c ctxSensitiveTool) Timeout() time.Duration { return time.Second }
+func (c ctxSensitiveTool) Call(ctx context.Context, _ map[string]any) (toolruntime.Result, error) {
+	if err := ctx.Err(); err != nil {
+		return toolruntime.Result{Content: "cancelled mid-fold", IsError: true}, nil
+	}
+	*c.runs++
+	return toolruntime.Result{Content: c.name + " done"}, nil
+}
+
+// TestFoldBatchCompletesDespiteCancelledCaller: the fold is the batch's
+// durable completion, not request-scoped work — a client that disconnects
+// right after POSTing the final verdict (cancelling the request ctx) must not
+// abort tool execution or the commit. The decision already committed and a
+// decided row renders no pending card, so nothing would ever retry.
+func TestFoldBatchCompletesDespiteCancelledCaller(t *testing.T) {
+	rg, ms, sess := newDecideRegistry(t)
+	ctx := context.Background()
+	run, _ := rg.rt.store.CreateRun(ctx, sess.ID, 1)
+	_, _ = ms.AppendMessage(ctx, StoredMessage{
+		SessionID: sess.ID, RunID: run.ID, Role: provider.RoleUser,
+		Content: []provider.Block{{Type: provider.BlockText, Text: "turn"}},
+	})
+	_, _ = ms.AppendMessage(ctx, StoredMessage{
+		SessionID: sess.ID, RunID: run.ID, Role: provider.RoleAssistant,
+		Content: []provider.Block{
+			{Type: provider.BlockToolUse, ToolUseID: "tu_g", ToolName: "danger", ToolInput: map[string]any{}},
+			{Type: provider.BlockToolUse, ToolUseID: "tu_p", ToolName: "load_skill", ToolInput: map[string]any{}},
+		},
+	})
+	ap := createSuspendedInteraction(t, rg, []string{"tu_g", "tu_p"}, Interaction{
+		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu_g", ToolName: "danger", Kind: KindToolApproval,
+	})
+	if _, _, err := rg.RecordDecision(ctx, ap.ID, true, nil); err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+
+	dangerRuns, readRuns := 0, 0
+	reg := toolruntime.NewRegistry()
+	reg.Register(ctxSensitiveTool{name: "danger", runs: &dangerRuns})
+	reg.Register(ctxSensitiveTool{name: "load_skill", runs: &readRuns})
+
+	// The "client disconnected" fold: every caller-facing ctx is already
+	// cancelled, yet the fold must run to completion and persist.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	history, err := rg.FoldBatch(cancelled, sess.ID, run.ID, reg, nil)
+	if err != nil {
+		t.Fatalf("FoldBatch with a cancelled caller ctx: %v", err)
+	}
+	if dangerRuns != 1 || readRuns != 1 {
+		t.Errorf("runs = danger:%d load_skill:%d, want 1 each — tools must see a live, detached ctx", dangerRuns, readRuns)
+	}
+	if len(history) == 0 {
+		t.Error("history empty — the fold must still rebuild and return it")
+	}
+	folded, _, err := rg.BatchFoldState(ctx, run.ID)
+	if err != nil || !folded {
+		t.Errorf("batch folded = %v, err %v — the commit must land despite the cancelled caller", folded, err)
+	}
+}
+
 // TestFoldBatchIdempotentRetry: a retried resume after a committed fold
 // re-executes nothing and persists no duplicate.
 func TestFoldBatchIdempotentRetry(t *testing.T) {

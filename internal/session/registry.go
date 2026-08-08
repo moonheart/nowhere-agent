@@ -332,6 +332,16 @@ type ToolGate func(ctx context.Context, tool toolruntime.Tool) (deny bool, reaso
 // ask_user / skipped). gate re-authorizes the un-gated sibling calls (see the
 // dispatch branch below); pass nil only when the caller has no policy.
 func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, tools *toolruntime.Registry, gate ToolGate) ([]provider.Message, error) {
+	// The fold is the suspended batch's durable completion — a commit-class
+	// operation, not request-scoped work. Detach it from the caller's
+	// cancellation: a client disconnect after POSTing the final verdict must
+	// not abort tool execution halfway and strand the batch decided-but-
+	// unfolded (the decision already committed; there is no automatic retry —
+	// a decided row renders no pending card). This mirrors the run model,
+	// where a run's ctx derives from context.Background, not the submitter's
+	// connection. Per-tool timeouts still bound each call; ctx VALUES (the
+	// session id the execution gate resolves its mode from) are preserved.
+	ctx = context.WithoutCancel(ctx)
 	snap, err := rg.rt.store.SuspendedBatchForRun(ctx, runID)
 	if err != nil {
 		return nil, fmt.Errorf("fold batch: %w", err)
