@@ -24,7 +24,7 @@
 
 > **P0 实施进度(2026-08-08 起,进行中):**
 > - [x] **审计日志(§2.2)** —— 已落地:migration `000022` + `internal/audit` + 认证/管理/凭据埋点 + `GET /api/admin/audit`。
-> - [ ] **密钥静态加密(§2.10/§2.5)** —— 待做。
+> - [x] **密钥静态加密(§2.10/§2.5)** —— 已落地:`internal/secrets`(AES-256-GCM)+ `SECRETS_MASTER_KEY` + 渐进迁移 + 轮换。
 > - [ ] **可观测性 metrics + request-id(§2.3)** —— 待做。
 
 > 标记说明:✅ 已实现 / ◐ 已实现但未接线或仅部分 / ○ 完全缺失。⭐ = 高价值优先。
@@ -157,7 +157,14 @@
 - 启动搁浅 run  reconciliation;MCP 故障降级而非启动失败;团队 key 解析失败回退平台 key。
 - 认证 token 哈希存储;密码 bcrypt。
 
-**缺失:** 团队 provider API key **明文入库**(migration `000003` 头注释自承"生产用 pgcrypto 或外部 KMS 加密 —— 明文仅用于本地 dev",但**没有任何加密代码**)—— 这是平台存的唯一真机密,无静态加密、无 KMS/Vault 集成;LLM 平台 key 是裸 env var;无备份工具/脚本/文档化策略(全树无 backup 命中);除 MCP 重试外无熔断;Docker 沙箱依赖宿主 Docker socket,本身是重要的宿主信任边界,代码未讨论。
+> **密钥静态加密:已实现(2026-08-08,P0-2)。** 团队 provider API key 不再明文入库:
+> - `internal/secrets`:AES-256-GCM 认证加密,随机 nonce 逐值前置(同值两次加密不同);密文自描述 `enc:v1:<base64(nonce||ct)>`。
+> - **主密钥来自 env** `SECRETS_MASTER_KEY`(raw 32B 或 base64;自托管单二进制的可信根)。未设置则回退明文 + 启动告警,**绝不静默**(误配的 key = 硬失败)。
+> - **渐进迁移**:读者靠前缀区分密文/明文,旧明文行照常读、下次写时重加密 —— 启用加密非 flag day。
+> - **密钥轮换**:密文头带 key id + 有序 key ring,新 key 加密、旧 key 仍可解密旧密文;`internal/routing` 读写路径透明加解密,console mask 取自明文(非密文尾巴)。
+> - **故障语义**:无法解密的行 → Resolve 响亮报错(回退平台 key + 记日志),绝不向 provider 静默发送损坏凭据。
+
+**仍缺:** 主密钥本身无 KMS/Vault 集成(当前 env 即可信根,威胁模型见 `internal/secrets` 包注释;可经 KeySource 抽象接 KMS 而不改信封格式);LLM 平台 key 是裸 env var;无备份工具/脚本/文档化策略;除 MCP 重试外无熔断;Docker 沙箱依赖宿主 Docker socket 的信任边界代码未讨论。
 
 ---
 
@@ -169,12 +176,12 @@
 | 2 | 审计日志 | ✅ | 已落地(migration `000022` + `internal/audit` + 埋点 + 查询 API) |
 | 3 | 可观测 | ◐ ⭐ | slog + 浅层 /healthz;无 metrics/tracing |
 | 4 | 配额限流 | ◐ ⭐ | 只记账零执行;无成本核算 |
-| 5 | 多租户 | ◐ | 仅应用层 scoping;无 RLS;团队 key 明文 |
+| 5 | 多租户 | ◐ | 仅应用层 scoping;无 RLS;~~团队 key 明文~~(已加密,P0-2) |
 | 6 | 部署交付 | ◐ ⭐ | 迁移+优雅退出+CI 测试;无容器/k8s 产物 |
 | 7 | 管理控制台 | ✅ | 自助/团队/平台三层管理 UI 广泛 |
 | 8 | 外部集成 | ◐ | 单个硬编码 SearXNG MCP;无 webhook/通知 |
 | 9 | 数据治理 | ◐ | 记忆 TTL + 硬删;无导出、对话无保留策略 |
-| 10 | 韧性/机密 | ◐ ⭐ | 沙箱分档与故障降级好;无静态机密加密、无备份 |
+| 10 | 韧性/机密 | ◐ ⭐ | 沙箱分档与故障降级好;~~无静态机密加密~~(已加密,P0-2)、无备份 |
 
 **最大的企业级缺口:** 审计轨迹(2)、SSO(1)、metrics/tracing(3)、配额执行(4)、所存 provider key 的静态加密(5/10)、任何可部署产物(6)。
 

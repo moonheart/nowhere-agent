@@ -37,6 +37,7 @@ import (
 	"nowhere-agent/internal/schedule"
 	"nowhere-agent/internal/scheduleapi"
 	"nowhere-agent/internal/scheduler"
+	"nowhere-agent/internal/secrets"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/skillapi"
@@ -110,7 +111,19 @@ func run() error {
 
 	// Team-scoped provider credentials (model-routing D14). The store is both
 	// the resolver on the chat path (below) and the console's management path.
+	// Keys are encrypted at rest (enterprise-readiness P0-2) when a master key is
+	// configured; without one the store falls back to plaintext and we say so,
+	// because a deployment storing real provider credentials unprotected should
+	// not do so silently.
 	keyStore := routing.NewPGKeyStore(pool, cfg.LLM.APIKey)
+	if enc, err := buildEncryptor(cfg); err != nil {
+		return fmt.Errorf("secrets: %w", err)
+	} else if enc != nil {
+		keyStore.WithEncryption(enc)
+		log.Info("team provider keys encrypted at rest (AES-256-GCM)")
+	} else {
+		log.Warn("SECRETS_MASTER_KEY unset: team provider keys stored PLAINTEXT; set it to enable encryption at rest")
+	}
 
 	// Durable session runtime over Postgres: chat requests persist as runs,
 	// and the run log doubles as the episodes for dreaming.
@@ -774,6 +787,18 @@ func spaHandler(dir string) http.Handler {
 		}
 		http.ServeFile(w, r, index)
 	})
+}
+
+// buildEncryptor constructs the secret encryptor from config, or nil when no
+// master key is set (encryption disabled, plaintext fallback). An error means a
+// key WAS provided but is malformed — that is a hard failure, because silently
+// ignoring a mis-set SECRETS_MASTER_KEY would boot with keys unprotected while
+// the operator believes they are encrypted.
+func buildEncryptor(cfg config.Config) (*secrets.Encryptor, error) {
+	if cfg.Secrets.MasterKey == "" {
+		return nil, nil
+	}
+	return secrets.NewSingle([]byte(cfg.Secrets.MasterKey))
 }
 
 // buildProvider constructs the configured provider adapter from the platform

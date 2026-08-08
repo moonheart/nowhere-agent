@@ -41,6 +41,22 @@ type Config struct {
 	// Identity configures the account layer, notably platform-admin bootstrap
 	// (admin-console).
 	Identity Identity
+	// Secrets configures encryption-at-rest for stored credentials
+	// (enterprise-readiness P0-2).
+	Secrets Secrets
+}
+
+// Secrets holds the master key that encrypts stored credentials (the team LLM
+// provider API keys) before they reach Postgres. The key lives in the
+// environment — the accepted root of trust for a self-hosted single-binary
+// internal platform — and may be raw 32 bytes or base64 of 32 bytes.
+type Secrets struct {
+	// MasterKey encrypts/decrypts stored secrets. Empty DISABLES encryption:
+	// keys are then stored plaintext (legacy behaviour) and the server logs a
+	// warning, because an internal platform that stores provider credentials
+	// should not do so unprotected. Set it in any environment that holds real
+	// keys. Generate one with: openssl rand -base64 32
+	MasterKey string `envconfig:"SECRETS_MASTER_KEY" default:""`
 }
 
 // Permission maps each tool risk class to a decision for the execution-permission
