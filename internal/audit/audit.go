@@ -74,6 +74,10 @@ const (
 	ActionTeamKeySet    Action = "team.key.set"
 	ActionTeamKeyDelete Action = "team.key.delete"
 
+	// Usage-budget administration (the quota that caps monthly spend).
+	ActionQuotaSet   Action = "quota.set"
+	ActionQuotaClear Action = "quota.clear"
+
 	// Memory administration.
 	ActionMemoryDelete    Action = "memory.delete"
 	ActionMemoryDeprecate Action = "memory.deprecate"

@@ -11,6 +11,7 @@ import {
   Building2,
   CalendarClock,
   ChartNoAxesColumn,
+  Gauge,
   Loader2,
   ScrollText,
   ShieldCheck,
@@ -176,6 +177,9 @@ export function AdminLayout() {
                 </NavItem>
                 <NavItem to="/admin/platform/usage" icon={<ChartNoAxesColumn />}>
                   Usage
+                </NavItem>
+                <NavItem to="/admin/platform/quotas" icon={<Gauge />}>
+                  Quotas
                 </NavItem>
                 <NavItem to="/admin/platform/memories" icon={<Brain />}>
                   Memories

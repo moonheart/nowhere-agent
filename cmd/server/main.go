@@ -722,6 +722,7 @@ func run() error {
 	// registered outside the provider branch so the console stays reachable on
 	// a deployment with no LLM configured.
 	adminHandler := adminapi.NewHandler(identitySvc, keyStore, usage.NewStore(pool), memPort).
+		WithQuotas(quota.NewStore(pool)).
 		WithDreaming(dreamRunner).
 		WithAudit(auditLogger)
 	adminHandler.RegisterAuthed(mux, identityHandler.RequireAuth)

@@ -19,6 +19,7 @@ import {
   PlatformSkillsPage,
 } from "@/components/admin/SkillsPages";
 import { PlatformAuditPage } from "@/components/admin/AuditPage";
+import { PlatformQuotasPage } from "@/components/admin/QuotasPage";
 import { ScheduledTasksPage } from "@/components/admin/ScheduledTasksPage";
 import { Thread } from "@/components/thread";
 import { LoginForm } from "@/components/login";
@@ -405,6 +406,7 @@ export default function App() {
         <Route path="platform/users" element={<PlatformUsersPage />} />
         <Route path="platform/teams" element={<PlatformTeamsPage />} />
         <Route path="platform/usage" element={<PlatformUsagePage />} />
+        <Route path="platform/quotas" element={<PlatformQuotasPage />} />
         <Route path="platform/memories" element={<PlatformMemoriesPage />} />
         <Route path="platform/skills" element={<PlatformSkillsPage />} />
         <Route path="platform/audit" element={<PlatformAuditPage />} />

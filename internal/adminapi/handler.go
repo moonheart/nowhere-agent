@@ -18,6 +18,7 @@ import (
 	"nowhere-agent/internal/dreaming"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/quota"
 	"nowhere-agent/internal/routing"
 	"nowhere-agent/internal/usage"
 )
@@ -27,6 +28,7 @@ type Handler struct {
 	identity *identity.Service
 	keys     *routing.PGKeyStore
 	usage    *usage.Store
+	quotas   *quota.Store
 	memories memory.Port
 	dreaming *dreaming.Runner
 	// audit records administrative actions; nil disables recording.
@@ -38,6 +40,14 @@ type Handler struct {
 // a deployment without a memory port or provider keys serving the rest.
 func NewHandler(id *identity.Service, keys *routing.PGKeyStore, u *usage.Store, mem memory.Port) *Handler {
 	return &Handler{identity: id, keys: keys, usage: u, memories: mem}
+}
+
+// WithQuotas wires the usage-budget store, enabling the quota configuration
+// routes (enterprise-readiness P1-1 management face). Left nil, /api/admin/quotas
+// answers 503 — the console still serves everything else.
+func (h *Handler) WithQuotas(q *quota.Store) *Handler {
+	h.quotas = q
+	return h
 }
 
 // WithAudit wires the audit trail so administrative actions are recorded.
@@ -107,6 +117,9 @@ func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) htt
 	route(mux, auth, "GET /api/admin/teams", h.requireAdmin(h.listAllTeams))
 	route(mux, auth, "POST /api/admin/teams", h.requireAdmin(h.createTeamForOwner))
 	route(mux, auth, "GET /api/admin/usage", h.requireAdmin(h.platformUsage))
+	route(mux, auth, "GET /api/admin/quotas", h.requireAdmin(h.listQuotas))
+	route(mux, auth, "PUT /api/admin/quotas", h.requireAdmin(h.putQuota))
+	route(mux, auth, "DELETE /api/admin/quotas", h.requireAdmin(h.clearQuota))
 	route(mux, auth, "GET /api/admin/memories", h.requireAdmin(h.adminMemories))
 	route(mux, auth, "DELETE /api/admin/memories/{id}", h.requireAdmin(h.adminDeleteMemory))
 	route(mux, auth, "POST /api/admin/memories/{id}/deprecate", h.requireAdmin(h.adminDeprecateMemory))

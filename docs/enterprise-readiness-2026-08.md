@@ -110,7 +110,7 @@
 
 > **注意:** `openspec/specs/observability/spec.md` 与 `docs/claude-code-comparison/observability.md` 仍为**纯设计文档**;本次实现独立于它们,以 `internal/observability` 为运行真相。
 
-### 2.4 配额 / 限流 / 成本控制 —— ◐ PARTIAL ⭐
+### 2.4 配额 / 限流 / 成本控制 —— ✅ 执行已落地(管理面已补)⭐
 
 **已有(只记账,不执行):**
 - Token **记账**:per-call/per-run 用量列(migration `000013`),读侧聚合 `internal/usage/store.go`(按账户/团队/日期;仅 token,刻意不做成本估算)。
@@ -121,14 +121,16 @@
 > **配额执行 / 请求限流:已实现(2026-08-08,P1-1)。** 此前用量"只记账零执行",一个账户可以烧穿共享团队 key;现在两道口子都会咬人,且都 **fail-open**(配额库/限流器出问题绝不拖垮 chat):
 > - **月度 token 预算拦截**:`internal/quota` + `usage_budgets` 表(migration `000024`,scope=user/team、`owner_id` TEXT 无 FK、`monthly_tokens>0`,PK `(scope,owner_id)`)。`quota.Checker` 在 **run 提交前**(任何模型调用之前)比对"本月可计费 token(input+output) ≥ 月度上限",命中即拒绝:chat 路径返回 **HTTP 429 + Retry-After**(`WithBudgetGate`,映射 `quota.ErrBudgetExceeded`);scheduled run 同样拦截(命中则**跳过本次触发、保持 due** 下个扫描重试,记 warn 日志而非报错整个 sweep)。预算按**自然月**(UTC 月初边界,`monthWindow`,中国企业对账按月结)窗口;用户预算与付费团队预算双重检查,任一命中即拒。spend 走 `usage.Store.ForUser/ForTeam` 的薄 adapter(billable=`Tokens.Total()`),enforcement 与读侧报表解耦(`SpendFunc`/`BudgetReader` 接口)。
 > - **请求限流**:`quota.RateLimiter`(per-key 令牌桶,`golang.org/x/time/rate`),挂为最外层中间件(`httpHandler`,在 request-id/metrics **之前**——拒绝洪流时不为一个将被 429 的请求浪费任何 per-request 工作或 metric);429 + `Retry-After: 1`。key 默认按客户端 IP(`ClientIPKey`,取 X-Forwarded-For 首跳、剥离源端口),`/healthz`/`/metrics` 探测**豁免**(洪流时监控不能瞎)。env `HTTP_RATE_LIMIT_RPS`/`HTTP_RATE_LIMIT_BURST` 控制,默认 0=**关闭**(本地/dev 不受限),两者皆设才启用;空桶后台 sweeper 回收(TTL 10min)。
-> - 设计要点:配额是**保护预算**的手段,绝不让平台因配额库抖动而 429 自己;预算执行在提交时 fail-open,真正超支才 429。预算的**配置 UI**(控制台配额页)尚未补——后端 CRUD(`Store.Set/Get/Clear`)已就绪。
+> - 设计要点:配额是**保护预算**的手段,绝不让平台因配额库抖动而 429 自己;预算执行在提交时 fail-open,真正超支才 429。
+> - **配额配置 UI:已补(2026-08-08)。** 控制台 Platform 区新增 **Quotas** 页(`web/src/components/admin/QuotasPage.tsx`,路由 `/admin/platform/quotas`):按 scope(account/team)+ owner id 查/设/清月度 token 上限,复用后端 `quota.Store` 经新增管理端点 `GET/PUT/DELETE /api/admin/quotas`(均 `requireAdmin`;查无预算回 `200 budget:null` 表示"无上限"而非 404;设非正值 400;清无预算 404)。设/清均落审计 `quota.set`/`quota.clear`(只记 scope/owner/额度,绝不记任何凭据)。typed client `web/src/lib/admin.ts`(`getQuota`/`putQuota`/`clearQuota`)。
 
-**缺失(剩余):** 配额的**管理面**(控制台配额配置页)未补;无 per-route/分级限流。
+**缺失(剩余):** 无 per-route/分级限流。
 
 > **成本核算 / 精确团队用量:已实现(2026-08-08,P1-3)。** `runs` 加 `team_id`/`model` 两列(migration `000023`),run 提交时按**实际付费的团队 key**(`routing.Resolve(...).TeamID`)与 loop 配置的 model 打戳(`RunWork.TeamID/Model` → `SetRunAttribution`;chat 走 `TeamAttributor`,scheduled run 同样打戳):
 > - **团队用量从近似变精确**:`internal/usage` 的 team 维度改读 `runs.team_id`(直接归属),跨团队成员不再重复计数、离职成员不再带走历史;`team_id` 可空且**不带 FK**,删团队不删历史 run,NULL = 平台 key 付费。
 > - **历史行渐进兼容**:打戳前的旧行(team_id NULL)回退到"按当前成员"的旧近似(单条 OR + EXISTS 子句),随时间精确占比趋近 100%;`TeamOverlapNote` 更新为"新数据精确、旧数据近似"。
 > - **per-model 成本打底**:新增 `usage.Store.ByModel`(按 model 聚合),`runs.model` 使成本核算不再需要猜 model;挂载每模型定价即可把 token 换算成钱(定价属配置,不在 store 内)。
+> - **per-model 成本视图:已补(2026-08-08)。** 平台用量端点 `GET /api/admin/usage` 的 `group_by` 新增 `model`(走 `ByModel`,无 FK 跨表、按 model 聚合;未记录 model 的旧行归入 `(unrecorded)` 桶)。控制台 **Usage** 页分组下拉加 "By model",把 per-model token 摊在面前——挂上定价即换算成钱。
 > - 设计要点:attribution 在**提交时**服务端解析(chat 用 `TeamAttributor` 解析付费团队;error → 平台,绝不阻塞 run),**尽力而为**(打戳失败仅记日志)。
 
 ### 2.5 多租户隔离 —— ◐ PARTIAL
@@ -156,9 +158,9 @@
 
 - **自助:** 资料/改密/token 管理(`ProfilePage`)、我的用量/记忆/dream 触发(`SelfPages`)、我的技能+版本/回滚编辑器(`SkillsPages`+`SkillEditor`)、调度任务(`ScheduledTasksPage`)。
 - **团队:** 团队列表/详情多 tab —— 改名、成员增删改角色、团队 provider key(设/删/遮蔽)、团队用量、团队记忆。
-- **平台(admin):** 用户(列/建/改/重置密码/停/删)、团队(列/为属主建)、用量、记忆(删/弃用)、技能。
+- **平台(admin):** 用户(列/建/改/重置密码/停/删)、团队(列/为属主建)、用量(按账户/团队/**模型** 分组)、**配额配置**(查/设/清月度 token 上限)、记忆(删/弃用)、技能。
 
-> **说明:** 控制台的三层管理 UI 与后端一一对应,且**审计查看页已补**(P0-1,`/admin/platform/audit`)。控制台**仍没有**配额配置、部署/运维页 —— 因为对应后端尚不存在(见 2.4/2.6)。控制台的能力上限由后端决定。
+> **说明:** 控制台的三层管理 UI 与后端一一对应,且**审计查看页已补**(P0-1,`/admin/platform/audit`)、**配额配置页 + per-model 成本视图已补**(2026-08-08,`/admin/platform/quotas` 与 Usage 页 "By model")。控制台**仍没有**部署/运维页 —— 因为对应后端尚不存在(见 2.6)。控制台的能力上限由后端决定。
 
 ### 2.8 外部集成 Integrations —— ◐ PARTIAL
 
@@ -200,7 +202,7 @@
 | 1 | 认证授权 | ◐ | 本地 RBAC 扎实;无 SSO/MFA/服务 API key |
 | 2 | 审计日志 | ✅ | 已落地(migration `000022` + `internal/audit` + 埋点 + 查询 API) |
 | 3 | 可观测 | ✅ | 已落地(/metrics + request-id 关联 + /healthz 依赖探测);tracing/pprof 仍缺 |
-| 4 | 配额限流 | ◐ ⭐ | 只记账零执行;无成本核算 |
+| 4 | 配额限流 | ✅ ⭐ | 预算执行+限流+配额配置 UI+per-model 视图均已落地;余 per-route 限流 |
 | 5 | 多租户 | ◐ | 仅应用层 scoping;无 RLS;~~团队 key 明文~~(已加密,P0-2) |
 | 6 | 部署交付 | ◐ ⭐ | 迁移+优雅退出+CI 测试;无容器/k8s 产物 |
 | 7 | 管理控制台 | ✅ | 自助/团队/平台三层管理 UI 广泛 |

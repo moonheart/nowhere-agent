@@ -250,6 +250,17 @@ func (h *Handler) platformUsage(w http.ResponseWriter, r *http.Request) {
 		out["group_by"] = "team"
 		out["approximate"] = true
 		out["note"] = usage.TeamOverlapNote
+	case "model":
+		// Per-model is the cost-accounting read (P1-3): with the model known per
+		// run, a caller attaches per-model pricing and turns tokens into money.
+		// Runs with no recorded model group under the "(unrecorded)" label.
+		rows, err := h.usage.ByModel(r.Context(), rng, limit)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		out["rows"] = rowsOf(rows)
+		out["group_by"] = "model"
 	default:
 		rows, err := h.usage.ByUser(r.Context(), rng, limit)
 		if err != nil {

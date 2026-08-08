@@ -60,7 +60,7 @@ export type UsageReport = {
   total: Tokens;
   daily: UsageRow[];
   rows?: UsageRow[];
-  group_by?: "user" | "team";
+  group_by?: "user" | "team" | "model";
   // approximate/note carry the team-attribution caveat the server attaches to
   // any team-grouped figure. Rendering the numbers without them would present
   // an approximation as exact.
@@ -271,8 +271,36 @@ export const createTeamForOwner = (name: string, owner_user_id?: string) =>
   });
 
 export const platformUsage = (
-  params: DateRange & { group_by?: "user" | "team"; limit?: number },
+  params: DateRange & { group_by?: "user" | "team" | "model"; limit?: number },
 ) => api<UsageReport>(`/api/admin/usage${qs(params)}`);
+
+// ---- quota configuration ----
+
+// QuotaBudget mirrors the server's quota budget DTO: one scope's monthly token
+// cap. scope "user" caps one account, "team" caps the spend billed to one
+// team's provider key.
+export type QuotaBudget = {
+  scope: "user" | "team";
+  owner_id: string;
+  monthly_tokens: number;
+  updated_at: string;
+};
+
+// getQuota reads one scope's budget. budget is null when none is set — the
+// "no limit" state, which the server answers as 200/null rather than 404.
+export const getQuota = (scope: "user" | "team", owner_id: string) =>
+  api<{ budget: QuotaBudget | null }>(
+    `/api/admin/quotas${qs({ scope, owner_id })}`,
+  );
+
+export const putQuota = (body: {
+  scope: "user" | "team";
+  owner_id: string;
+  monthly_tokens: number;
+}) => api<{ budget: QuotaBudget }>("/api/admin/quotas", { method: "PUT", body });
+
+export const clearQuota = (scope: "user" | "team", owner_id: string) =>
+  api<void>(`/api/admin/quotas${qs({ scope, owner_id })}`, { method: "DELETE" });
 
 export const adminMemories = (params: {
   scope: "user" | "team" | "system";
@@ -341,6 +369,8 @@ export const AUDIT_ACTIONS = [
   "team.member.set_role",
   "team.key.set",
   "team.key.delete",
+  "quota.set",
+  "quota.clear",
   "memory.delete",
   "memory.deprecate",
 ] as const;

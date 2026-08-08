@@ -550,7 +550,7 @@ function CreateTeamForOwnerDialog({
 
 export function PlatformUsagePage() {
   const { range, setRange } = useDateRange();
-  const [groupBy, setGroupBy] = useState<"user" | "team">("user");
+  const [groupBy, setGroupBy] = useState<"user" | "team" | "model">("user");
   const state = useAsync(
     () => platformUsage({ ...range, group_by: groupBy }),
     [range.from, range.to, groupBy],
@@ -560,17 +560,18 @@ export function PlatformUsagePage() {
     <>
       <PageHeader
         title="Platform usage"
-        description="Tokens consumed across every account. Counts only — runs do not record which model produced them, so there is no cost figure."
+        description="Tokens consumed across every account, grouped by account, team, or model. The per-model view is the cost read: attach per-model pricing to turn tokens into money. Counts are tokens — no pricing is configured here."
         actions={
           <div className="flex items-center gap-2">
             <NativeSelect
               size="sm"
               value={groupBy}
-              onChange={(e) => setGroupBy(e.target.value as "user" | "team")}
+              onChange={(e) => setGroupBy(e.target.value as "user" | "team" | "model")}
               aria-label="Group by"
             >
               <NativeSelectOption value="user">By account</NativeSelectOption>
               <NativeSelectOption value="team">By team</NativeSelectOption>
+              <NativeSelectOption value="model">By model</NativeSelectOption>
             </NativeSelect>
             <DateRangePicker range={range} onChange={setRange} />
           </div>
@@ -584,7 +585,13 @@ export function PlatformUsagePage() {
             <UsageTrend rows={data.daily} />
             <UsageRowsTable
               rows={data.rows ?? []}
-              groupLabel={groupBy === "team" ? "Team" : "Account"}
+              groupLabel={
+                groupBy === "team"
+                  ? "Team"
+                  : groupBy === "model"
+                    ? "Model"
+                    : "Account"
+              }
             />
           </div>
         )}
