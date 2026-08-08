@@ -758,6 +758,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 		case <-settlePoll.C:
 			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
 				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
 				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
 			}
@@ -774,6 +775,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 		case e, open := <-contentCh:
 			if !open {
 				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
 				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
 			}
@@ -785,6 +787,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			// The run may have settled without a further frame we can observe.
 			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
 				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
 				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
 			}
@@ -825,6 +828,30 @@ func (h *Handler) settleFinish(r *http.Request, e *sseEmitter, sessionID, runID 
 		reason = "other"
 	}
 	e.finishWithReason(reason)
+}
+
+// drainLifecycle flushes lifecycle events still buffered on the subscription
+// before the stream is settled. The terminal KindError/KindCancelled rides the
+// lifecycle bus (not the content broker), so an attacher that observes the
+// settle first — via the poll or right after a content frame — must drain this
+// channel too, or the run's terminal event is stranded unread: the stream then
+// ends with a status-mapped finish and NO error frame. Non-blocking, like
+// drainContent.
+func (h *Handler) drainLifecycle(r *http.Request, emitter *sseEmitter, lifecycleCh <-chan session.Event, runID string) {
+	for {
+		select {
+		case e, open := <-lifecycleCh:
+			if !open {
+				return
+			}
+			if e.RunID != runID {
+				continue
+			}
+			emitLifecycleEvent(r, emitter, e)
+		default:
+			return
+		}
+	}
 }
 
 // drainContent flushes any content frames still buffered on the subscription

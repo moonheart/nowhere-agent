@@ -564,6 +564,41 @@ func TestLoopUnknownStopReasonFailsRun(t *testing.T) {
 	}
 }
 
+func TestLoopFinalizesUnclosedBlocksInStreamOrder(t *testing.T) {
+	// A provider that closes the stream WITHOUT block-stop events: the open
+	// blocks must be finalized in provider index order. The natural-close
+	// path used to range over a map, randomizing the persisted block order.
+	p := &scriptProvider{script: [][]provider.Event{
+		{
+			{Type: provider.EventMessageStart},
+			{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+			{Type: provider.EventBlockDelta, Index: 0, Delta: "lead-in"},
+			{Type: provider.EventBlockStart, Index: 1, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "echo", ToolInput: map[string]any{}}},
+			{Type: provider.EventBlockDelta, Index: 1, Delta: `{}`},
+			// No block-stops, no message-stop: the channel just closes.
+		},
+		textResponse("done"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), nil, &memEmitter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(produced) != 3 {
+		t.Fatalf("produced %d messages, want [assistant, tool_result, assistant]", len(produced))
+	}
+	content := produced[0].Content
+	if len(content) != 2 || content[0].Type != provider.BlockText || content[1].Type != provider.BlockToolUse {
+		t.Fatalf("assistant blocks = %+v, want [text, tool_use] in stream order", content)
+	}
+	if content[0].Text != "lead-in" || content[1].ToolUseID != "tu1" {
+		t.Errorf("assistant blocks = %+v, want text %q then tool_use tu1", content, "lead-in")
+	}
+}
+
 func TestLoopCancelBeforeStream(t *testing.T) {
 	// A pre-cancelled context must abort the loop at the iteration guard and
 	// emit a cancelled event, not a done/error.

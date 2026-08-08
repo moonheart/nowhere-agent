@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 
@@ -319,8 +320,11 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				return state.Produced, ctx.Err()
 			}
 			slog.Error("agent: provider attempt failed; run aborting", "iter", iter, "err", err, "view_msgs", len(state.View))
-			_ = emit.Emit(ctx, KindError, err.Error())
+			// Close the step before the terminal error frame, symmetric with
+			// every other exit: a step opened at iter>0 must not dangle.
+			l.emitStepFinish(ctx, emit, res, "error", false)
 			l.runAfterRun(ctx, state)
+			_ = emit.Emit(ctx, KindError, err.Error())
 			return state.Produced, err
 		}
 		if res.Usage != nil {
@@ -463,7 +467,9 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	// error frame rather than a silent stop: without this emit the run still flips
 	// to failed (registry.execute), but the client sees the stream just end with no
 	// explanation. Emit KindError so a terminal frame always accompanies the failure.
+	// Close the step first, symmetric with every other exit.
 	err := fmt.Errorf("max iterations (%d) exceeded", l.config.MaxIterations)
+	l.emitStepFinish(ctx, emit, ModelResult{}, "error", false)
 	l.runAfterRun(ctx, state)
 	_ = emit.Emit(ctx, KindError, err.Error())
 	return state.Produced, err
@@ -544,13 +550,44 @@ func (l *Loop) realAttempt(emit Emitter) ModelHandler {
 		if err != nil {
 			return ModelResult{}, fmt.Errorf("stream: %w", err)
 		}
-		assistant, calls, end, err := l.consume(ctx, events, emit)
+		track := &emissionTracker{inner: emit}
+		assistant, calls, end, err := l.consume(ctx, events, track)
 		if err != nil {
+			if track.emitted {
+				// The failure surfaced AFTER content frames already reached the
+				// client: retrying the call (e.g. the overflow fallback) would
+				// re-emit them. Mark it so retry middleware declines.
+				return ModelResult{}, &midStreamError{err: err}
+			}
 			return ModelResult{}, err
 		}
 		return ModelResult{Assistant: assistant, Calls: calls, Stop: end.stop, Usage: end.usage}, nil
 	}
 }
+
+// emissionTracker records whether any frame was successfully forwarded to the
+// client during one provider stream.
+type emissionTracker struct {
+	inner   Emitter
+	emitted bool
+}
+
+func (t *emissionTracker) Emit(ctx context.Context, kind EventKind, payload any) error {
+	err := t.inner.Emit(ctx, kind, payload)
+	if err == nil {
+		t.emitted = true
+	}
+	return err
+}
+
+// midStreamError marks a provider failure that surfaced after content frames
+// were already forwarded to the client, so a retry would duplicate output. It
+// unwraps to the underlying error, so classifiers (IsContextOverflow) still
+// see through it.
+type midStreamError struct{ err error }
+
+func (e *midStreamError) Error() string { return e.err.Error() }
+func (e *midStreamError) Unwrap() error { return e.err }
 
 // cacheHitPct returns the prompt-prefix cache hit rate as a whole percentage.
 // Semantics differ by provider: DeepSeek/OpenAI's InputTokens (prompt_tokens)
@@ -645,9 +682,16 @@ func (l *Loop) consume(ctx context.Context, events <-chan provider.Event, emit E
 				if err := ctx.Err(); err != nil {
 					return assistant, calls, end, err
 				}
-				// Stream closed naturally: finalize any blocks still open.
-				for idx, acc := range open {
-					l.appendFinalized(ctx, acc, &assistant, &calls, emit)
+				// Stream closed naturally: finalize any blocks still open, in
+				// provider index order — map iteration order is random, and the
+				// persisted assistant message must keep the stream's block order.
+				idxs := make([]int, 0, len(open))
+				for idx := range open {
+					idxs = append(idxs, idx)
+				}
+				sort.Ints(idxs)
+				for _, idx := range idxs {
+					l.appendFinalized(ctx, open[idx], &assistant, &calls, emit)
 					delete(open, idx)
 				}
 				return assistant, calls, end, nil

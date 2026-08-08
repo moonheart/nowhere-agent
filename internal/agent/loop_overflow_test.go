@@ -103,3 +103,38 @@ func (p *failProvider) Stream(_ context.Context, _ provider.Request) (<-chan pro
 	p.calls++
 	return nil, p.err
 }
+
+// midStreamOverflowProvider streams a text delta and THEN fails with a context
+// overflow — the shape the overflow fallback must NOT retry: the delta already
+// reached the client, and a retry would re-emit it.
+type midStreamOverflowProvider struct{ calls int }
+
+func (p *midStreamOverflowProvider) Name() string { return "midstream-overflow" }
+func (p *midStreamOverflowProvider) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	p.calls++
+	ch := make(chan provider.Event, 4)
+	ch <- provider.Event{Type: provider.EventMessageStart}
+	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+	ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "partial"}
+	ch <- provider.Event{Type: provider.EventError, Err: &provider.ContextOverflowError{StatusCode: 413, Body: "request too large"}}
+	close(ch)
+	return ch, nil
+}
+
+func TestLoopMidStreamOverflowNotRetried(t *testing.T) {
+	p := &midStreamOverflowProvider{}
+	emit := &memEmitter{}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+	loop.Use(&OverflowMW{})
+
+	_, err := loop.Run(context.Background(), bigConversation(4, 50), emit)
+	if err == nil {
+		t.Fatal("a mid-stream overflow should fail the run, not be retried")
+	}
+	if p.calls != 1 {
+		t.Errorf("calls = %d, want 1 (mid-stream failures must not retry — deltas already reached the client)", p.calls)
+	}
+	if emit.count(KindText) != 1 {
+		t.Errorf("text frames = %d, want 1 (a retry would duplicate the streamed delta)", emit.count(KindText))
+	}
+}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"nowhere-agent/internal/contextmgmt"
@@ -247,6 +248,13 @@ func (m *OverflowMW) WrapModelCall(ctx context.Context, c *ModelCall, next Model
 	}
 	res, err := next(ctx, c)
 	for attempts := 0; err != nil && provider.IsContextOverflow(err) && attempts < maxRetries; attempts++ {
+		var mse *midStreamError
+		if errors.As(err, &mse) {
+			// The overflow surfaced mid-stream, after deltas already reached
+			// the client: retrying with a shrunk view would re-emit them. Fail
+			// the run rather than duplicate output.
+			break
+		}
 		shrunk, ok := contextmgmt.DropOldestRound(c.View)
 		if !ok {
 			break // nothing safe left to drop
