@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -60,7 +61,7 @@ func (r *Registry) All() []Tool {
 func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (res Result) {
 	t, ok := r.Get(name)
 	if !ok {
-		return Result{Content: fmt.Sprintf("unknown tool: %s", name), IsError: true}
+		return Result{Content: fmt.Sprintf("unknown tool: %s (available tools: %s)", name, strings.Join(r.Names(), ", ")), IsError: true}
 	}
 
 	timeout := t.Timeout()

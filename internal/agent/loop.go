@@ -1067,7 +1067,7 @@ func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolrun
 		// guard for direct callers; this mirrors its message.
 		tool, ok := l.tools.Get(c.Name)
 		if !ok {
-			results[i] = toolruntime.Result{Content: fmt.Sprintf("unknown tool: %s", c.Name), IsError: true}
+			results[i] = toolruntime.Result{Content: fmt.Sprintf("unknown tool: %s (available tools: %s)", c.Name, strings.Join(l.tools.Names(), ", ")), IsError: true}
 			continue
 		}
 		// Schema screen (LangChain _parse_input parity): arguments that parsed
