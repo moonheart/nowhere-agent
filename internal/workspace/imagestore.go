@@ -15,8 +15,20 @@ import (
 	"strings"
 
 	"github.com/gen2brain/webp"
+	"github.com/google/uuid"
 
 	"nowhere-agent/internal/provider"
+)
+
+// Reserved root-relative directory for user-level upload blobs and the path
+// prefix messages reference them by. The dir name cannot collide with a session
+// id (UUIDs), and the prefix is unambiguous because every user-level upload
+// returns "uploads/<uuid>.webp".
+const (
+	uploadsDir        = "__uploads__"
+	userUploadPrefix  = "uploads/"
+	userUploadSuffix  = ".webp"
+	maxUploadFilename = 200
 )
 
 // ImageStore persists image payloads as WebP files under a per-session
@@ -29,12 +41,106 @@ import (
 // reads are session-relative (no session prefix), and every read/write is
 // confined to the session's directory — absolute paths, ".." escapes, and
 // symlink escapes are rejected.
+//
+// User-level uploads (change user-image-uploads) live separately under
+// <root>/__uploads__/<userID>/<id>.webp and are referenced as
+// "uploads/<id>.webp". Their blob I/O goes through the internal blobStore
+// seam so the backend can be swapped (local now, S3-compatible later — the
+// same convention workspace.Store documents for sandbox workspaces).
 type ImageStore struct {
-	root string
+	root  string
+	blobs blobStore
 }
 
 // NewImageStore creates an ImageStore rooted at dir (created on demand).
-func NewImageStore(root string) *ImageStore { return &ImageStore{root: root} }
+func NewImageStore(root string) *ImageStore {
+	return &ImageStore{root: root, blobs: &localBlobStore{root: root}}
+}
+
+// blobStore abstracts the durable blob read/write for user-level uploads. The
+// shipped implementation is a local directory; an S3-compatible backend
+// implements the same contract (mirrors the workspace.Store convention).
+type blobStore interface {
+	// Put writes a user's blob under its id, replacing any existing bytes.
+	Put(userID, id string, data []byte) error
+	// Open reads a user's blob by id.
+	Open(userID, id string) (io.ReadCloser, error)
+	// Delete removes a user's blob by id; a missing blob is not an error.
+	Delete(userID, id string) error
+}
+
+// localBlobStore is the filesystem blob backend: <root>/__uploads__/<userID>/<id>.webp.
+type localBlobStore struct {
+	root string
+}
+
+func (l *localBlobStore) userDir(userID string) (string, error) {
+	if userID == "" || strings.ContainsAny(userID, `/\`) {
+		return "", fmt.Errorf("invalid user id %q", userID)
+	}
+	dir := filepath.Join(l.root, uploadsDir, userID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create upload dir: %w", err)
+	}
+	return dir, nil
+}
+
+func (l *localBlobStore) Put(userID, id string, data []byte) error {
+	dir, err := l.userDir(userID)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+userUploadSuffix), data, 0o644); err != nil {
+		return fmt.Errorf("write upload blob: %w", err)
+	}
+	return nil
+}
+
+func (l *localBlobStore) Open(userID, id string) (io.ReadCloser, error) {
+	dir, err := l.userDir(userID)
+	if err != nil {
+		return nil, err
+	}
+	abs, err := resolveWithin(dir, id+userUploadSuffix)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, fmt.Errorf("open upload blob: %w", err)
+	}
+	return f, nil
+}
+
+func (l *localBlobStore) Delete(userID, id string) error {
+	dir, err := l.userDir(userID)
+	if err != nil {
+		return err
+	}
+	abs, err := resolveWithin(dir, id+userUploadSuffix)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(abs); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete upload blob: %w", err)
+	}
+	return nil
+}
+
+// encodeWebP decodes raw image bytes (PNG/JPEG/GIF/WebP) and re-encodes them
+// as WebP. A decode failure rejects the input (fail-closed: we never store an
+// unverifiable blob).
+func encodeWebP(raw []byte) ([]byte, error) {
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedImage, err)
+	}
+	var buf bytes.Buffer
+	if err := webp.Encode(&buf, img, webp.Options{Quality: 80}); err != nil {
+		return nil, fmt.Errorf("encode webp: %w", err)
+	}
+	return buf.Bytes(), nil
+}
 
 // sessionDir returns the absolute directory for a session, creating it.
 func (s *ImageStore) sessionDir(sessionID string) (string, error) {
@@ -90,20 +196,16 @@ func (s *ImageStore) Save(sessionID, name string, raw []byte) (relPath string, e
 	}
 	base = strings.TrimSuffix(base, filepath.Ext(base)) + ".webp"
 
-	img, _, err := image.Decode(bytes.NewReader(raw))
+	enc, err := encodeWebP(raw)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrUnsupportedImage, err)
-	}
-	var buf bytes.Buffer
-	if err := webp.Encode(&buf, img, webp.Options{Quality: 80}); err != nil {
-		return "", fmt.Errorf("encode webp: %w", err)
+		return "", err
 	}
 
 	abs, err := resolveWithin(dir, base)
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(abs, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(abs, enc, 0o644); err != nil {
 		return "", fmt.Errorf("write image: %w", err)
 	}
 	// Return the session-relative path with forward slashes (canonical form).
@@ -136,20 +238,98 @@ func (s *ImageStore) Open(sessionID, relPath string) (io.ReadCloser, error) {
 	return f, nil
 }
 
-// ResolverFor returns a provider.ImageResolver bound to one session, for the
-// pre-send materialization transform. Reads are confined to that session's
-// directory, so a run can only ever materialize its own session's images.
-func (s *ImageStore) ResolverFor(sessionID string) imageResolver {
-	return imageResolver{store: s, sessionID: sessionID}
+// SaveUserUpload decodes raw image bytes and stores the WebP blob under the
+// user's upload scope, returning the message-reference path ("uploads/<id>.webp")
+// and the encoded byte size. It is session-independent, so a brand-new
+// conversation's first message can carry an image (change user-image-uploads).
+func (s *ImageStore) SaveUserUpload(userID, name string, raw []byte) (path string, size int64, err error) {
+	base := filepath.Base(filepath.Clean(name))
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return "", 0, fmt.Errorf("invalid image name %q", name)
+	}
+	if len(base) > maxUploadFilename {
+		base = base[:maxUploadFilename]
+	}
+
+	enc, err := encodeWebP(raw)
+	if err != nil {
+		return "", 0, err
+	}
+	id := uuid.New().String()
+	if err := s.blobs.Put(userID, id, enc); err != nil {
+		return "", 0, err
+	}
+	return userUploadPrefix + id + userUploadSuffix, int64(len(enc)), nil
+}
+
+// parseUserUpload extracts the blob id from a "uploads/<id>.webp" reference,
+// rejecting anything that does not match the canonical shape (so a path can
+// never reach outside the user's blob scope).
+func parseUserUpload(path string) (string, error) {
+	if !strings.HasPrefix(path, userUploadPrefix) {
+		return "", fmt.Errorf("not a user upload path: %q", path)
+	}
+	rest := strings.TrimPrefix(path, userUploadPrefix)
+	if !strings.HasSuffix(rest, userUploadSuffix) {
+		return "", fmt.Errorf("invalid upload path %q", path)
+	}
+	id := strings.TrimSuffix(rest, userUploadSuffix)
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
+		return "", fmt.Errorf("invalid upload id in path %q", path)
+	}
+	return id, nil
+}
+
+// OpenUserUpload reads a user-level upload blob by its "uploads/<id>.webp"
+// reference, confined to the user's blob scope.
+func (s *ImageStore) OpenUserUpload(userID, path string) (io.ReadCloser, error) {
+	id, err := parseUserUpload(path)
+	if err != nil {
+		return nil, err
+	}
+	return s.blobs.Open(userID, id)
+}
+
+// DeleteUserUpload removes a user-level upload blob. A reference path or a bare
+// id is accepted; a missing blob is not an error (the record may already be gone).
+func (s *ImageStore) DeleteUserUpload(userID, pathOrID string) error {
+	id := pathOrID
+	if strings.HasPrefix(pathOrID, userUploadPrefix) {
+		var err error
+		id, err = parseUserUpload(pathOrID)
+		if err != nil {
+			return err
+		}
+	}
+	return s.blobs.Delete(userID, id)
+}
+
+// ResolverFor returns a provider.ImageResolver bound to one session and its
+// owner, for the pre-send materialization transform. It resolves both path
+// forms: "uploads/…" references from the user's upload scope, and session-
+// relative paths from that session's directory — so a run can only ever
+// materialize its own session's images and its own user's uploads.
+func (s *ImageStore) ResolverFor(sessionID, userID string) imageResolver {
+	return imageResolver{store: s, sessionID: sessionID, userID: userID}
 }
 
 type imageResolver struct {
 	store     *ImageStore
 	sessionID string
+	userID    string
 }
 
-// ResolveImage reads the session-relative image path into memory.
+// ResolveImage reads the referenced image bytes into memory, dispatching on the
+// path form: user-level uploads vs session-scoped images.
 func (r imageResolver) ResolveImage(_ context.Context, path string) ([]byte, error) {
+	if strings.HasPrefix(path, userUploadPrefix) {
+		rc, err := r.store.OpenUserUpload(r.userID, path)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		return io.ReadAll(rc)
+	}
 	rc, err := r.store.Open(r.sessionID, path)
 	if err != nil {
 		return nil, err

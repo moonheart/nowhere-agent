@@ -124,6 +124,12 @@ func (h *Handler) bindSessionMiddleware(loop *agent.Loop, r *http.Request, sessI
 		}
 	}
 	if h.images != nil {
-		loop.Use(&agent.ImageMW{Resolver: h.images.ResolverFor(sessID)})
+		// The resolver knows the session owner so it can materialize both the
+		// session's images and the owner's user-level uploads ("uploads/…" paths).
+		userID := ""
+		if user, ok := identity.UserFromContext(r.Context()); ok {
+			userID = user.ID
+		}
+		loop.Use(&agent.ImageMW{Resolver: h.images.ResolverFor(sessID, userID)})
 	}
 }

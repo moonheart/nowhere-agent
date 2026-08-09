@@ -48,6 +48,7 @@ import (
 	"nowhere-agent/internal/subagent"
 	"nowhere-agent/internal/toolruntime"
 	"nowhere-agent/internal/toolruntime/builtin"
+	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/usage"
 	"nowhere-agent/internal/workspace"
 
@@ -245,6 +246,15 @@ func run() error {
 	var imageStore *workspace.ImageStore
 	if cfg.Workspace.Dir != "" {
 		imageStore = workspace.NewImageStore(cfg.Workspace.Dir)
+	}
+	// User-level image uploads (change user-image-uploads): session-independent
+	// uploads so a brand-new conversation's first message can carry an image.
+	// Blob + metadata index are wired to the chat handler (upload/serve) and the
+	// console (/api/me/uploads). Requires the image store; without a workspace
+	// dir the routes answer 503.
+	var uploadSvc *upload.Service
+	if imageStore != nil {
+		uploadSvc = upload.NewService(upload.NewPGStore(pool), imageStore)
 	}
 
 	// Sandbox for built-in tools (file-tools): a per-session sandbox Manager
@@ -806,7 +816,7 @@ func run() error {
 					if t, err := provResolver.Resolve(ctx, sess.UserID); err == nil {
 						if vm, ok := provResolver.VisionModel(ctx, t); ok {
 							if visionAdapter := providerreg.BuildAdapter(t, recorder, cfg.LLM.StreamIdleTimeout); visionAdapter != nil {
-								reg.Register(builtin.NewViewImage(visionAdapter, vm, imageStore.ResolverFor(sessionID)))
+								reg.Register(builtin.NewViewImage(visionAdapter, vm, imageStore.ResolverFor(sessionID, sess.UserID)))
 							}
 						}
 					}
@@ -851,6 +861,9 @@ func run() error {
 			WithBudgetGate(chatapi.BudgetChecker(budgetGate))
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
+		}
+		if uploadSvc != nil {
+			handler = handler.WithUploads(uploadSvc)
 		}
 		// Vision gate (image-input): resolves per request — the caller's provider
 		// assignment and whether it has a vision model — so non-vision main models
@@ -938,6 +951,7 @@ func run() error {
 	adminHandler := adminapi.NewHandler(identitySvc, usage.NewStore(pool), memPort).
 		WithQuotas(quota.NewStore(pool)).
 		WithProviders(provStore).
+		WithUploads(uploadSvc).
 		WithDreaming(dreamRunner).
 		WithAudit(auditLogger)
 	adminHandler.RegisterAuthed(protected)

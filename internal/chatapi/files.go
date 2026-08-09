@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/workspace"
 )
 
@@ -59,6 +60,79 @@ func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"path": rel})
+}
+
+// serveUserImageUpload handles POST /api/chat/uploads (change
+// user-image-uploads): a session-independent, user-scoped image upload. It
+// stores the image via the upload service (WebP-normalized blob + metadata
+// record) and returns the "uploads/<id>.webp" reference the frontend then
+// includes as an image part in the next chat message — including a brand-new
+// conversation's first message, which has no session yet.
+func (h *Handler) serveUserImageUpload(w http.ResponseWriter, r *http.Request) {
+	if h.uploads == nil {
+		http.Error(w, `{"error":"image upload unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	u, ok := identity.UserFromContext(r.Context())
+	if !ok {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxImageUploadBytes+1))
+	if err != nil {
+		http.Error(w, `{"error":"read body failed"}`, http.StatusBadRequest)
+		return
+	}
+	if len(body) > maxImageUploadBytes {
+		http.Error(w, `{"error":"image too large"}`, http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	name := "upload.png"
+	if fn := r.URL.Query().Get("name"); fn != "" {
+		name = fn
+	}
+	up, err := h.uploads.Upload(r.Context(), u.ID, name, body)
+	if err != nil {
+		if errors.Is(err, workspace.ErrUnsupportedImage) {
+			http.Error(w, `{"error":"unsupported or malformed image"}`, http.StatusUnsupportedMediaType)
+			return
+		}
+		http.Error(w, `{"error":"image save failed"}`, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"path": "uploads/" + up.ID + ".webp"})
+}
+
+// serveUserFile handles GET /api/chat/uploads/{id}: it streams a user-level
+// image blob to its owner. History rendering resolves "uploads/…" message paths
+// here. Ownership is enforced by the blob layout (the id resolves under the
+// caller's own upload scope), so a guessed id from another user 404s.
+func (h *Handler) serveUserFile(w http.ResponseWriter, r *http.Request) {
+	if h.images == nil {
+		http.Error(w, `{"error":"files unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	u, ok := identity.UserFromContext(r.Context())
+	if !ok {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
+	rc, err := h.images.OpenUserUpload(u.ID, "uploads/"+r.PathValue("id"))
+	if err != nil {
+		// Missing file or rejected (malformed/escape) — indistinguishable to the
+		// caller, so we don't leak upload layout.
+		http.Error(w, `{"error":"file not found"}`, http.StatusNotFound)
+		return
+	}
+	defer rc.Close()
+
+	w.Header().Set("Content-Type", "image/webp")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	_, _ = io.Copy(w, rc)
 }
 
 // serveFile handles GET /api/chat/sessions/{id}/files/{path...}: it streams a

@@ -20,6 +20,7 @@ import (
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/providerreg"
 	"nowhere-agent/internal/quota"
+	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/usage"
 )
 
@@ -33,6 +34,9 @@ type Handler struct {
 	// providers is the provider registry (system CRUD + team assignment). Nil
 	// disables the provider routes with a 503 (see WithProviders).
 	providers providerreg.Store
+	// uploads is the user-level image upload service. Nil disables the
+	// /api/me/uploads routes with a 503 (see WithUploads).
+	uploads upload.Uploader
 	// audit records administrative actions; nil disables recording.
 	audit *audit.Logger
 }
@@ -76,6 +80,13 @@ func (h *Handler) WithProviders(s providerreg.Store) *Handler {
 	return h
 }
 
+// WithUploads wires the user-level image upload service, enabling the
+// /api/me/uploads list + delete routes. Left nil, those answer 503.
+func (h *Handler) WithUploads(u upload.Uploader) *Handler {
+	h.uploads = u
+	return h
+}
+
 // RegisterAuthed mounts every console route onto the protected group. Auth is
 // NOT wrapped per route: the group applies its middleware set once at Mount
 // time, so this handler only declares which routes belong to the protected
@@ -97,6 +108,8 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	route(g, "GET /api/me/tokens", h.myTokens)
 	route(g, "DELETE /api/me/tokens", h.revokeOtherTokens)
 	route(g, "DELETE /api/me/tokens/{id}", h.revokeToken)
+	route(g, "GET /api/me/uploads", h.listUploads)
+	route(g, "DELETE /api/me/uploads/{id}", h.deleteUpload)
 
 	// ---- teams ----
 	route(g, "GET /api/teams", h.myTeams)

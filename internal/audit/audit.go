@@ -52,6 +52,8 @@ const (
 	// Self-service account management.
 	ActionMePasswordChange Action = "me.password.change"
 	ActionMeTokenRevoke    Action = "me.token.revoke"
+	// Self-service file uploads (change user-image-uploads).
+	ActionMeUploadDelete Action = "me.upload.delete"
 
 	// Platform administration of accounts.
 	ActionAdminUserCreate        Action = "admin.user.create"

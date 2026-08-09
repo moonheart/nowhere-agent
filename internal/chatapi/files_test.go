@@ -10,10 +10,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/identity"
+	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
+	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/workspace"
 )
 
@@ -198,5 +202,122 @@ func TestServeImageUploadRejectsOversize(t *testing.T) {
 	mux.ServeHTTP(rec, uploadReq(t, sess.ID, big, "owner1"))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversize status = %d want 413", rec.Code)
+	}
+}
+
+// ---- user-level uploads (change user-image-uploads) ----
+
+// fakeUploader implements upload.Uploader over the workspace ImageStore, so the
+// handler tests need no database.
+type fakeUploader struct {
+	store *workspace.ImageStore
+}
+
+func (f *fakeUploader) Upload(_ context.Context, userID, name string, raw []byte) (upload.Upload, error) {
+	path, size, err := f.store.SaveUserUpload(userID, name, raw)
+	if err != nil {
+		return upload.Upload{}, err
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, "uploads/"), ".webp")
+	return upload.Upload{ID: id, UserID: userID, Filename: name, Size: size, MediaType: "image/webp", CreatedAt: time.Now()}, nil
+}
+
+func (f *fakeUploader) List(context.Context, string) ([]upload.Upload, error) { return nil, nil }
+func (f *fakeUploader) Delete(context.Context, string, string) error           { return nil }
+
+func setupUserUploadHandler(t *testing.T) (http.Handler, *workspace.ImageStore) {
+	t.Helper()
+	is := workspace.NewImageStore(t.TempDir())
+	h := NewHandler(newTestLoop, "sys").
+		WithImageStore(is).
+		WithUploads(&fakeUploader{store: is})
+	mux := http.NewServeMux()
+	h.Register(mux)
+	return mux, is
+}
+
+func userUploadReq(t *testing.T, userID string, body []byte) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/api/chat/uploads", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "image/png")
+	if userID != "" {
+		req = req.WithContext(identity.NewContextWithUser(req.Context(), identity.User{ID: userID}))
+	}
+	return req
+}
+
+func TestServeUserImageUploadReturnsUploadPath(t *testing.T) {
+	mux, _ := setupUserUploadHandler(t)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, userUploadReq(t, "owner1", testPNG(t)))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.HasPrefix(resp.Path, "uploads/") || !strings.HasSuffix(resp.Path, ".webp") {
+		t.Errorf("path = %q, want uploads/<id>.webp", resp.Path)
+	}
+}
+
+func TestServeUserFileOwnerOnly(t *testing.T) {
+	mux, _ := setupUserUploadHandler(t)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, userUploadReq(t, "owner1", testPNG(t)))
+	var resp struct {
+		Path string `json:"path"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	id := strings.TrimSuffix(strings.TrimPrefix(resp.Path, "uploads/"), ".webp")
+
+	// Owner reads it back as WebP. The read route takes "<id>.webp" (the
+	// reference minus the "uploads/" prefix), matching imageFileUrl.
+	req := httptest.NewRequest("GET", "/api/chat/uploads/"+id+".webp", nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), identity.User{ID: "owner1"}))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/webp" {
+		t.Fatalf("owner read = %d (%s)", rec.Code, rec.Header().Get("Content-Type"))
+	}
+
+	// Another user 404s (blob layout confines reads to the caller's scope).
+	req = httptest.NewRequest("GET", "/api/chat/uploads/"+id+".webp", nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), identity.User{ID: "other"}))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("non-owner read = %d, want 404", rec.Code)
+	}
+}
+
+func TestServeUserImageUploadRejectsUnsupported(t *testing.T) {
+	mux, _ := setupUserUploadHandler(t)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, userUploadReq(t, "owner1", []byte("not an image")))
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("status = %d, want 415", rec.Code)
+	}
+}
+
+func TestServeUserImageUploadRequiresAuth(t *testing.T) {
+	mux, _ := setupUserUploadHandler(t)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, userUploadReq(t, "", testPNG(t)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+// requestImages carries a user-level "uploads/…" path through unchanged, so a
+// first-message image part resolves from the user scope at send time.
+func TestRequestImagesCarriesUploadsPath(t *testing.T) {
+	blocks := requestImages(dataStreamRequest{Images: []incomingImagePart{{Path: "uploads/abc.webp"}}})
+	if len(blocks) != 1 || blocks[0].Type != provider.BlockImage || blocks[0].ImagePath != "uploads/abc.webp" {
+		t.Errorf("blocks = %+v, want the uploads path preserved", blocks)
 	}
 }

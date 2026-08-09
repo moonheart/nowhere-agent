@@ -17,6 +17,7 @@ import (
 	"nowhere-agent/internal/quota"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/toolruntime/builtin"
+	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/workspace"
 )
 
@@ -72,6 +73,10 @@ type Handler struct {
 	// images, when set, serves workspace image files to the session owner via
 	// GET /api/chat/sessions/{id}/files/... (persist-raw-messages D6).
 	images *workspace.ImageStore
+	// uploads, when set, serves user-level image uploads (change
+	// user-image-uploads): session-independent upload + owner read, which is
+	// what lets a brand-new conversation's first message carry an image.
+	uploads upload.Uploader
 	// msgStore, when set, is the authoritative conversation record: serveChat
 	// rebuilds cross-run history from it (ignoring client-sent history) and the
 	// run registry persists assembled messages into it.
@@ -149,6 +154,14 @@ func (h *Handler) WithImageStore(is *workspace.ImageStore) *Handler {
 	return h
 }
 
+// WithUploads wires user-level image uploads (change user-image-uploads): the
+// session-independent upload endpoint and the owner-scoped read endpoint for
+// "uploads/…" image references.
+func (h *Handler) WithUploads(u upload.Uploader) *Handler {
+	h.uploads = u
+	return h
+}
+
 // WithContextBuilder enables memory recall + skill L0 injection into the loop.
 func (h *Handler) WithContextBuilder(cb ContextBuilder) *Handler {
 	h.ctxBuilder = cb
@@ -201,6 +214,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat/sessions/{id}/state", h.serveSetSessionState)
 	mux.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
 	mux.HandleFunc("POST /api/chat/sessions/{id}/images", h.serveImageUpload)
+	mux.HandleFunc("POST /api/chat/uploads", h.serveUserImageUpload)
+	mux.HandleFunc("GET /api/chat/uploads/{id}", h.serveUserFile)
 }
 
 // RegisterAuthed mounts the protected chat routes onto the group. Auth is NOT
@@ -218,6 +233,8 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	g.HandleFunc("POST /api/chat/sessions/{id}/state", h.serveSetSessionState)
 	g.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
 	g.HandleFunc("POST /api/chat/sessions/{id}/images", h.serveImageUpload)
+	g.HandleFunc("POST /api/chat/uploads", h.serveUserImageUpload)
+	g.HandleFunc("GET /api/chat/uploads/{id}", h.serveUserFile)
 }
 
 // sseEmitter adapts agent.Emitter to write ui-message-stream frames live.

@@ -12,6 +12,7 @@ import (
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/providerreg"
+	"nowhere-agent/internal/upload"
 )
 
 // ---- authorization ----
@@ -146,6 +147,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "provider or model is disabled")
 	case errors.Is(err, providerreg.ErrModelMismatch):
 		writeError(w, http.StatusBadRequest, "model does not belong to the provider")
+	case errors.Is(err, upload.ErrNotFound):
+		writeError(w, http.StatusNotFound, "upload not found")
+	case errors.Is(err, upload.ErrReferenced):
+		writeError(w, http.StatusConflict, "image is used by a conversation; delete it there first")
 	case identity.IsNotFound(err):
 		writeError(w, http.StatusNotFound, "not found")
 	default:

@@ -8,6 +8,7 @@ import (
 	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/usage"
 )
 
@@ -278,4 +279,60 @@ func rowsOf(rows []usage.Row) []usage.Row {
 		return []usage.Row{}
 	}
 	return rows
+}
+
+// ---- user-level image uploads (change user-image-uploads) ----
+
+type uploadDTO struct {
+	ID        string    `json:"id"`
+	Filename  string    `json:"filename"`
+	Size      int64     `json:"size"`
+	MediaType string    `json:"media_type"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func uploadDTOs(ups []upload.Upload) []uploadDTO {
+	out := make([]uploadDTO, 0, len(ups))
+	for _, u := range ups {
+		out = append(out, uploadDTO{
+			ID:        u.ID,
+			Filename:  u.Filename,
+			Size:      u.Size,
+			MediaType: u.MediaType,
+			CreatedAt: u.CreatedAt,
+		})
+	}
+	return out
+}
+
+// listUploads serves GET /api/me/uploads: the caller's user-level image
+// uploads, newest first, so they can manage what they uploaded.
+func (h *Handler) listUploads(w http.ResponseWriter, r *http.Request) {
+	if h.uploads == nil {
+		writeError(w, http.StatusServiceUnavailable, "uploads unavailable")
+		return
+	}
+	ups, err := h.uploads.List(r.Context(), caller(r).ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"uploads": uploadDTOs(ups)})
+}
+
+// deleteUpload serves DELETE /api/me/uploads/{id}: removes the caller's upload,
+// rejecting one still referenced by a stored message (409) so history images
+// stay intact.
+func (h *Handler) deleteUpload(w http.ResponseWriter, r *http.Request) {
+	if h.uploads == nil {
+		writeError(w, http.StatusServiceUnavailable, "uploads unavailable")
+		return
+	}
+	id := r.PathValue("id")
+	if err := h.uploads.Delete(r.Context(), caller(r).ID, id); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	h.record(r, audit.Success(audit.ActionMeUploadDelete).Target("upload", id))
+	w.WriteHeader(http.StatusNoContent)
 }

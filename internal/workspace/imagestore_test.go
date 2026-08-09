@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
@@ -102,5 +104,113 @@ func TestImageStoreSessionIsolation(t *testing.T) {
 	// does not contain it).
 	if _, err := s.Open("sessB", rel); err == nil {
 		t.Error("sessB should not open sessA's image")
+	}
+}
+
+// ---- user-level uploads (change user-image-uploads) ----
+
+func TestUserUploadSaveAndReadRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	s := NewImageStore(root)
+
+	path, size, err := s.SaveUserUpload("user1", "photo.png", makePNG(t))
+	if err != nil {
+		t.Fatalf("SaveUserUpload: %v", err)
+	}
+	if !strings.HasPrefix(path, "uploads/") || !strings.HasSuffix(path, ".webp") {
+		t.Errorf("path = %q, want uploads/<id>.webp", path)
+	}
+	if size <= 0 {
+		t.Errorf("size = %d, want > 0", size)
+	}
+
+	rc, err := s.OpenUserUpload("user1", path)
+	if err != nil {
+		t.Fatalf("OpenUserUpload: %v", err)
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if len(data) != int(size) || len(data) < 12 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		t.Errorf("round-tripped blob is not the stored WebP (%d bytes)", len(data))
+	}
+
+	// Blob lives under <root>/__uploads__/<user>/<id>.webp.
+	id := strings.TrimSuffix(strings.TrimPrefix(path, "uploads/"), ".webp")
+	if _, err := os.Stat(filepath.Join(root, "__uploads__", "user1", id+".webp")); err != nil {
+		t.Errorf("blob file missing: %v", err)
+	}
+}
+
+func TestUserUploadRejectsUnsupported(t *testing.T) {
+	s := NewImageStore(t.TempDir())
+	if _, _, err := s.SaveUserUpload("user1", "x.png", []byte("not an image")); !errors.Is(err, ErrUnsupportedImage) {
+		t.Errorf("err = %v, want ErrUnsupportedImage", err)
+	}
+}
+
+func TestUserUploadCrossUserIsolation(t *testing.T) {
+	s := NewImageStore(t.TempDir())
+	path, _, err := s.SaveUserUpload("userA", "a.png", makePNG(t))
+	if err != nil {
+		t.Fatalf("SaveUserUpload: %v", err)
+	}
+	// userB cannot read userA's upload even with the exact reference path.
+	if _, err := s.OpenUserUpload("userB", path); err == nil {
+		t.Error("userB should not open userA's upload")
+	}
+	// userB's delete is confined to userB's own dir — userA's blob must survive.
+	_ = s.DeleteUserUpload("userB", path)
+	if rc, err := s.OpenUserUpload("userA", path); err != nil {
+		t.Error("userB's delete removed userA's blob")
+	} else {
+		rc.Close()
+	}
+	if err := s.DeleteUserUpload("userA", path); err != nil {
+		t.Errorf("owner delete: %v", err)
+	}
+}
+
+func TestUserUploadPathEscapeRejected(t *testing.T) {
+	s := NewImageStore(t.TempDir())
+	for _, p := range []string{"uploads/../../etc/passwd.webp", "uploads/..%2f.webp", "uploads/..webp", "uploads/.webp", "uploads/a/b.webp", "plain.webp"} {
+		if _, err := s.OpenUserUpload("user1", p); err == nil {
+			t.Errorf("OpenUserUpload(%q) should be rejected", p)
+		}
+	}
+}
+
+// The materialization resolver dispatches by path form: uploads/ references
+// resolve from the user scope, session-relative references from the session dir.
+func TestResolverForDispatchesPrefix(t *testing.T) {
+	root := t.TempDir()
+	s := NewImageStore(root)
+
+	// A session-scoped image and a user-level upload for the same user.
+	sessRel, err := s.Save("sess1", "s.png", makePNG(t))
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	upPath, _, err := s.SaveUserUpload("user1", "u.png", makePNG(t))
+	if err != nil {
+		t.Fatalf("SaveUserUpload: %v", err)
+	}
+
+	res := s.ResolverFor("sess1", "user1")
+
+	// Session path resolves.
+	if _, err := res.ResolveImage(context.Background(), sessRel); err != nil {
+		t.Errorf("session path resolve: %v", err)
+	}
+	// User-level path resolves.
+	if _, err := res.ResolveImage(context.Background(), upPath); err != nil {
+		t.Errorf("uploads path resolve: %v", err)
+	}
+	// A different user's resolver cannot resolve the uploads path.
+	resOther := s.ResolverFor("sess1", "user2")
+	if _, err := resOther.ResolveImage(context.Background(), upPath); err == nil {
+		t.Error("another user's resolver resolved the upload")
 	}
 }
