@@ -1,11 +1,15 @@
 package chatapi
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"nowhere-agent/internal/identity"
+	"nowhere-agent/internal/session"
 )
 
 // sessionDTO is one conversation in the sidebar list.
@@ -15,10 +19,47 @@ type sessionDTO struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// Default and cap for the sidebar conversation list page size.
+const (
+	defaultSessionPageSize = 25
+	maxSessionPageSize     = 100
+)
+
+// sessionCursorCodec is the wire format of the opaque pagination cursor: the
+// (updated_at, id) keyset position of the page's last session, base64url JSON.
+type sessionCursorCodec struct {
+	UpdatedAt string `json:"u"`
+	ID        string `json:"id"`
+}
+
+func encodeSessionCursor(c session.SessionCursor) string {
+	raw, _ := json.Marshal(sessionCursorCodec{UpdatedAt: c.UpdatedAt.Format(time.RFC3339Nano), ID: c.ID})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeSessionCursor(raw string) (*session.SessionCursor, error) {
+	data, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, errors.New("cursor is not base64url")
+	}
+	var c sessionCursorCodec
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, errors.New("cursor is malformed")
+	}
+	updatedAt, err := time.Parse(time.RFC3339Nano, c.UpdatedAt)
+	if err != nil || c.ID == "" {
+		return nil, errors.New("cursor is malformed")
+	}
+	return &session.SessionCursor{UpdatedAt: updatedAt, ID: c.ID}, nil
+}
+
 // serveSessions handles GET /api/chat/sessions: it lists the caller's sessions
-// (most-recently-active first) for the sidebar conversation list. Unlike
-// history/resume (which authorize a specific session), this scopes the query to
-// the authenticated user, so it only ever returns their own conversations.
+// (most-recently-active first) for the sidebar conversation list, one page at a
+// time. limit caps the page size (default 25); cursor is the previous page's
+// nextCursor (omitted for the first page). The response's nextCursor is empty
+// when the list is exhausted. Unlike history/resume (which authorize a specific
+// session), this scopes the query to the authenticated user, so it only ever
+// returns their own conversations.
 func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
 		http.Error(w, `{"error":"sessions unavailable"}`, http.StatusServiceUnavailable)
@@ -30,18 +71,38 @@ func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessions, err := h.runtime.ListSessionsByUser(r.Context(), user.ID)
+	limit := defaultSessionPageSize
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = min(n, maxSessionPageSize)
+		}
+	}
+	var cursor *session.SessionCursor
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		c, err := decodeSessionCursor(raw)
+		if err != nil {
+			http.Error(w, `{"error":"invalid cursor"}`, http.StatusBadRequest)
+			return
+		}
+		cursor = c
+	}
+
+	page, err := h.runtime.ListSessionsByUser(r.Context(), user.ID, limit, cursor)
 	if err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
 
-	out := make([]sessionDTO, 0, len(sessions))
-	for _, s := range sessions {
+	out := make([]sessionDTO, 0, len(page.Sessions))
+	for _, s := range page.Sessions {
 		out = append(out, sessionDTO{ID: s.ID, Title: s.Title, UpdatedAt: s.UpdatedAt})
 	}
+	resp := map[string]any{"sessions": out, "nextCursor": ""}
+	if page.NextCursor != nil {
+		resp["nextCursor"] = encodeSessionCursor(*page.NextCursor)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": out})
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // serveDeleteSession handles DELETE /api/chat/sessions/{id}: it soft-deletes

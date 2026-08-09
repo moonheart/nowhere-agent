@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"nowhere-agent/internal/identity"
@@ -258,16 +259,32 @@ func (s *PGStore) SessionState(ctx context.Context, id string) (map[string]json.
 	return out, nil
 }
 
-// ListSessionsByUser returns a user's active (non-deleted) sessions,
+// ListSessionsByUser returns a page of a user's active (non-deleted) sessions,
 // most-recently-active first. Ended sessions are hidden from the sidebar.
-func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {
-	rows, err := s.db.QueryContext(ctx, `
+// Pagination is keyset: the query fetches limit+1 rows, the extra one proving
+// that another page exists, and NextCursor pins (updated_at, id) of the page's
+// last row (id breaks ties between sessions updated in the same instant).
+func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string, limit int, cursor *SessionCursor) (SessionPage, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	query := `
 		SELECT id, user_id, title, status, created_at, updated_at
 		FROM sessions
-		WHERE user_id = $1 AND status = $2
-		ORDER BY updated_at DESC`, userID, string(SessionActive))
+		WHERE user_id = $1 AND status = $2`
+	args := []any{userID, string(SessionActive)}
+	if cursor != nil {
+		query += ` AND (updated_at, id) < ($3::timestamptz, $4::uuid)`
+		args = append(args, cursor.UpdatedAt, cursor.ID)
+	}
+	query += `
+		ORDER BY updated_at DESC, id DESC
+		LIMIT $` + strconv.Itoa(len(args)+1)
+	args = append(args, limit+1)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list sessions by user: %w", err)
+		return SessionPage{}, fmt.Errorf("list sessions by user: %w", err)
 	}
 	defer rows.Close()
 
@@ -275,11 +292,23 @@ func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string) ([]Sess
 	for rows.Next() {
 		var sess Session
 		if err := rows.Scan(&sess.ID, &sess.UserID, &sess.Title, &sess.Status, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan session: %w", err)
+			return SessionPage{}, fmt.Errorf("scan session: %w", err)
 		}
 		out = append(out, sess)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return SessionPage{}, fmt.Errorf("list sessions by user: %w", err)
+	}
+
+	page := SessionPage{}
+	if len(out) > limit {
+		last := out[limit-1]
+		page.Sessions = out[:limit]
+		page.NextCursor = &SessionCursor{UpdatedAt: last.UpdatedAt, ID: last.ID}
+	} else {
+		page.Sessions = out
+	}
+	return page, nil
 }
 
 // DeleteSessionForUser soft-deletes (ends) a session owned by userID.

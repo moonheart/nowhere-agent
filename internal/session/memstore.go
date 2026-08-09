@@ -187,17 +187,45 @@ func (m *MemStore) SessionState(_ context.Context, id string) (map[string]json.R
 	return out, nil
 }
 
-func (m *MemStore) ListSessionsByUser(_ context.Context, userID string) ([]Session, error) {
+func (m *MemStore) ListSessionsByUser(_ context.Context, userID string, limit int, cursor *SessionCursor) (SessionPage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 25
+	}
 	var out []Session
 	for _, s := range m.sessions {
 		if s.UserID == userID && s.Status == SessionActive {
 			out = append(out, *s)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
-	return out, nil
+	// Most-recently-active first; id breaks ties (mirrors the PG ordering).
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	// Keyset: keep only rows strictly below the cursor in that ordering.
+	if cursor != nil {
+		kept := out[:0]
+		for _, s := range out {
+			if s.UpdatedAt.Before(cursor.UpdatedAt) ||
+				(s.UpdatedAt.Equal(cursor.UpdatedAt) && s.ID < cursor.ID) {
+				kept = append(kept, s)
+			}
+		}
+		out = kept
+	}
+	page := SessionPage{}
+	if len(out) > limit {
+		last := out[limit-1]
+		page.Sessions = out[:limit]
+		page.NextCursor = &SessionCursor{UpdatedAt: last.UpdatedAt, ID: last.ID}
+	} else {
+		page.Sessions = out
+	}
+	return page, nil
 }
 
 func (m *MemStore) DeleteSessionForUser(_ context.Context, id, userID string) (bool, error) {

@@ -83,12 +83,12 @@ func sessionIDs(h *Handler) []string {
 	if h.runtime == nil {
 		return nil
 	}
-	sessions, err := h.runtime.ListSessionsByUser(context.Background(), testUserID)
+	sessions, err := h.runtime.ListSessionsByUser(context.Background(), testUserID, 0, nil)
 	if err != nil {
 		return nil
 	}
-	ids := make([]string, 0, len(sessions))
-	for _, s := range sessions {
+	ids := make([]string, 0, len(sessions.Sessions))
+	for _, s := range sessions.Sessions {
 		ids = append(ids, s.ID)
 	}
 	return ids
@@ -320,11 +320,11 @@ func TestDisconnectLeavesRunRunning(t *testing.T) {
 	}
 
 	// But the run must still be active: disconnect detaches, it does not cancel.
-	sessions, err := rt.ListSessionsByUser(context.Background(), testUserID)
-	if err != nil || len(sessions) == 0 {
-		t.Fatalf("list sessions: %v n=%d", err, len(sessions))
+	page, err := rt.ListSessionsByUser(context.Background(), testUserID, 0, nil)
+	if err != nil || len(page.Sessions) == 0 {
+		t.Fatalf("list sessions: %v n=%d", err, len(page.Sessions))
 	}
-	if _, active, err := rt.ActiveRun(context.Background(), sessions[0].ID); err != nil || !active {
+	if _, active, err := rt.ActiveRun(context.Background(), page.Sessions[0].ID); err != nil || !active {
 		t.Errorf("run active = %v err=%v, want still active after disconnect", active, err)
 	}
 }

@@ -73,6 +73,22 @@ type Session struct {
 	State map[string]json.RawMessage
 }
 
+// SessionCursor is the keyset position of the last session in a page of the
+// conversation list, used to fetch the next page. It pins (updated_at, id):
+// the list is ordered by updated_at DESC with id as a tiebreaker, so every
+// page continues strictly below this pair.
+type SessionCursor struct {
+	UpdatedAt time.Time
+	ID        string
+}
+
+// SessionPage is one page of a user's conversation list: the sessions in the
+// page plus the cursor to fetch the next one (nil when the list is exhausted).
+type SessionPage struct {
+	Sessions   []Session
+	NextCursor *SessionCursor
+}
+
 // Run is one agent turn-chain within a session.
 type Run struct {
 	ID        string

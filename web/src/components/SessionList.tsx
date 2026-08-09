@@ -1,6 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { MessageSquare, Plus, Search, Trash2 } from "lucide-react";
-import { deleteSession, listSessions, relTime, type SessionSummary } from "@/lib/sessions";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, MessageSquare, Plus, Search, Trash2 } from "lucide-react";
+import {
+  deleteSession,
+  listSessions,
+  relTime,
+  type SessionSummary,
+} from "@/lib/sessions";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -37,17 +42,59 @@ type Props = {
 
 // SessionList is the left sidebar of conversations. Selecting one switches the
 // active thread; "New chat" starts a fresh session; the trash icon deletes one.
+// The list is loaded from the backend in pages of SESSION_PAGE_SIZE, newest
+// first; scrolling near the bottom fetches the next page automatically.
 export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refreshToken }: Props) => {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [nextCursor, setNextCursor] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [query, setQuery] = useState("");
+  // Sentinel at the bottom of the list; becoming visible triggers the next page.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
+  // refresh reloads from the first page (bumped by refreshToken, e.g. after a
+  // new session is created). Any previously loaded pages are dropped so the
+  // list reflects the new activity order.
   const refresh = useCallback(async () => {
-    setSessions(await listSessions());
+    setLoading(true);
+    const page = await listSessions();
+    setSessions(page.sessions);
+    setNextCursor(page.nextCursor);
+    setLoading(false);
   }, []);
+
+  const loadMore = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    const page = await listSessions(nextCursor);
+    setLoadingMore(false);
+    if (page.sessions.length === 0) {
+      setNextCursor("");
+      return;
+    }
+    setSessions((prev) => [...prev, ...page.sessions]);
+    setNextCursor(page.nextCursor);
+  }, [nextCursor, loadingMore]);
 
   useEffect(() => {
     void refresh();
   }, [refresh, refreshToken]);
+
+  // Infinite scroll: when the bottom sentinel scrolls into view (rootMargin
+  // preloads a screenful) and more pages exist, fetch the next one.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) void loadMore();
+      },
+      { rootMargin: "240px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [loadMore]);
 
   const handleDelete = async (id: string) => {
     if (!(await deleteSession(id))) return;
@@ -88,7 +135,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="p-2">
-          {sessions.length === 0 && (
+          {!loading && sessions.length === 0 && (
             <Empty className="p-4">
               <EmptyHeader>
                 <EmptyMedia variant="icon">
@@ -167,6 +214,13 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
               );
             })}
           </ul>
+          <div ref={sentinelRef} className="h-px" aria-hidden="true" />
+          {loadingMore && (
+            <div className="flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              Loading…
+            </div>
+          )}
         </div>
       </ScrollArea>
     </aside>

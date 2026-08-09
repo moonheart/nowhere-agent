@@ -25,8 +25,12 @@ type Store interface {
 	CreateSession(ctx context.Context, userID, title string) (Session, error)
 	GetSession(ctx context.Context, id string) (Session, error)
 	EndSession(ctx context.Context, id string) error
-	// ListSessionsByUser returns a user's sessions, most-recently-active first.
-	ListSessionsByUser(ctx context.Context, userID string) ([]Session, error)
+	// ListSessionsByUser returns a page of a user's active sessions,
+	// most-recently-active first. limit caps the page size (<= 0 falls back to
+	// a default); cursor is the previous page's NextCursor (nil for the first
+	// page). The returned page's NextCursor is nil when no further sessions
+	// exist.
+	ListSessionsByUser(ctx context.Context, userID string, limit int, cursor *SessionCursor) (SessionPage, error)
 	// DeleteSessionForUser soft-deletes (ends) a session owned by userID,
 	// returning false if no such session exists for that user.
 	DeleteSessionForUser(ctx context.Context, id, userID string) (bool, error)
@@ -421,9 +425,10 @@ func (rt *Runtime) RecoverStrandedRuns(ctx context.Context) (int, error) {
 	return rt.store.FailStrandedRuns(ctx)
 }
 
-// ListSessionsByUser returns a user's sessions for the conversation list.
-func (rt *Runtime) ListSessionsByUser(ctx context.Context, userID string) ([]Session, error) {
-	return rt.store.ListSessionsByUser(ctx, userID)
+// ListSessionsByUser returns a page of a user's sessions for the conversation
+// list (most-recently-active first, keyset-paginated by limit/cursor).
+func (rt *Runtime) ListSessionsByUser(ctx context.Context, userID string, limit int, cursor *SessionCursor) (SessionPage, error) {
+	return rt.store.ListSessionsByUser(ctx, userID, limit, cursor)
 }
 
 // DeleteSessionForUser ends a session the user owns; false if not theirs.

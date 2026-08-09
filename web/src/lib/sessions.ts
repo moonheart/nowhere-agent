@@ -1,5 +1,7 @@
 // Conversation list for the sidebar: fetches the caller's sessions from the
-// backend (which scopes them to the authenticated user).
+// backend (which scopes them to the authenticated user), one page at a time.
+// The server orders by most-recently-active and returns an opaque cursor to
+// load the next page; an empty cursor means the list is exhausted.
 
 import { getToken } from "@/lib/auth";
 
@@ -9,15 +11,29 @@ export type SessionSummary = {
   updatedAt: string;
 };
 
-export async function listSessions(): Promise<SessionSummary[]> {
+// The server default page size (internal/chatapi/sessions.go); sent explicitly
+// so the page size doesn't silently drift from the backend default.
+export const SESSION_PAGE_SIZE = 25;
+
+export type SessionPage = {
+  sessions: SessionSummary[];
+  nextCursor: string;
+};
+
+export async function listSessions(cursor = ""): Promise<SessionPage> {
   const token = getToken();
-  if (!token) return [];
-  const res = await fetch("/api/chat/sessions", {
+  if (!token) return { sessions: [], nextCursor: "" };
+  const params = new URLSearchParams({ limit: String(SESSION_PAGE_SIZE) });
+  if (cursor) params.set("cursor", cursor);
+  const res = await fetch(`/api/chat/sessions?${params}`, {
     headers: { authorization: `Bearer ${token}` },
   });
-  if (!res.ok) return [];
-  const data = (await res.json()) as { sessions?: SessionSummary[] };
-  return data.sessions ?? [];
+  if (!res.ok) return { sessions: [], nextCursor: "" };
+  const data = (await res.json()) as {
+    sessions?: SessionSummary[];
+    nextCursor?: string;
+  };
+  return { sessions: data.sessions ?? [], nextCursor: data.nextCursor ?? "" };
 }
 
 // deleteSession removes a conversation; returns true on success.
