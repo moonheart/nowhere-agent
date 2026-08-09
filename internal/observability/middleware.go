@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"runtime/debug"
 	"time"
+
+	"nowhere-agent/internal/httpx"
+	"nowhere-agent/internal/reqctx"
 )
 
 // Middleware is the standard http middleware shape. Chain composes them.
@@ -27,7 +30,7 @@ func Chain(h http.Handler, mws ...Middleware) http.Handler {
 // RequestID uses it to inject the request-scoped logger; background workers
 // (run goroutines) use it to propagate that logger past the HTTP boundary.
 func WithLogger(ctx context.Context, log *slog.Logger) context.Context {
-	return context.WithValue(ctx, loggerKey, log)
+	return reqctx.WithLogger(ctx, log)
 }
 
 // loggerFor returns the context's scoped logger, or the process default, so
@@ -53,10 +56,14 @@ func clientGone(r *http.Request) bool {
 
 // Recovery catches a panic in the wrapped handler, logs it with a stack on the
 // request-scoped logger, and — only if no status was committed yet — answers
-// 500. When the handler already started streaming (SSE), the response cannot be
-// rewritten, so Recovery just severs the connection by returning; the run layer
-// settles the run independently. Place it directly around the mux, INSIDE the
-// metrics middleware, so the 500 it writes is counted like any other status.
+// 500 with the standard JSON error body. When the handler already started
+// streaming (SSE), the response cannot be rewritten, so Recovery just severs
+// the connection by returning; the run layer settles the run independently.
+// Place it directly around the mux, INSIDE the metrics middleware, so the 500
+// it writes is counted like any other status. A panicked error value that
+// carries an HTTP status (see httpx.StatusFor) is answered with that status
+// instead of a blanket 500, so the panic boundary doubles as the "known errors
+// get normalized" boundary.
 func Recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -64,54 +71,13 @@ func Recovery(next http.Handler) http.Handler {
 				loggerFor(r.Context()).Error("http handler panicked",
 					"panic", p, "stack", string(debug.Stack()))
 				if wr, ok := w.(interface{ Written() bool }); !ok || !wr.Written() {
-					http.Error(w, "internal server error", http.StatusInternalServerError)
+					httpx.Error(w, httpx.StatusFor(p), "internal server error")
 				}
 			}
 		}()
 		next.ServeHTTP(w, r)
 	})
 }
-
-// accessRecorder captures status, bytes written, and time-to-first-byte for the
-// access log, independently of the metrics recorder (they sit at different
-// layers of the stack and must not share state).
-type accessRecorder struct {
-	http.ResponseWriter
-	start  time.Time
-	status int
-	bytes  int
-	ttfb   time.Duration
-	wrote  bool
-}
-
-func (a *accessRecorder) WriteHeader(code int) {
-	if !a.wrote {
-		a.wrote = true
-		a.status = code
-		a.ttfb = time.Since(a.start)
-	}
-	a.ResponseWriter.WriteHeader(code)
-}
-
-func (a *accessRecorder) Write(b []byte) (int, error) {
-	if !a.wrote {
-		a.WriteHeader(http.StatusOK)
-	}
-	n, err := a.ResponseWriter.Write(b)
-	a.bytes += n
-	return n, err
-}
-
-// Flush forwards streaming flushes (SSE asserts http.Flusher directly; a type
-// assertion does not traverse Unwrap).
-func (a *accessRecorder) Flush() {
-	if f, ok := a.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
-// Unwrap lets http.ResponseController reach the underlying writer.
-func (a *accessRecorder) Unwrap() http.ResponseWriter { return a.ResponseWriter }
 
 // AccessLog emits one structured log line per completed request: status,
 // latency, time-to-first-byte, and response bytes, on the request-scoped
@@ -122,7 +88,7 @@ func (a *accessRecorder) Unwrap() http.ResponseWriter { return a.ResponseWriter 
 func AccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rec := &accessRecorder{ResponseWriter: w, start: start, status: http.StatusOK}
+		rec := newStatusWriter(w, start)
 		next.ServeHTTP(rec, r)
 
 		status := rec.status
