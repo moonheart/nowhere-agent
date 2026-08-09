@@ -98,8 +98,9 @@ func (h *Handler) WithMemoryInjector(f MemoryInjectorFactory) *Handler {
 
 // bindSessionMiddleware attaches the session-scoped middleware to the loop once
 // the session id is known: memory injection (recalled memories into the
-// transient view) and image materialization (BlockImage path → base64). Memory
-// injection runs as a BeforeModel hook, BEFORE compression, so injected
+// transient view), the vision gate (image blocks → view_image hint for non-
+// vision main models), and image materialization (BlockImage path → base64).
+// Memory injection runs as a BeforeModel hook, BEFORE compression, so injected
 // memories count against the context budget; image materialization stays a
 // WrapModelCall, innermost, so base64 payloads never enter the durable record.
 func (h *Handler) bindSessionMiddleware(loop *agent.Loop, r *http.Request, sessID string, query string) {
@@ -109,6 +110,14 @@ func (h *Handler) bindSessionMiddleware(loop *agent.Loop, r *http.Request, sessI
 				loop.Use(&agent.MemoryInjectMW{Injector: inj, SessionID: sessID})
 			}
 		}
+	}
+	// The vision gate is registered BEFORE ImageMW, so it is the outermost
+	// wrap layer and runs first: for a non-vision main model it rewrites every
+	// image block to a text hint BEFORE ImageMW materializes anything, so no
+	// base64 payload is ever built for a model that cannot use it. ImageMW then
+	// materializes only what remains (vision-capable models keep their blocks).
+	if h.visionProvider != "" {
+		loop.Use(&agent.VisionGateMW{ProviderName: h.visionProvider})
 	}
 	if h.images != nil {
 		loop.Use(&agent.ImageMW{Resolver: h.images.ResolverFor(sessID)})

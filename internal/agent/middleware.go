@@ -456,6 +456,46 @@ func (m *MemoryInjectMW) BeforeModel(ctx context.Context, s *RunState) error {
 	return nil
 }
 
+// VisionGateMW decides how image blocks reach the main model (image-input
+// capability). Per send it consults the model's capability profile: a model
+// with native image input keeps its image blocks (ImageMW materializes them and
+// the adapter serializes natively); a model without it gets each image block
+// rewritten to a text hint pointing at the view_image tool. The rewrite touches
+// only the transient per-attempt request copy, so the durable record keeps the
+// canonical BlockImage. It is registered only when a vision model is configured;
+// without one, image blocks flow to the adapter's own degrade path unchanged.
+type VisionGateMW struct {
+	// ProviderName is the main provider (e.g. "anthropic", "openai"), used with
+	// the request's model to look up the capability profile.
+	ProviderName string
+}
+
+func (m *VisionGateMW) MiddlewareName() string { return "vision-gate" }
+
+func (m *VisionGateMW) WrapModelCall(ctx context.Context, c *ModelCall, next ModelHandler) (ModelResult, error) {
+	if m.ProviderName == "" {
+		return next(ctx, c)
+	}
+	profile, known := provider.LookupProfile(m.ProviderName, c.Request.Model)
+	if known && profile.ImageInput {
+		return next(ctx, c) // native image blocks
+	}
+	// Non-vision (or unknown, conservatively) main model: replace each image
+	// block with a hint naming the view_image tool.
+	for mi := range c.Request.Messages {
+		for bi := range c.Request.Messages[mi].Content {
+			b := &c.Request.Messages[mi].Content[bi]
+			if b.Type != provider.BlockImage {
+				continue
+			}
+			text := "[已附加图片: " + b.ImagePath + " — 如需查看图片内容,请调用 view_image 工具传入此路径]"
+			c.Request.Messages[mi].Content[bi] = provider.Block{Type: provider.BlockText, Text: text}
+		}
+	}
+	c.View = c.Request.Messages
+	return next(ctx, c)
+}
+
 // ImageMW materializes image blocks (path → base64) before the send
 // (WrapModelCall, innermost). Byte-stable across turns for prompt caching.
 type ImageMW struct {

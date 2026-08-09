@@ -350,6 +350,13 @@ func run() error {
 	// Chat endpoint: build an agent loop per request from the configured provider.
 	if adapter, rawRecorder := buildProvider(cfg, log); adapter != nil {
 		model := cfg.LLM.Model
+		// Dedicated vision model for the view_image tool (image-input): backs a
+		// non-vision main model with a cheap vision-capable model. Built from the
+		// platform VISION_* settings; nil disables the tool.
+		visionAdapter := buildVisionProvider(cfg, rawRecorder)
+		if visionAdapter != nil {
+			log.Info("vision model configured (view_image tool)", "provider", cfg.Vision.Provider, "model", cfg.Vision.Model)
+		}
 
 		// Execution-permission gate (D10): authorize each tool call by the tool's
 		// risk before dispatch. This server is headless, so an "ask" decision
@@ -708,6 +715,14 @@ func run() error {
 					reg.Register(t)
 				}
 			}
+			// view_image (image-input): a dedicated vision model backs a main model
+			// without native image input. The tool resolves the image bytes through
+			// this session's ImageStore, sends them to the vision adapter, and
+			// returns the description as text. Registered only when a vision model
+			// is configured AND an image store exists; RiskReadOnly.
+			if visionAdapter != nil && imageStore != nil {
+				reg.Register(builtin.NewViewImage(visionAdapter, cfg.Vision.Model, imageStore.ResolverFor(sessionID)))
+			}
 			// Subagent spawn tool: children draw from a scoped view of this run's
 			// registry, so nested loops share the session's tools. Registered last.
 			if cfg.Subagent.Enabled {
@@ -748,6 +763,12 @@ func run() error {
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
 		}
+		// Vision gate (image-input): enable only when a vision model is
+		// configured, so non-vision main models get the view_image hint instead
+		// of useless image blocks.
+		if visionAdapter != nil {
+			handler = handler.WithVisionGate(cfg.LLM.Provider)
+		}
 		// Incremental memory injection (capability K / context-mgmt): each run's
 		// loop surfaces newly-created memories into the outgoing view (never the
 		// durable history), keeping the system prefix byte-stable for caching.
@@ -755,16 +776,19 @@ func run() error {
 			return chatapi.NewSessionMemoryInjector(memPort, identitySvc, sessionRuntime, user, query)
 		})
 		// Tool binder: attach session-scoped tools to each run. Runs when the
-		// sandbox (file tools), MCP (network tools), or memory (recall_memory) is
-		// configured — the latter two need no sandbox, so they must register even
-		// when the sandbox is off.
-		if sandboxMgr != nil || mcpClient != nil || memPort != nil {
+		// sandbox (file tools), MCP (network tools), memory (recall_memory), or
+		// vision (view_image) is configured — the latter three need no sandbox,
+		// so they must register even when the sandbox is off.
+		if sandboxMgr != nil || mcpClient != nil || memPort != nil || visionAdapter != nil {
 			handler = handler.WithToolBinder(bindChatTools)
 			if sandboxMgr != nil {
 				log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
 			}
 			if execEnabled {
 				log.Info("run_command tool enabled", "backend", cfg.Sandbox.Backend)
+			}
+			if visionAdapter != nil {
+				log.Info("view_image tool enabled", "vision_model", cfg.Vision.Model)
 			}
 			// MCP tool count is logged by reconnectMCP when the async connect
 			// lands; at this point it is still 0, so there is nothing to report.
@@ -1061,23 +1085,64 @@ func buildProvider(cfg config.Config, log *slog.Logger) (provider.Adapter, *prov
 // pooling is preserved through the shared client, and no adapter cache is
 // warranted.
 func buildProviderWithKey(cfg config.Config, recorder *provider.RawRecorder, apiKey string) provider.Adapter {
-	switch cfg.LLM.Provider {
+	return buildProviderWith(providerSettings{
+		Provider:        cfg.LLM.Provider,
+		Model:           cfg.LLM.Model,
+		APIKey:          apiKey,
+		BaseURL:         cfg.LLM.BaseURL,
+		RawLogDir:       cfg.LLM.RawLogDir,
+		StreamIdle:      cfg.LLM.StreamIdleTimeout,
+	}, recorder)
+}
+
+// providerSettings carries the provider-agnostic knobs shared by the main
+// chat adapter and the dedicated vision adapter (image-input capability).
+type providerSettings struct {
+	Provider   string
+	Model      string
+	APIKey     string
+	BaseURL    string
+	RawLogDir  string
+	StreamIdle time.Duration
+}
+
+// buildVisionProvider constructs the dedicated vision adapter backing the
+// view_image tool. Returns nil when the provider or model is unset, so vision
+// is fully opt-in (the legacy image-degradation path stays when unset).
+func buildVisionProvider(cfg config.Config, recorder *provider.RawRecorder) provider.Adapter {
+	if cfg.Vision.Provider == "" || cfg.Vision.Model == "" {
+		return nil
+	}
+	return buildProviderWith(providerSettings{
+		Provider:   cfg.Vision.Provider,
+		Model:      cfg.Vision.Model,
+		APIKey:     cfg.Vision.APIKey,
+		BaseURL:    cfg.Vision.BaseURL,
+		RawLogDir:  cfg.LLM.RawLogDir,
+		StreamIdle: cfg.LLM.StreamIdleTimeout,
+	}, recorder)
+}
+
+// buildProviderWith constructs an adapter from explicit settings (shared by
+// buildProviderWithKey and buildVisionProvider).
+func buildProviderWith(s providerSettings, recorder *provider.RawRecorder) provider.Adapter {
+	switch s.Provider {
 	case "anthropic":
 		var opts []anthropic.Option
-		if cfg.LLM.BaseURL != "" {
-			opts = append(opts, anthropic.WithEndpoint(cfg.LLM.BaseURL))
+		if s.BaseURL != "" {
+			opts = append(opts, anthropic.WithEndpoint(s.BaseURL))
 		}
 		opts = append(opts, anthropic.WithRawRecorder(recorder))
-		opts = append(opts, anthropic.WithStreamIdleTimeout(cfg.LLM.StreamIdleTimeout))
-		return anthropic.New(apiKey, opts...)
+		opts = append(opts, anthropic.WithStreamIdleTimeout(s.StreamIdle))
+		return anthropic.New(s.APIKey, opts...)
 	case "openai":
 		var opts []openai.Option
-		if cfg.LLM.BaseURL != "" {
-			opts = append(opts, openai.WithEndpoint(cfg.LLM.BaseURL))
+		if s.BaseURL != "" {
+			opts = append(opts, openai.WithEndpoint(s.BaseURL))
 		}
 		opts = append(opts, openai.WithRawRecorder(recorder))
-		opts = append(opts, openai.WithStreamIdleTimeout(cfg.LLM.StreamIdleTimeout))
-		return openai.New(apiKey, opts...)
+		opts = append(opts, openai.WithStreamIdleTimeout(s.StreamIdle))
+		return openai.New(s.APIKey, opts...)
 	default:
 		return nil
 	}

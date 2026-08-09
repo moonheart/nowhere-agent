@@ -33,8 +33,14 @@ type historyUsageData struct {
 }
 
 type historyPart struct {
-	Type string `json:"type"`           // "text" | "reasoning" | "tool-call"
+	Type string `json:"type"`           // "text" | "reasoning" | "tool-call" | "image"
 	Text string `json:"text,omitempty"` // text/reasoning payload
+
+	// image fields (image-input capability): a user attachment referenced by its
+	// session-relative workspace path. The client renders it via the
+	// authenticated file endpoint (GET .../sessions/{id}/files/{path...}).
+	MediaType string `json:"mediaType,omitempty"`
+	Path      string `json:"path,omitempty"`
 
 	// tool-call fields (assistant-ui ToolCallMessagePart)
 	ToolCallID string `json:"toolCallId,omitempty"`
@@ -310,8 +316,15 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 			flush()
 			hm := historyMessage{ID: fmt.Sprintf("msg-%d", m.ID), Role: string(m.Role)}
 			for _, b := range m.Content {
-				if b.Type == provider.BlockText {
+				switch b.Type {
+				case provider.BlockText:
 					appendPartText(&hm, "text", b.Text)
+				case provider.BlockImage:
+					// An attached image (image-input capability): carried by path
+					// so the client renders it via the authenticated /files/ route.
+					if b.ImagePath != "" {
+						hm.Content = append(hm.Content, historyPart{Type: "image", MediaType: b.MediaType, Path: b.ImagePath})
+					}
 				}
 			}
 			if len(hm.Content) > 0 {

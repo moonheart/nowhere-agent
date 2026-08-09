@@ -17,7 +17,10 @@ type Config struct {
 	DB   DB
 	Log  Log
 	LLM  LLM
-	Web  Web
+	// Vision configures the dedicated vision model used by the view_image tool
+	// for main models without native image input (image-input capability).
+	Vision Vision
+	Web    Web
 	// Workspace configures per-session image storage (persist-raw-messages).
 	Workspace Workspace
 	// Stream configures the live content broker (redis-stream-live).
@@ -242,12 +245,24 @@ type LLM struct {
 	StreamIdleTimeout time.Duration `envconfig:"LLM_STREAM_IDLE_TIMEOUT" default:"120s"`
 }
 
+// Vision configures the dedicated vision model backing the view_image tool for
+// main models without native image input (image-input capability). Provider and
+// model must BOTH be set for vision to be enabled; unset keeps the legacy
+// behaviour (image blocks degrade to text placeholders, no view_image tool).
+// Vision calls use this platform key, not team keys (the tool is bound per
+// session where no caller key context exists).
+type Vision struct {
+	Provider string `envconfig:"VISION_PROVIDER" default:""` // anthropic | openai
+	Model    string `envconfig:"VISION_MODEL" default:""`
+	APIKey   string `envconfig:"VISION_API_KEY" default:""`
+	BaseURL  string `envconfig:"VISION_BASE_URL" default:""` // optional override/proxy
+}
+
 // Web configures serving the built frontend.
 type Web struct {
 	// Dir is the built frontend (web/dist). Empty disables static serving.
 	Dir string `envconfig:"WEB_DIR" default:""`
 }
-
 // Identity configures the account layer (admin-console). The first account
 // created on an empty platform is made a platform admin automatically, which
 // does nothing for a deployment whose accounts predate the role — those

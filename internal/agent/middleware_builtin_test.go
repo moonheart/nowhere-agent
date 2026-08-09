@@ -413,3 +413,131 @@ func TestLoopUseFirstGateWins(t *testing.T) {
 		t.Errorf("execute gate = (%v, %q), want the first (denyNetwork) policy, not the approval marker", deny, reason)
 	}
 }
+
+// mkImageCall builds a ModelCall whose view carries one text + one image block.
+func mkImageCall() *ModelCall {
+	call := &ModelCall{
+		View: []provider.Message{{
+			Role: provider.RoleUser,
+			Content: []provider.Block{
+				{Type: provider.BlockText, Text: "look at this"},
+				{Type: provider.BlockImage, MediaType: "image/webp", ImagePath: "img/a.webp"},
+			},
+		}},
+	}
+	call.Request.Messages = call.View
+	return call
+}
+
+func imageBlocks(c *ModelCall) int {
+	n := 0
+	for _, m := range c.Request.Messages {
+		for _, b := range m.Content {
+			if b.Type == provider.BlockImage {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// TestVisionGateLeavesBlocksForVisionModel: a vision-capable model keeps its
+// image blocks so ImageMW can materialize them.
+func TestVisionGateLeavesBlocksForVisionModel(t *testing.T) {
+	mw := &VisionGateMW{ProviderName: "anthropic"} // claude-* profiles: ImageInput true
+	var got *ModelCall
+	call := mkImageCall()
+	call.Request.Model = "claude-sonnet-4"
+	if _, err := mw.WrapModelCall(context.Background(), call, okHandler(&got)); err != nil {
+		t.Fatalf("WrapModelCall: %v", err)
+	}
+	if n := imageBlocks(got); n != 1 {
+		t.Errorf("vision model: image blocks = %d, want 1 (left for native serialization)", n)
+	}
+}
+
+// TestVisionGateRewritesBlocksForNonVisionModel: a non-vision model gets every
+// image block rewritten to a text hint naming view_image.
+func TestVisionGateRewritesBlocksForNonVisionModel(t *testing.T) {
+	mw := &VisionGateMW{ProviderName: "openai"} // deepseek-* profiles: ImageInput false
+	var got *ModelCall
+	call := mkImageCall()
+	call.Request.Model = "deepseek-chat"
+	if _, err := mw.WrapModelCall(context.Background(), call, okHandler(&got)); err != nil {
+		t.Fatalf("WrapModelCall: %v", err)
+	}
+	if n := imageBlocks(got); n != 0 {
+		t.Errorf("non-vision model: image blocks = %d, want 0", n)
+	}
+	var hint string
+	for _, m := range got.Request.Messages {
+		for _, b := range m.Content {
+			if strings.Contains(b.Text, "view_image") {
+				hint = b.Text
+			}
+		}
+	}
+	if hint == "" {
+		t.Fatal("non-vision model should see a hint naming view_image")
+	}
+	if !strings.Contains(hint, "img/a.webp") {
+		t.Errorf("hint should carry the image path, got %q", hint)
+	}
+}
+
+// TestVisionGateUnknownModelFallsBack: an unknown profile is treated
+// conservatively — no native image blocks.
+func TestVisionGateUnknownModelFallsBack(t *testing.T) {
+	mw := &VisionGateMW{ProviderName: "openai"}
+	var got *ModelCall
+	call := mkImageCall()
+	call.Request.Model = "some-unknown-model"
+	if _, err := mw.WrapModelCall(context.Background(), call, okHandler(&got)); err != nil {
+		t.Fatalf("WrapModelCall: %v", err)
+	}
+	if n := imageBlocks(got); n != 0 {
+		t.Errorf("unknown model: image blocks = %d, want 0 (conservative default)", n)
+	}
+}
+
+// TestVisionGateDurableRecordUntouched: the rewrite mutates only the transient
+// per-attempt copy (fresh Content slices, as the loop's copyMessageContents
+// produces); the durable-bound source still holds the canonical BlockImage.
+func TestVisionGateDurableRecordUntouched(t *testing.T) {
+	mw := &VisionGateMW{ProviderName: "openai"}
+	src := mkImageCall()
+	durable := src.Request.Messages // durable-bound copy the loop would persist
+	transient := copyMessageContents(durable)
+	call := &ModelCall{View: transient}
+	call.Request.Messages = transient
+	call.Request.Model = "deepseek-chat"
+	if _, err := mw.WrapModelCall(context.Background(), call, okHandler(&call)); err != nil {
+		t.Fatalf("WrapModelCall: %v", err)
+	}
+	// The durable source still carries the BlockImage unchanged.
+	found := false
+	for _, m := range durable {
+		for _, b := range m.Content {
+			if b.Type == provider.BlockImage {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("durable record lost its BlockImage after the gate rewrote the transient view")
+	}
+}
+
+// TestVisionGateDisabledWithoutProvider: empty provider name is a no-op.
+func TestVisionGateDisabledWithoutProvider(t *testing.T) {
+	mw := &VisionGateMW{}
+	var got *ModelCall
+	call := mkImageCall()
+	call.Request.Model = "deepseek-chat"
+	if _, err := mw.WrapModelCall(context.Background(), call, okHandler(&got)); err != nil {
+		t.Fatalf("WrapModelCall: %v", err)
+	}
+	if n := imageBlocks(got); n != 1 {
+		t.Errorf("empty provider: image blocks = %d, want 1 (gate disabled)", n)
+	}
+}

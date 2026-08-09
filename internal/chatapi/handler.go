@@ -89,6 +89,10 @@ type Handler struct {
 	// budgetGate, when set, enforces the monthly token budget before a run
 	// starts spending (enterprise-readiness P1-1). Nil leaves runs ungated.
 	budgetGate BudgetChecker
+	// visionProvider, when non-empty, enables the vision gate: image blocks are
+	// rewritten to a view_image hint for main models without native image input
+	// (image-input capability). Set only when a vision model is configured.
+	visionProvider string
 }
 
 // NewHandler creates a chat Handler.
@@ -158,6 +162,16 @@ func (h *Handler) WithBudgetGate(g BudgetChecker) *Handler {
 	return h
 }
 
+// WithVisionGate enables the vision gate (image-input capability) for main
+// models without native image input. providerName is the main provider (e.g.
+// "anthropic", "openai"); the gate consults the model's capability profile per
+// send and rewrites image blocks to a view_image hint when the model cannot see
+// them natively. Empty disables the gate.
+func (h *Handler) WithVisionGate(providerName string) *Handler {
+	h.visionProvider = providerName
+	return h
+}
+
 // WithToolBinder enables per-session tool wiring (file-tools): the binder runs
 // for each run after the session is resolved, attaching the session's
 // sandbox-bound tools to the loop.
@@ -176,6 +190,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/chat/sessions/{id}", h.serveDeleteSession)
 	mux.HandleFunc("POST /api/chat/sessions/{id}/state", h.serveSetSessionState)
 	mux.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
+	mux.HandleFunc("POST /api/chat/sessions/{id}/images", h.serveImageUpload)
 }
 
 // RegisterAuthed mounts the protected chat routes onto the group. Auth is NOT
@@ -192,6 +207,7 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	g.HandleFunc("DELETE /api/chat/sessions/{id}", h.serveDeleteSession)
 	g.HandleFunc("POST /api/chat/sessions/{id}/state", h.serveSetSessionState)
 	g.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
+	g.HandleFunc("POST /api/chat/sessions/{id}/images", h.serveImageUpload)
 }
 
 // sseEmitter adapts agent.Emitter to write ui-message-stream frames live.
@@ -336,10 +352,12 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	h.bindSessionMiddleware(loop, r, sessID, lastUserText(req))
 
 	// Build the user turn's message so the run worker can persist it (full-block
-	// conversation record) in addition to the replay event below.
+	// conversation record) in addition to the replay event below. It carries any
+	// attached image blocks (image-input capability) alongside the text, so the
+	// durable record persists the image path pointers.
 	var userMsg *provider.Message
-	if text := lastUserText(req); text != "" {
-		m := provider.TextMessage(provider.RoleUser, text)
+	if blocks := userTurnBlocks(req); len(blocks) > 0 {
+		m := provider.Message{Role: provider.RoleUser, Content: blocks}
 		userMsg = &m
 	}
 

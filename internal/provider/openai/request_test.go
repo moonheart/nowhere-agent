@@ -8,6 +8,18 @@ import (
 	"nowhere-agent/internal/provider"
 )
 
+// contentString decodes a legacy string-form Content for assertions.
+func contentString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return string(raw)
+	}
+	return s
+}
+
 func TestBuildRequestSystemAndUser(t *testing.T) {
 	req, err := buildRequest(provider.Request{
 		Model:    "gpt-test",
@@ -20,7 +32,7 @@ func TestBuildRequestSystemAndUser(t *testing.T) {
 	if len(req.Messages) != 2 {
 		t.Fatalf("expected system+user, got %d", len(req.Messages))
 	}
-	if req.Messages[0].Role != "system" || req.Messages[0].Content != "be nice" {
+	if req.Messages[0].Role != "system" || contentString(req.Messages[0].Content) != "be nice" {
 		t.Errorf("system message wrong: %+v", req.Messages[0])
 	}
 	if req.Messages[1].Role != "user" {
@@ -57,7 +69,7 @@ func TestBuildRequestToolUseAndResult(t *testing.T) {
 	if assistant.ToolCalls[0].Function.Arguments == "" {
 		t.Error("tool args not serialized")
 	}
-	if tool == nil || tool.ToolCallID != "c1" || tool.Content != "data" {
+	if tool == nil || tool.ToolCallID != "c1" || contentString(tool.Content) != "data" {
 		t.Fatalf("tool result message wrong: %+v", tool)
 	}
 }
@@ -76,7 +88,7 @@ func TestBuildRequestDropsThinking(t *testing.T) {
 		t.Fatalf("buildRequest: %v", err)
 	}
 	// Only the text should survive.
-	if req.Messages[0].Content != "answer" {
+	if contentString(req.Messages[0].Content) != "answer" {
 		t.Errorf("thinking not dropped / text wrong: %+v", req.Messages[0])
 	}
 }
@@ -192,5 +204,116 @@ func TestBuildRequestToolsGatedForNonToolModel(t *testing.T) {
 	}
 	if len(req.Tools) != 0 {
 		t.Errorf("o1-mini must get no tools: %+v", req.Tools)
+	}
+}
+
+// imageBlock builds a canonical image block with materialized base64.
+func imageBlock(path, mediaType, data string) provider.Block {
+	return provider.Block{Type: provider.BlockImage, MediaType: mediaType, ImagePath: path, ImageData: data}
+}
+
+// contentParts decodes an array-form Content into parts.
+func contentParts(raw json.RawMessage) []apiContentPart {
+	var parts []apiContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil
+	}
+	return parts
+}
+
+// TestBuildRequestVisionModelEmitsImageURLParts: a vision-capable model gets
+// its materialized image serialized as an image_url content part.
+func TestBuildRequestVisionModelEmitsImageURLParts(t *testing.T) {
+	req, err := buildRequest(provider.Request{
+		Model: "gpt-4o",
+		Messages: []provider.Message{{
+			Role: provider.RoleUser,
+			Content: []provider.Block{
+				{Type: provider.BlockText, Text: "what is this"},
+				imageBlock("img/a.webp", "image/webp", "AAAA"),
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	msg := req.Messages[len(req.Messages)-1]
+	parts := contentParts(msg.Content)
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d, want 2 (text + image_url): %s", len(parts), msg.Content)
+	}
+	if parts[0].Type != "text" || parts[0].Text != "what is this" {
+		t.Errorf("part[0] = %+v, want the text part", parts[0])
+	}
+	if parts[1].Type != "image_url" || parts[1].ImageURL == nil {
+		t.Fatalf("part[1] = %+v, want an image_url part", parts[1])
+	}
+	want := "data:image/webp;base64,AAAA"
+	if parts[1].ImageURL.URL != want {
+		t.Errorf("image_url = %q, want %q", parts[1].ImageURL.URL, want)
+	}
+}
+
+// TestBuildRequestNonVisionModelDegrades: a model without native image input
+// still gets the legacy text degradation, not image parts.
+func TestBuildRequestNonVisionModelDegrades(t *testing.T) {
+	req, err := buildRequest(provider.Request{
+		Model: "deepseek-chat",
+		Messages: []provider.Message{{
+			Role:    provider.RoleUser,
+			Content: []provider.Block{imageBlock("img/a.webp", "image/webp", "AAAA")},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	msg := req.Messages[len(req.Messages)-1]
+	if parts := contentParts(msg.Content); len(parts) > 0 {
+		t.Fatalf("non-vision model must not emit image parts, got %s", msg.Content)
+	}
+	if !strings.Contains(contentString(msg.Content), "[image: img/a.webp]") {
+		t.Errorf("degraded content = %q, want an [image: path] reference", contentString(msg.Content))
+	}
+}
+
+// TestBuildRequestUnmaterializedImageDegradesEvenForVisionModel: a vision model
+// cannot serialize an image with no materialized data, so it degrades too.
+func TestBuildRequestUnmaterializedImageDegradesEvenForVisionModel(t *testing.T) {
+	req, err := buildRequest(provider.Request{
+		Model: "gpt-4o",
+		Messages: []provider.Message{{
+			Role:    provider.RoleUser,
+			Content: []provider.Block{imageBlock("img/a.webp", "image/webp", "")},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	msg := req.Messages[len(req.Messages)-1]
+	if parts := contentParts(msg.Content); len(parts) > 0 {
+		t.Fatalf("unmaterialized image must degrade, got %s", msg.Content)
+	}
+	if !strings.Contains(contentString(msg.Content), "[image: img/a.webp]") {
+		t.Errorf("degraded content = %q, want an [image: path] reference", contentString(msg.Content))
+	}
+}
+
+// TestBuildRequestMixedMessageFlattensImageParts: text + image in one message
+// flatten into one parts array; image-only messages still send.
+func TestBuildRequestMixedMessageFlattensImageParts(t *testing.T) {
+	req, err := buildRequest(provider.Request{
+		Model: "gpt-4o-mini",
+		Messages: []provider.Message{{
+			Role:    provider.RoleUser,
+			Content: []provider.Block{imageBlock("img/a.webp", "image/webp", "AAA")},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	msg := req.Messages[len(req.Messages)-1]
+	parts := contentParts(msg.Content)
+	if len(parts) != 1 || parts[0].Type != "image_url" {
+		t.Fatalf("image-only message parts = %+v, want one image_url part", parts)
 	}
 }

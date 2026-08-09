@@ -19,10 +19,25 @@ type dataStreamRequest struct {
 	// returns the output as the tool result. Keyed by tool name.
 	Tools    map[string]clientToolDecl `json:"tools,omitempty"`
 	ThreadID string                    `json:"threadId"`
+	// Images carries the images attached to the CURRENT user turn (image-input
+	// capability). The frontend uploads each attachment to the session first and
+	// includes the returned path + media type here; they append as BlockImage
+	// blocks to the most recent user message. (The data-stream runtime mangles
+	// per-message image parts into opaque file parts, so images travel top-level.)
+	Images []incomingImagePart `json:"images,omitempty"`
 	// Approval, when set, turns this POST into a verdict on a parked run rather
 	// than a new turn: the handler resumes the run and streams its continuation
 	// over the same ui-message-stream response (reusing the chat attach path).
 	Approval *approvalRequest `json:"approval,omitempty"`
+}
+
+// incomingImagePart is one attached image already stored in the session's
+// workspace, referenced by its session-relative path (the upload endpoint's
+// response). MediaType is optional; it defaults to image/webp (the store's
+// normalized output) when empty.
+type incomingImagePart struct {
+	MediaType string `json:"mediaType"`
+	Path      string `json:"path"`
 }
 
 // clientToolDecl is one client-declared tool definition from the request body.
@@ -55,10 +70,16 @@ type incomingMessage struct {
 type incomingPart struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
+	// Image part (image-input): MediaType + Path of an attached image, uploaded
+	// via the session's image endpoint first. The path is workspace-relative.
+	MediaType string `json:"mediaType"`
+	Path      string `json:"path"`
 }
 
-// toHistory converts incoming messages into canonical provider messages.
-// The data-stream runtime sends AI-SDK-style messages; we extract text.
+// toHistory converts incoming messages into canonical provider messages,
+// preserving both text and image parts (image-input capability). The data-stream
+// runtime sends AI-SDK-style messages; we extract the blocks they carry.
+// Top-level attached images (req.Images) append to the most recent user message.
 func toHistory(req dataStreamRequest) []provider.Message {
 	var history []provider.Message
 	for _, m := range req.Messages {
@@ -69,16 +90,85 @@ func toHistory(req dataStreamRequest) []provider.Message {
 		if m.Role == "system" {
 			continue // system handled separately
 		}
-		text := extractText(m)
-		if text == "" {
+		blocks := extractBlocks(m)
+		if len(blocks) == 0 {
 			continue
 		}
-		history = append(history, provider.TextMessage(role, text))
+		history = append(history, provider.Message{Role: role, Content: blocks})
+	}
+	if imgs := requestImages(req); len(imgs) > 0 {
+		if n := len(history); n > 0 && history[n-1].Role == provider.RoleUser {
+			history[n-1].Content = append(history[n-1].Content, imgs...)
+		} else {
+			// Image-only turn (no user text, or the last user message carried
+			// nothing extractable): still surface the images.
+			history = append(history, provider.Message{Role: provider.RoleUser, Content: imgs})
+		}
 	}
 	return history
 }
 
-// extractText pulls text from either content (string or array) or parts.
+// requestImages converts the request's top-level attached images (image-input
+// capability) into provider image blocks. Paths are workspace-relative and were
+// already validated at upload time.
+func requestImages(req dataStreamRequest) []provider.Block {
+	var out []provider.Block
+	for _, img := range req.Images {
+		if img.Path == "" {
+			continue
+		}
+		mediaType := img.MediaType
+		if mediaType == "" {
+			mediaType = "image/webp"
+		}
+		out = append(out, provider.Block{Type: provider.BlockImage, MediaType: mediaType, ImagePath: img.Path})
+	}
+	return out
+}
+
+// extractBlocks pulls the content blocks from either content (string or array)
+// or parts: text parts become text blocks, image parts become BlockImage blocks.
+func extractBlocks(m incomingMessage) []provider.Block {
+	var parts []incomingPart
+	switch {
+	case len(m.Parts) > 0:
+		parts = m.Parts
+	case len(m.Content) == 0:
+		return nil
+	default:
+		// content may be a plain string or an array of parts.
+		var s string
+		if err := json.Unmarshal(m.Content, &s); err == nil {
+			if s != "" {
+				return []provider.Block{{Type: provider.BlockText, Text: s}}
+			}
+			return nil
+		}
+		if err := json.Unmarshal(m.Content, &parts); err != nil {
+			return nil
+		}
+	}
+	var out []provider.Block
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			if p.Text != "" {
+				out = append(out, provider.Block{Type: provider.BlockText, Text: p.Text})
+			}
+		case "image":
+			if p.Path != "" {
+				mediaType := p.MediaType
+				if mediaType == "" {
+					mediaType = "image/webp"
+				}
+				out = append(out, provider.Block{Type: provider.BlockImage, MediaType: mediaType, ImagePath: p.Path})
+			}
+		}
+	}
+	return out
+}
+
+// extractText pulls plain text from either content (string or array) or parts.
 func extractText(m incomingMessage) string {
 	if len(m.Parts) > 0 {
 		var b strings.Builder
@@ -118,6 +208,23 @@ func lastUserText(req dataStreamRequest) string {
 		}
 	}
 	return ""
+}
+
+// userTurnBlocks returns the content blocks of the most recent user message
+// (text + any attached images, image-input capability). It is the full-block
+// user turn the run worker persists, mirroring toHistory but scoped to the last
+// user message. Top-level attached images (req.Images) append even when that
+// message is otherwise empty (an image-only turn), so the durable record
+// persists the image path pointers.
+func userTurnBlocks(req dataStreamRequest) []provider.Block {
+	var blocks []provider.Block
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			blocks = extractBlocks(req.Messages[i])
+			break
+		}
+	}
+	return append(blocks, requestImages(req)...)
 }
 
 // storedMessagesToProvider converts durable StoredMessages back into canonical

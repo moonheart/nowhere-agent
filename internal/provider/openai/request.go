@@ -33,10 +33,24 @@ type streamOptions struct {
 }
 
 type apiMessage struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	ToolCalls  []apiCall  `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content,omitempty"`
+	ToolCalls  []apiCall       `json:"tool_calls,omitempty"`
+	ToolCallID string          `json:"tool_call_id,omitempty"`
+}
+
+// apiContentPart is one element of OpenAI's array content form
+// (image-input capability): text and image_url parts. Content is serialized as
+// either a plain JSON string (legacy) or an array of these when a message
+// carries images.
+type apiContentPart struct {
+	Type     string       `json:"type"`
+	Text     string       `json:"text,omitempty"`
+	ImageURL *apiImageURL `json:"image_url,omitempty"`
+}
+
+type apiImageURL struct {
+	URL string `json:"url"`
 }
 
 type apiCall struct {
@@ -72,11 +86,16 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 	}
 
 	if r.System != "" {
-		req.Messages = append(req.Messages, apiMessage{Role: "system", Content: r.System})
+		req.Messages = append(req.Messages, apiMessage{Role: "system", Content: rawString(r.System)})
+	}
+
+	imageInput := false
+	if profile, known := provider.LookupProfile("openai", r.Model); known {
+		imageInput = profile.ImageInput
 	}
 
 	for _, m := range r.Messages {
-		msgs, err := convertMessage(m)
+		msgs, err := convertMessage(m, imageInput)
 		if err != nil {
 			return apiRequest{}, err
 		}
@@ -116,12 +135,23 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 	return req, nil
 }
 
+// rawString encodes a plain string as JSON for apiMessage.Content (the legacy
+// string content form).
+func rawString(s string) json.RawMessage {
+	b, _ := json.Marshal(s)
+	return b
+}
+
 // convertMessage flattens one canonical message into one or more OpenAI
 // messages. Tool results become role=tool messages keyed by tool_call_id.
-func convertMessage(m provider.Message) ([]apiMessage, error) {
+// When imageInput is true and a BlockImage has materialized data, the message
+// content becomes an array of parts (text + image_url); otherwise images
+// degrade to a text reference so the request still sends.
+func convertMessage(m provider.Message, imageInput bool) ([]apiMessage, error) {
 	var text string
 	var calls []apiCall
 	var results []apiMessage
+	var images []apiContentPart
 
 	for _, b := range m.Content {
 		switch b.Type {
@@ -141,29 +171,56 @@ func convertMessage(m provider.Message) ([]apiMessage, error) {
 		case provider.BlockToolResult:
 			results = append(results, apiMessage{
 				Role:       "tool",
-				Content:    b.ToolContent,
+				Content:    rawString(b.ToolContent),
 				ToolCallID: b.ToolResultID,
 			})
 		case provider.BlockThinking:
 			// Not representable; intentionally dropped.
 		case provider.BlockImage:
-			// OpenAI content here is a plain string; degrade images to a text
-			// reference. (The OpenAI-compat gateway in use does not accept image
-			// parts on this path; Anthropic is the image-capable provider.)
-			text += "[image: " + b.ImagePath + "]"
+			if imageInput && b.ImageData != "" {
+				mediaType := b.MediaType
+				if mediaType == "" {
+					mediaType = "image/webp"
+				}
+				images = append(images, apiContentPart{
+					Type: "image_url",
+					ImageURL: &apiImageURL{
+						URL: "data:" + mediaType + ";base64," + b.ImageData,
+					},
+				})
+			} else {
+				text += "[image: " + b.ImagePath + "]"
+			}
 		}
 	}
 
+	content := contentJSON(text, images)
+
 	var out []apiMessage
 	if m.Role == provider.RoleAssistant && len(calls) > 0 {
-		out = append(out, apiMessage{Role: "assistant", Content: text, ToolCalls: calls})
-	} else if len(results) > 0 && text == "" {
+		out = append(out, apiMessage{Role: "assistant", Content: content, ToolCalls: calls})
+	} else if len(results) > 0 && len(images) == 0 && text == "" {
 		// pure tool-result message(s)
 		out = append(out, results...)
 		return out, nil
 	} else {
-		out = append(out, apiMessage{Role: string(m.Role), Content: text})
+		out = append(out, apiMessage{Role: string(m.Role), Content: content})
 	}
 	out = append(out, results...)
 	return out, nil
+}
+
+// contentJSON serializes a message's content: a plain string when there are no
+// image parts (legacy form), otherwise an array of text + image_url parts.
+func contentJSON(text string, images []apiContentPart) json.RawMessage {
+	if len(images) == 0 {
+		return rawString(text)
+	}
+	parts := make([]apiContentPart, 0, len(images)+1)
+	if text != "" {
+		parts = append(parts, apiContentPart{Type: "text", Text: text})
+	}
+	parts = append(parts, images...)
+	b, _ := json.Marshal(parts)
+	return b
 }

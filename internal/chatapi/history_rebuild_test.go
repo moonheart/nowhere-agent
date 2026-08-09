@@ -136,3 +136,41 @@ func TestForgedClientHistoryIgnored(t *testing.T) {
 		t.Errorf("store history not used: %+v", got)
 	}
 }
+
+// TestBuildHistoryRendersImageParts verifies a persisted user message with an
+// image block serializes as an `image` historyPart (path pointer), so a
+// reloading client renders it via the authenticated file endpoint.
+func TestBuildHistoryRendersImageParts(t *testing.T) {
+	ms := session.NewMemMessageStore()
+	h := NewHandler(newTestLoop, "sys").WithMessageStore(ms)
+
+	_, _ = ms.AppendMessage(context.Background(), session.StoredMessage{
+		SessionID: "s1",
+		RunID:     "r1",
+		Role:      provider.RoleUser,
+		Content: []provider.Block{
+			{Type: provider.BlockText, Text: "look at this"},
+			{Type: provider.BlockImage, MediaType: "image/webp", ImagePath: "img/a.webp"},
+		},
+	})
+
+	msgs, err := h.buildHistory(&http.Request{}, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %d, want 1", len(msgs))
+	}
+	parts := msgs[0].Content
+	if len(parts) != 2 {
+		t.Fatalf("parts = %+v, want text + image", parts)
+	}
+	if parts[1].Type != "image" || parts[1].Path != "img/a.webp" || parts[1].MediaType != "image/webp" {
+		t.Errorf("image part = %+v, want {type:image path:img/a.webp}", parts[1])
+	}
+	// The user turn must be a user-role message (not folded into an assistant
+	// turn).
+	if msgs[0].Role != "user" {
+		t.Errorf("role = %q, want user", msgs[0].Role)
+	}
+}

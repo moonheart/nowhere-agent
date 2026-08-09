@@ -3,6 +3,7 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif"  // register GIF decoding
@@ -68,6 +69,11 @@ func resolveWithin(dir, rel string) (string, error) {
 	return abs, nil
 }
 
+// ErrUnsupportedImage reports that Save could not decode the payload as a
+// supported image format (PNG/JPEG/GIF/WebP). The upload endpoint maps it to a
+// 415; callers may also treat it as "reject".
+var ErrUnsupportedImage = errors.New("unsupported or malformed image")
+
 // Save decodes raw image bytes (PNG/JPEG/GIF/WebP), re-encodes to WebP, writes
 // it under the session dir, and returns the session-relative path to store in a
 // message block. A decode failure rejects the image (fail-closed: we never
@@ -86,7 +92,7 @@ func (s *ImageStore) Save(sessionID, name string, raw []byte) (relPath string, e
 
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
-		return "", fmt.Errorf("decode image: %w", err)
+		return "", fmt.Errorf("%w: %v", ErrUnsupportedImage, err)
 	}
 	var buf bytes.Buffer
 	if err := webp.Encode(&buf, img, webp.Options{Quality: 80}); err != nil {
