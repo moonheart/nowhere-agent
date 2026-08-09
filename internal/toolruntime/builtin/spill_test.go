@@ -68,6 +68,75 @@ func TestCapAndSpillDegradesWhenWriteFails(t *testing.T) {
 	}
 }
 
+// TestCapAndSpillShowsTailPreview pins the head+tail upgrade: an oversized
+// result keeps its head inline AND a tail preview (the last spillKeepTail
+// bytes), so the model sees both ends of a long output without paging. The
+// head ends exactly at the marker's offset and the preview comes after the
+// truncation marker, so the two regions never overlap, and head + preview +
+// marker still fit the persistence cap.
+func TestCapAndSpillShowsTailPreview(t *testing.T) {
+	ctx := context.Background()
+	sb := sandbox.NewMemPort()
+	h, _ := sb.Create(ctx, "s", sandbox.Options{})
+	full := strings.Repeat("A", spillKeepHead) + strings.Repeat("B", spillCap)
+
+	got := capAndSpill(ctx, sb, h, "run_command", full)
+
+	if !strings.HasSuffix(got, strings.Repeat("B", spillKeepTail)) {
+		t.Errorf("result does not end with the tail preview (last %d bytes)", spillKeepTail)
+	}
+	if !strings.Contains(got, "tail preview") {
+		t.Error("truncation marker missing the tail-preview notice")
+	}
+	off := markerOffset(t, got)
+	if !strings.HasPrefix(got, full[:off]) {
+		t.Errorf("head is not exactly the first %d bytes of the output", off)
+	}
+	if len(got) > contextmgmt.MaxToolResultChars {
+		t.Errorf("capped result %d exceeds persistence cap %d", len(got), contextmgmt.MaxToolResultChars)
+	}
+}
+
+// TestCapAndSpillTailPreviewSurvivesWriteFailure: even when the spill write
+// fails, the tail preview still shows — it is cut from the in-memory output,
+// not the file — so a storage failure only costs the retrievable middle, not
+// the end of the output.
+func TestCapAndSpillTailPreviewSurvivesWriteFailure(t *testing.T) {
+	full := strings.Repeat("z", spillCap+1) + strings.Repeat("Y", spillKeepTail)
+	got := capAndSpill(context.Background(), sandbox.NewMemPort(), sandbox.Handle{ID: "missing"}, "run_command", full)
+	if !strings.Contains(got, "could not be saved") {
+		t.Error("want a degraded marker on spill failure")
+	}
+	if !strings.HasSuffix(got, strings.Repeat("Y", spillKeepTail)) {
+		t.Error("tail preview missing from the degraded result")
+	}
+}
+
+// TestCapAndSpillTailPreviewRuneSafe: the tail preview is cut on a rune boundary
+// too — a multi-byte rune straddling the tail cut must not surface as U+FFFD,
+// and the preview must stay valid UTF-8 (capability-gap T8).
+func TestCapAndSpillTailPreviewRuneSafe(t *testing.T) {
+	ctx := context.Background()
+	sb := sandbox.NewMemPort()
+	h, _ := sb.Create(ctx, "s", sandbox.Options{})
+	// "x" + 汉*spillCap + "z": the tail cut target (len(spillKeepTail)) lands
+	// mid-rune, forcing the retreat that a naive full[tail:] cut would get wrong.
+	full := "x" + strings.Repeat("汉", spillCap) + "z"
+
+	got := capAndSpill(ctx, sb, h, "run_command", full)
+
+	if !utf8.ValidString(got) || strings.ContainsRune(got, '�') {
+		t.Error("tail preview split a rune — result is not valid UTF-8")
+	}
+	if !strings.Contains(got, "tail preview") {
+		t.Error("truncation marker missing the tail-preview notice")
+	}
+	// The preview ends with the output's final byte, intact and appearing once.
+	if !strings.HasSuffix(got, "z") || strings.Count(got, "z") != 1 {
+		t.Error("tail preview does not end with the intact final byte")
+	}
+}
+
 // TestSpillPathStableForSameContent: content-hash naming is deterministic
 // (idempotent for identical output) and lives under the scratch namespace.
 func TestSpillPathStableForSameContent(t *testing.T) {

@@ -121,7 +121,7 @@ func TestRunCommandSpillsAndRetrievesOversizedOutput(t *testing.T) {
 	ctx := context.Background()
 	sb := sandbox.NewMemPort()
 	h, _ := sb.Create(ctx, "s", sandbox.Options{})
-	big := strings.Repeat("x", spillKeepHead+5000)
+	big := strings.Repeat("x", spillCap+5000)
 	bp := &bigExecPort{MemPort: sb, out: big}
 
 	res, err := NewRunCommand(bp, h).Call(ctx, map[string]any{"command": "emit"})
