@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 
 	"nowhere-agent/internal/provider"
@@ -28,6 +29,14 @@ type chunk struct {
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *usage `json:"usage"`
+	// Err carries a mid-stream error payload. Some OpenAI-compatible gateways
+	// report failures (including context-length rejections) as an SSE data
+	// frame after the 200 OK instead of a non-200 status.
+	Err *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+	} `json:"error"`
 }
 
 // usage is the OpenAI streaming usage payload. PromptCacheHitTokens is
@@ -40,6 +49,20 @@ type usage struct {
 	PromptTokensDetails  *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
+	// CompletionTokensDetails carries the reasoning-token share of the
+	// completion (reasoning models). Absent on non-reasoning models.
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
+}
+
+// reasoning returns the reasoning-token share of the completion, 0 when the
+// provider does not break it out.
+func (u *usage) reasoning() int {
+	if u.CompletionTokensDetails != nil {
+		return u.CompletionTokensDetails.ReasoningTokens
+	}
+	return 0
 }
 
 // cacheRead picks the cache-hit count: DeepSeek's prompt_cache_hit_tokens,
@@ -85,6 +108,17 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 	var c chunk
 	if err := json.Unmarshal(data, &c); err != nil {
 		return []provider.Event{{Type: provider.EventError, Err: err}}
+	}
+
+	// A mid-stream error frame (gateway-reported failure after the 200 OK).
+	// Classify it so a context-length rejection surfaces as a
+	// ContextOverflowError and the loop's overflow fallback can retry with a
+	// shrunk view instead of failing the run.
+	if c.Err != nil {
+		if ov := provider.ClassifyStreamError(c.Err.Message); ov != nil {
+			return []provider.Event{{Type: provider.EventError, Err: ov}}
+		}
+		return []provider.Event{{Type: provider.EventError, Err: fmt.Errorf("openai stream error (%s/%s): %s", c.Err.Type, c.Err.Code, c.Err.Message)}}
 	}
 
 	var events []provider.Event
@@ -172,6 +206,7 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 				// There is no explicit cache-write on OpenAI/DeepSeek (the prefix
 				// cache is automatic), so CacheWriteTokens stays 0.
 				CacheReadTokens: c.Usage.cacheRead(),
+				ReasoningTokens: c.Usage.reasoning(),
 			},
 		})
 	}

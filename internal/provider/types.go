@@ -102,6 +102,19 @@ type Request struct {
 	// the stable system/tool prefix to enable prompt caching where supported.
 	CacheablePrefix bool
 
+	// Temperature / TopP / StopSequences are the sampling controls. Nil /
+	// empty means "provider default" — the field is omitted from the wire
+	// request. Adapters drop sampling params the model's capability profile
+	// forbids (e.g. reasoning models that reject temperature).
+	Temperature   *float64
+	TopP          *float64
+	StopSequences []string
+
+	// Thinking, when non-nil with BudgetTokens>0, enables extended reasoning:
+	// the model thinks before answering within the token budget (Anthropic
+	// `thinking`; ignored by adapters with no native equivalent).
+	Thinking *ThinkingSpec
+
 	// JSONResponse, when non-nil, forces a STRUCTURED output (capability L3):
 	// the model must produce a single JSON object conforming to Schema, with no
 	// surrounding prose. It is implemented as a forced tool call (both Anthropic
@@ -110,6 +123,14 @@ type Request struct {
 	// arrives as a BlockToolUse whose ToolInput is the JSON object. Name is the
 	// synthetic tool's name; the caller reads the object back from the block.
 	JSONResponse *JSONResponseSpec
+}
+
+// ThinkingSpec configures extended reasoning for one generation.
+type ThinkingSpec struct {
+	// BudgetTokens is the maximum number of tokens the model may spend
+	// thinking. The provider requires MaxTokens > BudgetTokens; adapters
+	// enlarge MaxTokens when the caller's value leaves no room for the reply.
+	BudgetTokens int
 }
 
 // JSONResponseSpec describes a forced structured-output call.
@@ -131,6 +152,11 @@ type Usage struct {
 	OutputTokens     int `json:"output_tokens"`
 	CacheReadTokens  int `json:"cache_read_tokens"`
 	CacheWriteTokens int `json:"cache_write_tokens"`
+	// ReasoningTokens is the share of OutputTokens spent on reasoning
+	// (OpenAI completion_tokens_details.reasoning_tokens). 0 when the
+	// provider does not break it out — it is a cost-accounting detail, not
+	// an additional token count.
+	ReasoningTokens int `json:"reasoning_tokens"`
 }
 
 // StopReason is the provider-neutral reason a generation ended. Each adapter

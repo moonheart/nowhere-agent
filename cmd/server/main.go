@@ -419,7 +419,19 @@ func run() error {
 		// per-loop below, over the CALLER's adapter and model, so team-scoped
 		// keys and model overrides apply to summarize calls exactly as they do
 		// to chat calls.
-		compressionEnabled := cfg.LLM.ContextWindow > 0
+		//
+		// The window comes from LLM_CONTEXT_WINDOW when set; otherwise it is
+		// derived from the model's capability profile (models.dev-style table),
+		// so a known model gets working compression out of the box. An unknown
+		// model with no explicit window keeps compression disabled.
+		contextWindow := cfg.LLM.ContextWindow
+		if contextWindow == 0 {
+			if profile, ok := provider.LookupProfile(cfg.LLM.Provider, model); ok {
+				contextWindow = profile.ContextWindow
+				log.Info("context window derived from model profile", "model", model, "window", contextWindow)
+			}
+		}
+		compressionEnabled := contextWindow > 0
 
 		// replyBudget reserves response space inside the context window. With a
 		// small window configured, the 64k default would exceed it (the
@@ -427,8 +439,8 @@ func run() error {
 		// compression budget (window - reply) negative, so it is clamped to a
 		// quarter of the window.
 		replyBudget := 65536
-		if cfg.LLM.ContextWindow > 0 && cfg.LLM.ContextWindow/4 < replyBudget {
-			replyBudget = cfg.LLM.ContextWindow / 4
+		if contextWindow > 0 && contextWindow/4 < replyBudget {
+			replyBudget = contextWindow / 4
 		}
 
 		// Dreaming worker + the scheduler that drives it (capability-gaps K1+K2).
@@ -487,7 +499,7 @@ func run() error {
 			// registration covers every session and reacts to the live toggle.
 			loop.Use(&agent.PermissionMW{Check: permit})
 			if compressionEnabled {
-				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callAdapter, modelName), Window: cfg.LLM.ContextWindow, MaxTokens: replyBudget, Breaker: breaker})
+				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callAdapter, modelName), Window: contextWindow, MaxTokens: replyBudget, Breaker: breaker})
 			}
 			loop.Use(&agent.OverflowMW{})
 		}
@@ -503,6 +515,16 @@ func run() error {
 		// on the middleware instance would reset each run and never trip.
 		subCompressBreaker := &agent.CircuitBreaker{}
 		chatCompressBreaker := &agent.CircuitBreaker{}
+
+		// Sampling/reasoning knobs shared by every loop the platform builds:
+		// LLM_TEMPERATURE (negative = provider default) and LLM_THINKING_BUDGET
+		// (0 = no extended thinking). Adapters gate them per model profile.
+		var temperature *float64
+		if cfg.LLM.Temperature >= 0 {
+			t := cfg.LLM.Temperature
+			temperature = &t
+		}
+
 		subStore := agentdef.NewStore()
 		subFactory := func(ctx context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
 			childModel := def.Model
@@ -519,6 +541,8 @@ func run() error {
 				MaxTokens:       replyBudget,
 				MaxIterations:   maxIter,
 				CacheablePrefix: true,
+				Temperature:     temperature,
+				ThinkingBudget:  cfg.LLM.ThinkingBudget,
 			})
 			// The child's permission policy resolves from the spawn context's session
 			// id (set on the run by the registry), so it inherits the parent session's
@@ -553,6 +577,8 @@ func run() error {
 					MaxTokens:       replyBudget,
 					MaxIterations:   25,
 					CacheablePrefix: true,
+					Temperature:     temperature,
+					ThinkingBudget:  cfg.LLM.ThinkingBudget,
 				})
 			// Tool authorization gates dispatch. The policy (permit) resolves the
 			// per-session permission mode from the run context at call time, so one
@@ -753,7 +779,7 @@ func run() error {
 			log.Info("scheduled-task trigger disabled; task CRUD still available")
 		}
 		if compressionEnabled {
-			log.Info("context compression enabled", "window", cfg.LLM.ContextWindow)
+			log.Info("context compression enabled", "window", contextWindow)
 		}
 		log.Info("chat endpoint enabled (auth required)", "provider", adapter.Name(), "model", model)
 	} else {
@@ -985,6 +1011,7 @@ func buildProviderWithKey(cfg config.Config, recorder *provider.RawRecorder, api
 			opts = append(opts, anthropic.WithEndpoint(cfg.LLM.BaseURL))
 		}
 		opts = append(opts, anthropic.WithRawRecorder(recorder))
+		opts = append(opts, anthropic.WithStreamIdleTimeout(cfg.LLM.StreamIdleTimeout))
 		return anthropic.New(apiKey, opts...)
 	case "openai":
 		var opts []openai.Option
@@ -992,6 +1019,7 @@ func buildProviderWithKey(cfg config.Config, recorder *provider.RawRecorder, api
 			opts = append(opts, openai.WithEndpoint(cfg.LLM.BaseURL))
 		}
 		opts = append(opts, openai.WithRawRecorder(recorder))
+		opts = append(opts, openai.WithStreamIdleTimeout(cfg.LLM.StreamIdleTimeout))
 		return openai.New(apiKey, opts...)
 	default:
 		return nil

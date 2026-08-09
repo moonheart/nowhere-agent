@@ -132,6 +132,31 @@ func TestDecodeInvalidJSON(t *testing.T) {
 	}
 }
 
+// A mid-stream error envelope naming a context limit must surface as a
+// ContextOverflowError so the loop's overflow fallback can shrink and retry.
+func TestDecodeErrorEnvelopeOverflow(t *testing.T) {
+	ev := decode(t, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`)
+	if ev.Type != provider.EventError {
+		t.Fatalf("got %q", ev.Type)
+	}
+	if !provider.IsContextOverflow(ev.Err) {
+		t.Errorf("err = %v, want ContextOverflowError", ev.Err)
+	}
+}
+
+func TestDecodeErrorEnvelopeGeneric(t *testing.T) {
+	ev := decode(t, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
+	if ev.Type != provider.EventError {
+		t.Fatalf("got %q", ev.Type)
+	}
+	if provider.IsContextOverflow(ev.Err) {
+		t.Error("overloaded must not classify as overflow")
+	}
+	if ev.Err == nil || ev.Err.Error() == "" {
+		t.Error("expected a descriptive error")
+	}
+}
+
 // TestStreamEventsEndToEnd feeds a raw SSE body through the scanner and
 // verifies the ordered canonical events that come out.
 func TestStreamEventsEndToEnd(t *testing.T) {

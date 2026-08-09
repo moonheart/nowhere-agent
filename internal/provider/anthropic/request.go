@@ -4,6 +4,10 @@
 package anthropic
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"regexp"
+
 	"nowhere-agent/internal/provider"
 )
 
@@ -17,6 +21,20 @@ type apiRequest struct {
 	// ToolChoice forces a specific tool when set (used for structured output).
 	ToolChoice *apiToolChoice `json:"tool_choice,omitempty"`
 	Stream    bool          `json:"stream"`
+
+	// Sampling controls; omitted entirely when nil (provider default).
+	Temperature   *float64 `json:"temperature,omitempty"`
+	TopP          *float64 `json:"top_p,omitempty"`
+	StopSequences []string `json:"stop_sequences,omitempty"`
+
+	// Thinking enables extended reasoning with a token budget.
+	Thinking *apiThinking `json:"thinking,omitempty"`
+}
+
+// apiThinking is the Anthropic extended-thinking request block.
+type apiThinking struct {
+	Type         string `json:"type"` // "enabled"
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 // apiToolChoice forces the model to call one named tool (type "tool").
@@ -76,12 +94,33 @@ type apiTool struct {
 }
 
 // buildRequest converts a canonical Request into the Anthropic API shape.
-// Pure: no I/O. Applies prompt caching when CacheablePrefix is set.
+// Pure: no I/O. Applies prompt caching when CacheablePrefix is set, gates
+// parameters on the model's capability profile, and enables extended thinking
+// when requested.
 func buildRequest(r provider.Request) apiRequest {
 	req := apiRequest{
 		Model:     r.Model,
 		MaxTokens: r.MaxTokens,
 		Stream:    true,
+	}
+	profile, profileKnown := provider.LookupProfile("anthropic", r.Model)
+
+	// Extended thinking. The API requires max_tokens > thinking.budget_tokens
+	// and forbids temperature/top_p alongside it, so those are enlarged /
+	// dropped respectively.
+	if r.Thinking != nil && r.Thinking.BudgetTokens > 0 {
+		req.Thinking = &apiThinking{Type: "enabled", BudgetTokens: r.Thinking.BudgetTokens}
+		if req.MaxTokens <= r.Thinking.BudgetTokens {
+			req.MaxTokens = r.Thinking.BudgetTokens + 4096
+		}
+	} else {
+		// Sampling controls, gated by profile: a model known to reject them
+		// gets none. Unknown models get whatever the caller asked for.
+		if !profileKnown || profile.Sampling {
+			req.Temperature = r.Temperature
+			req.TopP = r.TopP
+		}
+		req.StopSequences = r.StopSequences
 	}
 
 	// System with optional cache point.
@@ -93,16 +132,24 @@ func buildRequest(r provider.Request) apiRequest {
 		req.System = []systemBlock{sb}
 	}
 
-	// Tools; mark the last tool cacheable as part of the stable prefix.
-	if len(r.Tools) > 0 {
-		req.Tools = make([]apiTool, len(r.Tools))
-		for i, t := range r.Tools {
+	// Tools; mark the last tool cacheable as part of the stable prefix. A
+	// model profiled without tool calling gets no tools (sending them would
+	// be a 400).
+	tools := r.Tools
+	jsonResp := r.JSONResponse
+	if profileKnown && !profile.ToolCalling {
+		tools = nil
+		jsonResp = nil
+	}
+	if len(tools) > 0 {
+		req.Tools = make([]apiTool, len(tools))
+		for i, t := range tools {
 			req.Tools[i] = apiTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}
 		}
 	}
 
 	// Structured output (L3): append the synthetic response tool and force it.
-	if jr := r.JSONResponse; jr != nil {
+	if jr := jsonResp; jr != nil {
 		req.Tools = append(req.Tools, apiTool{Name: jr.Name, Description: jr.Description, InputSchema: jr.Schema})
 		req.ToolChoice = &apiToolChoice{Type: "tool", Name: jr.Name}
 	}
@@ -126,6 +173,24 @@ func buildRequest(r provider.Request) apiRequest {
 	return req
 }
 
+// toolUseIDPattern is Anthropic's accepted tool_use id shape (documented as
+// ^[a-zA-Z0-9_-]+$, bounded in practice at 64 chars).
+var toolUseIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// normalizeToolUseID makes a tool_use/tool_result id acceptable to Anthropic.
+// IDs produced by other providers (cross-provider continuation) can carry
+// characters Anthropic rejects — e.g. Fireworks/Kimi's "functions.xxx:0" —
+// which fails the whole request with a 400. An illegal id is replaced by a
+// DETERMINISTIC hash so the tool_use and its matching tool_result (and every
+// later turn replaying them) normalize to the same value and stay paired.
+func normalizeToolUseID(id string) string {
+	if toolUseIDPattern.MatchString(id) {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "toolu_" + hex.EncodeToString(sum[:])[:24]
+}
+
 // convertBlocks maps canonical blocks to Anthropic blocks, preserving thinking
 // round-trip and tool use/result correlation.
 func convertBlocks(blocks []provider.Block) []apiBlock {
@@ -141,9 +206,9 @@ func convertBlocks(blocks []provider.Block) []apiBlock {
 		case provider.BlockThinking:
 			out = append(out, apiBlock{Type: "thinking", Thinking: b.Thinking, Signature: b.ThinkingSignature})
 		case provider.BlockToolUse:
-			out = append(out, apiBlock{Type: "tool_use", ID: b.ToolUseID, Name: b.ToolName, Input: b.ToolInput})
+			out = append(out, apiBlock{Type: "tool_use", ID: normalizeToolUseID(b.ToolUseID), Name: b.ToolName, Input: b.ToolInput})
 		case provider.BlockToolResult:
-			out = append(out, apiBlock{Type: "tool_result", ToolUseID: b.ToolResultID, Content: b.ToolContent, IsError: b.IsError})
+			out = append(out, apiBlock{Type: "tool_result", ToolUseID: normalizeToolUseID(b.ToolResultID), Content: b.ToolContent, IsError: b.IsError})
 		case provider.BlockImage:
 			// Materialized blocks carry base64 in ImageData; emit the native
 			// image source. Unmaterialized blocks (no data) degrade to a text

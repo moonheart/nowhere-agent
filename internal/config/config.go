@@ -225,8 +225,21 @@ type LLM struct {
 	RawLogDir string `envconfig:"LLM_RAW_LOG_DIR" default:""`
 	// ContextWindow is the model's context window in tokens. The agent loop
 	// compresses its working view when it approaches this window (context-
-	// compression). 0 disables in-loop compression.
+	// compression). 0 means "derive from the built-in model capability
+	// profile when the model is known, otherwise disable compression".
 	ContextWindow int `envconfig:"LLM_CONTEXT_WINDOW" default:"0"`
+	// Temperature is the sampling temperature for chat runs. Negative means
+	// "unset" — the provider default applies (and reasoning models ignore it
+	// per their capability profile). Agent tool-calling runs typically want 0.
+	Temperature float64 `envconfig:"LLM_TEMPERATURE" default:"-1"`
+	// ThinkingBudget enables extended reasoning with the given token budget
+	// (Anthropic `thinking`). 0 disables. Enlarged past MaxTokens when the
+	// reply budget would otherwise leave no room.
+	ThinkingBudget int `envconfig:"LLM_THINKING_BUDGET" default:"0"`
+	// StreamIdleTimeout is the stall detector for streaming generations: if
+	// no SSE bytes arrive for this long, the stream fails fast with a stall
+	// error instead of hanging until the run is cancelled. <=0 disables.
+	StreamIdleTimeout time.Duration `envconfig:"LLM_STREAM_IDLE_TIMEOUT" default:"120s"`
 }
 
 // Web configures serving the built frontend.
