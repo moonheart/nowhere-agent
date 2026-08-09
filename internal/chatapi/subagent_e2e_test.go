@@ -81,7 +81,7 @@ func TestChatSpawnsSubagent(t *testing.T) {
 		return agent.New(&spawnParentProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}, "sys").WithRuntime(rt).WithMessageStore(msgStore).WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string) {
 		reg := toolruntime.NewRegistry()
-		reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, 3))
+		reg.Register(subagent.NewSpawnTool(agentdef.NewResolver(subStore, nil), reg, subFactory, 3))
 		loop.WithTools(reg)
 	})
 

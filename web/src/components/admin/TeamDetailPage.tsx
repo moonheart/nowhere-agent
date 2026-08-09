@@ -64,6 +64,7 @@ import {
 import { ConfirmButton } from "@/components/admin/confirm";
 import { MemoryTable } from "@/components/admin/SelfPages";
 import { SkillEditor } from "@/components/admin/SkillEditor";
+import { AgentDefEditor } from "@/components/admin/AgentDefEditor";
 import {
   ApproximationNotice,
   DateRangePicker,
@@ -132,6 +133,7 @@ export function TeamDetailPage() {
               {manage && <TabsTrigger value="usage">Usage</TabsTrigger>}
               <TabsTrigger value="memories">Memories</TabsTrigger>
               <TabsTrigger value="skills">Skills</TabsTrigger>
+              <TabsTrigger value="agents">Agents</TabsTrigger>
             </TabsList>
 
             <TabsContent value="members" className="pt-4">
@@ -156,6 +158,9 @@ export function TeamDetailPage() {
               <div className="flex h-[calc(100dvh-16rem)] flex-col">
                 <SkillEditor base={{ kind: "team", teamId }} canWrite={manage} />
               </div>
+            </TabsContent>
+            <TabsContent value="agents" className="pt-4">
+              <AgentDefEditor base={{ kind: "team", teamId }} canWrite={manage} />
             </TabsContent>
           </Tabs>
         </>

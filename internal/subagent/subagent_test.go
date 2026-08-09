@@ -16,6 +16,11 @@ import (
 	"nowhere-agent/internal/toolruntime"
 )
 
+// testResolver wraps a built-in-only store as a Resolver (no PG layer).
+func testResolver(store *agentdef.Store) *agentdef.Resolver {
+	return agentdef.NewResolver(store, nil)
+}
+
 // --- fake providers -------------------------------------------------------
 
 // echoProvider yields one text block on every Stream call (stateless).
@@ -118,7 +123,7 @@ func TestSpawnBasic(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(echoProvider{"child result"}, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(store, reg, factory, 3)
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
 
 	res, err := tool.Call(context.Background(), map[string]any{"prompt": "do x"})
@@ -131,7 +136,7 @@ func TestSpawnBasic(t *testing.T) {
 }
 
 func TestSpawnUnknownType(t *testing.T) {
-	tool := NewSpawnTool(agentdef.NewStore(), toolruntime.NewRegistry(),
+	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(),
 		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
 		}, 3)
@@ -143,7 +148,7 @@ func TestSpawnUnknownType(t *testing.T) {
 }
 
 func TestSpawnEmptyPrompt(t *testing.T) {
-	tool := NewSpawnTool(agentdef.NewStore(), toolruntime.NewRegistry(),
+	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(),
 		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
 		}, 3)
@@ -155,7 +160,7 @@ func TestSpawnEmptyPrompt(t *testing.T) {
 }
 
 func TestSpawnDepthGuardDirect(t *testing.T) {
-	tool := NewSpawnTool(agentdef.NewStore(), toolruntime.NewRegistry(),
+	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(),
 		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
 		}, 2)
@@ -173,7 +178,7 @@ func TestSpawnDepthIncrements(t *testing.T) {
 		gotDepth = depth
 		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(agentdef.NewStore(), toolruntime.NewRegistry(), factory, 5)
+	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(), factory, 5)
 
 	if _, err := tool.Call(context.Background(), map[string]any{"prompt": "x"}); err != nil {
 		t.Fatal(err)
@@ -202,7 +207,7 @@ func TestSpawnNesting(t *testing.T) {
 	factory := func(_ context.Context, _ agentdef.AgentDef, depth int) *agent.Loop {
 		return agent.New(providers[depth], toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(store, reg, factory, 3)
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
 
 	res, err := tool.Call(context.Background(), map[string]any{"prompt": "top"})
@@ -232,7 +237,7 @@ func TestSpawnAllowListScoping(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(childProv, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(store, reg, factory, 3)
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
 
 	res, err := tool.Call(context.Background(), map[string]any{"prompt": "x", "subagent_type": "narrow"})
@@ -269,7 +274,7 @@ func TestSkillToolNames(t *testing.T) {
 }
 
 func TestSpawnCancellation(t *testing.T) {
-	tool := NewSpawnTool(agentdef.NewStore(), toolruntime.NewRegistry(),
+	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(),
 		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 			return agent.New(blockingProvider{}, toolruntime.NewRegistry(), childCfg())
 		}, 3)
@@ -304,7 +309,7 @@ func TestSpawnGatedChildReturnsError(t *testing.T) {
 		return agent.New(childProv, toolruntime.NewRegistry(), childCfg()).
 			Use(&agent.PermissionMW{Check: denyAll})
 	}
-	tool := NewSpawnTool(store, reg, factory, 3)
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
 
 	var mu sync.Mutex
@@ -358,7 +363,7 @@ func TestSpawnFoldsChildUsageIntoScope(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(agentdef.NewStore(), toolruntime.NewRegistry(), factory, 3)
+	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(), factory, 3)
 
 	res, err := tool.Call(ctx, map[string]any{"prompt": "x"})
 	if err != nil {
@@ -398,7 +403,7 @@ func TestUsageCaptureForwardsAndFolds(t *testing.T) {
 func TestSpawnToolDescriptionListsAgentTypes(t *testing.T) {
 	store := agentdef.NewStore()
 	store.Put(agentdef.AgentDef{Name: "narrow", WhenToUse: "use for narrow things", Tools: []string{"read_file"}, Scope: identity.SystemScope()})
-	tool := NewSpawnTool(store, toolruntime.NewRegistry(),
+	tool := NewSpawnTool(testResolver(store), toolruntime.NewRegistry(),
 		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
 		}, 3)
@@ -425,7 +430,7 @@ func TestSpawnConcurrent(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(agentdef.NewStore(), reg, factory, 3)
+	tool := NewSpawnTool(testResolver(agentdef.NewStore()), reg, factory, 3)
 	reg.Register(tool)
 
 	calls := []toolruntime.Call{

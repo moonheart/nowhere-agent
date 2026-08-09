@@ -44,7 +44,7 @@ type LoopFactory func(ctx context.Context, def agentdef.AgentDef, depth int) *ag
 // child's final assistant text as the tool result. It implements
 // toolruntime.Tool.
 type SpawnTool struct {
-	store    *agentdef.Store
+	resolver *agentdef.Resolver  // merged built-ins + authored definitions
 	parent   *toolruntime.Registry // the run's registry; child pools are scoped views of it
 	factory  LoopFactory
 	scopes   []identity.ScopeRef
@@ -58,12 +58,11 @@ type SpawnTool struct {
 	sem      chan struct{}
 }
 
-// NewSpawnTool creates a spawn tool over a definition store, the run's tool
+// NewSpawnTool creates a spawn tool over a definition resolver, the run's tool
 // registry, and a child-loop factory. maxDepth <= 0 uses the default. scopes
-// default to system scope (v1 resolves built-in + system definitions; per-user
-// authored definitions are future work). Fan-out is bounded by default budgets;
-// override with WithBudget.
-func NewSpawnTool(store *agentdef.Store, parent *toolruntime.Registry, factory LoopFactory, maxDepth int, scopes ...identity.ScopeRef) *SpawnTool {
+// default to system scope (built-in + system definitions). Fan-out is bounded
+// by default budgets; override with WithBudget.
+func NewSpawnTool(resolver *agentdef.Resolver, parent *toolruntime.Registry, factory LoopFactory, maxDepth int, scopes ...identity.ScopeRef) *SpawnTool {
 	if maxDepth <= 0 {
 		maxDepth = defaultMaxDepth
 	}
@@ -71,7 +70,7 @@ func NewSpawnTool(store *agentdef.Store, parent *toolruntime.Registry, factory L
 		scopes = []identity.ScopeRef{identity.SystemScope()}
 	}
 	return &SpawnTool{
-		store:    store,
+		resolver: resolver,
 		parent:   parent,
 		factory:  factory,
 		scopes:   scopes,
@@ -107,7 +106,7 @@ func (t *SpawnTool) Description() string {
 		"It does NOT see this conversation, so write a self-contained prompt: state the goal, the relevant context, " +
 		"and whether you want research or changes. Omit subagent_type to use the general-purpose agent. " +
 		"To run subagents in parallel, emit multiple spawn_agent calls in one turn."
-	names := t.store.Available(t.scopes)
+	names := t.resolver.Available(context.Background(), t.scopes)
 	if len(names) == 0 {
 		return base
 	}
@@ -117,7 +116,7 @@ func (t *SpawnTool) Description() string {
 	for _, n := range names {
 		b.WriteString("\n- ")
 		b.WriteString(n)
-		if def, err := t.store.Resolve(n, t.scopes); err == nil && def.WhenToUse != "" {
+		if def, err := t.resolver.Resolve(context.Background(), n, t.scopes); err == nil && def.WhenToUse != "" {
 			b.WriteString(": ")
 			b.WriteString(def.WhenToUse)
 		}
@@ -175,7 +174,7 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 	if strings.TrimSpace(typ) == "" {
 		typ = agentdef.GeneralPurpose
 	}
-	def, err := t.store.Resolve(typ, t.scopes)
+	def, err := t.resolver.Resolve(ctx, typ, t.scopes)
 	if err != nil {
 		return errf("%v", err), nil
 	}

@@ -18,6 +18,10 @@ import {
   MySkillsPage,
   PlatformSkillsPage,
 } from "@/components/admin/SkillsPages";
+import {
+  MyAgentDefsPage,
+  PlatformAgentDefsPage,
+} from "@/components/admin/AgentDefsPages";
 import { PlatformAuditPage } from "@/components/admin/AuditPage";
 import { PlatformQuotasPage } from "@/components/admin/QuotasPage";
 import { ScheduledTasksPage } from "@/components/admin/ScheduledTasksPage";
@@ -417,6 +421,7 @@ export default function App() {
         <Route path="usage" element={<MyUsagePage />} />
         <Route path="memories" element={<MyMemoriesPage />} />
         <Route path="skills" element={<MySkillsPage />} />
+        <Route path="agents" element={<MyAgentDefsPage />} />
         <Route path="scheduled-tasks" element={<ScheduledTasksPage />} />
         <Route path="teams" element={<TeamsPage />} />
         <Route path="teams/:teamId" element={<TeamDetailPage />} />
@@ -426,6 +431,7 @@ export default function App() {
         <Route path="platform/quotas" element={<PlatformQuotasPage />} />
         <Route path="platform/memories" element={<PlatformMemoriesPage />} />
         <Route path="platform/skills" element={<PlatformSkillsPage />} />
+        <Route path="platform/agents" element={<PlatformAgentDefsPage />} />
         <Route path="platform/audit" element={<PlatformAuditPage />} />
       </Route>
       {/* Anything else falls back to the chat view rather than a blank page. */}

@@ -19,6 +19,7 @@ import (
 	"nowhere-agent/internal/adminapi"
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/agentdef"
+	"nowhere-agent/internal/agentdefapi"
 	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/chatapi"
 	"nowhere-agent/internal/config"
@@ -284,6 +285,10 @@ func run() error {
 	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
 	memPort := memory.NewPGPort(pool)
 	skillStore := skill.NewPGStore(pool)
+	// Durable agent definitions (persist-agent-defs): one PG store backs both
+	// the spawn resolver (inside the provider branch) and the management API
+	// (outside it, so the console works with no LLM configured).
+	agentDefPG := agentdef.NewPGStore(pool)
 	// Seed the skill store from disk (capability-gap K3): each SKILL.md under
 	// SKILLS_DIR becomes a system-scope skill, lighting up the L0 index in the
 	// system prompt. Empty SKILLS_DIR leaves the runtime dormant. Scripts are
@@ -545,7 +550,11 @@ func run() error {
 			temperature = &t
 		}
 
-		subStore := agentdef.NewStore()
+		// Agent definitions resolve through the layered store (persist-agent-defs):
+		// durable PG-backed authored definitions overlaid on the code built-ins,
+		// so user/team/system definitions take effect without a restart and a
+		// store outage degrades to built-ins rather than failing spawns.
+		subResolver := agentdef.NewResolver(agentdef.NewStore(), agentDefPG)
 		subFactory := func(ctx context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
 			childModel := def.Model
 			if childModel == "" {
@@ -702,7 +711,7 @@ func run() error {
 			// Subagent spawn tool: children draw from a scoped view of this run's
 			// registry, so nested loops share the session's tools. Registered last.
 			if cfg.Subagent.Enabled {
-				reg.Register(subagent.NewSpawnTool(subStore, reg, subFactory, cfg.Subagent.MaxDepth).
+				reg.Register(subagent.NewSpawnTool(subResolver, reg, subFactory, cfg.Subagent.MaxDepth).
 					WithBudget(cfg.Subagent.MaxTotal, cfg.Subagent.MaxConcurrent))
 			}
 			// Whitelist filter (scheduled-tasks D3): narrow the registry to the
@@ -783,7 +792,7 @@ func run() error {
 			buildSchedLoop := func(ctx context.Context, task schedule.Task, system, modelOverride string) *agent.Loop {
 				return newChatLoopWithModel(ctx, system, modelOverride)
 			}
-			trigger := schedule.NewTrigger(schedStore, sessionRuntime, handler.Registry(), subStore, identitySvc, buildSchedLoop, pool, cfg.Schedule.ScanInterval)
+			trigger := schedule.NewTrigger(schedStore, sessionRuntime, handler.Registry(), subResolver.Bound(ctx), identitySvc, buildSchedLoop, pool, cfg.Schedule.ScanInterval)
 			// Tool binder: narrow the session's tool registry to the task's
 			// whitelist (D3) once the trigger has resolved the session id.
 			trigger.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string, whitelist []string) {
@@ -821,6 +830,29 @@ func run() error {
 	// behind the same auth middleware. Registered alongside the admin console.
 	skillapi.NewHandler(identitySvc, skillStore).RegisterAuthed(protected)
 	log.Info("skill management endpoints enabled (auth required)")
+
+	// Agent-definition management (persist-agent-defs): user/team/system
+	// definition CRUD over the same PG store the spawn resolver reads, behind
+	// the same auth middleware. The runnable check mirrors the run registry's
+	// run_skill_script registration rule (exec enabled + some visible skill has
+	// scripts), so a definition declaring unusable skills is flagged on write.
+	skillsRunnable := func(ctx context.Context, scopes []identity.ScopeRef) bool {
+		if !execEnabled {
+			return false
+		}
+		l0, err := skillEngine.LoadL0(ctx, scopes)
+		if err != nil {
+			return false
+		}
+		for _, meta := range l0 {
+			if len(meta.Scripts) > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	agentdefapi.NewHandler(identitySvc, agentDefPG, skillsRunnable).RegisterAuthed(protected)
+	log.Info("agent definition endpoints enabled (auth required)")
 
 	// Scheduled-task CRUD (scheduled-tasks): self-service management of recurring
 	// agent runs. Registered outside the provider branch so tasks can be managed

@@ -7,6 +7,7 @@
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   ArrowLeft,
+  Bot,
   Brain,
   Building2,
   CalendarClock,
@@ -138,6 +139,9 @@ export function AdminLayout() {
             <NavItem to="/admin/skills" icon={<Sparkles />}>
               My skills
             </NavItem>
+            <NavItem to="/admin/agents" icon={<Bot />}>
+              My agents
+            </NavItem>
             <NavItem to="/admin/scheduled-tasks" icon={<CalendarClock />}>
               Scheduled tasks
             </NavItem>
@@ -186,6 +190,9 @@ export function AdminLayout() {
                 </NavItem>
                 <NavItem to="/admin/platform/skills" icon={<Sparkles />}>
                   Skills
+                </NavItem>
+                <NavItem to="/admin/platform/agents" icon={<Bot />}>
+                  Agents
                 </NavItem>
                 <NavItem to="/admin/platform/audit" icon={<ScrollText />}>
                   Audit trail

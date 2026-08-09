@@ -22,7 +22,7 @@ func TestSpawnBudgetTotalCap(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(store, reg, factory, 3).WithBudget(2, 4)
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3).WithBudget(2, 4)
 	reg.Register(tool)
 
 	for i := 0; i < 2; i++ {
@@ -78,7 +78,7 @@ func TestSpawnBudgetConcurrencyCap(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(gateProvider{running: &running, maxRunning: &maxRunning, release: release}, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(store, reg, factory, 3).WithBudget(10, 2) // at most 2 concurrent
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3).WithBudget(10, 2) // at most 2 concurrent
 	reg.Register(tool)
 
 	const n = 5
