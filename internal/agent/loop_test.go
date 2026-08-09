@@ -1035,6 +1035,15 @@ func TestMergeUsageKeepsMostInformative(t *testing.T) {
 	if mergeUsage(nil, real) != real || mergeUsage(real, nil) != real {
 		t.Error("nil merge should pass through the non-nil side")
 	}
+	// ReasoningTokens merges by the same max rule.
+	a := &provider.Usage{ReasoningTokens: 0}
+	b := &provider.Usage{ReasoningTokens: 30}
+	if got := mergeUsage(a, b); got.ReasoningTokens != 30 {
+		t.Errorf("ReasoningTokens = %d want 30", got.ReasoningTokens)
+	}
+	if got := mergeUsage(b, a); got.ReasoningTokens != 30 {
+		t.Errorf("order-dependent ReasoningTokens merge: %d", got.ReasoningTokens)
+	}
 }
 
 // payloadEmitter captures every payload, for asserting on KindMessage contents.

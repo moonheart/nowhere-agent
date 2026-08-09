@@ -300,3 +300,45 @@ func TestRealDeepSeekSSEFixture(t *testing.T) {
 		t.Errorf("usage = %+v", usage)
 	}
 }
+
+// A mid-stream error frame naming a context limit must surface as a
+// ContextOverflowError so the loop's overflow fallback can shrink and retry
+// (some gateways report the rejection only after the 200 OK).
+func TestDecoderErrorChunkOverflow(t *testing.T) {
+	d := newStreamDecoder()
+	evs := d.feed([]byte(`{"error":{"message":"This model's maximum context length is 8192 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}`))
+	if len(evs) != 1 || evs[0].Type != provider.EventError {
+		t.Fatalf("expected one error event, got %+v", evs)
+	}
+	if !provider.IsContextOverflow(evs[0].Err) {
+		t.Errorf("err = %v, want ContextOverflowError", evs[0].Err)
+	}
+}
+
+func TestDecoderErrorChunkGeneric(t *testing.T) {
+	d := newStreamDecoder()
+	evs := d.feed([]byte(`{"error":{"message":"upstream connection reset","type":"server_error","code":""}}`))
+	if len(evs) != 1 || evs[0].Type != provider.EventError {
+		t.Fatalf("expected one error event, got %+v", evs)
+	}
+	if provider.IsContextOverflow(evs[0].Err) {
+		t.Error("generic upstream error must not classify as overflow")
+	}
+}
+
+func TestDecoderUsageReasoningTokens(t *testing.T) {
+	d := newStreamDecoder()
+	evs := d.feed([]byte(`{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":30}}}`))
+	var u *provider.Usage
+	for _, ev := range evs {
+		if ev.Usage != nil {
+			u = ev.Usage
+		}
+	}
+	if u == nil {
+		t.Fatal("no usage event")
+	}
+	if u.ReasoningTokens != 30 {
+		t.Errorf("ReasoningTokens = %d, want 30", u.ReasoningTokens)
+	}
+}

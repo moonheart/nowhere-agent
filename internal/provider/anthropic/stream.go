@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"nowhere-agent/internal/provider"
 )
@@ -14,6 +15,15 @@ type streamEvent struct {
 	Delta *rawDelta       `json:"delta,omitempty"`
 	Usage *rawUsage       `json:"usage,omitempty"`
 	Msg   *rawMessage     `json:"message,omitempty"`
+	Err   *rawStreamError `json:"error,omitempty"`
+}
+
+// rawStreamError is the payload of a mid-stream `error` event (e.g.
+// overloaded_error). Anthropic can send it any time after the 200 OK, so the
+// initial-response status check never sees it.
+type rawStreamError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
 }
 
 type rawMessage struct {
@@ -100,8 +110,23 @@ func decodeEvent(data []byte) (provider.Event, bool) {
 	case "message_stop":
 		return provider.Event{Type: provider.EventMessageStop}, true
 
+	case "error":
+		// A mid-stream error envelope (overloaded_error, or an overflow that
+		// only surfaces once generation starts). Classify it so the loop's
+		// overflow fallback can shrink and retry instead of failing the run.
+		msg := ""
+		etype := ""
+		if se.Err != nil {
+			msg = se.Err.Message
+			etype = se.Err.Type
+		}
+		if ov := provider.ClassifyStreamError(msg); ov != nil {
+			return provider.Event{Type: provider.EventError, Err: ov}, true
+		}
+		return provider.Event{Type: provider.EventError, Err: fmt.Errorf("anthropic stream error (%s): %s", etype, msg)}, true
+
 	default:
-		// ping, error envelopes handled elsewhere, unknown types ignored.
+		// ping and unknown types ignored.
 		return provider.Event{}, false
 	}
 }

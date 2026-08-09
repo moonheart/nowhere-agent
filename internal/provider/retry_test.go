@@ -116,3 +116,51 @@ func TestDoWithRetryHonorsContextCancel(t *testing.T) {
 		t.Errorf("calls = %d want 1 (cancel during backoff stops further attempts)", calls)
 	}
 }
+
+// A 429 carrying Retry-After must wait the server-requested duration rather
+// than the (much shorter) computed backoff.
+func TestDoWithRetryHonorsRetryAfter(t *testing.T) {
+	var calls int32
+	start := time.Now()
+	resp, err := DoWithRetry(context.Background(), fastPolicy(2), func() (*http.Response, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			r := statusResp(429)
+			r.Header = http.Header{"Retry-After": []string{"1"}}
+			return r, nil
+		}
+		return statusResp(200), nil
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Errorf("status = %d want 200", resp.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
+		t.Errorf("elapsed = %v, want >= ~1s (Retry-After must override the 1ms backoff)", elapsed)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	if d := parseRetryAfter(""); d != 0 {
+		t.Errorf("empty = %v want 0", d)
+	}
+	if d := parseRetryAfter("3"); d != 3*time.Second {
+		t.Errorf("seconds = %v want 3s", d)
+	}
+	if d := parseRetryAfter("0"); d != 0 {
+		t.Errorf("zero = %v want 0", d)
+	}
+	if d := parseRetryAfter("garbage"); d != 0 {
+		t.Errorf("garbage = %v want 0", d)
+	}
+	if d := parseRetryAfter(time.Now().Add(5 * time.Second).UTC().Format(http.TimeFormat)); d <= 0 || d > 5*time.Second {
+		t.Errorf("http date = %v, want within (0, 5s]", d)
+	}
+	if d := parseRetryAfter(time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat)); d != 0 {
+		t.Errorf("past date = %v want 0", d)
+	}
+	if d := parseRetryAfter("3600"); d != maxRetryAfter {
+		t.Errorf("huge value = %v, want capped at %v", d, maxRetryAfter)
+	}
+}

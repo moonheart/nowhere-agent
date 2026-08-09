@@ -167,3 +167,92 @@ func TestBuildRequestJSONResponseForced(t *testing.T) {
 		t.Errorf("response tool wrong: %+v", last)
 	}
 }
+
+func TestBuildRequestSampling(t *testing.T) {
+	temp, topP := 0.2, 0.9
+	req := buildRequest(provider.Request{
+		Model: "claude-sonnet-4", MaxTokens: 1,
+		Temperature: &temp, TopP: &topP, StopSequences: []string{"END"},
+	})
+	if req.Temperature == nil || *req.Temperature != 0.2 {
+		t.Errorf("temperature not forwarded: %+v", req.Temperature)
+	}
+	if req.TopP == nil || *req.TopP != 0.9 {
+		t.Errorf("top_p not forwarded: %+v", req.TopP)
+	}
+	if len(req.StopSequences) != 1 || req.StopSequences[0] != "END" {
+		t.Errorf("stop_sequences not forwarded: %+v", req.StopSequences)
+	}
+	if req.Thinking != nil {
+		t.Error("thinking must be absent when not requested")
+	}
+}
+
+// Extended thinking: the API forbids temperature alongside it and requires
+// max_tokens > budget, so the builder drops sampling and enlarges max_tokens.
+func TestBuildRequestThinking(t *testing.T) {
+	temp := 0.2
+	req := buildRequest(provider.Request{
+		Model: "claude-sonnet-4", MaxTokens: 1024,
+		Temperature: &temp,
+		Thinking:    &provider.ThinkingSpec{BudgetTokens: 4096},
+	})
+	if req.Thinking == nil || req.Thinking.Type != "enabled" || req.Thinking.BudgetTokens != 4096 {
+		t.Fatalf("thinking wrong: %+v", req.Thinking)
+	}
+	if req.Temperature != nil {
+		t.Error("temperature must be dropped when thinking is enabled")
+	}
+	if req.MaxTokens <= 4096 {
+		t.Errorf("max_tokens = %d, want > budget (4096)", req.MaxTokens)
+	}
+
+	roomy := buildRequest(provider.Request{
+		Model: "claude-sonnet-4", MaxTokens: 8192,
+		Thinking: &provider.ThinkingSpec{BudgetTokens: 4096},
+	})
+	if roomy.MaxTokens != 8192 {
+		t.Errorf("max_tokens = %d, want unchanged 8192 (already exceeds budget)", roomy.MaxTokens)
+	}
+}
+
+func TestNormalizeToolUseID(t *testing.T) {
+	if got := normalizeToolUseID("toolu_01ABC_xyz-"); got != "toolu_01ABC_xyz-" {
+		t.Errorf("valid id rewritten: %q", got)
+	}
+	// Cross-provider ids (Fireworks/Kimi style) are illegal for Anthropic.
+	a := normalizeToolUseID("functions.write_todos:0")
+	if a == "functions.write_todos:0" {
+		t.Error("illegal id passed through")
+	}
+	if !toolUseIDPattern.MatchString(a) {
+		t.Errorf("normalized id %q still violates the Anthropic pattern", a)
+	}
+	// Deterministic: the tool_use and its tool_result must normalize alike.
+	if b := normalizeToolUseID("functions.write_todos:0"); b != a {
+		t.Errorf("not deterministic: %q vs %q", a, b)
+	}
+	// Overlong ids (legal charset, >64) are also rejected by the API.
+	long := make([]byte, 100)
+	for i := range long {
+		long[i] = 'a'
+	}
+	if got := normalizeToolUseID(string(long)); !toolUseIDPattern.MatchString(got) {
+		t.Errorf("overlong id normalized to %q, still invalid", got)
+	}
+}
+
+// convertBlocks applies the SAME normalization to tool_use and tool_result,
+// keeping the pair correlated after rewriting.
+func TestConvertBlocksNormalizesIDsConsistently(t *testing.T) {
+	out := convertBlocks([]provider.Block{
+		{Type: provider.BlockToolUse, ToolUseID: "functions.read:0", ToolName: "read", ToolInput: map[string]any{}},
+		{Type: provider.BlockToolResult, ToolResultID: "functions.read:0", ToolContent: "ok"},
+	})
+	if out[0].ID == "functions.read:0" {
+		t.Fatal("illegal id not normalized")
+	}
+	if out[0].ID != out[1].ToolUseID {
+		t.Errorf("pairing broken: tool_use id %q != tool_result id %q", out[0].ID, out[1].ToolUseID)
+	}
+}

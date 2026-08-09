@@ -137,3 +137,60 @@ func TestBuildRequestJSONResponseToolNoForce(t *testing.T) {
 		t.Errorf("tool_choice must not be sent (gateway 400s on it): %s", b)
 	}
 }
+
+// Sampling params are forwarded for models whose profile allows them.
+func TestBuildRequestSamplingPassThrough(t *testing.T) {
+	temp, topP := 0.3, 0.8
+	req, err := buildRequest(provider.Request{
+		Model: "gpt-4o", Temperature: &temp, TopP: &topP, StopSequences: []string{"END"},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if req.Temperature == nil || *req.Temperature != 0.3 {
+		t.Errorf("temperature not forwarded: %+v", req.Temperature)
+	}
+	if req.TopP == nil || *req.TopP != 0.8 {
+		t.Errorf("top_p not forwarded: %+v", req.TopP)
+	}
+	if len(req.Stop) != 1 || req.Stop[0] != "END" {
+		t.Errorf("stop not forwarded: %+v", req.Stop)
+	}
+}
+
+// Reasoning models reject temperature/top_p with a 400; the profile gates
+// them out before the wire.
+func TestBuildRequestSamplingGatedForReasoners(t *testing.T) {
+	temp := 0.3
+	for _, model := range []string{"o3", "o3-mini", "gpt-5", "deepseek-reasoner"} {
+		req, err := buildRequest(provider.Request{Model: model, Temperature: &temp})
+		if err != nil {
+			t.Fatalf("buildRequest(%s): %v", model, err)
+		}
+		if req.Temperature != nil {
+			t.Errorf("%s: temperature must be dropped (profile forbids sampling)", model)
+		}
+	}
+	// Unknown model: no profile, no gating — caller's value passes through.
+	req, err := buildRequest(provider.Request{Model: "my-fine-tune", Temperature: &temp})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if req.Temperature == nil {
+		t.Error("unknown model: temperature must pass through (no profile, no gating)")
+	}
+}
+
+// A model profiled without tool calling gets no tools on the wire.
+func TestBuildRequestToolsGatedForNonToolModel(t *testing.T) {
+	req, err := buildRequest(provider.Request{
+		Model: "o1-mini",
+		Tools: []provider.ToolDefinition{{Name: "read", Description: "d", InputSchema: map[string]any{"type": "object"}}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if len(req.Tools) != 0 {
+		t.Errorf("o1-mini must get no tools: %+v", req.Tools)
+	}
+}

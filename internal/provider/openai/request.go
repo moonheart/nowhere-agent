@@ -18,6 +18,11 @@ type apiRequest struct {
 	MaxTokens     int            `json:"max_tokens,omitempty"`
 	Stream        bool           `json:"stream"`
 	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+
+	// Sampling controls; omitted entirely when nil (provider default).
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty"`
+	Stop        []string `json:"stop,omitempty"`
 }
 
 // streamOptions requests a final usage chunk in the SSE stream. Without
@@ -55,9 +60,16 @@ type apiTool struct {
 // buildRequest converts a canonical Request into the OpenAI API shape.
 // Thinking blocks cannot be represented in chat.completions and are dropped;
 // consecutive blocks of one message are flattened per OpenAI's message model.
-// Pure: no I/O.
+// Sampling parameters are gated on the model's capability profile (reasoning
+// models reject temperature/top_p). Pure: no I/O.
 func buildRequest(r provider.Request) (apiRequest, error) {
 	req := apiRequest{Model: r.Model, MaxTokens: r.MaxTokens, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}}
+
+	if profile, known := provider.LookupProfile("openai", r.Model); !known || profile.Sampling {
+		req.Temperature = r.Temperature
+		req.TopP = r.TopP
+		req.Stop = r.StopSequences
+	}
 
 	if r.System != "" {
 		req.Messages = append(req.Messages, apiMessage{Role: "system", Content: r.System})
@@ -71,7 +83,13 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 		req.Messages = append(req.Messages, msgs...)
 	}
 
-	for _, t := range r.Tools {
+	tools := r.Tools
+	jsonResp := r.JSONResponse
+	if profile, known := provider.LookupProfile("openai", r.Model); known && !profile.ToolCalling {
+		tools = nil
+		jsonResp = nil
+	}
+	for _, t := range tools {
 		var at apiTool
 		at.Type = "function"
 		at.Function.Name = t.Name
@@ -87,7 +105,7 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 	// to call the function (soft-forcing); reasoning models reliably do, and
 	// the answer still arrives as a tool_call's JSON arguments — isolated from
 	// any prose. The reader tolerates a missing tool call as an error.
-	if jr := r.JSONResponse; jr != nil {
+	if jr := jsonResp; jr != nil {
 		var at apiTool
 		at.Type = "function"
 		at.Function.Name = jr.Name

@@ -148,6 +148,16 @@ type Config struct {
 	MaxTokens       int
 	MaxIterations   int // guard against infinite loops
 	CacheablePrefix bool
+	// Temperature / TopP / StopSequences are the sampling controls forwarded
+	// to every provider call; nil/empty leaves the provider default. The
+	// adapter drops them when the model's capability profile forbids them.
+	Temperature   *float64
+	TopP          *float64
+	StopSequences []string
+	// ThinkingBudget, when >0, enables extended reasoning with that token
+	// budget on every provider call (providers without a native equivalent
+	// ignore it).
+	ThinkingBudget int
 }
 
 // Loop runs the think→tool→think cycle.
@@ -690,17 +700,24 @@ func (l *Loop) attempt(ctx context.Context, state *RunState, emit Emitter) (Mode
 	// Content slices with this view. Nested reference values inside a block
 	// (ToolInput maps) stay shared; middleware must treat them as read-only.
 	messages := copyMessageContents(state.View)
+	req := provider.Request{
+		Model:           l.config.Model,
+		System:          l.config.System,
+		Messages:        messages,
+		Tools:           l.toolDefs(),
+		MaxTokens:       l.config.MaxTokens,
+		CacheablePrefix: l.config.CacheablePrefix,
+		Temperature:     l.config.Temperature,
+		TopP:            l.config.TopP,
+		StopSequences:   l.config.StopSequences,
+	}
+	if l.config.ThinkingBudget > 0 {
+		req.Thinking = &provider.ThinkingSpec{BudgetTokens: l.config.ThinkingBudget}
+	}
 	call := &ModelCall{
-		Request: provider.Request{
-			Model:           l.config.Model,
-			System:          l.config.System,
-			Messages:        messages,
-			Tools:           l.toolDefs(),
-			MaxTokens:       l.config.MaxTokens,
-			CacheablePrefix: l.config.CacheablePrefix,
-		},
-		View:  messages,
-		State: state,
+		Request: req,
+		View:    messages,
+		State:   state,
 	}
 	return chainModel(l.modelWrap, l.realAttempt(emit))(ctx, call)
 }
@@ -833,6 +850,7 @@ func mergeUsage(old, new *provider.Usage) *provider.Usage {
 		OutputTokens:     max(old.OutputTokens, new.OutputTokens),
 		CacheReadTokens:  max(old.CacheReadTokens, new.CacheReadTokens),
 		CacheWriteTokens: max(old.CacheWriteTokens, new.CacheWriteTokens),
+		ReasoningTokens:  max(old.ReasoningTokens, new.ReasoningTokens),
 	}
 }
 

@@ -55,3 +55,29 @@ func TestIsContextOverflowUnwraps(t *testing.T) {
 		t.Error("plain error should not be overflow")
 	}
 }
+
+func TestClassifyStreamErrorMarkers(t *testing.T) {
+	for _, msg := range []string{
+		"This model's maximum context length is 8192 tokens",
+		"prompt is too long: 210000 tokens > 200000 maximum",
+		"prompt_too_long",
+		"reduce the length of the messages",
+	} {
+		err := ClassifyStreamError(msg)
+		if err == nil {
+			t.Errorf("stream error %q should classify as overflow", msg)
+			continue
+		}
+		if !IsContextOverflow(err) {
+			t.Errorf("IsContextOverflow should match for %q", msg)
+		}
+	}
+}
+
+func TestClassifyStreamErrorNonOverflow(t *testing.T) {
+	for _, msg := range []string{"Overloaded", "rate limit reached", "internal server error"} {
+		if err := ClassifyStreamError(msg); err != nil {
+			t.Errorf("stream error %q should NOT classify as overflow, got %v", msg, err)
+		}
+	}
+}

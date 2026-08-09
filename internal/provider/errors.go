@@ -26,6 +26,16 @@ func IsContextOverflow(err error) bool {
 	return errors.As(err, &coe)
 }
 
+// overflowMarkers are the lower-cased substrings that identify a provider
+// rejection as a context/token limit, shared by the HTTP-status and the
+// mid-stream classifiers.
+var overflowMarkers = []string{
+	"context length", "context_length", "context window",
+	"maximum context", "too many tokens", "prompt is too long",
+	"prompt_too_long", "max_tokens", "context overflow",
+	"reduce the length", "exceeds the context",
+}
+
 // ClassifyHTTPError classifies an HTTP error status+body, returning a
 // *ContextOverflowError when the rejection is a context/token limit and nil
 // otherwise. Adapters call this on a non-200 response before wrapping the error.
@@ -34,17 +44,31 @@ func ClassifyHTTPError(statusCode int, body string) error {
 		return &ContextOverflowError{StatusCode: statusCode, Body: body}
 	}
 	if statusCode == 400 || statusCode == 422 {
-		b := strings.ToLower(body)
-		for _, marker := range []string{
-			"context length", "context_length", "context window",
-			"maximum context", "too many tokens", "prompt is too long",
-			"prompt_too_long", "max_tokens", "context overflow",
-			"reduce the length", "exceeds the context",
-		} {
-			if strings.Contains(b, marker) {
-				return &ContextOverflowError{StatusCode: statusCode, Body: body}
-			}
+		if matchOverflowMarker(body) {
+			return &ContextOverflowError{StatusCode: statusCode, Body: body}
 		}
 	}
 	return nil
+}
+
+// ClassifyStreamError classifies an error that surfaced MID-STREAM (an SSE
+// error envelope after the 200 OK), where no HTTP status is available. It
+// returns a *ContextOverflowError when the message names a context/token
+// limit, so the loop's overflow fallback treats a mid-stream overflow exactly
+// like an initial-response one. Nil when the message matches no marker.
+func ClassifyStreamError(message string) error {
+	if matchOverflowMarker(message) {
+		return &ContextOverflowError{StatusCode: 0, Body: message}
+	}
+	return nil
+}
+
+func matchOverflowMarker(body string) bool {
+	b := strings.ToLower(body)
+	for _, marker := range overflowMarkers {
+		if strings.Contains(b, marker) {
+			return true
+		}
+	}
+	return false
 }

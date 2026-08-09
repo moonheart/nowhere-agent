@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"nowhere-agent/internal/provider"
 )
@@ -16,12 +17,13 @@ const defaultEndpoint = "https://api.anthropic.com/v1/messages"
 
 // Adapter implements provider.Adapter for the Anthropic Messages API.
 type Adapter struct {
-	apiKey     string
-	endpoint   string
-	anthroVer  string
-	httpClient *http.Client
-	recorder   *provider.RawRecorder
-	retry      provider.RetryPolicy
+	apiKey      string
+	endpoint    string
+	anthroVer   string
+	httpClient  *http.Client
+	recorder    *provider.RawRecorder
+	retry       provider.RetryPolicy
+	idleTimeout time.Duration
 }
 
 // Option customizes the Adapter.
@@ -40,6 +42,13 @@ func WithRawRecorder(r *provider.RawRecorder) Option {
 
 // WithRetry overrides the transient-failure retry policy (default 3 attempts).
 func WithRetry(p provider.RetryPolicy) Option { return func(a *Adapter) { a.retry = p } }
+
+// WithStreamIdleTimeout sets the stall detector: if no SSE bytes arrive for
+// the given duration, the stream fails with a *provider.StreamStallError
+// instead of blocking until the outer context is cancelled. <=0 disables.
+func WithStreamIdleTimeout(d time.Duration) Option {
+	return func(a *Adapter) { a.idleTimeout = d }
+}
 
 // New creates an Anthropic adapter.
 func New(apiKey string, opts ...Option) *Adapter {
@@ -102,7 +111,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	recorded := io.TeeReader(resp.Body, respSink)
 
 	out := make(chan provider.Event, 16)
-	go streamEvents(teeCloser{recorded, resp.Body, respSink}, out)
+	go streamEvents(provider.NewStallReader(teeCloser{recorded, resp.Body, respSink}, a.idleTimeout), out)
 	return out, nil
 }
 
