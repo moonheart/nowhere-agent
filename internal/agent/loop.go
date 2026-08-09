@@ -305,6 +305,14 @@ func (l *Loop) toolDefs() []provider.ToolDefinition {
 func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter) ([]provider.Message, error) {
 	state := &RunState{Emit: emit}
 
+	// Install the run tree's usage scope when the incoming context has none:
+	// that makes this run the root, whose terminal KindUsage folds in every
+	// descendant subagent loop's usage (see UsageScope). Nested loops inherit
+	// the same scope and report only their own usage.
+	if UsageScopeFrom(ctx) == nil {
+		ctx = WithUsageScope(ctx, &UsageScope{root: true})
+	}
+
 	// Repair tool pairing ONCE, up front: a prior run's cancel or a persisted
 	// compression split can leave history with an unpaired block, which the
 	// provider rejects outright. Re-running the repair every iteration is wasted

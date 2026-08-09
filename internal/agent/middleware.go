@@ -475,18 +475,33 @@ func (m *ImageMW) WrapModelCall(ctx context.Context, c *ModelCall, next ModelHan
 
 // UsageMW reports the run's accumulated token usage once at run end via
 // KindUsage (AfterRun). The loop folds each call's usage into RunState.Usage;
-// this middleware only emits the total. It is registered automatically by Run
-// (pointed at the run's emitter), so callers never wire it by hand. A zero
-// total is not emitted.
+// this middleware only emits the total — plus, at the root run of a tree, the
+// descendant usage accumulated in the run's UsageScope (subagents). It is
+// registered automatically by New (pointed at the run's emitter), so callers
+// never wire it by hand. A zero total is not emitted.
 type UsageMW struct{}
 
 func (m *UsageMW) MiddlewareName() string { return "usage" }
 
 func (m *UsageMW) AfterRun(ctx context.Context, s *RunState) error {
-	if s.Emit == nil || s.Usage == (provider.Usage{}) {
+	if s.Emit == nil {
 		return nil
 	}
-	_ = s.Emit.Emit(ctx, KindUsage, s.Usage)
+	total := s.Usage
+	// The root run of a tree also reports its descendants' usage (subagent
+	// loops fold theirs into the shared UsageScope). Non-root runs emit only
+	// their own, so nothing is counted twice.
+	if sc := UsageScopeFrom(ctx); sc != nil && sc.root {
+		c := sc.Total()
+		total.InputTokens += c.InputTokens
+		total.OutputTokens += c.OutputTokens
+		total.CacheReadTokens += c.CacheReadTokens
+		total.CacheWriteTokens += c.CacheWriteTokens
+	}
+	if total == (provider.Usage{}) {
+		return nil
+	}
+	_ = s.Emit.Emit(ctx, KindUsage, total)
 	return nil
 }
 

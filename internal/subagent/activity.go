@@ -13,7 +13,7 @@ import (
 type Activity struct {
 	AgentType string `json:"agentType"`
 	Depth     int    `json:"depth"`
-	Phase     string `json:"phase"`          // "start" | "stream" | "tool" | "result" | "done" | "error"
+	Phase     string `json:"phase"`          // "start" | "stream" | "tool" | "result" | "interrupted" | "done" | "error"
 	Tool      string `json:"tool,omitempty"` // tool name, for phase "tool"/"result"
 	// ToolCallID ties the signal to the spawn_agent tool call that launched this
 	// child, so the UI can nest output under the right card when several
@@ -63,9 +63,14 @@ type activityEmitter struct {
 	agentType  string
 	depth      int
 	toolCallID string
+	// interrupted records that the child ended awaiting client interactions
+	// (approval/ask_user/client_tool). The loop still emits KindDone after its
+	// interrupt frames; that trailing "done" is suppressed so the UI doesn't
+	// show a gated child as finished.
+	interrupted bool
 }
 
-func (e activityEmitter) Emit(_ context.Context, kind agent.EventKind, payload any) error {
+func (e *activityEmitter) Emit(_ context.Context, kind agent.EventKind, payload any) error {
 	if e.sink == nil {
 		return nil
 	}
@@ -98,7 +103,22 @@ func (e activityEmitter) Emit(_ context.Context, kind agent.EventKind, payload a
 			base.IsError, _ = m["is_error"].(bool)
 		}
 		e.sink(base)
+	case agent.KindInterrupt:
+		// The child hit a gate it cannot resolve (subagents can't suspend for
+		// human input). Surface it so the UI shows the child stalled on an
+		// approval/question rather than silently finishing.
+		e.interrupted = true
+		base.Phase = "interrupted"
+		if g, ok := payload.(agent.Interaction); ok {
+			base.Tool = g.ToolName
+			base.SubToolCallID = g.ToolCallID
+			base.Kind = g.Kind
+		}
+		e.sink(base)
 	case agent.KindDone:
+		if e.interrupted {
+			return nil
+		}
 		base.Phase = "done"
 		e.sink(base)
 	case agent.KindError:

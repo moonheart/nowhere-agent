@@ -285,6 +285,141 @@ func TestSpawnCancellation(t *testing.T) {
 	}
 }
 
+// TestSpawnGatedChildReturnsError pins that a child ending on a permission
+// gate (approval/ask_user) does NOT look completed: subagents cannot suspend
+// for human input, so the spawn returns an explicit error result naming the
+// gated tool, and the sink sees "interrupted" rather than a bare "done".
+func TestSpawnGatedChildReturnsError(t *testing.T) {
+	store := agentdef.NewStore()
+	reg := toolruntime.NewRegistry()
+	reg.Register(funcTool{name: "run_command"})
+
+	denyAll := func(context.Context, toolruntime.Tool) (bool, string) {
+		return true, agent.ApprovalReasonPrefix + "ask"
+	}
+	factory := func(_ context.Context, _ agentdef.AgentDef, _ int) *agent.Loop {
+		childProv := &scriptProvider{script: [][]provider.Event{
+			toolUseEvents("t1", "run_command", `{}`),
+		}}
+		return agent.New(childProv, toolruntime.NewRegistry(), childCfg()).
+			Use(&agent.PermissionMW{Check: denyAll})
+	}
+	tool := NewSpawnTool(store, reg, factory, 3)
+	reg.Register(tool)
+
+	var mu sync.Mutex
+	var got []Activity
+	ctx := WithSink(context.Background(), func(a Activity) {
+		mu.Lock()
+		got = append(got, a)
+		mu.Unlock()
+	})
+
+	res, err := tool.Call(ctx, map[string]any{"prompt": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatalf("gated child must surface an error result, got %+v", res)
+	}
+	if !strings.Contains(res.Content, "run_command") || !strings.Contains(res.Content, "cannot be delivered inside a subagent") {
+		t.Fatalf("error result must name the gated tool and the reason, got %q", res.Content)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var sawInterrupted, sawDone bool
+	for _, a := range got {
+		if a.Phase == "interrupted" {
+			sawInterrupted = true
+			if a.Tool != "run_command" {
+				t.Fatalf("interrupted activity must name the gated tool: %+v", a)
+			}
+		}
+		if a.Phase == "done" {
+			sawDone = true
+		}
+	}
+	if !sawInterrupted {
+		t.Fatalf("expected an interrupted activity, got %+v", got)
+	}
+	if sawDone {
+		t.Fatalf("the trailing done after an interrupt must be suppressed, got %+v", got)
+	}
+}
+
+// TestSpawnFoldsChildUsageIntoScope pins that a child run's token usage lands
+// in the run tree's usage scope, so the root run's terminal usage report (and
+// quota accounting) covers subagent model calls.
+func TestSpawnFoldsChildUsageIntoScope(t *testing.T) {
+	scope := &agent.UsageScope{}
+	ctx := agent.WithUsageScope(context.Background(), scope)
+
+	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
+		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
+	}
+	tool := NewSpawnTool(agentdef.NewStore(), toolruntime.NewRegistry(), factory, 3)
+
+	res, err := tool.Call(ctx, map[string]any{"prompt": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error result: %+v", res)
+	}
+	// echoProvider reports 1 input + 1 output token per call.
+	if got := scope.Total(); got != (provider.Usage{InputTokens: 1, OutputTokens: 1}) {
+		t.Fatalf("scope total = %+v, want the child's usage folded in", got)
+	}
+}
+
+// TestUsageCaptureForwardsAndFolds covers the capture wrapper directly: every
+// event reaches the wrapped emitter, and KindUsage is added to the scope.
+func TestUsageCaptureForwardsAndFolds(t *testing.T) {
+	scope := &agent.UsageScope{}
+	var kinds []agent.EventKind
+	cap := usageCapture{
+		next:  kindRecorder{fn: func(k agent.EventKind) { kinds = append(kinds, k) }},
+		scope: scope,
+	}
+	_ = cap.Emit(context.Background(), agent.KindText, "hi")
+	_ = cap.Emit(context.Background(), agent.KindUsage, provider.Usage{InputTokens: 5, OutputTokens: 2})
+	if len(kinds) != 2 {
+		t.Fatalf("wrapped emitter must see every event, got %v", kinds)
+	}
+	if got := scope.Total(); got != (provider.Usage{InputTokens: 5, OutputTokens: 2}) {
+		t.Fatalf("scope total = %+v", got)
+	}
+}
+
+// TestSpawnToolDescriptionListsAgentTypes pins that the tool description
+// enumerates resolvable agent types with their when-to-use, so the model can
+// pick a subagent_type instead of guessing.
+func TestSpawnToolDescriptionListsAgentTypes(t *testing.T) {
+	store := agentdef.NewStore()
+	store.Put(agentdef.AgentDef{Name: "narrow", WhenToUse: "use for narrow things", Tools: []string{"read_file"}, Scope: identity.SystemScope()})
+	tool := NewSpawnTool(store, toolruntime.NewRegistry(),
+		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
+			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
+		}, 3)
+
+	desc := tool.Description()
+	if !strings.Contains(desc, "- narrow: use for narrow things") {
+		t.Fatalf("description must list authored types with when-to-use, got %q", desc)
+	}
+	if !strings.Contains(desc, agentdef.GeneralPurpose) {
+		t.Fatalf("description must list the built-in general-purpose type, got %q", desc)
+	}
+}
+
+// kindRecorder is an agent.Emitter that records event kinds.
+type kindRecorder struct{ fn func(agent.EventKind) }
+
+func (r kindRecorder) Emit(_ context.Context, kind agent.EventKind, _ any) error {
+	r.fn(kind)
+	return nil
+}
+
 func TestSpawnConcurrent(t *testing.T) {
 	reg := toolruntime.NewRegistry()
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {

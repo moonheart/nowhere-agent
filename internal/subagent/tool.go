@@ -3,6 +3,7 @@ package subagent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"nowhere-agent/internal/agentdef"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/toolruntime"
 )
 
@@ -96,13 +98,31 @@ func (t *SpawnTool) WithBudget(maxTotal, maxConcurrent int) *SpawnTool {
 // Name identifies the tool.
 func (t *SpawnTool) Name() string { return ToolName }
 
-// Description tells the model what the tool does.
+// Description tells the model what the tool does, and lists the agent types
+// currently resolvable in this run's scopes (name + when-to-use) so the model
+// can pick a subagent_type instead of guessing.
 func (t *SpawnTool) Description() string {
-	return "Launch a subagent to handle a delegated task autonomously in an isolated context. " +
+	base := "Launch a subagent to handle a delegated task autonomously in an isolated context. " +
 		"The subagent runs its own agent loop with a scoped set of tools and returns a single result to you. " +
 		"It does NOT see this conversation, so write a self-contained prompt: state the goal, the relevant context, " +
 		"and whether you want research or changes. Omit subagent_type to use the general-purpose agent. " +
 		"To run subagents in parallel, emit multiple spawn_agent calls in one turn."
+	names := t.store.Available(t.scopes)
+	if len(names) == 0 {
+		return base
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString(" Available subagent_type values:")
+	for _, n := range names {
+		b.WriteString("\n- ")
+		b.WriteString(n)
+		if def, err := t.store.Resolve(n, t.scopes); err == nil && def.WhenToUse != "" {
+			b.WriteString(": ")
+			b.WriteString(def.WhenToUse)
+		}
+	}
+	return b.String()
 }
 
 // Schema is the JSON Schema for the tool input.
@@ -120,7 +140,7 @@ func (t *SpawnTool) Schema() map[string]any {
 			},
 			"subagent_type": map[string]any{
 				"type":        "string",
-				"description": "Which agent type to launch; omit for general-purpose",
+				"description": "Which agent type to launch; omit for general-purpose. Available types are listed in the tool description",
 			},
 		},
 		"required": []string{"prompt"},
@@ -173,6 +193,15 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 	// would sit at the maximum depth (so it cannot spawn further).
 	allow := def.Tools
 	if !def.Wildcard() {
+		if len(def.Skills) > 0 {
+			if _, ok := t.parent.Get(skill.RunSkillScriptName); !ok {
+				// The def declares skills but this run has no script runner
+				// (exec disabled or no visible skill has scripts): the child
+				// silently loses its skills. Warn so the config gap is visible.
+				slog.Warn("subagent: definition declares skills but the run has no skill script runner; skills unavailable",
+					"agent", def.Name, "skills", def.Skills)
+			}
+		}
 		if extra := skillToolNames(t.parent, def.Skills); len(extra) > 0 {
 			allow = append(append([]string{}, allow...), extra...)
 		}
@@ -195,7 +224,14 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 	var emitter agent.Emitter = discardEmitter{}
 	if sink := sinkFrom(ctx); sink != nil {
 		sink(Activity{AgentType: def.Name, Depth: childDepth, Phase: "start", ToolCallID: callID})
-		emitter = activityEmitter{sink: sink, agentType: def.Name, depth: childDepth, toolCallID: callID}
+		emitter = &activityEmitter{sink: sink, agentType: def.Name, depth: childDepth, toolCallID: callID}
+	}
+	// Fold the child's token usage into the run tree's usage scope so the root
+	// run's terminal usage report (persisted runs-row usage, quota accounting)
+	// covers subagent model calls too. Wraps whatever emitter is active —
+	// black-box children count just the same.
+	if scope := agent.UsageScopeFrom(ctx); scope != nil {
+		emitter = usageCapture{next: emitter, scope: scope}
 	}
 
 	// Bound concurrent child runs to limit goroutine/CPU/memory pressure under
@@ -219,12 +255,70 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 		}
 		return res, nil
 	}
+	// A child that ended awaiting client interactions (a permission approval,
+	// an ask_user question set, a client-side tool) did NOT finish: subagents
+	// cannot suspend for human input, so those prompts would never be answered.
+	// Without this check the gated child "completes" silently and the parent
+	// model sees a done-looking result with the work undone. Return an explicit
+	// error result naming the gated calls so the parent can perform that step
+	// itself — its own approval flow reaches the user.
+	if pending := child.PendingInteractions; len(pending) > 0 {
+		res := collapse(msgs)
+		res.IsError = true
+		res.Content = fmt.Sprintf("subagent stopped: it requires %s, which cannot be delivered inside a subagent. "+
+			"Perform that step yourself (your own approval flow will ask the user), or finish the task without it.",
+			describeInteractions(pending))
+		if partial := lastAssistantText(msgs); partial != "" {
+			res.Content += "\n\npartial output:\n" + partial
+		}
+		return res, nil
+	}
 	return collapse(msgs), nil
 }
 
 // errf builds an error tool result from a formatted message.
 func errf(format string, a ...any) toolruntime.Result {
 	return toolruntime.Result{Content: fmt.Sprintf(format, a...), IsError: true}
+}
+
+// describeInteractions summarizes a gated interaction batch for the parent
+// model: "approval for tool X", "a question via ask_user", etc.
+func describeInteractions(pending []*agent.Interaction) string {
+	parts := make([]string, 0, len(pending))
+	for _, g := range pending {
+		kind := g.Kind
+		if kind == "" {
+			kind = "approval"
+		}
+		switch kind {
+		case "approval":
+			parts = append(parts, fmt.Sprintf("an approval for tool %q", g.ToolName))
+		default:
+			parts = append(parts, fmt.Sprintf("a %s interaction via tool %q", kind, g.ToolName))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// usageCapture folds a child loop's terminal KindUsage into the run tree's
+// usage scope, then forwards every event to the wrapped emitter unchanged.
+type usageCapture struct {
+	next  agent.Emitter
+	scope *agent.UsageScope
+}
+
+func (u usageCapture) Emit(ctx context.Context, kind agent.EventKind, payload any) error {
+	if kind == agent.KindUsage {
+		switch v := payload.(type) {
+		case provider.Usage:
+			u.scope.Add(v)
+		case *provider.Usage:
+			if v != nil {
+				u.scope.Add(*v)
+			}
+		}
+	}
+	return u.next.Emit(ctx, kind, payload)
 }
 
 // discardEmitter drops all child loop events. It is the fallback when no
