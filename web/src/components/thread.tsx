@@ -1,9 +1,10 @@
-import type { ChangeEvent, FC } from "react";
+import type { ChangeEvent, ClipboardEvent, FC } from "react";
 import { useRef, useState } from "react";
 import {
   ThreadPrimitive,
   ComposerPrimitive,
   MessagePrimitive,
+  useAui,
 } from "@assistant-ui/react";
 import { ArrowDown, ArrowUp, Loader2, Paperclip, X } from "lucide-react";
 import { Reasoning } from "@/components/reasoning";
@@ -35,7 +36,7 @@ import {
   AttachmentTitle,
 } from "@/components/ui/attachment";
 import { PermissionSelect } from "@/components/permission-select";
-import { uploadSessionImage, uploadUserImage } from "@/lib/api";
+import { uploadUserImage } from "@/lib/api";
 import {
   addImage,
   imageFileUrl,
@@ -128,6 +129,25 @@ const UserMessage: FC = () => (
       <Bubble align="end">
         <BubbleContent className="px-4 py-2.5">
           <MessagePrimitive.Parts />
+          {/* Images staged via the composer attachments render here, so the
+              outgoing message shows its images immediately; history-loading
+              image parts ride in message content and render via Parts above. */}
+          <MessagePrimitive.Attachments>
+            {({ attachment }) => (
+              <div className="flex flex-wrap gap-2 pt-2">
+                {attachment.content.map((part, i) =>
+                  part.type === "image" ? (
+                    <img
+                      key={i}
+                      src={part.image}
+                      alt={attachment.name}
+                      className="max-h-48 rounded-lg border border-border object-contain"
+                    />
+                  ) : null,
+                )}
+              </div>
+            )}
+          </MessagePrimitive.Attachments>
         </BubbleContent>
       </Bubble>
     </Message>
@@ -164,12 +184,34 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
   const images = usePendingImages();
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
+  // The composer mirrors each staged image as a CreateAttachment so the
+  // outgoing user message carries the image part and shows it immediately
+  // (the local thread's optimistic message); the durable record still comes
+  // from the images in the POST body.
+  const aui = useAui();
+  const composer = aui.composer();
+
+  // Uploads one image file as a USER-LEVEL upload and stages it as a chip.
+  // Shared by the file picker and clipboard paste. Every image uploads to the
+  // user scope (session-independent) so the first message can carry an image
+  // and all references share one "uploads/<uuid>.webp" form — the model never
+  // has to guess between session-relative and uploads- prefixed paths.
+  const uploadFile = async (file: File) => {
+    const { path } = await uploadUserImage(file);
+    const name = file.name || "pasted image";
+    addImage({ path, mediaType: "image/webp", name });
+    void composer.addAttachment({
+      id: path,
+      type: "image",
+      name,
+      contentType: "image/webp",
+      content: [{ type: "image", image: imageFileUrl(sessionId, path) }],
+    });
+  };
 
   // Each selected image is uploaded immediately (the backend re-encodes to WebP
   // and returns a reference path); the chip then shows the stored file through
-  // the same authenticated endpoint history rendering uses. Without a session
-  // yet (a brand-new conversation) the upload goes to the user-level endpoint,
-  // so the first message can carry an image; with one it uses the session path.
+  // the same authenticated endpoint history rendering uses.
   const onFiles = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-selecting the same file
@@ -178,10 +220,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
     let uploaded = 0;
     for (const file of files) {
       try {
-        const { path } = sessionId
-          ? await uploadSessionImage(sessionId, file)
-          : await uploadUserImage(file);
-        addImage({ path, mediaType: "image/webp", name: file.name });
+        await uploadFile(file);
         uploaded++;
       } catch {
         reportNotice(`Could not upload ${file.name} — try a different image.`);
@@ -189,6 +228,33 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
     }
     setUploading(false);
     if (uploaded === 0) return;
+  };
+
+  // Clipboard paste: a pasted image (a screenshot, say) is uploaded and staged
+  // exactly like a picked file. Only image files are intercepted; pasting text
+  // keeps its default behaviour.
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData?.files ?? []).filter((f) =>
+      f.type.startsWith("image/"),
+    );
+    if (files.length === 0) return;
+    e.preventDefault();
+    setUploading(true);
+    files.forEach((file) => {
+      uploadFile(file)
+        .catch(() => reportNotice("Could not upload the pasted image — try again."))
+        .finally(() => setUploading(false));
+    });
+  };
+
+  // removeStaged drops a chip from both the pending store (what the POST body
+  // carries) and the composer mirror, so a removed image is neither sent to the
+  // backend nor shown on the outgoing message.
+  const removeStaged = (path: string) => {
+    removeImage(path);
+    if (composer.getState().attachments.some((a) => a.id === path)) {
+      void composer.attachment({ id: path }).remove();
+    }
   };
 
   return (
@@ -211,7 +277,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
                 <AttachmentActions>
                   <AttachmentAction
                     title="Remove image"
-                    onClick={() => removeImage(p.path)}
+                    onClick={() => removeStaged(p.path)}
                   >
                     <X />
                   </AttachmentAction>
@@ -235,6 +301,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
           <ComposerPrimitive.Input
             placeholder="Message nowhere-agent…"
             maxRows={8}
+            onPaste={onPaste}
             data-slot="input-group-control"
             className="w-full resize-none bg-transparent px-2.5 py-2 text-base outline-none placeholder:text-muted-foreground md:text-sm"
           />
@@ -288,3 +355,4 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
     </div>
   );
 };
+

@@ -7,6 +7,7 @@
 // composer in thread.tsx and the runtime body in App.tsx share one list.
 
 import { useSyncExternalStore } from "react";
+import { getToken } from "@/lib/auth";
 
 export type PendingImage = {
   /** Session-relative path returned by the upload endpoint (…/images). */
@@ -71,6 +72,14 @@ export function resetImages() {
   emit();
 }
 
+// authQuery appends the bearer token as a query param. An <img> tag cannot set
+// an Authorization header, and the server's RequireAuth accepts the query
+// fallback; the access log records the path only, never the query.
+function authQuery(): string {
+  const t = getToken();
+  return t ? `?token=${encodeURIComponent(t)}` : "";
+}
+
 // imageFileUrl resolves an image reference to the authenticated endpoint the
 // browser loads it from. A "uploads/<id>.webp" reference is a user-level
 // upload (change user-image-uploads) served from /api/chat/uploads/<id>.webp,
@@ -78,8 +87,9 @@ export function resetImages() {
 // image served from GET .../sessions/{id}/files/{path}. Both forms come from
 // their upload endpoints and are safe to interpolate (a uuid + extension).
 export function imageFileUrl(sessionId: string | null, path: string): string {
+  const auth = authQuery();
   if (path.startsWith("uploads/")) {
-    return `/api/chat/uploads/${encodeURIComponent(path.slice("uploads/".length))}`;
+    return `/api/chat/uploads/${encodeURIComponent(path.slice("uploads/".length))}${auth}`;
   }
-  return `/api/chat/sessions/${encodeURIComponent(sessionId ?? "")}/files/${path}`;
+  return `/api/chat/sessions/${encodeURIComponent(sessionId ?? "")}/files/${path}${auth}`;
 }
