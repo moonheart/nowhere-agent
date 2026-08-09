@@ -838,7 +838,10 @@ func run() error {
 	// back to index.html. API routes carry more specific patterns, which Go's
 	// ServeMux prefers over this one, so they are unaffected.
 	if cfg.Web.Dir != "" {
-		mux.Handle("GET /", spaHandler(cfg.Web.Dir))
+		// SPA must be registered method-less: "GET /" would conflict with the
+		// all-methods "/api/" subtree (more general path, fewer methods). The
+		// method guard lives in spaHandler instead.
+		mux.Handle("/", spaHandler(cfg.Web.Dir))
 	}
 
 	srv := &http.Server{
@@ -953,6 +956,10 @@ func spaHandler(dir string) http.Handler {
 	files := http.FileServer(http.Dir(dir))
 	index := filepath.Join(dir, "index.html")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.NotFound(w, r)
+			return
+		}
 		// Reject traversal before touching the filesystem: path.Clean on a
 		// rooted path cannot escape, and http.ServeFile would reject it anyway,
 		// but checking here keeps the stat below honest.
