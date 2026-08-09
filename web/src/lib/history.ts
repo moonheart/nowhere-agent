@@ -24,12 +24,19 @@ import { asAsyncIterableStream } from "assistant-stream/utils";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
+import { imageFileUrl } from "@/lib/image-attachment";
 import { reportInteraction, type Interaction } from "@/lib/approval";
 import { reportPlan, type Plan } from "@/lib/plan";
 import { reportPermissionMode, permissionModeFromSessionState } from "@/lib/permission";
 
 type HistoryPart =
   | { type: "text" | "reasoning"; text: string }
+  | {
+      type: "image";
+      /** Session-relative workspace path; rendered via the /files/ endpoint. */
+      mediaType?: string;
+      path: string;
+    }
   | {
       type: "tool-call";
       toolCallId: string;
@@ -66,10 +73,14 @@ function parseToolArgs(argsText: string): ReadonlyJSONObject {
 }
 
 // mapPart converts one history part to a ThreadMessageLike part, recursing into
-// a tool-call's nested sub-conversation (a spawn_agent child's turns).
-function mapPart(p: HistoryPart): ThreadAssistantMessagePart {
+// a tool-call's nested sub-conversation (a spawn_agent child's turns). sessionId
+// resolves an image part's path to the authenticated file endpoint URL.
+function mapPart(p: HistoryPart, sessionId: string): ThreadAssistantMessagePart {
   if (p.type === "reasoning") {
     return { type: "reasoning", text: p.text };
+  }
+  if (p.type === "image") {
+    return { type: "image", image: imageFileUrl(sessionId, p.path) };
   }
   if (p.type === "tool-call") {
     return {
@@ -81,18 +92,18 @@ function mapPart(p: HistoryPart): ThreadAssistantMessagePart {
       result: p.result,
       isError: p.isError,
       ...(p.messages && p.messages.length > 0
-        ? { messages: p.messages.map(mapMessage) as never }
+        ? { messages: p.messages.map((m) => mapMessage(m, sessionId)) as never }
         : {}),
     };
   }
   return { type: "text", text: p.text };
 }
 
-function mapMessage(m: HistoryMessage): ThreadMessageLike {
+function mapMessage(m: HistoryMessage, sessionId: string): ThreadMessageLike {
   return {
     id: m.id,
     role: m.role === "assistant" ? "assistant" : "user",
-    content: m.content.map(mapPart),
+    content: m.content.map((p) => mapPart(p, sessionId)),
     // Carry the run's token usage (unstable_data) so a reloaded reply renders
     // the same usage footer as the live stream.
     ...(m.metadata ? { metadata: m.metadata as never } : {}),
@@ -122,7 +133,7 @@ async function loadHistory(): Promise<{
     pendingInteractions?: Interaction[] | null;
     sessionState?: { plan?: Plan } | null;
   };
-  const messages = (data.messages ?? []).map(mapMessage);
+  const messages = (data.messages ?? []).map((m) => mapMessage(m, threadId));
   return {
     messages,
     active: data.active === true,

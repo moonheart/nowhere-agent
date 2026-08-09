@@ -20,6 +20,10 @@ export class ApiError extends Error {
 type Options = {
   method?: string;
   body?: unknown;
+  // contentType overrides the automatic application/json (for raw/binary
+  // payloads like the image upload endpoint, which reads the request body
+  // directly rather than parsing JSON).
+  contentType?: string;
   // signal lets a component abandon an in-flight request when it unmounts or
   // when a newer request supersedes it.
   signal?: AbortSignal;
@@ -29,12 +33,21 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {};
   if (token) headers.authorization = `Bearer ${token}`;
-  if (opts.body !== undefined) headers["content-type"] = "application/json";
+  if (opts.body !== undefined) {
+    headers["content-type"] = opts.contentType ?? "application/json";
+  }
 
   const res = await fetch(path, {
     method: opts.method ?? "GET",
     headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    // JSON callers pass an object to stringify; a contentType override signals a
+    // raw binary body (the image upload endpoint) passed through untouched.
+    body:
+      opts.body === undefined
+        ? undefined
+        : opts.contentType
+          ? (opts.body as BodyInit)
+          : JSON.stringify(opts.body),
     signal: opts.signal,
   });
 
@@ -67,4 +80,23 @@ export function qs(params: Record<string, string | number | undefined>): string 
     .filter(([, v]) => v !== undefined && v !== "")
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
   return parts.length > 0 ? `?${parts.join("&")}` : "";
+}
+
+// uploadSessionImage uploads an image to the session's workspace (POST
+// .../sessions/{id}/images) and returns the session-relative path the chat
+// request then references as an image part. The endpoint reads the RAW payload
+// (ImageStore re-encodes to WebP), so the file bytes go straight in the body
+// with the file's own content type.
+export async function uploadSessionImage(
+  sessionId: string,
+  file: File,
+): Promise<{ path: string }> {
+  return api<{ path: string }>(
+    `/api/chat/sessions/${encodeURIComponent(sessionId)}/images`,
+    {
+      method: "POST",
+      body: await file.arrayBuffer(),
+      contentType: file.type || "application/octet-stream",
+    },
+  );
 }

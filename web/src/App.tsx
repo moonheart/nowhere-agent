@@ -39,6 +39,7 @@ import { reportInteraction, resetApprovals, registerDecisionFollower, hasPending
 import { clearNotice, reportNotice } from "@/lib/notice";
 import { clientToolDeclarations } from "@/lib/client-tools";
 import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
+import { takeImages, resetImages } from "@/lib/image-attachment";
 import {
   resetPermissionMode,
   reportPermissionMode,
@@ -74,9 +75,16 @@ function Chat({
       // agent on every turn. The model may call them; the backend suspends the
       // run and streams a client_tool interaction the browser fulfils locally.
       const tools = clientToolDeclarations();
+      // Images the composer staged for THIS turn (uploaded first, paths held in
+      // the attachment store). Consuming them here clears the chips — the batch
+      // is exactly what this send carries.
+      const images = takeImages();
       return {
         ...(threadId ? { threadId } : {}),
         ...(Object.keys(tools).length > 0 ? { tools } : {}),
+        ...(images.length > 0
+          ? { images: images.map((p) => ({ path: p.path, mediaType: p.mediaType })) }
+          : {}),
       };
     },
     onData: (d) => {
@@ -253,6 +261,7 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
       resetApprovals();
       resetPlan();
       resetPermissionMode();
+      resetImages();
       clearNotice();
       setConversationKey((k) => k + 1);
     }
@@ -279,6 +288,7 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
     resetActivity();
     resetApprovals();
     resetPlan();
+    resetImages();
     clearNotice();
     // Do NOT resetPermissionMode here: a draft 完全允许 picked on this blank
     // thread is a one-off for the session the first message creates; clearing it
@@ -301,6 +311,7 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
     resetApprovals();
     resetPlan();
     resetPermissionMode();
+    resetImages();
     clearNotice();
     setConversationKey((k) => k + 1);
   };
