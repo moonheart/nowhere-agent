@@ -2,12 +2,17 @@ package toolruntime
 
 import (
 	"fmt"
+	"math"
+	"reflect"
+	"regexp"
 )
 
 // ValidateOutput checks a value against a declared JSON output schema, covering
 // the subset client tools realistically declare: type, required, properties
-// (recursive), items, enum, and additionalProperties. It is deliberately a
-// small validator — enough to reject malformed client output before folding —
+// (recursive), items, enum, const, additionalProperties, string constraints
+// (minLength/maxLength/pattern), numeric ranges (minimum/maximum and their
+// exclusive variants), and array sizes (minItems/maxItems). It is deliberately
+// a small validator — enough to reject malformed client output before folding —
 // not a full JSON Schema implementation. Returns nil when the value conforms.
 func ValidateOutput(schema map[string]any, value any) error {
 	return validate(schema, value, "$")
@@ -28,8 +33,14 @@ func validate(schema map[string]any, value any, path string) error {
 	if schema == nil {
 		return nil
 	}
+	// const: value must equal the declared constant.
+	if c, present := schema["const"]; present {
+		if !jsonEqual(c, value) {
+			return fmt.Errorf("%s: value %v does not equal const %v", path, value, c)
+		}
+	}
 	// enum: value must be one of the listed constants.
-	if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
+	if enum := enumValues(schema["enum"]); len(enum) > 0 {
 		if !inEnum(enum, value) {
 			return fmt.Errorf("%s: value %v not in enum", path, value)
 		}
@@ -71,6 +82,12 @@ func validate(schema map[string]any, value any, path string) error {
 		if !ok {
 			return fmt.Errorf("%s: want array, got %T", path, value)
 		}
+		if min, ok := toNumber(schema["minItems"]); ok && float64(len(arr)) < min {
+			return fmt.Errorf("%s: array length %d below minItems %v", path, len(arr), min)
+		}
+		if max, ok := toNumber(schema["maxItems"]); ok && float64(len(arr)) > max {
+			return fmt.Errorf("%s: array length %d above maxItems %v", path, len(arr), max)
+		}
 		if items, ok := schema["items"].(map[string]any); ok {
 			for i, el := range arr {
 				if err := validate(items, el, fmt.Sprintf("%s[%d]", path, i)); err != nil {
@@ -80,8 +97,22 @@ func validate(schema map[string]any, value any, path string) error {
 		}
 		return nil
 	case "string":
-		if _, ok := value.(string); !ok {
+		s, ok := value.(string)
+		if !ok {
 			return fmt.Errorf("%s: want string, got %T", path, value)
+		}
+		n := float64(len([]rune(s)))
+		if min, ok := toNumber(schema["minLength"]); ok && n < min {
+			return fmt.Errorf("%s: string length %v below minLength %v", path, n, min)
+		}
+		if max, ok := toNumber(schema["maxLength"]); ok && n > max {
+			return fmt.Errorf("%s: string length %v above maxLength %v", path, n, max)
+		}
+		if p, ok := schema["pattern"].(string); ok {
+			re, err := regexp.Compile(p)
+			if err == nil && !re.MatchString(s) {
+				return fmt.Errorf("%s: string %q does not match pattern %q", path, s, p)
+			}
 		}
 		return nil
 	case "boolean":
@@ -91,15 +122,16 @@ func validate(schema map[string]any, value any, path string) error {
 		return nil
 	case "integer":
 		f, ok := value.(float64)
-		if !ok || f != float64(int64(f)) {
+		if !ok || f != math.Trunc(f) {
 			return fmt.Errorf("%s: want integer, got %v", path, value)
 		}
-		return nil
+		return validateRange(schema, f, path)
 	case "number":
-		if _, ok := value.(float64); !ok {
+		f, ok := value.(float64)
+		if !ok {
 			return fmt.Errorf("%s: want number, got %T", path, value)
 		}
-		return nil
+		return validateRange(schema, f, path)
 	case "null":
 		if value != nil {
 			return fmt.Errorf("%s: want null, got %T", path, value)
@@ -112,11 +144,108 @@ func validate(schema map[string]any, value any, path string) error {
 
 func inEnum(enum []any, value any) bool {
 	for _, e := range enum {
-		if fmt.Sprintf("%v", e) == fmt.Sprintf("%v", value) {
+		if jsonEqual(e, value) {
 			return true
 		}
 	}
 	return false
+}
+
+// validateRange enforces minimum/maximum (and their exclusive variants) on a
+// numeric value.
+func validateRange(schema map[string]any, f float64, path string) error {
+	if min, ok := toNumber(schema["minimum"]); ok && f < min {
+		return fmt.Errorf("%s: %v below minimum %v", path, f, min)
+	}
+	if max, ok := toNumber(schema["maximum"]); ok && f > max {
+		return fmt.Errorf("%s: %v above maximum %v", path, f, max)
+	}
+	if min, ok := toNumber(schema["exclusiveMinimum"]); ok && f <= min {
+		return fmt.Errorf("%s: %v not above exclusiveMinimum %v", path, f, min)
+	}
+	if max, ok := toNumber(schema["exclusiveMaximum"]); ok && f >= max {
+		return fmt.Errorf("%s: %v not below exclusiveMaximum %v", path, f, max)
+	}
+	return nil
+}
+
+// enumValues normalizes an enum declaration. Schemas are authored both as
+// decoded JSON ([]any) and as Go literals ([]string); both must be enforced.
+func enumValues(x any) []any {
+	switch arr := x.(type) {
+	case []any:
+		return arr
+	case []string:
+		out := make([]any, len(arr))
+		for i, s := range arr {
+			out[i] = s
+		}
+		return out
+	}
+	return nil
+}
+
+// jsonEqual compares two JSON values type-sensitively: the number 1 and the
+// string "1" are different. Go-native literals (int, []string, ...) are
+// normalized to their JSON-decoded form first so schema authors can use either.
+func jsonEqual(a, b any) bool {
+	return reflect.DeepEqual(normalizeJSON(a), normalizeJSON(b))
+}
+
+func normalizeJSON(v any) any {
+	switch n := v.(type) {
+	case int:
+		return float64(n)
+	case int8:
+		return float64(n)
+	case int16:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case uint:
+		return float64(n)
+	case uint8:
+		return float64(n)
+	case uint16:
+		return float64(n)
+	case uint32:
+		return float64(n)
+	case uint64:
+		return float64(n)
+	case float32:
+		return float64(n)
+	case []string:
+		out := make([]any, len(n))
+		for i, s := range n {
+			out[i] = s
+		}
+		return out
+	case []any:
+		out := make([]any, len(n))
+		for i, el := range n {
+			out[i] = normalizeJSON(el)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(n))
+		for k, el := range n {
+			out[k] = normalizeJSON(el)
+		}
+		return out
+	}
+	return v
+}
+
+// toNumber reads a numeric schema keyword, accepting both decoded-JSON float64
+// and Go-native int literals.
+func toNumber(x any) (float64, bool) {
+	switch n := normalizeJSON(x).(type) {
+	case float64:
+		return n, true
+	}
+	return 0, false
 }
 
 func toStringSlice(x any) []string {
