@@ -2,6 +2,7 @@ package chatapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -308,5 +309,73 @@ func TestBuildHistorySplitsOnHITLGate(t *testing.T) {
 	}
 	if !strings.Contains(replyText, "JavaScript") {
 		t.Errorf("verdict reply text = %q, want the answer", replyText)
+	}
+}
+
+// TestBuildHistoryEmitsGenerativeUIDataPart verifies a tool_result block that
+// carries a GenerativeUI spec becomes a data part named generative-ui in the
+// assistant turn, mirroring the live data-generative-ui frame so a reloaded
+// client renders the same card.
+func TestBuildHistoryEmitsGenerativeUIDataPart(t *testing.T) {
+	ms := session.NewMemMessageStore()
+	sess := "sess-1"
+	append := func(role provider.Role, blocks ...provider.Block) {
+		if _, err := ms.AppendMessage(context.Background(), session.StoredMessage{
+			SessionID: sess, RunID: "r1", Role: role, Content: blocks,
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	append(provider.RoleUser, provider.Block{Type: provider.BlockText, Text: "test the ui"})
+	append(provider.RoleAssistant,
+		provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "test_ui", ToolInput: map[string]any{}},
+	)
+	append(provider.RoleUser,
+		provider.Block{
+			Type:         provider.BlockToolResult,
+			ToolResultID: "tu1",
+			ToolContent:  "test UI card pushed",
+			GenerativeUI: &provider.GenerativeUISpec{Root: []provider.GenerativeUINode{
+				{Component: "test-ui-card", Props: map[string]any{"title": "Generative UI works"}},
+			}},
+		},
+	)
+	append(provider.RoleAssistant, provider.Block{Type: provider.BlockText, Text: "done"})
+
+	h := NewHandler(newTestLoop, "sys").WithMessageStore(ms)
+	req := httptest.NewRequest("GET", "/api/chat/history?threadId="+sess, nil)
+	msgs, err := h.buildHistory(req, sess)
+	if err != nil {
+		t.Fatalf("buildHistory: %v", err)
+	}
+
+	// The turn folds into ONE assistant bubble carrying the data part.
+	if len(msgs) != 2 || msgs[1].Role != "assistant" {
+		t.Fatalf("expected [user assistant], got roles %v", roles(msgs))
+	}
+	var found *historyPart
+	for i := range msgs[1].Content {
+		if msgs[1].Content[i].Type == "data" {
+			found = &msgs[1].Content[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no data part in history: %+v", msgs[1].Content)
+	}
+	if found.Name != "generative-ui" {
+		t.Errorf("data part name = %q want generative-ui", found.Name)
+	}
+	var payload struct {
+		Spec struct {
+			Root []struct {
+				Component string `json:"component"`
+			} `json:"root"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(found.Data, &payload); err != nil {
+		t.Fatalf("data part is not the spec envelope: %v (%s)", err, found.Data)
+	}
+	if len(payload.Spec.Root) != 1 || payload.Spec.Root[0].Component != "test-ui-card" {
+		t.Errorf("spec envelope root = %+v", payload.Spec.Root)
 	}
 }

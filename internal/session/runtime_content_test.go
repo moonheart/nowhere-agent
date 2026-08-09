@@ -25,11 +25,14 @@ func TestIsContentKindRoutesInterruptToBroker(t *testing.T) {
 	// the finish frame's counts. When it was NOT a content kind it fell to the
 	// lifecycle path (whose handler drops it), so live streams showed usage:0
 	// and only a history reload surfaced the real counts.
+	// KindGenerativeUI is broker-routed the same way: the data-generative-ui
+	// frame must reach attached clients live; a reload re-renders the UI from
+	// the durable message block instead.
 	for _, k := range []agent.EventKind{
 		agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolArgs, agent.KindToolResult, agent.KindSubagent, agent.KindUsage,
 		// Step frames are live render detail (start-step/finish-step), served for
 		// settled runs via /history, so they ride the broker and are never persisted.
-		agent.KindStepStart, agent.KindStepFinish,
+		agent.KindStepStart, agent.KindStepFinish, agent.KindGenerativeUI,
 	} {
 		if !isContentKind(string(k)) {
 			t.Errorf("%q should be a content kind", k)

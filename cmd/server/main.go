@@ -762,6 +762,9 @@ func run() error {
 				}
 				return sessionRuntime.SetSessionStateKV(ctx, sessionID, key, data)
 			}))
+			// Generative-UI smoke test (agent-driven UI): the tool pushes a fixed
+			// test card. Always available (sandbox-independent), RiskReadOnly.
+			reg.Register(builtin.NewTestUI())
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
 			// present (independent of the sandbox); scopes mirror the context

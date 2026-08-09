@@ -1,4 +1,4 @@
-import type { ChangeEvent, ClipboardEvent, FC } from "react";
+import type { ChangeEvent, ClipboardEvent, FC, PropsWithChildren } from "react";
 import { useRef, useState } from "react";
 import {
   ThreadPrimitive,
@@ -12,6 +12,7 @@ import { StopButton } from "@/components/stop-button";
 import { ToolCall } from "@/components/tool-call";
 import { MarkdownText } from "@/components/markdown-text";
 import { MessageImage, ImageThumb } from "@/components/message-image";
+import { DataUI, GenerativeUIFromMetadata } from "@/components/generative-ui";
 import { UsageFooter } from "@/components/usage-footer";
 import { PlanPanel } from "@/components/plan-panel";
 import { PendingNotice } from "@/components/pending-notice";
@@ -129,7 +130,12 @@ const UserMessage: FC = () => (
     <Message align="end">
       <Bubble align="end">
         <BubbleContent className="px-4 py-2.5">
-          <MessagePrimitive.Parts components={{ Image: MessageImage }} />
+          <MessagePrimitive.Parts
+            components={{
+              Image: MessageImage,
+              data: { Fallback: DataUI },
+            }}
+          />
           {/* Images staged via the composer attachments render here, so the
               outgoing message shows its images immediately; history-loading
               image parts ride in message content and render via Parts above. */}
@@ -150,6 +156,19 @@ const UserMessage: FC = () => (
   </MessagePrimitive.Root>
 );
 
+// ToolGroupWithUI renders a run's consecutive tool-call cards, then any
+// generative UI the message's metadata carries. The live data-generative-ui
+// frame lands on the message that made the call, so the card renders right
+// after its tool card — the same position history puts the rebuilt content
+// part (after the tool call, before the trailing text). A message without a
+// spec renders nothing extra.
+const ToolGroupWithUI: FC<PropsWithChildren> = ({ children }) => (
+  <>
+    {children}
+    <GenerativeUIFromMetadata />
+  </>
+);
+
 const AssistantMessage: FC = () => (
   <MessagePrimitive.Root asChild>
     <Message>
@@ -165,7 +184,9 @@ const AssistantMessage: FC = () => (
               Text: MarkdownText,
               Reasoning,
               Image: MessageImage,
+              data: { Fallback: DataUI },
               tools: { Fallback: ToolCall },
+              ToolGroup: ToolGroupWithUI,
             }}
           />
           <UsageFooter />

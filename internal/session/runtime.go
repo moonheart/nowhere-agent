@@ -297,7 +297,7 @@ func (rt *Runtime) AppendEvent(ctx context.Context, e Event) error {
 // old string, dropping every interaction frame in the runtime-wired server.
 func isContentKind(kind string) bool {
 	switch agent.EventKind(kind) {
-	case agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolArgs, agent.KindToolResult, agent.KindSubagent, agent.KindInterrupt, agent.KindUsage, agent.KindStepStart, agent.KindStepFinish:
+	case agent.KindText, agent.KindThinking, agent.KindToolUse, agent.KindToolArgs, agent.KindToolResult, agent.KindSubagent, agent.KindInterrupt, agent.KindUsage, agent.KindStepStart, agent.KindStepFinish, agent.KindGenerativeUI:
 		return true
 	default:
 		return false

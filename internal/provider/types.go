@@ -23,6 +23,21 @@ const (
 	BlockImage      BlockType = "image"
 )
 
+// GenerativeUISpec is the declarative agent-driven UI tree (the assistant-ui
+// GenerativeUISpec wire shape). The client resolves each node's component
+// name against its own allowlist — unknown names render nothing.
+type GenerativeUISpec struct {
+	Root []GenerativeUINode `json:"root"`
+}
+
+// GenerativeUINode is one node of a generative-UI tree.
+type GenerativeUINode struct {
+	Component string             `json:"component"`
+	Props     map[string]any     `json:"props,omitempty"`
+	Children  []GenerativeUINode `json:"children,omitempty"`
+	Key       string             `json:"key,omitempty"`
+}
+
 // Block is one unit of message content. Only the fields relevant to Type are set.
 // The JSON tags control how blocks are persisted (messages.content) and shipped
 // over the wire: empty fields are omitted, and the materialized base64 payload
@@ -58,6 +73,12 @@ type Block struct {
 	// to rebuild the sub-conversation in history; it is NEVER sent back to the
 	// provider (the model only sees the collapsed ToolContent).
 	ToolMessages []Block `json:"tool_messages,omitempty"`
+
+	// GenerativeUI is agent-driven UI a tool result declares (the assistant-ui
+	// GenerativeUISpec wire shape), attached to the BlockToolResult block it
+	// belongs to. Persisted so history re-renders it; adapters skip it when
+	// building the provider request (the model never sees it — like ToolMessages).
+	GenerativeUI *GenerativeUISpec `json:"generative_ui,omitempty"`
 
 	// Image (BlockImage) — a reference to an image, never the payload. The
 	// image bytes live in the session workspace; the block carries a

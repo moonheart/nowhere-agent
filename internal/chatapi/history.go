@@ -33,8 +33,15 @@ type historyUsageData struct {
 }
 
 type historyPart struct {
-	Type string `json:"type"`           // "text" | "reasoning" | "tool-call" | "image"
+	Type string `json:"type"` // "text" | "reasoning" | "tool-call" | "image" | "data"
 	Text string `json:"text,omitempty"` // text/reasoning payload
+
+	// data fields: agent-driven UI declared by a tool result. Shape mirrors the
+	// live data-generative-ui frame's data part: {type:"data", name,
+	// data:{spec}} — the client's mapPart passes it straight through to the
+	// same data-part renderer the live stream uses.
+	Name string          `json:"name,omitempty"`
+	Data json.RawMessage `json:"data,omitempty"`
 
 	// image fields (image-input capability): a user attachment referenced by its
 	// session-relative workspace path. The client renders it via the
@@ -308,6 +315,13 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 					// A spawn_agent result carries the child's sub-conversation.
 					if len(b.ToolMessages) > 0 {
 						call.Messages = nestedFromBlocks(b.ToolMessages)
+					}
+				}
+				// Agent-driven UI declared by the tool result: re-render it in the
+				// turn exactly where the live data-generative-ui frame landed it.
+				if b.GenerativeUI != nil {
+					if raw, err := json.Marshal(map[string]any{"spec": b.GenerativeUI}); err == nil {
+						cur.Content = append(cur.Content, historyPart{Type: "data", Name: "generative-ui", Data: raw})
 					}
 				}
 			}

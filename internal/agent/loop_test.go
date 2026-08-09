@@ -97,6 +97,61 @@ func (echoTool) Call(_ context.Context, args map[string]any) (toolruntime.Result
 	return toolruntime.Result{Content: "echo-result"}, nil
 }
 
+// genUITool returns a fixed generative-UI spec with its result, the way the
+// builtin test_ui tool does.
+type genUITool struct{}
+
+func (genUITool) Name() string           { return "genui" }
+func (genUITool) Description() string    { return "pushes a UI card" }
+func (genUITool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (genUITool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
+func (genUITool) Timeout() time.Duration { return time.Second }
+func (genUITool) Call(_ context.Context, _ map[string]any) (toolruntime.Result, error) {
+	return toolruntime.Result{
+		Content: "card pushed",
+		GenerativeUI: &provider.GenerativeUISpec{Root: []provider.GenerativeUINode{
+			{Component: "test-ui-card", Props: map[string]any{"title": "hi"}},
+		}},
+	}, nil
+}
+
+// TestLoopToolResultEmitsGenerativeUI verifies a tool result carrying a
+// generative-UI spec: the loop emits a KindGenerativeUI event for the live
+// data frame AND folds the spec into the durable tool-result message block.
+func TestLoopToolResultEmitsGenerativeUI(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "genui", `{}`),
+		textResponse("final answer"),
+	}}
+	reg := toolruntime.NewRegistry()
+	reg.Register(genUITool{})
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	produced, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "show me")}, emit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emit.count(KindGenerativeUI) != 1 {
+		t.Errorf("KindGenerativeUI emitted %d times, want 1", emit.count(KindGenerativeUI))
+	}
+	// The spec must be persisted with the tool-result message.
+	for _, m := range produced {
+		for _, b := range m.Content {
+			if b.Type == provider.BlockToolResult && b.ToolResultID == "tu1" {
+				if b.GenerativeUI == nil || len(b.GenerativeUI.Root) != 1 {
+					t.Fatalf("tool-result block missing GenerativeUI spec: %+v", b)
+				}
+				if b.GenerativeUI.Root[0].Component != "test-ui-card" {
+					t.Errorf("spec component = %q", b.GenerativeUI.Root[0].Component)
+				}
+				return
+			}
+		}
+	}
+	t.Fatalf("no tool-result block for tu1 in produced messages: %+v", produced)
+}
+
 func TestLoopSingleTurn(t *testing.T) {
 	p := &scriptProvider{script: [][]provider.Event{textResponse("hello world")}}
 	reg := toolruntime.NewRegistry()

@@ -38,6 +38,12 @@ type HistoryPart =
       path: string;
     }
   | {
+      type: "data";
+      /** Data-part name (e.g. "generative-ui" for agent-driven UI). */
+      name: string;
+      data: unknown;
+    }
+  | {
       type: "tool-call";
       toolCallId: string;
       toolName: string;
@@ -81,6 +87,9 @@ function mapPart(p: HistoryPart, sessionId: string): ThreadAssistantMessagePart 
   }
   if (p.type === "image") {
     return { type: "image", image: imageFileUrl(sessionId, p.path) };
+  }
+  if (p.type === "data") {
+    return { type: "data", name: p.name, data: p.data };
   }
   if (p.type === "tool-call") {
     return {

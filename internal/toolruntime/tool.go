@@ -37,6 +37,10 @@ type Result struct {
 	// and replayed to the UI as the sub-conversation; it is NEVER fed back to the
 	// model (the model only sees the collapsed Content).
 	Nested []provider.Block
+	// GenerativeUI declares agent-driven UI the client renders for this tool
+	// result (a generative-UI spec). It is persisted so history re-renders it
+	// and streamed live as a data frame; it is NEVER fed back to the model.
+	GenerativeUI *provider.GenerativeUISpec
 }
 
 // Tool is the unified contract. Implementations must be safe for concurrent use.

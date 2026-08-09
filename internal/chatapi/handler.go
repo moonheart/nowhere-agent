@@ -1066,6 +1066,16 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 			"toolName":      toolName,
 			"args":          args,
 		}, "transient": true})
+	case agent.KindGenerativeUI:
+		// Agent-driven UI a tool result declared: a durable (non-transient) data
+		// frame so the client's message accumulates a data part and history
+		// reloads re-render it. Shape: {type, data:{spec}}; the client matches
+		// the data part by name "generative-ui".
+		if m, ok := payload.(map[string]any); ok {
+			if spec, ok := m["spec"]; ok {
+				e.write(chunk{"type": "data-generative-ui", "data": map[string]any{"spec": spec}})
+			}
+		}
 	case agent.KindDone:
 		e.writeRunStatus("done")
 	case agent.KindUsage:

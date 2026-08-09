@@ -132,6 +132,12 @@ const (
 	// stop reason, usage, and whether another step follows. Live-only content, so
 	// the transport can emit a finish-step frame with real per-step usage.
 	KindStepFinish EventKind = "step_finish"
+	// KindGenerativeUI carries agent-driven UI a tool result declared (payload:
+	// map[string]any{"spec": *provider.GenerativeUISpec}). Persisted and fanned
+	// out so attached clients render the UI live and a history reload restores
+	// it (the durable copy lives in the tool-result message's generative_ui
+	// block; this event is the live render frame for the current run).
+	KindGenerativeUI EventKind = "generative_ui"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).
@@ -1167,6 +1173,9 @@ func (l *Loop) recordToolResults(ctx context.Context, emit Emitter, state *RunSt
 			"content":     r.Content,
 			"is_error":    r.IsError,
 		})
+		if r.GenerativeUI != nil {
+			_ = emit.Emit(ctx, KindGenerativeUI, map[string]any{"spec": r.GenerativeUI})
+		}
 	}
 	msg := toolResultMessage(calls, results)
 	state.Produced = append(state.Produced, msg)
@@ -1331,6 +1340,7 @@ func toolResultMessage(calls []toolruntime.Call, results []toolruntime.Result) p
 			ToolContent:  content,
 			IsError:      res.IsError,
 			ToolMessages: res.Nested,
+			GenerativeUI: res.GenerativeUI,
 		})
 	}
 	return msg
