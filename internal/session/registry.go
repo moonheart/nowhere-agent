@@ -14,6 +14,7 @@ import (
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/contextmgmt"
+	"nowhere-agent/internal/observability"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/subagent"
 	"nowhere-agent/internal/toolruntime"
@@ -118,9 +119,12 @@ func (rg *RunRegistry) WithMessageStore(ms MessageStore) *RunRegistry {
 
 // Submit starts a run for the session and executes it on a dedicated goroutine.
 // It enforces the single-active-run lock (via Runtime.StartRun) and returns
-// ErrRunActive if a run is in flight. The run's context is independent of the
-// caller's ctx, so the caller disconnecting does not cancel the run; ctx is used
-// only for the synchronous start (session lookup, run row creation).
+// ErrRunActive if a run is in flight. The run's context is decoupled from the
+// caller's CANCELLATION — the caller disconnecting does not cancel the run —
+// but INHERITS the caller's context values (request id, request-scoped logger)
+// via context.WithoutCancel, so run/loop/tool logs correlate back to the
+// request that started the run. ctx is used for the synchronous start (session
+// lookup, run row creation).
 func (rg *RunRegistry) Submit(ctx context.Context, sessionID string, work RunWork) (Run, error) {
 	run, err := rg.rt.StartRun(ctx, sessionID)
 	if err != nil {
@@ -138,9 +142,11 @@ func (rg *RunRegistry) Submit(ctx context.Context, sessionID string, work RunWor
 		}
 	}
 
-	// The worker's context is deliberately NOT derived from the caller's request
-	// context: the run must outlive the submitting connection (D7).
-	runCtx, cancel := context.WithCancel(context.Background())
+	// The worker's context is deliberately decoupled from the caller's request
+	// cancellation: the run must outlive the submitting connection (D7). Values
+	// (request id, request-scoped logger) are kept via WithoutCancel so the
+	// run's log trail stays correlated with the request that started it.
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	w := &runWorker{runID: run.ID, cancel: cancel, done: make(chan struct{})}
 
 	rg.mu.Lock()
@@ -188,6 +194,16 @@ func messageText(m *provider.Message) string {
 // worker is removed from the registry here so a fresh Submit is not blocked.
 func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run, w *runWorker, work RunWork) {
 	defer close(w.done)
+	// Bind a run-scoped logger into the context: the submitter's request logger
+	// (carrying request_id) when the run came in over HTTP, else the process
+	// default, plus the run/session identity. Loop, middleware, and tool code
+	// that logs via observability.LoggerFromContext correlates for free.
+	log := observability.LoggerFromContext(runCtx)
+	if log == nil {
+		log = slog.Default()
+	}
+	log = log.With("session", sessionID, "run", run.ID)
+	runCtx = observability.WithLogger(runCtx, log)
 	defer func() {
 		rg.mu.Lock()
 		// Remove the worker only if it is still the registered one — a resumed
@@ -204,7 +220,7 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 	// the cleanup defers so it runs first (LIFO) and settles before they fire.
 	defer func() {
 		if p := recover(); p != nil {
-			slog.Error("run worker panicked", "session", sessionID, "run", run.ID, "panic", p, "stack", string(debug.Stack()))
+			log.Error("run worker panicked", "panic", p, "stack", string(debug.Stack()))
 			bg := context.Background()
 			rg.voidPendingInteractions(bg, run.ID)
 			_ = rg.appendEvent(bg, sessionID, run.ID, agent.KindError, fmt.Sprintf("internal error: %v", p))

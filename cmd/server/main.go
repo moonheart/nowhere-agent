@@ -50,6 +50,8 @@ import (
 	"nowhere-agent/internal/toolruntime/builtin"
 	"nowhere-agent/internal/usage"
 	"nowhere-agent/internal/workspace"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func main() {
@@ -202,6 +204,22 @@ func run() error {
 		log.Info("live delivery: redis streams (content) + redis pub/sub (lifecycle)", "addr", cfg.Stream.RedisAddr)
 	} else {
 		log.Info("live delivery: in-memory (single instance)")
+	}
+
+	// Live-delivery health: surface slow-consumer drops from the fan-out layers.
+	// A rising count means attached clients are falling behind live delivery and
+	// healing via Read catch-up / Replay — previously silent.
+	if ds, ok := sessionRuntime.Bus().(session.DropStats); ok {
+		_ = metrics.Register(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "nowhere_session_bus_dropped_total",
+			Help: "Lifecycle events dropped for slow subscribers (they heal via replay).",
+		}, func() float64 { return float64(ds.DroppedTotal()) }))
+	}
+	if ds, ok := sessionRuntime.Broker().(session.DropStats); ok {
+		_ = metrics.Register(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "nowhere_session_broker_dropped_total",
+			Help: "Live content frames dropped for slow subscribers (they heal via catch-up read).",
+		}, func() float64 { return float64(ds.DroppedTotal()) }))
 	}
 
 	// Full-block conversation record (persist-raw-messages): messages are
@@ -897,14 +915,21 @@ func spaHandler(dir string) http.Handler {
 	})
 }
 
-// httpHandler composes the inbound middleware stack around the mux, outermost
-// first: rate-limit (P1-1, reject a flood before any per-request work or metric
-// is spent on it) → request-id (so every logged/served request carries an id) →
-// metrics (count what actually serves) → mux. Health and metrics probes are
-// opted out of rate limiting so monitoring stays up during a flood. Limiting is
-// disabled unless both HTTP_RATE_LIMIT_RPS and _BURST are set.
+// httpHandler composes the inbound middleware stack around the mux via Chain,
+// outermost first. Order invariants:
+//
+//   - request-id outermost: an id is near-free (one random read), and giving
+//     EVERY request one — including requests the limiter is about to reject —
+//     keeps throttled floods traceable instead of anonymous.
+//   - access-log next: one line per completed request (status/latency/ttfb/
+//     bytes, 499 on client disconnect), so rejected requests are also seen.
+//   - rate-limit (P1-1) before metrics: a flood must not churn metric series;
+//     probes are opted out so monitoring stays up during a flood. Limiting is
+//     disabled unless both HTTP_RATE_LIMIT_RPS and _BURST are set.
+//   - metrics then recovery, innermost around the mux: a panic is recovered,
+//     logged with a stack, and answered 500 — and because recovery sits inside
+//     metrics, that 500 is counted like any other status.
 func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Metrics, mux *http.ServeMux) http.Handler {
-	inner := observability.RequestID(log)(metrics.Middleware(mux))
 	limiter := quota.NewRateLimiter(cfg.HTTP.RateLimitRPS, cfg.HTTP.RateLimitBurst,
 		func(r *http.Request) string {
 			// Never throttle probes: a flooded API must not blind the operator.
@@ -913,7 +938,13 @@ func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Met
 			}
 			return quota.ClientIPKey(r)
 		})
-	return limiter.Middleware(inner)
+	return observability.Chain(mux,
+		observability.RequestID(log),
+		observability.AccessLog,
+		limiter.Middleware,
+		metrics.Middleware,
+		observability.Recovery,
+	)
 }
 
 // buildEncryptor constructs the secret encryptor from config, or nil when no
