@@ -1,6 +1,9 @@
 package session
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // EventBus fans run events out to attached clients. It is a live-delivery layer
 // only: the durable run log (Store) is the single source of truth, and a slow or
@@ -17,10 +20,19 @@ type EventBus interface {
 	Subscribe(sessionID string, buffer int) (<-chan Event, func())
 }
 
+// DropStats is implemented by fan-out layers that drop live deliveries for
+// slow consumers. It lets the wiring layer expose drop counters as metrics
+// without the session package depending on a metrics library.
+type DropStats interface {
+	// DroppedTotal reports cumulative dropped deliveries since startup.
+	DroppedTotal() int64
+}
+
 // memBus is the single-instance in-memory EventBus.
 type memBus struct {
-	mu   sync.Mutex
-	subs map[string]map[chan Event]struct{} // sessionID -> subscriber channels
+	mu      sync.Mutex
+	subs    map[string]map[chan Event]struct{} // sessionID -> subscriber channels
+	dropped atomic.Int64                       // events dropped for slow subscribers
 }
 
 // NewMemBus creates an in-memory EventBus.
@@ -38,9 +50,15 @@ func (b *memBus) Publish(sessionID string, e Event) {
 		select {
 		case ch <- e:
 		default: // drop for slow consumers rather than block the run
+			b.dropped.Add(1)
 		}
 	}
 }
+
+// DroppedTotal reports how many lifecycle events have been dropped for slow
+// subscribers since startup. A rising count means attached clients are
+// falling behind live delivery and healing via Replay.
+func (b *memBus) DroppedTotal() int64 { return b.dropped.Load() }
 
 // Subscribe registers a buffered channel for the session's events.
 //

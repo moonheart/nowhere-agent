@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 // StreamEvent is one live content frame for an active run — a text/thinking
@@ -57,6 +58,7 @@ type memBroker struct {
 	mu       sync.Mutex
 	streams  map[string]*liveStream // sessionID -> ring + subs
 	capacity int                    // max frames retained per session
+	dropped  atomic.Int64           // live frames dropped for slow subscribers
 }
 
 // liveStream holds one session's retained frames and live subscribers.
@@ -99,10 +101,16 @@ func (b *memBroker) Publish(_ context.Context, sessionID string, ev StreamEvent)
 		select {
 		case ch <- ev:
 		default: // drop for slow consumers; they recover via Read
+			b.dropped.Add(1)
 		}
 	}
 	return ev.Offset, nil
 }
+
+// DroppedTotal reports how many live frames have been dropped for slow
+// subscribers since startup — the live-delivery health signal. A rising count
+// means consumers are falling behind and relying on Read catch-up.
+func (b *memBroker) DroppedTotal() int64 { return b.dropped.Load() }
 
 func (b *memBroker) Read(_ context.Context, sessionID string, after int64) ([]StreamEvent, error) {
 	b.mu.Lock()

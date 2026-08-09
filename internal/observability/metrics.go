@@ -86,10 +86,19 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
 
+// Register adds a collector to the registry (e.g. a GaugeFunc over a
+// subsystem's internal counters), so components outside this package can
+// expose their own series without reaching for the global registry.
+func (m *Metrics) Register(c prometheus.Collector) error {
+	return m.reg.Register(c)
+}
+
 // Middleware instruments the wrapped handler. It is the outermost wrapper so it
 // sees the final status code and full latency. The route label is r.Pattern —
 // the ServeMux pattern — which is only populated on Go 1.22+, matching the rest
-// of the server.
+// of the server. A client that disconnected before the handler returned (the
+// normal end of an SSE stream) is counted as 499, not 200, so dashboards do
+// not read dropped streams as successful responses.
 func (m *Metrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.inflight.Inc()
@@ -102,8 +111,11 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 		if route == "" {
 			route = "unmatched"
 		}
-		status := itoa(rec.status)
-		m.requests.WithLabelValues(route, r.Method, status).Inc()
+		status := rec.status
+		if clientGone(r) {
+			status = StatusClientClosed
+		}
+		m.requests.WithLabelValues(route, r.Method, itoa(status)).Inc()
 		m.latency.WithLabelValues(route, r.Method).Observe(time.Since(start).Seconds())
 	})
 }
@@ -113,12 +125,23 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	wrote  bool
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
+	s.wrote = true
 	s.ResponseWriter.WriteHeader(code)
 }
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	s.wrote = true
+	return s.ResponseWriter.Write(b)
+}
+
+// Written reports whether the handler committed a status, so Recovery knows a
+// 500 can no longer be written (the stream is already underway).
+func (s *statusRecorder) Written() bool { return s.wrote }
 
 // Unwrap lets http.ResponseController reach the underlying writer (for SSE
 // flushing), which the middleware would otherwise hide.
