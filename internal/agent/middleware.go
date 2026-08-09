@@ -9,6 +9,7 @@ import (
 
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/redact"
 	"nowhere-agent/internal/toolruntime"
 )
 
@@ -562,3 +563,54 @@ func (m *PermissionMW) MiddlewareName() string { return "permission" }
 
 // GateCheck supplies the policy to the loop (used at both gate points).
 func (m *PermissionMW) GateCheck() GateFunc { return m.Check }
+
+// RedactMW scrubs PII and secrets from tool results (WrapToolCall, post-
+// execution) so neither the model context nor the durable record carries the
+// emails, card numbers, tokens, or keys a tool may echo (enterprise-readiness;
+// see internal/redact for the detector catalog). It runs on every dispatched
+// result — success and error alike — because an error string can quote the very
+// secret it failed on. Nested sub-conversation blocks (a spawn_agent result) are
+// scrubbed too: they persist even though the model never sees them, so a secret
+// there would otherwise land in the durable record. The Redactor is immutable
+// and shared across the dispatch fan-out's concurrent goroutines.
+type RedactMW struct {
+	Redactor *redact.Redactor
+}
+
+func (m *RedactMW) MiddlewareName() string { return "redact" }
+
+func (m *RedactMW) WrapToolCall(ctx context.Context, c *ToolCall, next ToolHandler) toolruntime.Result {
+	res := next(ctx, c)
+	if m.Redactor == nil {
+		return res
+	}
+	if res.Content != "" {
+		res.Content = m.Redactor.Redact(res.Content)
+	}
+	if len(res.Nested) > 0 {
+		res.Nested = redactBlocks(m.Redactor, res.Nested)
+	}
+	return res
+}
+
+// redactBlocks scrubs the text-bearing fields of a nested block tree in place.
+// Nested blocks are the sub-conversation a spawn_agent result carries; only the
+// fields that can hold free text are rewritten (text, thinking, tool content),
+// recursing into nested tool-message trees.
+func redactBlocks(r *redact.Redactor, blocks []provider.Block) []provider.Block {
+	for i := range blocks {
+		b := &blocks[i]
+		switch b.Type {
+		case provider.BlockText:
+			b.Text = r.Redact(b.Text)
+		case provider.BlockThinking:
+			b.Thinking = r.Redact(b.Thinking)
+		case provider.BlockToolResult:
+			b.ToolContent = r.Redact(b.ToolContent)
+		}
+		if len(b.ToolMessages) > 0 {
+			b.ToolMessages = redactBlocks(r, b.ToolMessages)
+		}
+	}
+	return blocks
+}

@@ -37,6 +37,7 @@ import (
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/providerreg"
 	"nowhere-agent/internal/quota"
+	"nowhere-agent/internal/redact"
 	"nowhere-agent/internal/sandbox"
 	"nowhere-agent/internal/schedule"
 	"nowhere-agent/internal/scheduleapi"
@@ -450,6 +451,24 @@ func run() error {
 			"read_only", cfg.Permission.ReadOnly, "sandbox_write", cfg.Permission.SandboxWrite,
 			"network", cfg.Permission.Network, "external_write", cfg.Permission.ExternalWrite)
 
+		// PII/secret redaction (enterprise-readiness): one Redactor is built once
+		// and shared by every loop the platform constructs (chat, subagents,
+		// scheduled tasks). It is immutable after construction, so the shared
+		// instance is safe across concurrent tool dispatches. Disabled by
+		// default; an invalid strategy/category fails startup rather than
+		// silently redacting nothing.
+		redactor, err := redact.New(redact.Config{
+			Enabled:    cfg.Redact.Enabled,
+			Strategy:   redact.Strategy(cfg.Redact.Strategy),
+			Categories: cfg.Redact.Categories,
+		})
+		if err != nil {
+			return fmt.Errorf("redact config: %w", err)
+		}
+		if redactor != nil {
+			log.Info("PII/secret redaction enabled", "strategy", cfg.Redact.Strategy, "categories", cfg.Redact.Categories)
+		}
+
 		// MCP integration (mcp capability): connect to the configured SearXNG MCP
 		// server over Streamable HTTP and list its tools. The client is shared
 		// across runs; the ToolBinder registers its tools into each run's registry
@@ -569,6 +588,9 @@ func run() error {
 			// per-session permission mode from the run context at call time, so one
 			// registration covers every session and reacts to the live toggle.
 			loop.Use(&agent.PermissionMW{Check: permit})
+			if redactor != nil {
+				loop.Use(&agent.RedactMW{Redactor: redactor})
+			}
 			if window > 0 {
 				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callAdapter, model), Window: window, MaxTokens: replyBudgetFor(window), Breaker: breaker})
 			}

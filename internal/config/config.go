@@ -47,6 +47,11 @@ type Config struct {
 	// Secrets configures encryption-at-rest for stored credentials
 	// (enterprise-readiness P0-2).
 	Secrets Secrets
+	// Redact configures PII/secret redaction of tool results (enterprise-
+	// readiness). When enabled, emails, card numbers, IPs, tokens, and keys in
+	// tool output are replaced before the result reaches the model context or
+	// the durable record. See internal/redact for the detector catalog.
+	Redact Redact
 }
 
 // Secrets holds the master key that encrypts stored credentials (the team LLM
@@ -60,6 +65,25 @@ type Secrets struct {
 	// should not do so unprotected. Set it in any environment that holds real
 	// keys. Generate one with: openssl rand -base64 32
 	MasterKey string `envconfig:"SECRETS_MASTER_KEY" default:""`
+}
+
+// Redact configures the PII/secret redaction middleware (enterprise-readiness).
+// Disabled by default because redaction rewrites what the model sees — a
+// workflow that legitimately passes emails or keys through tool output would be
+// surprised by the change. Enable it for stricter multi-tenant isolation: PII
+// and provider keys then stay out of tool results, the model context, and the
+// durable record.
+type Redact struct {
+	// Enabled gates redaction of tool results.
+	Enabled bool `envconfig:"REDACT_ENABLED" default:"false"`
+	// Strategy is how each detected value is replaced: redact (whole value →
+	// [REDACTED_<TYPE>]) or mask (→ ***<last 4 chars>, so a user can still
+	// recognize their own key or card).
+	Strategy string `envconfig:"REDACT_STRATEGY" default:"redact"`
+	// Categories narrows redaction to a comma-separated subset of: email,
+	// credit_card, ipv4, bearer, basic_auth, api_key, private_key,
+	// secret_value. Empty redacts all of them.
+	Categories string `envconfig:"REDACT_CATEGORIES" default:""`
 }
 
 // Permission maps each tool risk class to a decision for the execution-permission
