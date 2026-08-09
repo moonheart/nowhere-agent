@@ -54,10 +54,11 @@ export type SubagentRun = {
 export type SubagentSignal = {
   agentType: string;
   depth: number;
-  phase: "start" | "stream" | "tool" | "result" | "done" | "error";
+  phase: "start" | "stream" | "tool" | "result" | "interrupted" | "done" | "error";
   tool?: string;
   toolCallId?: string;
-  kind?: "text" | "thinking";
+  /** "text" | "thinking" for stream signals; the interaction kind (e.g. "approval") for interrupted. */
+  kind?: string;
   text?: string;
   subToolCallId?: string;
   args?: unknown;
@@ -158,6 +159,19 @@ export function reportSubagentActivity(sig: SubagentSignal, atEpoch: number = ep
         break;
       case "result":
         fillToolResult(run, sig);
+        break;
+      case "interrupted":
+        // The child hit a gate it cannot resolve (subagents can't suspend for
+        // human input) and stopped. Show it as failed with the reason, not as
+        // still running — the backend suppresses the trailing "done" here.
+        run.status = "error";
+        closeOpenTools(run);
+        run.parts.push({
+          kind: "text",
+          text: sig.tool
+            ? `Stopped: needs ${sig.kind || "approval"} for ${sig.tool}, which cannot be delivered inside a subagent.`
+            : "Stopped: waiting on input that cannot be delivered inside a subagent.",
+        });
         break;
       case "done":
         run.status = "done";

@@ -53,6 +53,25 @@ func TestActivityEmitterStreamTagsCallID(t *testing.T) {
 	}
 }
 
+// TestActivityEmitterInterruptSuppressesDone pins that a child's KindInterrupt
+// is forwarded as an "interrupted" activity (naming the gated tool) and the
+// loop's trailing KindDone after it is suppressed — a gated child stalled, it
+// did not finish.
+func TestActivityEmitterInterruptSuppressesDone(t *testing.T) {
+	var got []Activity
+	e := &activityEmitter{sink: func(a Activity) { got = append(got, a) }, agentType: "x", depth: 1, toolCallID: "tc-1"}
+
+	_ = e.Emit(context.Background(), agent.KindInterrupt, agent.Interaction{Kind: "approval", ToolCallID: "t1", ToolName: "run_command"})
+	_ = e.Emit(context.Background(), agent.KindDone, nil)
+
+	if len(got) != 1 {
+		t.Fatalf("expected exactly the interrupted activity (done suppressed), got %+v", got)
+	}
+	if got[0].Phase != "interrupted" || got[0].Tool != "run_command" || got[0].SubToolCallID != "t1" || got[0].Kind != "approval" {
+		t.Fatalf("interrupted activity: %+v", got[0])
+	}
+}
+
 func TestActivityEmitterNilSink(t *testing.T) {
 	e := activityEmitter{sink: nil, agentType: "x", depth: 1}
 	if err := e.Emit(context.Background(), agent.KindToolUse, map[string]any{"name": "x"}); err != nil {
