@@ -12,6 +12,7 @@ import (
 	"context"
 	"net/http"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/schedule"
 )
@@ -57,24 +58,26 @@ func (h *Handler) WithRunner(r Runner) *Handler {
 	return h
 }
 
-// RegisterAuthed mounts every route behind the auth middleware, so each handler
-// can rely on an authenticated user being on the request context.
-func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) http.Handler) {
-	route(mux, auth, "GET /api/me/scheduled-tasks", h.list)
-	route(mux, auth, "POST /api/me/scheduled-tasks", h.create)
-	route(mux, auth, "GET /api/me/scheduled-tasks/{id}", h.get)
-	route(mux, auth, "PUT /api/me/scheduled-tasks/{id}", h.update)
-	route(mux, auth, "DELETE /api/me/scheduled-tasks/{id}", h.remove)
-	route(mux, auth, "POST /api/me/scheduled-tasks/{id}/enable", h.enable)
-	route(mux, auth, "POST /api/me/scheduled-tasks/{id}/disable", h.disable)
-	route(mux, auth, "POST /api/me/scheduled-tasks/{id}/run", h.runNow)
-	route(mux, auth, "GET /api/me/scheduled-tasks/{id}/sessions", h.sessions)
-	route(mux, auth, "POST /api/me/scheduled-tasks/{id}/sessions/clear", h.clearSessions)
+// RegisterAuthed mounts every route onto the protected group. Auth is NOT
+// wrapped per route: the group applies its middleware set once at Mount time,
+// so this handler only declares which routes belong to the protected tier. Each
+// handler relies on an authenticated user being on the request context.
+func (h *Handler) RegisterAuthed(g *httpx.Router) {
+	route(g, "GET /api/me/scheduled-tasks", h.list)
+	route(g, "POST /api/me/scheduled-tasks", h.create)
+	route(g, "GET /api/me/scheduled-tasks/{id}", h.get)
+	route(g, "PUT /api/me/scheduled-tasks/{id}", h.update)
+	route(g, "DELETE /api/me/scheduled-tasks/{id}", h.remove)
+	route(g, "POST /api/me/scheduled-tasks/{id}/enable", h.enable)
+	route(g, "POST /api/me/scheduled-tasks/{id}/disable", h.disable)
+	route(g, "POST /api/me/scheduled-tasks/{id}/run", h.runNow)
+	route(g, "GET /api/me/scheduled-tasks/{id}/sessions", h.sessions)
+	route(g, "POST /api/me/scheduled-tasks/{id}/sessions/clear", h.clearSessions)
 }
 
-// route mounts one pattern behind the auth middleware.
-func route(mux *http.ServeMux, auth func(http.Handler) http.Handler, pattern string, h http.HandlerFunc) {
-	mux.Handle(pattern, auth(h))
+// route registers one pattern onto the protected group.
+func route(g *httpx.Router, pattern string, h http.HandlerFunc) {
+	g.HandleFunc(pattern, h)
 }
 
 // caller returns the authenticated user; handlers behind RegisterAuthed rely on it.

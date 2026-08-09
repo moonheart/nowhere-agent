@@ -17,6 +17,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"golang.org/x/crypto/bcrypt"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/routing"
@@ -81,11 +82,13 @@ func newEnv(t *testing.T) *env {
 	e.mux = http.NewServeMux()
 	// Stand-in for identity's RequireAuth: it puts the current actor on the
 	// context exactly as the real middleware does, without needing a token.
-	h.RegisterAuthed(e.mux, func(next http.Handler) http.Handler {
+	authed := httpx.NewRouter(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), e.actor)))
 		})
 	})
+	h.RegisterAuthed(authed)
+	authed.Mount(e.mux, "/api/")
 	return e
 }
 

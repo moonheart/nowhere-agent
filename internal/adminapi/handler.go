@@ -16,6 +16,7 @@ import (
 
 	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/dreaming"
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/quota"
@@ -66,69 +67,73 @@ func (h *Handler) WithDreaming(r *dreaming.Runner) *Handler {
 	return h
 }
 
-// RegisterAuthed mounts every console route behind the auth middleware, so each
-// handler can rely on an authenticated user being on the request context.
+// RegisterAuthed mounts every console route onto the protected group. Auth is
+// NOT wrapped per route: the group applies its middleware set once at Mount
+// time, so this handler only declares which routes belong to the protected
+// tier. Each handler relies on an authenticated user being on the request
+// context.
 //
-// Ordering: auth runs outermost, then this package's tier guard. Registering
-// the guard outside auth would have it read an empty user and reject everyone.
-func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) http.Handler) {
+// Ordering: auth runs outermost (group middleware), then this package's tier
+// guard. Registering the guard outside auth would have it read an empty user
+// and reject everyone.
+func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	// ---- self ----
-	route(mux, auth, "PATCH /api/me", h.updateMe)
-	route(mux, auth, "POST /api/me/password", h.changePassword)
-	route(mux, auth, "GET /api/me/usage", h.myUsage)
-	route(mux, auth, "GET /api/me/memories", h.myMemories)
-	route(mux, auth, "DELETE /api/me/memories/{id}", h.deleteMyMemory)
-	route(mux, auth, "GET /api/me/dream", h.dreamStatus)
-	route(mux, auth, "POST /api/me/dream", h.triggerDream)
-	route(mux, auth, "GET /api/me/tokens", h.myTokens)
-	route(mux, auth, "DELETE /api/me/tokens", h.revokeOtherTokens)
-	route(mux, auth, "DELETE /api/me/tokens/{id}", h.revokeToken)
+	route(g, "PATCH /api/me", h.updateMe)
+	route(g, "POST /api/me/password", h.changePassword)
+	route(g, "GET /api/me/usage", h.myUsage)
+	route(g, "GET /api/me/memories", h.myMemories)
+	route(g, "DELETE /api/me/memories/{id}", h.deleteMyMemory)
+	route(g, "GET /api/me/dream", h.dreamStatus)
+	route(g, "POST /api/me/dream", h.triggerDream)
+	route(g, "GET /api/me/tokens", h.myTokens)
+	route(g, "DELETE /api/me/tokens", h.revokeOtherTokens)
+	route(g, "DELETE /api/me/tokens/{id}", h.revokeToken)
 
 	// ---- teams ----
-	route(mux, auth, "GET /api/teams", h.myTeams)
-	route(mux, auth, "POST /api/teams", h.createTeam)
-	route(mux, auth, "GET /api/teams/{id}", h.requireTeamRole(identity.RoleMember, h.getTeam))
-	route(mux, auth, "PATCH /api/teams/{id}", h.requireTeamRole(identity.RoleAdmin, h.renameTeam))
-	route(mux, auth, "DELETE /api/teams/{id}", h.requireTeamRole(identity.RoleOwner, h.deleteTeam))
+	route(g, "GET /api/teams", h.myTeams)
+	route(g, "POST /api/teams", h.createTeam)
+	route(g, "GET /api/teams/{id}", h.requireTeamRole(identity.RoleMember, h.getTeam))
+	route(g, "PATCH /api/teams/{id}", h.requireTeamRole(identity.RoleAdmin, h.renameTeam))
+	route(g, "DELETE /api/teams/{id}", h.requireTeamRole(identity.RoleOwner, h.deleteTeam))
 
-	route(mux, auth, "GET /api/teams/{id}/members", h.requireTeamRole(identity.RoleMember, h.listMembers))
-	route(mux, auth, "POST /api/teams/{id}/members", h.requireTeamRole(identity.RoleAdmin, h.addMember))
-	route(mux, auth, "PATCH /api/teams/{id}/members/{userId}", h.requireTeamRole(identity.RoleOwner, h.changeMemberRole))
+	route(g, "GET /api/teams/{id}/members", h.requireTeamRole(identity.RoleMember, h.listMembers))
+	route(g, "POST /api/teams/{id}/members", h.requireTeamRole(identity.RoleAdmin, h.addMember))
+	route(g, "PATCH /api/teams/{id}/members/{userId}", h.requireTeamRole(identity.RoleOwner, h.changeMemberRole))
 	// Removal is the one team route a plain member may reach, because leaving
 	// is removing yourself. The handler distinguishes the two cases.
-	route(mux, auth, "DELETE /api/teams/{id}/members/{userId}", h.requireTeamRole(identity.RoleMember, h.removeMember))
+	route(g, "DELETE /api/teams/{id}/members/{userId}", h.requireTeamRole(identity.RoleMember, h.removeMember))
 
-	route(mux, auth, "GET /api/teams/{id}/keys", h.requireTeamRole(identity.RoleAdmin, h.listKeys))
-	route(mux, auth, "PUT /api/teams/{id}/keys/{provider}", h.requireTeamRole(identity.RoleAdmin, h.putKey))
-	route(mux, auth, "DELETE /api/teams/{id}/keys/{provider}", h.requireTeamRole(identity.RoleAdmin, h.deleteKey))
+	route(g, "GET /api/teams/{id}/keys", h.requireTeamRole(identity.RoleAdmin, h.listKeys))
+	route(g, "PUT /api/teams/{id}/keys/{provider}", h.requireTeamRole(identity.RoleAdmin, h.putKey))
+	route(g, "DELETE /api/teams/{id}/keys/{provider}", h.requireTeamRole(identity.RoleAdmin, h.deleteKey))
 
-	route(mux, auth, "GET /api/teams/{id}/usage", h.requireTeamRole(identity.RoleAdmin, h.teamUsage))
-	route(mux, auth, "GET /api/teams/{id}/memories", h.requireTeamRole(identity.RoleMember, h.teamMemories))
-	route(mux, auth, "DELETE /api/teams/{id}/memories/{mid}", h.requireTeamRole(identity.RoleAdmin, h.deleteTeamMemory))
-	route(mux, auth, "POST /api/teams/{id}/memories/{mid}/deprecate", h.requireTeamRole(identity.RoleAdmin, h.deprecateTeamMemory))
+	route(g, "GET /api/teams/{id}/usage", h.requireTeamRole(identity.RoleAdmin, h.teamUsage))
+	route(g, "GET /api/teams/{id}/memories", h.requireTeamRole(identity.RoleMember, h.teamMemories))
+	route(g, "DELETE /api/teams/{id}/memories/{mid}", h.requireTeamRole(identity.RoleAdmin, h.deleteTeamMemory))
+	route(g, "POST /api/teams/{id}/memories/{mid}/deprecate", h.requireTeamRole(identity.RoleAdmin, h.deprecateTeamMemory))
 
 	// ---- platform ----
-	route(mux, auth, "GET /api/admin/stats", h.requireAdmin(h.stats))
-	route(mux, auth, "GET /api/admin/users", h.requireAdmin(h.listUsers))
-	route(mux, auth, "POST /api/admin/users", h.requireAdmin(h.createUser))
-	route(mux, auth, "PATCH /api/admin/users/{id}", h.requireAdmin(h.patchUser))
-	route(mux, auth, "POST /api/admin/users/{id}/password", h.requireAdmin(h.resetPassword))
-	route(mux, auth, "DELETE /api/admin/users/{id}", h.requireAdmin(h.deleteUser))
-	route(mux, auth, "GET /api/admin/teams", h.requireAdmin(h.listAllTeams))
-	route(mux, auth, "POST /api/admin/teams", h.requireAdmin(h.createTeamForOwner))
-	route(mux, auth, "GET /api/admin/usage", h.requireAdmin(h.platformUsage))
-	route(mux, auth, "GET /api/admin/quotas", h.requireAdmin(h.listQuotas))
-	route(mux, auth, "PUT /api/admin/quotas", h.requireAdmin(h.putQuota))
-	route(mux, auth, "DELETE /api/admin/quotas", h.requireAdmin(h.clearQuota))
-	route(mux, auth, "GET /api/admin/memories", h.requireAdmin(h.adminMemories))
-	route(mux, auth, "DELETE /api/admin/memories/{id}", h.requireAdmin(h.adminDeleteMemory))
-	route(mux, auth, "POST /api/admin/memories/{id}/deprecate", h.requireAdmin(h.adminDeprecateMemory))
-	route(mux, auth, "GET /api/admin/audit", h.requireAdmin(h.listAudit))
+	route(g, "GET /api/admin/stats", h.requireAdmin(h.stats))
+	route(g, "GET /api/admin/users", h.requireAdmin(h.listUsers))
+	route(g, "POST /api/admin/users", h.requireAdmin(h.createUser))
+	route(g, "PATCH /api/admin/users/{id}", h.requireAdmin(h.patchUser))
+	route(g, "POST /api/admin/users/{id}/password", h.requireAdmin(h.resetPassword))
+	route(g, "DELETE /api/admin/users/{id}", h.requireAdmin(h.deleteUser))
+	route(g, "GET /api/admin/teams", h.requireAdmin(h.listAllTeams))
+	route(g, "POST /api/admin/teams", h.requireAdmin(h.createTeamForOwner))
+	route(g, "GET /api/admin/usage", h.requireAdmin(h.platformUsage))
+	route(g, "GET /api/admin/quotas", h.requireAdmin(h.listQuotas))
+	route(g, "PUT /api/admin/quotas", h.requireAdmin(h.putQuota))
+	route(g, "DELETE /api/admin/quotas", h.requireAdmin(h.clearQuota))
+	route(g, "GET /api/admin/memories", h.requireAdmin(h.adminMemories))
+	route(g, "DELETE /api/admin/memories/{id}", h.requireAdmin(h.adminDeleteMemory))
+	route(g, "POST /api/admin/memories/{id}/deprecate", h.requireAdmin(h.adminDeprecateMemory))
+	route(g, "GET /api/admin/audit", h.requireAdmin(h.listAudit))
 }
 
-// route mounts one pattern behind the auth middleware.
-func route(mux *http.ServeMux, auth func(http.Handler) http.Handler, pattern string, h http.HandlerFunc) {
-	mux.Handle(pattern, auth(h))
+// route registers one pattern onto the protected group.
+func route(g *httpx.Router, pattern string, h http.HandlerFunc) {
+	g.HandleFunc(pattern, h)
 }
 
 // record writes one event to the audit trail when one is wired, attributing it

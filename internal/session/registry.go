@@ -16,6 +16,7 @@ import (
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/observability"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/reqctx"
 	"nowhere-agent/internal/subagent"
 	"nowhere-agent/internal/toolruntime"
 )
@@ -121,10 +122,10 @@ func (rg *RunRegistry) WithMessageStore(ms MessageStore) *RunRegistry {
 // It enforces the single-active-run lock (via Runtime.StartRun) and returns
 // ErrRunActive if a run is in flight. The run's context is decoupled from the
 // caller's CANCELLATION — the caller disconnecting does not cancel the run —
-// but INHERITS the caller's context values (request id, request-scoped logger)
-// via context.WithoutCancel, so run/loop/tool logs correlate back to the
-// request that started the run. ctx is used for the synchronous start (session
-// lookup, run row creation).
+// but carries the caller's request-scoped values (request id, request-scoped
+// logger, user, session id) via reqctx.Detach, so run/loop/tool logs correlate
+// back to the request that started the run. ctx is used for the synchronous
+// start (session lookup, run row creation).
 func (rg *RunRegistry) Submit(ctx context.Context, sessionID string, work RunWork) (Run, error) {
 	run, err := rg.rt.StartRun(ctx, sessionID)
 	if err != nil {
@@ -143,10 +144,12 @@ func (rg *RunRegistry) Submit(ctx context.Context, sessionID string, work RunWor
 	}
 
 	// The worker's context is deliberately decoupled from the caller's request
-	// cancellation: the run must outlive the submitting connection (D7). Values
-	// (request id, request-scoped logger) are kept via WithoutCancel so the
-	// run's log trail stays correlated with the request that started it.
-	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	// cancellation: the run must outlive the submitting connection (D7).
+	// reqctx.Detach is the explicit typed handoff — it re-stamps the caller's
+	// request id, logger, user, and session id as reqctx values, so the run's
+	// log trail stays correlated with the request that started it without
+	// relying on implicit context-value osmosis through WithoutCancel.
+	runCtx, cancel := context.WithCancel(reqctx.Detach(ctx))
 	w := &runWorker{runID: run.ID, cancel: cancel, done: make(chan struct{})}
 
 	rg.mu.Lock()

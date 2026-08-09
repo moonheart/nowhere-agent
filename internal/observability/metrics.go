@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"time"
 
+	"nowhere-agent/internal/reqctx"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -34,16 +36,12 @@ import (
 // that every response echoes back. Standard reverse-proxy convention.
 const RequestIDHeader = "X-Request-Id"
 
-type ctxKey string
-
-const requestIDKey ctxKey = "request-id"
-const loggerKey ctxKey = "logger"
-
 // Metrics records HTTP request metrics and exposes the registry they live in.
 type Metrics struct {
 	reg       *prometheus.Registry
 	requests  *prometheus.CounterVec
 	latency   *prometheus.HistogramVec
+	ttfb      *prometheus.HistogramVec
 	inflight  prometheus.Gauge
 	runsTotal *prometheus.CounterVec
 	tokens    *prometheus.CounterVec
@@ -63,6 +61,11 @@ func NewMetrics() *Metrics {
 		latency: f.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "nowhere_http_request_duration_seconds",
 			Help:    "HTTP request latency, by route and method.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"route", "method"}),
+		ttfb: f.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "nowhere_http_ttfb_seconds",
+			Help:    "HTTP time-to-first-byte, by route and method (high value for SSE streams).",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"route", "method"}),
 		inflight: f.NewGauge(prometheus.GaugeOpts{
@@ -93,18 +96,22 @@ func (m *Metrics) Register(c prometheus.Collector) error {
 	return m.reg.Register(c)
 }
 
-// Middleware instruments the wrapped handler. It is the outermost wrapper so it
-// sees the final status code and full latency. The route label is r.Pattern —
-// the ServeMux pattern — which is only populated on Go 1.22+, matching the rest
-// of the server. A client that disconnected before the handler returned (the
-// normal end of an SSE stream) is counted as 499, not 200, so dashboards do
-// not read dropped streams as successful responses.
+// Middleware instruments the wrapped handler. In the StandardStack it sits
+// INSIDE the rate limiter — rejected floods never reach it, so a throttle
+// cannot churn metric series — and outside Recovery, so the 500 a recovered
+// panic produces is counted like any other status. The route label is
+// r.Pattern — the ServeMux pattern — which is only populated on Go 1.22+,
+// matching the rest of the server. A client that disconnected before the
+// handler returned (the normal end of an SSE stream) is counted as 499, not
+// 200, so dashboards do not read dropped streams as successful responses. Uses
+// the shared statusWriter so every recorder in the stack implements the same
+// Write/Flush/Unwrap contract.
 func (m *Metrics) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.inflight.Inc()
 		defer m.inflight.Dec()
 		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		rec := newStatusWriter(w, start)
 		next.ServeHTTP(rec, r)
 
 		route := r.Pattern
@@ -117,50 +124,19 @@ func (m *Metrics) Middleware(next http.Handler) http.Handler {
 		}
 		m.requests.WithLabelValues(route, r.Method, itoa(status)).Inc()
 		m.latency.WithLabelValues(route, r.Method).Observe(time.Since(start).Seconds())
+		// TTFB is only meaningful once a status was committed (headers flushed);
+		// a request aborted before the handler wrote anything contributes nothing.
+		if rec.wrote {
+			m.ttfb.WithLabelValues(route, r.Method).Observe(rec.ttfb.Seconds())
+		}
 	})
-}
-
-// statusRecorder captures the status code that the handler writes; the default
-// is 200 (an implicit WriteHeader(200) on first Write).
-type statusRecorder struct {
-	http.ResponseWriter
-	status int
-	wrote  bool
-}
-
-func (s *statusRecorder) WriteHeader(code int) {
-	s.status = code
-	s.wrote = true
-	s.ResponseWriter.WriteHeader(code)
-}
-
-func (s *statusRecorder) Write(b []byte) (int, error) {
-	s.wrote = true
-	return s.ResponseWriter.Write(b)
-}
-
-// Written reports whether the handler committed a status, so Recovery knows a
-// 500 can no longer be written (the stream is already underway).
-func (s *statusRecorder) Written() bool { return s.wrote }
-
-// Unwrap lets http.ResponseController reach the underlying writer (for SSE
-// flushing), which the middleware would otherwise hide.
-func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
-
-// Flush implements http.Flusher by forwarding to the underlying writer. SSE
-// endpoints assert http.Flusher directly (a type assertion does NOT traverse
-// Unwrap), so without this the recorder would 500 every stream with
-// "streaming unsupported" — after the run already started server-side.
-func (s *statusRecorder) Flush() {
-	if f, ok := s.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
 }
 
 // RequestID adopts the incoming X-Request-Id if present and well-formed, else
 // generates one. It echoes the id on the response and injects both the id and a
 // request-scoped logger (carrying request_id, method, path) into the context, so
-// downstream code logs with correlation for free.
+// downstream code logs with correlation for free. Both live in reqctx, the one
+// typed home for request-scoped values.
 func RequestID(log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -170,8 +146,8 @@ func RequestID(log *slog.Logger) func(http.Handler) http.Handler {
 			}
 			w.Header().Set(RequestIDHeader, id)
 			reqLog := log.With("request_id", id, "method", r.Method, "path", r.URL.Path)
-			ctx := context.WithValue(r.Context(), requestIDKey, id)
-			ctx = context.WithValue(ctx, loggerKey, reqLog)
+			ctx := reqctx.WithRequestID(r.Context(), id)
+			ctx = reqctx.WithLogger(ctx, reqLog)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -180,20 +156,14 @@ func RequestID(log *slog.Logger) func(http.Handler) http.Handler {
 // FromContext returns the request id on the context, or "" if none (e.g. a
 // background worker context that never passed through the middleware).
 func FromContext(ctx context.Context) string {
-	if v, ok := ctx.Value(requestIDKey).(string); ok {
-		return v
-	}
-	return ""
+	return reqctx.RequestID(ctx)
 }
 
 // LoggerFromContext returns the request-scoped logger injected by RequestID, or
 // nil if the context did not come through the middleware. Callers fall back to
 // the package-level slog default so they can log unconditionally.
 func LoggerFromContext(ctx context.Context) *slog.Logger {
-	if v, ok := ctx.Value(loggerKey).(*slog.Logger); ok {
-		return v
-	}
-	return nil
+	return reqctx.Logger(ctx)
 }
 
 // validID accepts a client-supplied id only if it is short and printable, so a
