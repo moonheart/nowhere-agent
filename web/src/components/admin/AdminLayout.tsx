@@ -13,6 +13,7 @@ import {
   CalendarClock,
   ChartNoAxesColumn,
   Gauge,
+  KeyRound,
   Loader2,
   ScrollText,
   ShieldCheck,
@@ -184,6 +185,9 @@ export function AdminLayout() {
                 </NavItem>
                 <NavItem to="/admin/platform/quotas" icon={<Gauge />}>
                   Quotas
+                </NavItem>
+                <NavItem to="/admin/platform/providers" icon={<KeyRound />}>
+                  Providers
                 </NavItem>
                 <NavItem to="/admin/platform/memories" icon={<Brain />}>
                   Memories

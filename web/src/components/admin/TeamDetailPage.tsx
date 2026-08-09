@@ -4,7 +4,7 @@
 
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { KeyRound, Trash2, UserPlus } from "lucide-react";
+import { Plus, UserPlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -34,19 +34,29 @@ import {
 import {
   addMember,
   changeMemberRole,
-  deleteKey,
+  clearTeamAssignment,
+  createTeamModel,
+  createTeamProvider,
   deleteTeam,
   deleteTeamMemory,
+  deleteTeamModel,
+  deleteTeamProvider,
   deprecateTeamMemory,
+  fetchTeamModels,
   getTeam,
-  listKeys,
   listMembers,
-  putKey,
+  listTeamProviders,
   removeMember,
   renameTeam,
+  setTeamAssignment,
+  setTeamDefaultModel,
   teamMemories,
   teamUsage,
+  updateTeamModel,
+  updateTeamProvider,
   type Member,
+  type Provider,
+  type ProviderModel,
   type TeamRole,
 } from "@/lib/admin";
 import { canManageTeam, isTeamOwner } from "@/lib/me";
@@ -55,7 +65,6 @@ import {
   AsyncSection,
   ErrorNotice,
   formatDate,
-  formatDateTime,
   PageHeader,
   RoleBadge,
   TokenStats,
@@ -71,12 +80,14 @@ import {
   UsageTrend,
   useDateRange,
 } from "@/components/admin/usage-parts";
+import {
+  FetchModelsDialog,
+  ModelFormDialog,
+  ProviderCard,
+  ProviderFormDialog,
+} from "@/components/admin/ProvidersParts";
 
 const ROLES: TeamRole[] = ["owner", "admin", "member"];
-
-// PROVIDERS mirrors the server's allowlist. A key stored under any other name
-// would never be selected on the chat path.
-const PROVIDERS = ["anthropic", "openai"];
 
 export function TeamDetailPage() {
   const { teamId = "" } = useParams();
@@ -129,7 +140,7 @@ export function TeamDetailPage() {
           <Tabs defaultValue="members">
             <TabsList>
               <TabsTrigger value="members">Members</TabsTrigger>
-              {manage && <TabsTrigger value="keys">Provider keys</TabsTrigger>}
+              {manage && <TabsTrigger value="providers">Providers</TabsTrigger>}
               {manage && <TabsTrigger value="usage">Usage</TabsTrigger>}
               <TabsTrigger value="memories">Memories</TabsTrigger>
               <TabsTrigger value="skills">Skills</TabsTrigger>
@@ -140,8 +151,8 @@ export function TeamDetailPage() {
               <MembersTab teamId={teamId} canManage={manage} canSetOwner={owner} />
             </TabsContent>
             {manage && (
-              <TabsContent value="keys" className="pt-4">
-                <KeysTab teamId={teamId} />
+              <TabsContent value="providers" className="pt-4">
+                <ProvidersTab teamId={teamId} />
               </TabsContent>
             )}
             {manage && (
@@ -477,9 +488,16 @@ function AddMemberDialog({
   );
 }
 
-function KeysTab({ teamId }: { teamId: string }) {
-  const state = useAsync(() => listKeys(teamId), [teamId]);
+function ProvidersTab({ teamId }: { teamId: string }) {
+  const state = useAsync(() => listTeamProviders(teamId), [teamId]);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Provider | null>(null);
+  const [fetching, setFetching] = useState<Provider | null>(null);
+  const [addingModelTo, setAddingModelTo] = useState<Provider | null>(null);
+  const [editingModel, setEditingModel] = useState<{
+    provider: Provider;
+    model: ProviderModel;
+  } | null>(null);
 
   const act = async (fn: () => Promise<unknown>) => {
     setError(null);
@@ -494,77 +512,166 @@ function KeysTab({ teamId }: { teamId: string }) {
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        A key configured here is used for this team's members' model calls instead
-        of the platform key. Keys are write-only: once saved, only the last four
-        characters are ever shown again.
+        Pick which provider serves this team's runs. Teams may use any system
+        provider or one they configure here; without an assignment, the platform
+        default is used.
       </p>
-      <SetKeyDialog teamId={teamId} onSaved={state.reload} />
       {error && <ErrorNotice message={error} />}
-      <AsyncSection state={state} loadingLabel="Loading keys">
-        {(data) =>
-          data.keys.length === 0 ? (
-            <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-              No provider keys configured — this team's calls use the platform key.
-            </p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Provider</TableHead>
-                  <TableHead>Key</TableHead>
-                  <TableHead className="w-40">Last updated</TableHead>
-                  <TableHead className="w-16" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.keys.map((k) => (
-                  <TableRow key={k.provider}>
-                    <TableCell className="font-medium capitalize">{k.provider}</TableCell>
-                    <TableCell className="font-mono text-sm text-muted-foreground">
-                      {k.masked}
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {formatDateTime(k.updated_at)}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <ConfirmButton
-                        title={`Remove the ${k.provider} key?`}
-                        description="This team's calls fall back to the platform key."
-                        confirmLabel="Remove"
-                        onConfirm={() => act(() => deleteKey(teamId, k.provider))}
-                        trigger={
-                          <Button variant="ghost" size="icon-sm" aria-label="Remove key">
-                            <Trash2 />
-                          </Button>
-                        }
-                      />
-                    </TableCell>
-                  </TableRow>
+      <AsyncSection state={state} loadingLabel="Loading providers">
+        {(data) => (
+          <>
+            <AssignmentPicker
+              teamId={teamId}
+              providers={data.providers}
+              assignment={data.assignment}
+              onSaved={() => {
+                state.reload();
+              }}
+            />
+            <div className="flex items-center justify-between pt-2">
+              <h3 className="text-sm font-medium">Providers</h3>
+              <ProviderFormDialog
+                trigger={
+                  <Button size="sm">
+                    <Plus />
+                    Add provider
+                  </Button>
+                }
+                title="Add a provider"
+                description="A provider this team owns. It is visible only to this team's members and is billed to its own key."
+                submitLabel="Add provider"
+                onSave={(b) => createTeamProvider(teamId, b)}
+                onDone={state.reload}
+              />
+            </div>
+            {data.providers.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                No providers available to this team. A platform admin can add
+                system providers, or this team can add its own.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                {data.providers.map((p) => (
+                  <ProviderCard
+                    key={p.id}
+                    provider={p}
+                    canWrite={p.scope === "team"}
+                    assignment={data.assignment?.provider_id === p.id}
+                    onEdit={() => setEditing(p)}
+                    onDelete={(pr) => act(() => deleteTeamProvider(teamId, pr.id))}
+                    onFetchModels={() => setFetching(p)}
+                    onAddModel={() => setAddingModelTo(p)}
+                    onUpdateModel={(pr, m) =>
+                      setEditingModel({ provider: pr, model: m })
+                    }
+                    onDeleteModel={(pr, m) =>
+                      act(() => deleteTeamModel(teamId, pr.id, m.id))
+                    }
+                    onSetDefaultModel={(pr, m) =>
+                      act(() => setTeamDefaultModel(teamId, pr.id, m.id))
+                    }
+                  />
                 ))}
-              </TableBody>
-            </Table>
-          )
-        }
+              </div>
+            )}
+          </>
+        )}
       </AsyncSection>
+
+      {editing && (
+        <ProviderFormDialog
+          open
+          onOpenChange={(open) => !open && setEditing(null)}
+          title="Edit provider"
+          description="Changes apply to the team's next model call."
+          initial={editing}
+          submitLabel="Save"
+          onSave={(b) => updateTeamProvider(teamId, editing.id, b)}
+          onDone={state.reload}
+        />
+      )}
+      {fetching && (
+        <FetchModelsDialog
+          open
+          onOpenChange={(open) => !open && setFetching(null)}
+          fetchModels={() => fetchTeamModels(teamId, fetching.id).then((r) => r.models)}
+          addModel={(name) => createTeamModel(teamId, fetching.id, { name })}
+          onDone={state.reload}
+        />
+      )}
+      {addingModelTo && (
+        <ModelFormDialog
+          open
+          onOpenChange={(open) => !open && setAddingModelTo(null)}
+          title={`Add a model to ${addingModelTo.name}`}
+          description="A vision-capable model backs the view_image tool."
+          onSave={(b) => createTeamModel(teamId, addingModelTo.id, b)}
+          onDone={state.reload}
+        />
+      )}
+      {editingModel && (
+        <ModelFormDialog
+          open
+          onOpenChange={(open) => !open && setEditingModel(null)}
+          title="Edit model"
+          description="Changes apply to the team's next model call."
+          initial={editingModel.model}
+          onSave={(b) =>
+            updateTeamModel(teamId, editingModel.provider.id, editingModel.model.id, b)
+          }
+          onDone={state.reload}
+        />
+      )}
     </div>
   );
 }
 
-function SetKeyDialog({ teamId, onSaved }: { teamId: string; onSaved: () => void }) {
-  const [open, setOpen] = useState(false);
-  const [provider, setProvider] = useState(PROVIDERS[0]);
-  const [key, setKey] = useState("");
+function AssignmentPicker({
+  teamId,
+  providers,
+  assignment,
+  onSaved,
+}: {
+  teamId: string;
+  providers: Provider[];
+  assignment: { provider_id: string; model_id?: string } | null;
+  onSaved: () => void;
+}) {
+  const enabled = providers.filter((p) => p.enabled);
+  const [providerId, setProviderId] = useState(
+    assignment?.provider_id ?? enabled[0]?.id ?? "",
+  );
+  const [modelId, setModelId] = useState(assignment?.model_id ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const submit = async (e: React.FormEvent) => {
+  // Follow the assignment when the listing changes (e.g. after a save).
+  const provider = providers.find((p) => p.id === providerId);
+  const models = provider?.models ?? [];
+  const hasAssignment = assignment != null;
+
+  const save = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!providerId) return;
     setBusy(true);
     setError(null);
     try {
-      await putKey(teamId, provider, key.trim());
-      setOpen(false);
-      setKey("");
+      await setTeamAssignment(teamId, { provider_id: providerId, model_id: modelId });
+      onSaved();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await clearTeamAssignment(teamId);
+      setProviderId(enabled[0]?.id ?? "");
+      setModelId("");
       onSaved();
     } catch (err) {
       setError((err as Error).message);
@@ -574,60 +681,79 @@ function SetKeyDialog({ teamId, onSaved }: { teamId: string; onSaved: () => void
   };
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger
-        render={
-          <Button size="sm">
-            <KeyRound />
-            Set a key
+    <form onSubmit={save} className="rounded-lg border border-border p-4">
+      <div className="flex flex-wrap items-end gap-3">
+        <div className="space-y-1.5">
+          <Label htmlFor="assign-provider">Provider</Label>
+          <NativeSelect
+            id="assign-provider"
+            value={providerId}
+            onChange={(e) => {
+              setProviderId(e.target.value);
+              setModelId("");
+            }}
+            disabled={enabled.length === 0}
+          >
+            {enabled.length === 0 && (
+              <NativeSelectOption value="">No enabled providers</NativeSelectOption>
+            )}
+            {enabled.map((p) => (
+              <NativeSelectOption key={p.id} value={p.id}>
+                {p.name}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="assign-model">Model</Label>
+          <NativeSelect
+            id="assign-model"
+            value={modelId}
+            onChange={(e) => setModelId(e.target.value)}
+            disabled={models.length === 0}
+          >
+            <NativeSelectOption value="">
+              {models.length > 0 ? "Provider default" : "No models"}
+            </NativeSelectOption>
+            {models
+              .filter((m) => m.enabled)
+              .map((m) => (
+                <NativeSelectOption key={m.id} value={m.id}>
+                  {m.display_name || m.name}
+                </NativeSelectOption>
+              ))}
+          </NativeSelect>
+        </div>
+        <Button type="submit" disabled={busy || !providerId}>
+          {busy ? "Saving…" : hasAssignment ? "Change" : "Assign"}
+        </Button>
+        {hasAssignment && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={clear}
+            disabled={busy}
+          >
+            Use platform default
           </Button>
-        }
-      />
-      <DialogContent>
-        <form onSubmit={submit}>
-          <DialogHeader>
-            <DialogTitle>Set a provider key</DialogTitle>
-            <DialogDescription>
-              Saving over an existing provider rotates the key. It takes effect on
-              the team's next model call.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="key-provider">Provider</Label>
-              <NativeSelect
-                id="key-provider"
-                value={provider}
-                onChange={(e) => setProvider(e.target.value)}
-              >
-                {PROVIDERS.map((p) => (
-                  <NativeSelectOption key={p} value={p}>
-                    {p}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="key-value">API key</Label>
-              <Input
-                id="key-value"
-                type="password"
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                placeholder="sk-…"
-                autoComplete="off"
-              />
-            </div>
-          </div>
-          {error && <ErrorNotice message={error} />}
-          <DialogFooter>
-            <Button type="submit" disabled={busy || key.trim() === ""}>
-              {busy ? "Saving…" : "Save"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+        )}
+      </div>
+      {hasAssignment && (
+        <p className="mt-2 text-xs text-muted-foreground">
+          This team is assigned to{" "}
+          <span className="font-medium">
+            {providers.find((p) => p.id === assignment.provider_id)?.name ??
+              "a provider"}
+          </span>
+          . Clearing the assignment falls back to the platform default.
+        </p>
+      )}
+      {error && (
+        <div className="mt-2">
+          <ErrorNotice message={error} />
+        </div>
+      )}
+    </form>
   );
 }
 

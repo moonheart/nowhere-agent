@@ -39,12 +39,63 @@ export type Member = {
   joined_at: string;
 };
 
-export type TeamKey = {
-  provider: string;
-  masked: string;
+// ---- provider registry (change provider-registry) ----
+
+export type Provider = {
+  id: string;
+  scope: "system" | "team";
+  team_id?: string;
+  name: string;
+  vendor: "anthropic" | "openai";
+  base_url?: string;
+  // Masked server-side; the plaintext key is write-only.
+  key: string;
+  is_default: boolean;
+  enabled: boolean;
+  models?: ProviderModel[];
   created_at: string;
   updated_at: string;
 };
+
+export type ProviderModel = {
+  id: string;
+  provider_id: string;
+  name: string;
+  display_name?: string;
+  vision: boolean;
+  context_window?: number | null;
+  is_default: boolean;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ProviderAssignment = {
+  provider_id: string;
+  model_id?: string;
+};
+
+export type ProviderBody = {
+  name?: string;
+  vendor?: "anthropic" | "openai";
+  base_url?: string;
+  api_key?: string;
+  enabled?: boolean;
+};
+
+export type ProviderModelBody = {
+  name?: string;
+  display_name?: string;
+  vision?: boolean;
+  context_window?: number | null;
+  clear_context_window?: boolean;
+  enabled?: boolean;
+};
+
+// FetchedModel is one model returned by the "fetch models" action: its name on
+// the provider's API and whether the registry already holds it. Fetching is a
+// preview — the user picks which names to register.
+export type FetchedModel = { name: string; registered: boolean };
 
 export type Tokens = {
   input: number;
@@ -187,19 +238,78 @@ export const removeMember = (id: string, userId: string) =>
     method: "DELETE",
   });
 
-export const listKeys = (id: string) =>
-  api<{ keys: TeamKey[] }>(`${team(id)}/keys`);
+// Teams configure their own providers AND may use system providers; the
+// assignment picks which provider+model serves the team's runs.
+export type TeamProviderListing = {
+  providers: Provider[];
+  assignment: ProviderAssignment | null;
+};
 
-export const putKey = (id: string, provider: string, api_key: string) =>
-  api<{ key: TeamKey }>(`${team(id)}/keys/${encodeURIComponent(provider)}`, {
-    method: "PUT",
-    body: { api_key },
+export const listTeamProviders = (id: string) =>
+  api<TeamProviderListing>(`${team(id)}/providers`);
+
+export const createTeamProvider = (id: string, body: ProviderBody) =>
+  api<{ provider: Provider }>(`${team(id)}/providers`, {
+    method: "POST",
+    body,
   });
 
-export const deleteKey = (id: string, provider: string) =>
-  api<void>(`${team(id)}/keys/${encodeURIComponent(provider)}`, {
+export const updateTeamProvider = (id: string, pid: string, body: ProviderBody) =>
+  api<{ provider: Provider }>(`${team(id)}/providers/${encodeURIComponent(pid)}`, {
+    method: "PATCH",
+    body,
+  });
+
+export const deleteTeamProvider = (id: string, pid: string) =>
+  api<void>(`${team(id)}/providers/${encodeURIComponent(pid)}`, {
     method: "DELETE",
   });
+
+export const createTeamModel = (id: string, pid: string, body: ProviderModelBody) =>
+  api<{ model: ProviderModel }>(
+    `${team(id)}/providers/${encodeURIComponent(pid)}/models`,
+    { method: "POST", body },
+  );
+
+export const updateTeamModel = (
+  id: string,
+  pid: string,
+  mid: string,
+  body: ProviderModelBody,
+) =>
+  api<{ model: ProviderModel }>(
+    `${team(id)}/providers/${encodeURIComponent(pid)}/models/${encodeURIComponent(mid)}`,
+    { method: "PATCH", body },
+  );
+
+export const deleteTeamModel = (id: string, pid: string, mid: string) =>
+  api<void>(
+    `${team(id)}/providers/${encodeURIComponent(pid)}/models/${encodeURIComponent(mid)}`,
+    { method: "DELETE" },
+  );
+
+export const setTeamDefaultModel = (id: string, pid: string, mid: string) =>
+  api<void>(
+    `${team(id)}/providers/${encodeURIComponent(pid)}/models/${encodeURIComponent(mid)}/default`,
+    { method: "POST" },
+  );
+
+// Fetches the provider's model list from its own API as a preview; nothing is
+// registered until the caller adds the models it selects.
+export const fetchTeamModels = (id: string, pid: string) =>
+  api<{ models: FetchedModel[] }>(
+    `${team(id)}/providers/${encodeURIComponent(pid)}/models/fetch`,
+    { method: "POST" },
+  );
+
+export const setTeamAssignment = (id: string, assignment: ProviderAssignment) =>
+  api<{ assignment: ProviderAssignment }>(`${team(id)}/provider-assignment`, {
+    method: "PUT",
+    body: assignment,
+  });
+
+export const clearTeamAssignment = (id: string) =>
+  api<void>(`${team(id)}/provider-assignment`, { method: "DELETE" });
 
 export const teamUsage = (id: string, range: DateRange = {}) =>
   api<UsageReport>(`${team(id)}/usage${qs(range)}`);
@@ -273,6 +383,60 @@ export const createTeamForOwner = (name: string, owner_user_id?: string) =>
 export const platformUsage = (
   params: DateRange & { group_by?: "user" | "team" | "model"; limit?: number },
 ) => api<UsageReport>(`/api/admin/usage${qs(params)}`);
+
+// System providers are platform-managed; one of them is the platform default
+// every team without an assignment falls back to.
+const adminProvider = (id: string) =>
+  `/api/admin/providers/${encodeURIComponent(id)}`;
+
+export const listSystemProviders = () =>
+  api<{ providers: Provider[] }>("/api/admin/providers");
+
+export const createSystemProvider = (body: ProviderBody) =>
+  api<{ provider: Provider }>("/api/admin/providers", { method: "POST", body });
+
+export const updateSystemProvider = (id: string, body: ProviderBody) =>
+  api<{ provider: Provider }>(adminProvider(id), { method: "PATCH", body });
+
+export const deleteSystemProvider = (id: string) =>
+  api<void>(adminProvider(id), { method: "DELETE" });
+
+export const setSystemDefaultProvider = (id: string) =>
+  api<void>(`${adminProvider(id)}/default`, { method: "POST" });
+
+export const createSystemModel = (id: string, body: ProviderModelBody) =>
+  api<{ model: ProviderModel }>(`${adminProvider(id)}/models`, {
+    method: "POST",
+    body,
+  });
+
+export const updateSystemModel = (
+  id: string,
+  mid: string,
+  body: ProviderModelBody,
+) =>
+  api<{ model: ProviderModel }>(
+    `${adminProvider(id)}/models/${encodeURIComponent(mid)}`,
+    { method: "PATCH", body },
+  );
+
+export const deleteSystemModel = (id: string, mid: string) =>
+  api<void>(`${adminProvider(id)}/models/${encodeURIComponent(mid)}`, {
+    method: "DELETE",
+  });
+
+export const setSystemDefaultModel = (id: string, mid: string) =>
+  api<void>(
+    `${adminProvider(id)}/models/${encodeURIComponent(mid)}/default`,
+    { method: "POST" },
+  );
+
+// Fetches the provider's model list from its own API as a preview; nothing is
+// registered until the caller adds the models it selects.
+export const fetchSystemModels = (id: string) =>
+  api<{ models: FetchedModel[] }>(`${adminProvider(id)}/models/fetch`, {
+    method: "POST",
+  });
 
 // ---- quota configuration ----
 
@@ -369,6 +533,16 @@ export const AUDIT_ACTIONS = [
   "team.member.set_role",
   "team.key.set",
   "team.key.delete",
+  "provider.create",
+  "provider.update",
+  "provider.delete",
+  "provider.set_default",
+  "provider.model.create",
+  "provider.model.update",
+  "provider.model.delete",
+  "provider.model.set_default",
+  "team.provider.assign",
+  "team.provider.assign.clear",
   "quota.set",
   "quota.clear",
   "memory.delete",

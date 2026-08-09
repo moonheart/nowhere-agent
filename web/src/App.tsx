@@ -23,6 +23,7 @@ import {
   PlatformAgentDefsPage,
 } from "@/components/admin/AgentDefsPages";
 import { PlatformAuditPage } from "@/components/admin/AuditPage";
+import { PlatformProvidersPage } from "@/components/admin/PlatformProvidersPage";
 import { PlatformQuotasPage } from "@/components/admin/QuotasPage";
 import { ScheduledTasksPage } from "@/components/admin/ScheduledTasksPage";
 import { Thread } from "@/components/thread";
@@ -440,6 +441,7 @@ export default function App() {
         <Route path="platform/teams" element={<PlatformTeamsPage />} />
         <Route path="platform/usage" element={<PlatformUsagePage />} />
         <Route path="platform/quotas" element={<PlatformQuotasPage />} />
+        <Route path="platform/providers" element={<PlatformProvidersPage />} />
         <Route path="platform/memories" element={<PlatformMemoriesPage />} />
         <Route path="platform/skills" element={<PlatformSkillsPage />} />
         <Route path="platform/agents" element={<PlatformAgentDefsPage />} />
