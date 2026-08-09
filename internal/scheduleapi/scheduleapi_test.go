@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/schedule"
 )
@@ -72,11 +73,13 @@ func newEnv(t *testing.T) *env {
 	e := &env{t: t, db: db, store: schedule.NewPGStore(db), runner: &fakeRunner{}}
 	h := NewHandler(e.store).WithRunner(e.runner)
 	e.mux = http.NewServeMux()
-	h.RegisterAuthed(e.mux, func(next http.Handler) http.Handler {
+	authed := httpx.NewRouter(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), e.actor)))
 		})
 	})
+	h.RegisterAuthed(authed)
+	authed.Mount(e.mux, "/api/")
 	return e
 }
 
@@ -417,11 +420,13 @@ func TestRunNowNoRunner(t *testing.T) {
 	// Rebuild the mux with a runnerless handler.
 	h := NewHandler(e.store)
 	e.mux = http.NewServeMux()
-	h.RegisterAuthed(e.mux, func(next http.Handler) http.Handler {
+	authed := httpx.NewRouter(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), e.actor)))
 		})
 	})
+	h.RegisterAuthed(authed)
+	authed.Mount(e.mux, "/api/")
 
 	rec := e.as(owner, "POST", "/api/me/scheduled-tasks", validPayload())
 	id := decodeBody(t, rec)["task"].(map[string]any)["id"].(string)

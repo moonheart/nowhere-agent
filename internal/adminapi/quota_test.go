@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"testing"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/quota"
 )
@@ -18,13 +19,15 @@ func quotaEnv(t *testing.T) (*env, *quota.Store) {
 	e := newEnv(t)
 	qs := quota.NewStore(e.db)
 	e.mux = http.NewServeMux()
+	authed := httpx.NewRouter(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), e.actor)))
+		})
+	})
 	NewHandler(e.svc, nil, nil, e.mem).
 		WithQuotas(qs).
-		RegisterAuthed(e.mux, func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), e.actor)))
-			})
-		})
+		RegisterAuthed(authed)
+	authed.Mount(e.mux, "/api/")
 	return e, qs
 }
 

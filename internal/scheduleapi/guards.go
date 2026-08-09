@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/schedule"
 )
 
@@ -117,13 +118,11 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	httpx.JSON(w, status, v)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httpx.Error(w, status, msg)
 }
 
 // writeStoreError maps a store error onto a status code, so a not-found never

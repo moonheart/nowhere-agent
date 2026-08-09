@@ -8,23 +8,23 @@ import (
 	"strings"
 
 	"nowhere-agent/internal/audit"
+	"nowhere-agent/internal/httpx"
+	"nowhere-agent/internal/reqctx"
 )
 
-// contextKey is the type for identity values stored on the request context.
-type contextKey string
-
-const userContextKey contextKey = "identity.user"
-
-// UserFromContext returns the authenticated user, or false.
+// UserFromContext returns the authenticated user, or false. The value lives in
+// reqctx, the shared typed home for request-scoped values; this wrapper keeps
+// the concrete identity.User type here.
 func UserFromContext(ctx context.Context) (User, bool) {
-	u, ok := ctx.Value(userContextKey).(User)
+	v, ok := reqctx.User(ctx)
+	u, _ := v.(User)
 	return u, ok
 }
 
 // NewContextWithUser stores u on the context, as RequireAuth does. Exported so
 // other packages' tests can build authenticated requests without a database.
 func NewContextWithUser(ctx context.Context, u User) context.Context {
-	return context.WithValue(ctx, userContextKey, u)
+	return reqctx.WithUser(ctx, u)
 }
 
 // Handler exposes identity endpoints over HTTP.
@@ -213,7 +213,7 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), userContextKey, u)))
+		next(w, r.WithContext(NewContextWithUser(r.Context(), u)))
 	}
 }
 
@@ -227,11 +227,9 @@ func bearerToken(r *http.Request) string {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	httpx.JSON(w, status, v)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httpx.Error(w, status, msg)
 }

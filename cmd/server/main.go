@@ -24,6 +24,7 @@ import (
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/dreaming"
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/mcp"
@@ -100,6 +101,13 @@ func run() error {
 	identitySvc := identity.NewService(identityStore)
 	identityHandler := identity.NewHandler(identitySvc)
 	identityHandler.Register(mux)
+
+	// Protected route tier (httpx.Router): auth — and any future per-route
+	// concern (CSRF, encryption context, tenant resolution) — is applied ONCE to
+	// the whole group at Mount, instead of each handler wrapping its own routes
+	// in RequireAuth. Open routes (auth, oidc, healthz, metrics) stay on the
+	// outer mux; a more specific pattern there beats the "/api/" subtree.
+	protected := httpx.NewRouter(identityHandler.RequireAuth)
 
 	// Audit trail (enterprise-readiness P0): one append-only logger shared by the
 	// identity handler (auth events) and the admin console (administrative and
@@ -348,20 +356,6 @@ func run() error {
 			Network:       permission.Decision(cfg.Permission.Network),
 			ExternalWrite: permission.Decision(cfg.Permission.ExternalWrite),
 		})
-		// permitEnv evaluates the env policy: deny → blocked (fed to the model);
-		// ask → gated for human approval (the ApprovalReasonPrefix marker tells the
-		// loop to SUSPEND and prompt, not error). This is the base policy the
-		// per-session mode wraps.
-		permitEnv := func(t toolruntime.Tool) (bool, string) {
-			switch permChecker.Check(t) {
-			case permission.Deny:
-				return true, fmt.Sprintf("%s (risk: %s) is not permitted by policy", t.Name(), t.Risk())
-			case permission.Ask:
-				return true, agent.ApprovalReasonPrefix + fmt.Sprintf("%s (risk: %s)", t.Name(), t.Risk())
-			default:
-				return false, ""
-			}
-		}
 		// permissionMode reads the session's permission mode from its state store.
 		// An empty session id (a run with no session binding), a read error, or an
 		// unknown value all fall back to auto — the safe default.
@@ -379,22 +373,48 @@ func run() error {
 			}
 			return mode
 		}
+		// sessionLiftsAsk reports whether the run's session has set permission
+		// mode to allow_all, which lifts only the approval gate.
+		sessionLiftsAsk := func(ctx context.Context) bool {
+			return permissionMode(ctx, agent.SessionIDFromContext(ctx)) == chatapi.PermissionModeAllowAll
+		}
+		// permitAsk is the approval gate: an env "ask" decision surfaces as a
+		// deny carrying the ApprovalReasonPrefix marker (the loop SUSPENDS and
+		// prompts for human input, not errors). The session's permission mode
+		// resolves at call time (see sessionLiftsAsk) so the client's "allow
+		// all" toggle takes effect with no loop rebuild; allow_all lifts ONLY
+		// this approval gate — the env deny gate below still blocks, and
+		// ask_user/client_tool are unaffected.
+		permitAsk := func(ctx context.Context, t toolruntime.Tool) (bool, string) {
+			if permChecker.Check(t) != permission.Ask {
+				return false, "" // not an ask-risk tool; defer to the next gate
+			}
+			if sessionLiftsAsk(ctx) {
+				return false, ""
+			}
+			return true, agent.ApprovalReasonPrefix + fmt.Sprintf("%s (risk: %s)", t.Name(), t.Risk())
+		}
+		// permitEnv is the hard env-deny gate: an env "deny" decision blocks the
+		// tool outright, and the reason is fed back to the model.
+		permitEnv := func(ctx context.Context, t toolruntime.Tool) (bool, string) {
+			if permChecker.Check(t) != permission.Deny {
+				return false, ""
+			}
+			return true, fmt.Sprintf("%s (risk: %s) is not permitted by policy", t.Name(), t.Risk())
+		}
 		// permit is the GateFunc the PermissionMW middleware exposes to the loop,
 		// registered ONCE per loop. The loop calls it at both gate points on every
 		// tool call, so resolving the mode HERE (per call, from the run context's
-		// session id) — not at registration time — makes the client's "allow all"
-		// toggle take effect with no loop rebuild and no middleware re-wiring, and
-		// lets a subagent child inherit its parent session's mode through the same
-		// context. allow_all lifts ONLY the approval gate (the ask marker): an env
-		// deny still blocks, and ask_user/client_tool are unaffected. The mode read
-		// is best-effort: any failure or unknown value falls back to auto (env).
-		permit := func(ctx context.Context, t toolruntime.Tool) (bool, string) {
-			deny, reason := permitEnv(t)
-			if deny && agent.IsApprovalReason(reason) && permissionMode(ctx, agent.SessionIDFromContext(ctx)) == chatapi.PermissionModeAllowAll {
-				return false, ""
-			}
-			return deny, reason
-		}
+		// session id) — not at registration time — keeps the client's "allow all"
+		// toggle live and lets a subagent child inherit its parent session's mode
+		// through the same context. Composed as first-deny-wins via agent.GateGroup
+		// so the assembly point does not hand-nest closures: the approval gate
+		// (which allow_all lifts) runs before the hard env-deny gate, so an env
+		// deny still wins for a tool that is both askable and denyable.
+		permit := agent.NewGateGroup().
+			Use(permitAsk).
+			Use(permitEnv).
+			GateCheck()
 		log.Info("execution-permission gate enabled",
 			"read_only", cfg.Permission.ReadOnly, "sandbox_write", cfg.Permission.SandboxWrite,
 			"network", cfg.Permission.Network, "external_write", cfg.Permission.ExternalWrite)
@@ -717,7 +737,7 @@ func run() error {
 				log.Info("subagent tool enabled (spawn_agent)", "max_depth", cfg.Subagent.MaxDepth)
 			}
 		}
-		handler.RegisterAuthed(mux, identityHandler.RequireAuth)
+		handler.RegisterAuthed(protected)
 
 		// Scheduled tasks (scheduled-tasks capability): the trigger scans for
 		// due tasks and fires each through the SAME run path a human chat uses —
@@ -768,20 +788,24 @@ func run() error {
 		WithQuotas(quota.NewStore(pool)).
 		WithDreaming(dreamRunner).
 		WithAudit(auditLogger)
-	adminHandler.RegisterAuthed(mux, identityHandler.RequireAuth)
+	adminHandler.RegisterAuthed(protected)
 	log.Info("admin console endpoints enabled (auth required)")
 
 	// Skill management (skill-console): user/team/system skill CRUD + versioning,
 	// behind the same auth middleware. Registered alongside the admin console.
-	skillapi.NewHandler(identitySvc, skillStore).RegisterAuthed(mux, identityHandler.RequireAuth)
+	skillapi.NewHandler(identitySvc, skillStore).RegisterAuthed(protected)
 	log.Info("skill management endpoints enabled (auth required)")
 
 	// Scheduled-task CRUD (scheduled-tasks): self-service management of recurring
 	// agent runs. Registered outside the provider branch so tasks can be managed
 	// on a deployment with no LLM; only firing needs a provider, so run-now is
 	// wired to the trigger when one was built above and answers 503 otherwise.
-	scheduleapi.NewHandler(schedule.NewPGStore(pool)).WithRunner(schedTrigger).RegisterAuthed(mux, identityHandler.RequireAuth)
+	scheduleapi.NewHandler(schedule.NewPGStore(pool)).WithRunner(schedTrigger).RegisterAuthed(protected)
 	log.Info("scheduled-task endpoints enabled (auth required)")
+
+	// Mount the protected tier once: every authed route above is now behind the
+	// group's middleware set, with a single wrap instead of one per route.
+	protected.Mount(mux, "/api/")
 
 	// Serve the built frontend if present. The console is a client-side route,
 	// so a deep link like /admin/users has no file behind it — spaHandler falls
@@ -938,13 +962,7 @@ func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Met
 			}
 			return quota.ClientIPKey(r)
 		})
-	return observability.Chain(mux,
-		observability.RequestID(log),
-		observability.AccessLog,
-		limiter.Middleware,
-		metrics.Middleware,
-		observability.Recovery,
-	)
+	return observability.StandardStack(mux, log, metrics, limiter.Middleware)
 }
 
 // buildEncryptor constructs the secret encryptor from config, or nil when no

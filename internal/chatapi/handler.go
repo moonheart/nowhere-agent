@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"nowhere-agent/internal/agent"
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/quota"
@@ -177,17 +178,20 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
 }
 
-// RegisterAuthed mounts the route behind auth middleware, so each chat request
-// resolves to an authenticated user (sessions are user-owned).
-func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) http.Handler) {
-	mux.Handle("POST /api/chat", auth(http.HandlerFunc(h.serveChat)))
-	mux.Handle("GET /api/chat/history", auth(http.HandlerFunc(h.serveHistory)))
-	mux.Handle("POST /api/chat/resume", auth(http.HandlerFunc(h.serveResume)))
-	mux.Handle("POST /api/chat/cancel", auth(http.HandlerFunc(h.serveCancel)))
-	mux.Handle("GET /api/chat/sessions", auth(http.HandlerFunc(h.serveSessions)))
-	mux.Handle("DELETE /api/chat/sessions/{id}", auth(http.HandlerFunc(h.serveDeleteSession)))
-	mux.Handle("POST /api/chat/sessions/{id}/state", auth(http.HandlerFunc(h.serveSetSessionState)))
-	mux.Handle("GET /api/chat/sessions/{id}/files/{path...}", auth(http.HandlerFunc(h.serveFile)))
+// RegisterAuthed mounts the protected chat routes onto the group. Auth is NOT
+// wrapped per route: the group applies its middleware set (auth, and anything
+// added later) once at Mount time, so this handler only declares which routes
+// belong to the protected tier. Each request resolves to an authenticated user
+// (sessions are user-owned).
+func (h *Handler) RegisterAuthed(g *httpx.Router) {
+	g.HandleFunc("POST /api/chat", h.serveChat)
+	g.HandleFunc("GET /api/chat/history", h.serveHistory)
+	g.HandleFunc("POST /api/chat/resume", h.serveResume)
+	g.HandleFunc("POST /api/chat/cancel", h.serveCancel)
+	g.HandleFunc("GET /api/chat/sessions", h.serveSessions)
+	g.HandleFunc("DELETE /api/chat/sessions/{id}", h.serveDeleteSession)
+	g.HandleFunc("POST /api/chat/sessions/{id}/state", h.serveSetSessionState)
+	g.HandleFunc("GET /api/chat/sessions/{id}/files/{path...}", h.serveFile)
 }
 
 // sseEmitter adapts agent.Emitter to write ui-message-stream frames live.

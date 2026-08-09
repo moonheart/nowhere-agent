@@ -13,6 +13,7 @@ import (
 	"context"
 	"net/http"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/skill"
 )
@@ -43,48 +44,50 @@ func NewHandler(id *identity.Service, store Store) *Handler {
 	return &Handler{identity: id, store: store}
 }
 
-// RegisterAuthed mounts every route behind the auth middleware, so each handler
-// can rely on an authenticated user being on the request context.
-func (h *Handler) RegisterAuthed(mux *http.ServeMux, auth func(http.Handler) http.Handler) {
+// RegisterAuthed mounts every route onto the protected group. Auth is NOT
+// wrapped per route: the group applies its middleware set once at Mount time,
+// so this handler only declares which routes belong to the protected tier. Each
+// handler relies on an authenticated user being on the request context.
+func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	// ---- self (user scope) ----
-	route(mux, auth, "GET /api/me/skills", h.mySkills)
-	route(mux, auth, "POST /api/me/skills", h.createMySkill)
-	route(mux, auth, "GET /api/me/skills/{id}", h.getMySkill)
-	route(mux, auth, "PUT /api/me/skills/{id}", h.updateMySkill)
-	route(mux, auth, "DELETE /api/me/skills/{id}", h.deleteMySkill)
-	route(mux, auth, "GET /api/me/skills/{id}/versions", h.mySkillVersions)
-	route(mux, auth, "GET /api/me/skills/{id}/versions/{v}", h.mySkillVersionAt)
-	route(mux, auth, "POST /api/me/skills/{id}/rollback/{v}", h.rollbackMySkill)
-	route(mux, auth, "POST /api/me/skills/{id}/enable", h.enableMySkill)
-	route(mux, auth, "POST /api/me/skills/{id}/disable", h.disableMySkill)
-	route(mux, auth, "POST /api/me/skills/{id}/move", h.moveMySkill)
+	route(g, "GET /api/me/skills", h.mySkills)
+	route(g, "POST /api/me/skills", h.createMySkill)
+	route(g, "GET /api/me/skills/{id}", h.getMySkill)
+	route(g, "PUT /api/me/skills/{id}", h.updateMySkill)
+	route(g, "DELETE /api/me/skills/{id}", h.deleteMySkill)
+	route(g, "GET /api/me/skills/{id}/versions", h.mySkillVersions)
+	route(g, "GET /api/me/skills/{id}/versions/{v}", h.mySkillVersionAt)
+	route(g, "POST /api/me/skills/{id}/rollback/{v}", h.rollbackMySkill)
+	route(g, "POST /api/me/skills/{id}/enable", h.enableMySkill)
+	route(g, "POST /api/me/skills/{id}/disable", h.disableMySkill)
+	route(g, "POST /api/me/skills/{id}/move", h.moveMySkill)
 
 	// ---- team (team scope): members read, admins write ----
-	route(mux, auth, "GET /api/teams/{id}/skills", h.requireTeamRole(identity.RoleMember, h.teamSkills))
-	route(mux, auth, "POST /api/teams/{id}/skills", h.requireTeamRole(identity.RoleAdmin, h.createTeamSkill))
-	route(mux, auth, "GET /api/teams/{id}/skills/{sid}", h.requireTeamRole(identity.RoleMember, h.getTeamSkill))
-	route(mux, auth, "PUT /api/teams/{id}/skills/{sid}", h.requireTeamRole(identity.RoleAdmin, h.updateTeamSkill))
-	route(mux, auth, "DELETE /api/teams/{id}/skills/{sid}", h.requireTeamRole(identity.RoleAdmin, h.deleteTeamSkill))
-	route(mux, auth, "GET /api/teams/{id}/skills/{sid}/versions", h.requireTeamRole(identity.RoleMember, h.teamSkillVersions))
-	route(mux, auth, "GET /api/teams/{id}/skills/{sid}/versions/{v}", h.requireTeamRole(identity.RoleMember, h.teamSkillVersionAt))
-	route(mux, auth, "POST /api/teams/{id}/skills/{sid}/rollback/{v}", h.requireTeamRole(identity.RoleAdmin, h.rollbackTeamSkill))
-	route(mux, auth, "POST /api/teams/{id}/skills/{sid}/enable", h.requireTeamRole(identity.RoleAdmin, h.enableTeamSkill))
-	route(mux, auth, "POST /api/teams/{id}/skills/{sid}/disable", h.requireTeamRole(identity.RoleAdmin, h.disableTeamSkill))
+	route(g, "GET /api/teams/{id}/skills", h.requireTeamRole(identity.RoleMember, h.teamSkills))
+	route(g, "POST /api/teams/{id}/skills", h.requireTeamRole(identity.RoleAdmin, h.createTeamSkill))
+	route(g, "GET /api/teams/{id}/skills/{sid}", h.requireTeamRole(identity.RoleMember, h.getTeamSkill))
+	route(g, "PUT /api/teams/{id}/skills/{sid}", h.requireTeamRole(identity.RoleAdmin, h.updateTeamSkill))
+	route(g, "DELETE /api/teams/{id}/skills/{sid}", h.requireTeamRole(identity.RoleAdmin, h.deleteTeamSkill))
+	route(g, "GET /api/teams/{id}/skills/{sid}/versions", h.requireTeamRole(identity.RoleMember, h.teamSkillVersions))
+	route(g, "GET /api/teams/{id}/skills/{sid}/versions/{v}", h.requireTeamRole(identity.RoleMember, h.teamSkillVersionAt))
+	route(g, "POST /api/teams/{id}/skills/{sid}/rollback/{v}", h.requireTeamRole(identity.RoleAdmin, h.rollbackTeamSkill))
+	route(g, "POST /api/teams/{id}/skills/{sid}/enable", h.requireTeamRole(identity.RoleAdmin, h.enableTeamSkill))
+	route(g, "POST /api/teams/{id}/skills/{sid}/disable", h.requireTeamRole(identity.RoleAdmin, h.disableTeamSkill))
 
 	// ---- platform (system scope) ----
-	route(mux, auth, "GET /api/admin/skills", h.requireAdmin(h.systemSkills))
-	route(mux, auth, "POST /api/admin/skills", h.requireAdmin(h.createSystemSkill))
-	route(mux, auth, "GET /api/admin/skills/{id}", h.requireAdmin(h.getSystemSkill))
-	route(mux, auth, "PUT /api/admin/skills/{id}", h.requireAdmin(h.updateSystemSkill))
-	route(mux, auth, "DELETE /api/admin/skills/{id}", h.requireAdmin(h.deleteSystemSkill))
-	route(mux, auth, "GET /api/admin/skills/{id}/versions", h.requireAdmin(h.systemSkillVersions))
-	route(mux, auth, "GET /api/admin/skills/{id}/versions/{v}", h.requireAdmin(h.systemSkillVersionAt))
-	route(mux, auth, "POST /api/admin/skills/{id}/rollback/{v}", h.requireAdmin(h.rollbackSystemSkill))
-	route(mux, auth, "POST /api/admin/skills/{id}/enable", h.requireAdmin(h.enableSystemSkill))
-	route(mux, auth, "POST /api/admin/skills/{id}/disable", h.requireAdmin(h.disableSystemSkill))
+	route(g, "GET /api/admin/skills", h.requireAdmin(h.systemSkills))
+	route(g, "POST /api/admin/skills", h.requireAdmin(h.createSystemSkill))
+	route(g, "GET /api/admin/skills/{id}", h.requireAdmin(h.getSystemSkill))
+	route(g, "PUT /api/admin/skills/{id}", h.requireAdmin(h.updateSystemSkill))
+	route(g, "DELETE /api/admin/skills/{id}", h.requireAdmin(h.deleteSystemSkill))
+	route(g, "GET /api/admin/skills/{id}/versions", h.requireAdmin(h.systemSkillVersions))
+	route(g, "GET /api/admin/skills/{id}/versions/{v}", h.requireAdmin(h.systemSkillVersionAt))
+	route(g, "POST /api/admin/skills/{id}/rollback/{v}", h.requireAdmin(h.rollbackSystemSkill))
+	route(g, "POST /api/admin/skills/{id}/enable", h.requireAdmin(h.enableSystemSkill))
+	route(g, "POST /api/admin/skills/{id}/disable", h.requireAdmin(h.disableSystemSkill))
 }
 
-// route mounts one pattern behind the auth middleware.
-func route(mux *http.ServeMux, auth func(http.Handler) http.Handler, pattern string, h http.HandlerFunc) {
-	mux.Handle(pattern, auth(h))
+// route registers one pattern onto the protected group.
+func route(g *httpx.Router, pattern string, h http.HandlerFunc) {
+	g.HandleFunc(pattern, h)
 }

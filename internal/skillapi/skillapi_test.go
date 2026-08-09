@@ -15,6 +15,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/skill"
 )
@@ -73,11 +74,13 @@ func newEnv(t *testing.T) *env {
 
 	h := NewHandler(e.svc, e.skills)
 	e.mux = http.NewServeMux()
-	h.RegisterAuthed(e.mux, func(next http.Handler) http.Handler {
+	authed := httpx.NewRouter(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), e.actor)))
 		})
 	})
+	h.RegisterAuthed(authed)
+	authed.Mount(e.mux, "/api/")
 	return e
 }
 
@@ -531,11 +534,13 @@ func TestStoreUnavailableAnswers503(t *testing.T) {
 	h := NewHandler(e.svc, nil) // no store wired
 	mux := http.NewServeMux()
 	u := e.user(identity.PlatformRoleUser)
-	h.RegisterAuthed(mux, func(next http.Handler) http.Handler {
+	authed := httpx.NewRouter(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), u)))
 		})
 	})
+	h.RegisterAuthed(authed)
+	authed.Mount(mux, "/api/")
 	req := httptest.NewRequest("GET", "/api/me/skills", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
