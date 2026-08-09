@@ -49,29 +49,9 @@ func (s *Store) Put(d AgentDef) {
 // authored definitions override built-ins.
 func (s *Store) Resolve(name string, scopes []identity.ScopeRef) (AgentDef, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	visible := s.visibleLocked(scopes)
-
-	if d, ok := visible[name]; ok {
-		return d, nil
-	}
-
-	target := normalize(name)
-	var matches []string
-	for n := range visible {
-		if normalize(n) == target {
-			matches = append(matches, n)
-		}
-	}
-	sort.Strings(matches)
-	switch len(matches) {
-	case 1:
-		return visible[matches[0]], nil
-	case 0:
-		return AgentDef{}, fmt.Errorf("unknown agent type %q; available: %s", name, strings.Join(sortedKeys(visible), ", "))
-	default:
-		return AgentDef{}, fmt.Errorf("ambiguous agent type %q — matches %s; use an exact name", name, strings.Join(matches, ", "))
-	}
+	s.mu.Unlock()
+	return s.resolveFrom(visible, name)
 }
 
 // Available lists the agent type names visible in the given scopes, sorted.
@@ -121,6 +101,14 @@ func normalize(s string) string {
 		}
 	}
 	return b.String()
+}
+
+func errUnknownType(name string, visible map[string]AgentDef) error {
+	return fmt.Errorf("unknown agent type %q; available: %s", name, strings.Join(sortedKeys(visible), ", "))
+}
+
+func errAmbiguousType(name string, matches []string) error {
+	return fmt.Errorf("ambiguous agent type %q — matches %s; use an exact name", name, strings.Join(matches, ", "))
 }
 
 func scopeEqual(a, b identity.ScopeRef) bool {

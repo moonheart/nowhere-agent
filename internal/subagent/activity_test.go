@@ -91,7 +91,7 @@ func TestSpawnForwardsActivity(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(childProv, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(store, reg, factory, 3)
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
 
 	var mu sync.Mutex
@@ -140,7 +140,7 @@ func TestSpawnNoSinkStillWorks(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
 	}
-	tool := NewSpawnTool(store, reg, factory, 3)
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
 
 	res, err := tool.Call(context.Background(), map[string]any{"prompt": "x"})
@@ -166,7 +166,7 @@ func TestSpawnTagsActivitiesWithCallID(t *testing.T) {
 	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
 		return agent.New(childProv, toolruntime.NewRegistry(), childCfg())
 	}
-	reg.Register(NewSpawnTool(store, reg, factory, 3))
+	reg.Register(NewSpawnTool(testResolver(store), reg, factory, 3))
 
 	var mu sync.Mutex
 	var got []Activity
