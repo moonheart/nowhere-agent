@@ -11,6 +11,7 @@ import { Reasoning } from "@/components/reasoning";
 import { StopButton } from "@/components/stop-button";
 import { ToolCall } from "@/components/tool-call";
 import { MarkdownText } from "@/components/markdown-text";
+import { MessageImage, ImageThumb } from "@/components/message-image";
 import { UsageFooter } from "@/components/usage-footer";
 import { PlanPanel } from "@/components/plan-panel";
 import { PendingNotice } from "@/components/pending-notice";
@@ -128,7 +129,7 @@ const UserMessage: FC = () => (
     <Message align="end">
       <Bubble align="end">
         <BubbleContent className="px-4 py-2.5">
-          <MessagePrimitive.Parts />
+          <MessagePrimitive.Parts components={{ Image: MessageImage }} />
           {/* Images staged via the composer attachments render here, so the
               outgoing message shows its images immediately; history-loading
               image parts ride in message content and render via Parts above. */}
@@ -137,12 +138,7 @@ const UserMessage: FC = () => (
               <div className="flex flex-wrap gap-2 pt-2">
                 {attachment.content.map((part, i) =>
                   part.type === "image" ? (
-                    <img
-                      key={i}
-                      src={part.image}
-                      alt={attachment.name}
-                      className="max-h-48 rounded-lg border border-border object-contain"
-                    />
+                    <ImageThumb key={i} src={part.image} alt={attachment.name} />
                   ) : null,
                 )}
               </div>
@@ -168,6 +164,7 @@ const AssistantMessage: FC = () => (
             components={{
               Text: MarkdownText,
               Reasoning,
+              Image: MessageImage,
               tools: { Fallback: ToolCall },
             }}
           />
