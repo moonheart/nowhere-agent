@@ -100,3 +100,15 @@ export async function uploadSessionImage(
     },
   );
 }
+
+// uploadUserImage stores an image as a user-level upload (change
+// user-image-uploads), independent of any session — so a brand-new
+// conversation's first message can carry an image. The returned path has the
+// "uploads/<id>.webp" form the message wire format resolves.
+export async function uploadUserImage(file: File): Promise<{ path: string }> {
+  return api<{ path: string }>("/api/chat/uploads", {
+    method: "POST",
+    body: await file.arrayBuffer(),
+    contentType: file.type || "application/octet-stream",
+  });
+}

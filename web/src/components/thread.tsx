@@ -35,7 +35,7 @@ import {
   AttachmentTitle,
 } from "@/components/ui/attachment";
 import { PermissionSelect } from "@/components/permission-select";
-import { uploadSessionImage } from "@/lib/api";
+import { uploadSessionImage, uploadUserImage } from "@/lib/api";
 import {
   addImage,
   imageFileUrl,
@@ -166,17 +166,21 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
   const [uploading, setUploading] = useState(false);
 
   // Each selected image is uploaded immediately (the backend re-encodes to WebP
-  // and returns the session-relative path); the chip then shows the stored file
-  // through the same authenticated /files/ endpoint history rendering uses.
+  // and returns a reference path); the chip then shows the stored file through
+  // the same authenticated endpoint history rendering uses. Without a session
+  // yet (a brand-new conversation) the upload goes to the user-level endpoint,
+  // so the first message can carry an image; with one it uses the session path.
   const onFiles = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-selecting the same file
-    if (files.length === 0 || !sessionId) return;
+    if (files.length === 0) return;
     setUploading(true);
     let uploaded = 0;
     for (const file of files) {
       try {
-        const { path } = await uploadSessionImage(sessionId, file);
+        const { path } = sessionId
+          ? await uploadSessionImage(sessionId, file)
+          : await uploadUserImage(file);
         addImage({ path, mediaType: "image/webp", name: file.name });
         uploaded++;
       } catch {
@@ -193,7 +197,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
           asChild would move onSubmit onto a plain div and the Send button would
           stop working. */}
       <ComposerPrimitive.Root className="mx-auto max-w-3xl">
-        {images.length > 0 && sessionId && (
+        {images.length > 0 && (
           <AttachmentGroup className="mb-2">
             {images.map((p) => (
               <Attachment key={p.path} size="sm">
@@ -235,21 +239,17 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
             className="w-full resize-none bg-transparent px-2.5 py-2 text-base outline-none placeholder:text-muted-foreground md:text-sm"
           />
           <InputGroupAddon align="block-end">
-            {/* Bottom-left: image attach (new chats have no session to upload
-                into until the first message creates one — start with text), then
-                the execution-permission selector. Send/Stop carry ml-auto, so
+            {/* Bottom-left: image attach (available even before a session —
+                first-message images upload user-level), then the
+                execution-permission selector. Send/Stop carry ml-auto, so
                 these stay pinned to the left of them. */}
             <ThreadPrimitive.If running={false}>
               <Button
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                title={
-                  sessionId
-                    ? "Attach image"
-                    : "Attach images after the first message creates this chat"
-                }
-                disabled={!sessionId || uploading}
+                title="Attach image"
+                disabled={uploading}
                 onClick={() => fileRef.current?.click()}
               >
                 {uploading ? (

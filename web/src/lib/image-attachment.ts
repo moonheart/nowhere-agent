@@ -71,10 +71,15 @@ export function resetImages() {
   emit();
 }
 
-// imageFileUrl resolves a session-relative workspace image to the authenticated
-// file endpoint the browser loads it from (GET .../sessions/{id}/files/{path}).
-// The path comes from the upload endpoint and is safe to interpolate (a
-// session-local uuid + extension).
-export function imageFileUrl(sessionId: string, path: string): string {
-  return `/api/chat/sessions/${encodeURIComponent(sessionId)}/files/${path}`;
+// imageFileUrl resolves an image reference to the authenticated endpoint the
+// browser loads it from. A "uploads/<id>.webp" reference is a user-level
+// upload (change user-image-uploads) served from /api/chat/uploads/<id>.webp,
+// scoped to the signed-in user; anything else is a session-relative workspace
+// image served from GET .../sessions/{id}/files/{path}. Both forms come from
+// their upload endpoints and are safe to interpolate (a uuid + extension).
+export function imageFileUrl(sessionId: string | null, path: string): string {
+  if (path.startsWith("uploads/")) {
+    return `/api/chat/uploads/${encodeURIComponent(path.slice("uploads/".length))}`;
+  }
+  return `/api/chat/sessions/${encodeURIComponent(sessionId ?? "")}/files/${path}`;
 }
