@@ -298,6 +298,33 @@ func TestBuildRequestUnmaterializedImageDegradesEvenForVisionModel(t *testing.T)
 	}
 }
 
+// TestBuildRequestForcedImageInputOverridesProfile: a model outside the
+// capability table (self-hosted vLLM) still emits image_url parts when the
+// request forces image input — the view_image tool's contract.
+func TestBuildRequestForcedImageInputOverridesProfile(t *testing.T) {
+	force := true
+	req, err := buildRequest(provider.Request{
+		Model:      "mimo-v2.5",
+		ImageInput: &force,
+		Messages: []provider.Message{{
+			Role:    provider.RoleUser,
+			Content: []provider.Block{imageBlock("img/a.webp", "image/webp", "AAAA")},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	msg := req.Messages[len(req.Messages)-1]
+	parts := contentParts(msg.Content)
+	if len(parts) != 1 || parts[0].Type != "image_url" || parts[0].ImageURL == nil {
+		t.Fatalf("forced image input must emit image_url, got %s", msg.Content)
+	}
+	want := "data:image/webp;base64,AAAA"
+	if parts[0].ImageURL.URL != want {
+		t.Errorf("image_url = %q, want %q", parts[0].ImageURL.URL, want)
+	}
+}
+
 // TestBuildRequestMixedMessageFlattensImageParts: text + image in one message
 // flatten into one parts array; image-only messages still send.
 func TestBuildRequestMixedMessageFlattensImageParts(t *testing.T) {

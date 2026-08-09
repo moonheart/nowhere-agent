@@ -115,6 +115,13 @@ type Request struct {
 	// `thinking`; ignored by adapters with no native equivalent).
 	Thinking *ThinkingSpec
 
+	// ImageInput overrides the model capability profile's image-input flag for
+	// this call. The view_image tool sets it true so a vision model whose name
+	// is not in the capability table (e.g. a self-hosted vLLM deployment) still
+	// receives the image bytes instead of degrading to a text reference; nil
+	// falls back to the profile.
+	ImageInput *bool
+
 	// JSONResponse, when non-nil, forces a STRUCTURED output (capability L3):
 	// the model must produce a single JSON object conforming to Schema, with no
 	// surrounding prose. It is implemented as a forced tool call (both Anthropic

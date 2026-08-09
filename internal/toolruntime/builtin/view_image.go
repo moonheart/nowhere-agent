@@ -89,10 +89,16 @@ func (t viewImage) Call(ctx context.Context, args map[string]any) (toolruntime.R
 	if question == "" {
 		question = "Describe this image in detail."
 	}
+	// Force image input: this tool exists specifically to send the image to a
+	// vision model, whose name may not be in the capability table (self-hosted
+	// vLLM deployments). Without the override the OpenAI adapter would degrade
+	// the image block to a text reference and the model would answer blind.
+	forceImage := true
 	req := provider.Request{
-		Model:     t.model,
-		System:    system,
-		MaxTokens: 2048,
+		Model:      t.model,
+		System:     system,
+		MaxTokens:  2048,
+		ImageInput: &forceImage,
 		Messages: []provider.Message{{
 			Role: provider.RoleUser,
 			Content: []provider.Block{

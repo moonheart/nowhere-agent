@@ -93,6 +93,12 @@ func buildRequest(r provider.Request) (apiRequest, error) {
 	if profile, known := provider.LookupProfile("openai", r.Model); known {
 		imageInput = profile.ImageInput
 	}
+	// An explicit request override wins: the view_image tool forces image input
+	// for vision models whose name is not in the capability table (self-hosted
+	// vLLM deployments), so their image blocks are not degraded to text.
+	if r.ImageInput != nil {
+		imageInput = *r.ImageInput
+	}
 
 	for _, m := range r.Messages {
 		msgs, err := convertMessage(m, imageInput)
