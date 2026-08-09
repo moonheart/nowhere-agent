@@ -13,12 +13,12 @@ import (
 	"nowhere-agent/internal/provider"
 )
 
-const defaultEndpoint = "https://api.openai.com/v1/chat/completions"
+const defaultEndpoint = "https://api.openai.com/v1"
 
 // Adapter implements provider.Adapter for OpenAI-compatible chat.completions.
 type Adapter struct {
 	apiKey      string
-	endpoint    string
+	endpoint    string // API base URL (root), e.g. https://api.openai.com/v1
 	httpClient  *http.Client
 	recorder    *provider.RawRecorder
 	retry       provider.RetryPolicy
@@ -28,8 +28,11 @@ type Adapter struct {
 // Option customizes the Adapter.
 type Option func(*Adapter)
 
-// WithEndpoint overrides the API endpoint (also enables OpenAI-compatible proxies).
-func WithEndpoint(url string) Option { return func(a *Adapter) { a.endpoint = url } }
+// WithEndpoint sets the API base URL. Accepts either a bare base
+// ("https://api.openai.com/v1", "https://proxy.example.com/v1") or the full
+// legacy endpoint (".../v1/chat/completions"); both are normalized to the base
+// so chat and model-list calls share one root.
+func WithEndpoint(url string) Option { return func(a *Adapter) { a.endpoint = provider.NormalizeBase(url) } }
 
 // WithHTTPClient overrides the HTTP client.
 func WithHTTPClient(c *http.Client) Option { return func(a *Adapter) { a.httpClient = c } }
@@ -61,6 +64,50 @@ func New(apiKey string, opts ...Option) *Adapter {
 // Name returns the provider identifier.
 func (a *Adapter) Name() string { return "openai" }
 
+// chatEndpoint returns the concrete chat.completions URL for the base.
+func (a *Adapter) chatEndpoint() string {
+	return provider.ResolveEndpoint(a.endpoint, provider.EndpointChat)
+}
+
+// modelsEndpoint returns the concrete GET /models URL for the base.
+func (a *Adapter) modelsEndpoint() string {
+	return provider.ResolveEndpoint(a.endpoint, provider.EndpointModels)
+}
+
+// Models lists the model identifiers the API serves (GET /models on the base
+// URL), used by the admin console's "fetch models" action to seed the registry.
+func (a *Adapter) Models(ctx context.Context) ([]string, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, a.modelsEndpoint(), nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("authorization", "Bearer "+a.apiKey)
+	resp, err := a.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("list models: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("openai status %d: %s", resp.StatusCode, string(b))
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode models: %w", err)
+	}
+	names := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if m.ID != "" {
+			names = append(names, m.ID)
+		}
+	}
+	return names, nil
+}
+
 // Stream starts a streaming generation and returns canonical events. The
 // caller's ctx governs cancellation: cancelling it aborts the HTTP request.
 func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
@@ -78,7 +125,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	// reader is re-seeked. Context overflow (a non-retryable 4xx) falls through
 	// to the classification below.
 	resp, err := provider.DoWithRetry(ctx, a.retry, func() (*http.Response, error) {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint, bytes.NewReader(body))
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.chatEndpoint(), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}

@@ -151,3 +151,46 @@ func TestAdapterName(t *testing.T) {
 		t.Error("wrong name")
 	}
 }
+
+// TestAdapterModels verifies the GET /models list is decoded from a base URL
+// configured as a /v1 root (the admin console's fetch-models action).
+func TestAdapterModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-api-key"); got != "test-key" {
+			t.Errorf("x-api-key = %q", got)
+		}
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q, want /v1/models", r.URL.Path)
+		}
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"data":[{"type":"model","id":"claude-3-5-sonnet-20241022","display_name":"Claude 3.5 Sonnet"},{"type":"model","id":"claude-3-haiku-20240307"}]}`))
+	}))
+	defer srv.Close()
+
+	a := New("test-key", WithEndpoint(srv.URL+"/v1"))
+	names, err := a.Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+	if len(names) != 2 || names[0] != "claude-3-5-sonnet-20241022" || names[1] != "claude-3-haiku-20240307" {
+		t.Errorf("models = %v", names)
+	}
+}
+
+// A legacy full endpoint (…/v1/messages) normalizes to the same base, so the
+// model list is still fetched from …/v1/models.
+func TestAdapterModelsLegacyEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q, want /v1/models", r.URL.Path)
+		}
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	a := New("k", WithEndpoint(srv.URL+"/v1/messages"))
+	if _, err := a.Models(context.Background()); err != nil {
+		t.Fatalf("Models: %v", err)
+	}
+}
