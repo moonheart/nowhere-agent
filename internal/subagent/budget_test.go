@@ -19,8 +19,8 @@ import (
 func TestSpawnBudgetTotalCap(t *testing.T) {
 	store := agentdef.NewStore()
 	reg := toolruntime.NewRegistry()
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(store), reg, factory, 3).WithBudget(2, 4)
 	reg.Register(tool)
@@ -75,8 +75,8 @@ func TestSpawnBudgetConcurrencyCap(t *testing.T) {
 	release := make(chan struct{})
 	store := agentdef.NewStore()
 	reg := toolruntime.NewRegistry()
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(gateProvider{running: &running, maxRunning: &maxRunning, release: release}, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(gateProvider{running: &running, maxRunning: &maxRunning, release: release}, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(store), reg, factory, 3).WithBudget(10, 2) // at most 2 concurrent
 	reg.Register(tool)

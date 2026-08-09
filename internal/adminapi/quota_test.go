@@ -24,7 +24,7 @@ func quotaEnv(t *testing.T) (*env, *quota.Store) {
 			next.ServeHTTP(w, r.WithContext(identity.NewContextWithUser(r.Context(), e.actor)))
 		})
 	})
-	NewHandler(e.svc, nil, nil, e.mem).
+	NewHandler(e.svc, nil, e.mem).
 		WithQuotas(qs).
 		RegisterAuthed(authed)
 	authed.Mount(e.mux, "/api/")

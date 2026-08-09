@@ -1,8 +1,7 @@
 // Package adminapi is the HTTP surface of the management console
 // (admin-console). It contains no SQL: users, teams, memberships, and tokens
-// come from identity; team provider keys from routing; token accounting from
-// usage; memories from the memory port. Its own job is routing, authorization,
-// and DTOs.
+// come from identity; token accounting from usage; memories from the memory
+// port. Its own job is routing, authorization, and DTOs.
 //
 // Routes fall into three tiers, and the tier is visible in the path:
 //
@@ -19,28 +18,30 @@ import (
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/providerreg"
 	"nowhere-agent/internal/quota"
-	"nowhere-agent/internal/routing"
 	"nowhere-agent/internal/usage"
 )
 
 // Handler serves the console's endpoints.
 type Handler struct {
 	identity *identity.Service
-	keys     *routing.PGKeyStore
 	usage    *usage.Store
 	quotas   *quota.Store
 	memories memory.Port
 	dreaming *dreaming.Runner
+	// providers is the provider registry (system CRUD + team assignment). Nil
+	// disables the provider routes with a 503 (see WithProviders).
+	providers providerreg.Store
 	// audit records administrative actions; nil disables recording.
 	audit *audit.Logger
 }
 
-// NewHandler builds the console handler. keys, usage, and memories may be nil;
-// the routes that need them then answer 503 rather than panicking, which keeps
-// a deployment without a memory port or provider keys serving the rest.
-func NewHandler(id *identity.Service, keys *routing.PGKeyStore, u *usage.Store, mem memory.Port) *Handler {
-	return &Handler{identity: id, keys: keys, usage: u, memories: mem}
+// NewHandler builds the console handler. usage and memories may be nil; the
+// routes that need them then answer 503 rather than panicking, which keeps a
+// deployment without a memory port serving the rest.
+func NewHandler(id *identity.Service, u *usage.Store, mem memory.Port) *Handler {
+	return &Handler{identity: id, usage: u, memories: mem}
 }
 
 // WithQuotas wires the usage-budget store, enabling the quota configuration
@@ -64,6 +65,14 @@ func (h *Handler) WithAudit(l *audit.Logger) *Handler {
 // of the console does not.
 func (h *Handler) WithDreaming(r *dreaming.Runner) *Handler {
 	h.dreaming = r
+	return h
+}
+
+// WithProviders wires the provider registry, enabling the provider
+// administration routes (system CRUD + team provider/assignment). Left nil,
+// those routes answer 503 — the rest of the console still serves.
+func (h *Handler) WithProviders(s providerreg.Store) *Handler {
+	h.providers = s
 	return h
 }
 
@@ -103,14 +112,26 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	// is removing yourself. The handler distinguishes the two cases.
 	route(g, "DELETE /api/teams/{id}/members/{userId}", h.requireTeamRole(identity.RoleMember, h.removeMember))
 
-	route(g, "GET /api/teams/{id}/keys", h.requireTeamRole(identity.RoleAdmin, h.listKeys))
-	route(g, "PUT /api/teams/{id}/keys/{provider}", h.requireTeamRole(identity.RoleAdmin, h.putKey))
-	route(g, "DELETE /api/teams/{id}/keys/{provider}", h.requireTeamRole(identity.RoleAdmin, h.deleteKey))
-
 	route(g, "GET /api/teams/{id}/usage", h.requireTeamRole(identity.RoleAdmin, h.teamUsage))
 	route(g, "GET /api/teams/{id}/memories", h.requireTeamRole(identity.RoleMember, h.teamMemories))
 	route(g, "DELETE /api/teams/{id}/memories/{mid}", h.requireTeamRole(identity.RoleAdmin, h.deleteTeamMemory))
 	route(g, "POST /api/teams/{id}/memories/{mid}/deprecate", h.requireTeamRole(identity.RoleAdmin, h.deprecateTeamMemory))
+
+	// Provider registry (change provider-registry): teams see the providers
+	// available to them (system + their own) and manage their own providers,
+	// their models, and their provider assignment.
+	route(g, "GET /api/teams/{id}/providers", h.requireTeamRole(identity.RoleMember, h.listTeamProviders))
+	route(g, "POST /api/teams/{id}/providers", h.requireTeamRole(identity.RoleAdmin, h.createTeamProvider))
+	route(g, "PATCH /api/teams/{id}/providers/{pid}", h.requireTeamRole(identity.RoleAdmin, h.updateTeamProvider))
+	route(g, "DELETE /api/teams/{id}/providers/{pid}", h.requireTeamRole(identity.RoleAdmin, h.deleteTeamProvider))
+	route(g, "GET /api/teams/{id}/providers/{pid}/models", h.requireTeamRole(identity.RoleMember, h.listProviderModels))
+	route(g, "POST /api/teams/{id}/providers/{pid}/models/fetch", h.requireTeamRole(identity.RoleAdmin, h.fetchTeamModels))
+	route(g, "POST /api/teams/{id}/providers/{pid}/models", h.requireTeamRole(identity.RoleAdmin, h.createTeamModel))
+	route(g, "PATCH /api/teams/{id}/providers/{pid}/models/{mid}", h.requireTeamRole(identity.RoleAdmin, h.updateTeamModel))
+	route(g, "DELETE /api/teams/{id}/providers/{pid}/models/{mid}", h.requireTeamRole(identity.RoleAdmin, h.deleteTeamModel))
+	route(g, "POST /api/teams/{id}/providers/{pid}/models/{mid}/default", h.requireTeamRole(identity.RoleAdmin, h.setTeamDefaultModel))
+	route(g, "PUT /api/teams/{id}/provider-assignment", h.requireTeamRole(identity.RoleAdmin, h.setTeamAssignment))
+	route(g, "DELETE /api/teams/{id}/provider-assignment", h.requireTeamRole(identity.RoleAdmin, h.clearTeamAssignment))
 
 	// ---- platform ----
 	route(g, "GET /api/admin/stats", h.requireAdmin(h.stats))
@@ -129,6 +150,21 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	route(g, "DELETE /api/admin/memories/{id}", h.requireAdmin(h.adminDeleteMemory))
 	route(g, "POST /api/admin/memories/{id}/deprecate", h.requireAdmin(h.adminDeprecateMemory))
 	route(g, "GET /api/admin/audit", h.requireAdmin(h.listAudit))
+
+	// Provider registry, platform tier (change provider-registry): system
+	// providers and their models are platform-managed; one of them is the
+	// platform default every team falls back to.
+	route(g, "GET /api/admin/providers", h.requireAdmin(h.listSystemProviders))
+	route(g, "POST /api/admin/providers", h.requireAdmin(h.createSystemProvider))
+	route(g, "PATCH /api/admin/providers/{pid}", h.requireAdmin(h.updateSystemProvider))
+	route(g, "DELETE /api/admin/providers/{pid}", h.requireAdmin(h.deleteSystemProvider))
+	route(g, "POST /api/admin/providers/{pid}/default", h.requireAdmin(h.setSystemDefaultProvider))
+	route(g, "GET /api/admin/providers/{pid}/models", h.requireAdmin(h.listProviderModels))
+	route(g, "POST /api/admin/providers/{pid}/models/fetch", h.requireAdmin(h.fetchSystemModels))
+	route(g, "POST /api/admin/providers/{pid}/models", h.requireAdmin(h.createSystemModel))
+	route(g, "PATCH /api/admin/providers/{pid}/models/{mid}", h.requireAdmin(h.updateSystemModel))
+	route(g, "DELETE /api/admin/providers/{pid}/models/{mid}", h.requireAdmin(h.deleteSystemModel))
+	route(g, "POST /api/admin/providers/{pid}/models/{mid}/default", h.requireAdmin(h.setSystemDefaultModel))
 }
 
 // route registers one pattern onto the protected group.

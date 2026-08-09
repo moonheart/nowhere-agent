@@ -12,7 +12,6 @@ import (
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/provider"
-	"nowhere-agent/internal/routing"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/usage"
 )
@@ -74,7 +73,7 @@ func (e *env) withDreaming(src dreaming.EpisodeSource) *dreaming.Runner {
 	r := dreaming.NewRunner(w, context.Background())
 	e.t.Cleanup(r.Wait)
 
-	h := NewHandler(e.svc, routing.NewPGKeyStore(e.db, "platform-key"), usage.NewStore(e.db), e.mem).
+	h := NewHandler(e.svc, usage.NewStore(e.db), e.mem).
 		WithDreaming(r)
 	e.mux = http.NewServeMux()
 	authed := httpx.NewRouter(func(next http.Handler) http.Handler {

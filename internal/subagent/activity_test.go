@@ -88,8 +88,8 @@ func TestSpawnForwardsActivity(t *testing.T) {
 		toolUseEvents("t1", "read_file", `{}`),
 		textEvents("done"),
 	}}
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(childProv, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(childProv, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
@@ -137,8 +137,8 @@ func TestSpawnNoSinkStillWorks(t *testing.T) {
 	// collapses normally (discardEmitter path).
 	store := agentdef.NewStore()
 	reg := toolruntime.NewRegistry()
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
@@ -163,8 +163,8 @@ func TestSpawnTagsActivitiesWithCallID(t *testing.T) {
 	childProv := &scriptProvider{script: [][]provider.Event{
 		textEvents("child working…"),
 	}}
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(childProv, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(childProv, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	reg.Register(NewSpawnTool(testResolver(store), reg, factory, 3))
 

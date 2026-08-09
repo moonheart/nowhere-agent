@@ -89,11 +89,20 @@ type Handler struct {
 	// budgetGate, when set, enforces the monthly token budget before a run
 	// starts spending (enterprise-readiness P1-1). Nil leaves runs ungated.
 	budgetGate BudgetChecker
-	// visionProvider, when non-empty, enables the vision gate: image blocks are
-	// rewritten to a view_image hint for main models without native image input
-	// (image-input capability). Set only when a vision model is configured.
-	visionProvider string
+	// visionGate, when set, enables the vision gate: image blocks are rewritten
+	// to a view_image hint for main models without native image input
+	// (image-input capability). It resolves the inputs per request — the main
+	// provider's vendor and whether a vision model is available for it — so
+	// team-scoped provider resolution stays live.
+	visionGate VisionGateResolver
 }
+
+// VisionGateResolver reports the vision-gate inputs for a request: the main
+// provider's vendor ("" disables the gate) and whether a vision-capable model
+// is available for the request's resolved provider (false = leave image blocks
+// to the adapter's own degrade path). The server implements it over the
+// provider registry so the gate follows per-team resolution.
+type VisionGateResolver func(ctx context.Context) (vendor string, visionAvailable bool)
 
 // NewHandler creates a chat Handler.
 func NewHandler(newLoop LoopFactory, systemPrompt string) *Handler {
@@ -163,12 +172,13 @@ func (h *Handler) WithBudgetGate(g BudgetChecker) *Handler {
 }
 
 // WithVisionGate enables the vision gate (image-input capability) for main
-// models without native image input. providerName is the main provider (e.g.
-// "anthropic", "openai"); the gate consults the model's capability profile per
-// send and rewrites image blocks to a view_image hint when the model cannot see
-// them natively. Empty disables the gate.
-func (h *Handler) WithVisionGate(providerName string) *Handler {
-	h.visionProvider = providerName
+// models without native image input. resolver reports, per request, the main
+// provider's vendor and whether a vision model is available for the request's
+// resolved provider; the gate consults the model's capability profile per send
+// and rewrites image blocks to a view_image hint when the model cannot see them
+// natively. Nil disables the gate.
+func (h *Handler) WithVisionGate(resolver VisionGateResolver) *Handler {
+	h.visionGate = resolver
 	return h
 }
 

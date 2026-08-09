@@ -72,9 +72,9 @@ func TestChatSpawnsSubagent(t *testing.T) {
 	msgStore := session.NewMemMessageStore()
 
 	subStore := agentdef.NewStore()
-	subFactory := func(_ context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
+	subFactory := func(_ context.Context, def agentdef.AgentDef, _ int) (*agent.Loop, error) {
 		return agent.New(subChildProvider{"child findings: 42"}, toolruntime.NewRegistry(),
-			agent.Config{Model: "m", System: def.System, MaxTokens: 100})
+			agent.Config{Model: "m", System: def.System, MaxTokens: 100}), nil
 	}
 
 	h := NewHandler(func(ctx context.Context, system string) *agent.Loop {

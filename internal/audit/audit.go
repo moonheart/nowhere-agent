@@ -74,6 +74,19 @@ const (
 	ActionTeamKeySet    Action = "team.key.set"
 	ActionTeamKeyDelete Action = "team.key.delete"
 
+	// Provider registry administration (change provider-registry). The secret
+	// itself is never recorded, only that a key was written or rotated.
+	ActionProviderCreate      Action = "provider.create"
+	ActionProviderUpdate      Action = "provider.update"
+	ActionProviderDelete      Action = "provider.delete"
+	ActionProviderSetDefault  Action = "provider.set_default"
+	ActionProviderModelCreate Action = "provider.model.create"
+	ActionProviderModelUpdate Action = "provider.model.update"
+	ActionProviderModelDelete Action = "provider.model.delete"
+	ActionProviderModelDefault Action = "provider.model.set_default"
+	ActionTeamProviderAssign      Action = "team.provider.assign"
+	ActionTeamProviderAssignClear Action = "team.provider.assign.clear"
+
 	// Usage-budget administration (the quota that caps monthly spend).
 	ActionQuotaSet   Action = "quota.set"
 	ActionQuotaClear Action = "quota.clear"

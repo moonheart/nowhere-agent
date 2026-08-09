@@ -35,10 +35,8 @@ import (
 	"nowhere-agent/internal/permission"
 	"nowhere-agent/internal/platform/db"
 	"nowhere-agent/internal/provider"
-	"nowhere-agent/internal/provider/anthropic"
-	"nowhere-agent/internal/provider/openai"
+	"nowhere-agent/internal/providerreg"
 	"nowhere-agent/internal/quota"
-	"nowhere-agent/internal/routing"
 	"nowhere-agent/internal/sandbox"
 	"nowhere-agent/internal/schedule"
 	"nowhere-agent/internal/scheduleapi"
@@ -163,20 +161,27 @@ func run() error {
 		}
 	}
 
-	// Team-scoped provider credentials (model-routing D14). The store is both
-	// the resolver on the chat path (below) and the console's management path.
-	// Keys are encrypted at rest (enterprise-readiness P0-2) when a master key is
-	// configured; without one the store falls back to plaintext and we say so,
-	// because a deployment storing real provider credentials unprotected should
-	// not do so silently.
-	keyStore := routing.NewPGKeyStore(pool, cfg.LLM.APIKey)
+	// Provider registry (change provider-registry): DB-managed LLM providers and
+	// models replace the env-var model selection (LLM_*/VISION_*) and the
+	// deprecated team_api_keys mechanism. Teams select a system or team-owned
+	// provider; every decision is resolved per request, so registry edits and
+	// reassignments take effect without a restart.
+	provStore := providerreg.NewPGStore(pool)
 	if enc, err := buildEncryptor(cfg); err != nil {
 		return fmt.Errorf("secrets: %w", err)
 	} else if enc != nil {
-		keyStore.WithEncryption(enc)
-		log.Info("team provider keys encrypted at rest (AES-256-GCM)")
+		provStore.WithEncryption(enc)
+		log.Info("provider registry keys encrypted at rest (AES-256-GCM)")
 	} else {
-		log.Warn("SECRETS_MASTER_KEY unset: team provider keys stored PLAINTEXT; set it to enable encryption at rest")
+		log.Warn("SECRETS_MASTER_KEY unset: provider registry keys stored PLAINTEXT; set it to enable encryption at rest")
+	}
+	provResolver := providerreg.NewResolver(provStore)
+	recorder := provider.NewRawRecorder(cfg.LLM.RawLogDir)
+	if recorder.Enabled() {
+		log.Info("recording raw LLM request/response", "dir", cfg.LLM.RawLogDir)
+	}
+	if _, err := provResolver.ResolveForTeam(ctx, ""); err != nil {
+		log.Warn("no platform provider configured; chat/schedule fail until a provider is added (see the admin console)")
 	}
 
 	// Durable session runtime over Postgres: chat requests persist as runs,
@@ -316,16 +321,26 @@ func run() error {
 	var schedTrigger *schedule.Trigger
 
 	// Billing attribution (enterprise-readiness P1-3): a run is stamped with the
-	// team whose provider key pays for it, so per-team cost reports read the run
-	// row directly. Resolution mirrors the credential lookup: a hiccup yields ""
-	// (platform-billed), never a blocked run. Shared by the chat handler and the
-	// scheduled-task trigger, which attributes the same way as a human run.
+	// team whose provider assignment pays for it, so per-team cost reports read
+	// the run row directly. Attribution mirrors resolution: the team is billed
+	// only when its own assignment actually serves the request; anything else is
+	// platform-billed. A hiccup yields "" (platform-billed), never a blocked run.
+	// Shared by the chat handler and the scheduled-task trigger, which attribute
+	// the same way as a human run.
 	teamAttributor := func(ctx context.Context, userID string) string {
-		creds, err := keyStore.Resolve(ctx, userID, cfg.LLM.Provider)
+		teamID, err := provStore.UserTeam(ctx, userID)
+		if err != nil || teamID == "" {
+			return ""
+		}
+		a, err := provStore.GetTeamAssignment(ctx, teamID)
 		if err != nil {
 			return ""
 		}
-		return creds.TeamID
+		t, err := provResolver.ResolveForTeam(ctx, teamID)
+		if err != nil || t.ProviderID != a.ProviderID {
+			return ""
+		}
+		return teamID
 	}
 
 	// Budget enforcement (enterprise-readiness P1-1): the platform records token
@@ -347,17 +362,11 @@ func run() error {
 		})
 	budgetGate := budgetChecker.Check
 
-	// Chat endpoint: build an agent loop per request from the configured provider.
-	if adapter, rawRecorder := buildProvider(cfg, log); adapter != nil {
-		model := cfg.LLM.Model
-		// Dedicated vision model for the view_image tool (image-input): backs a
-		// non-vision main model with a cheap vision-capable model. Built from the
-		// platform VISION_* settings; nil disables the tool.
-		visionAdapter := buildVisionProvider(cfg, rawRecorder)
-		if visionAdapter != nil {
-			log.Info("vision model configured (view_image tool)", "provider", cfg.Vision.Provider, "model", cfg.Vision.Model)
-		}
-
+	// Chat endpoint: build an agent loop per request from the provider registry.
+	// The loop factories resolve provider+model per request, so registry edits
+	// and team reassignments take effect without a restart. A request that
+	// cannot be resolved fails closed — there is no boot-time default adapter.
+	{
 		// Execution-permission gate (D10): authorize each tool call by the tool's
 		// risk before dispatch. This server is headless, so an "ask" decision
 		// denies (no interactive approver). Defaults allow read-only/sandbox-write/
@@ -456,23 +465,32 @@ func run() error {
 		// derived from the model's capability profile (models.dev-style table),
 		// so a known model gets working compression out of the box. An unknown
 		// model with no explicit window keeps compression disabled.
-		contextWindow := cfg.LLM.ContextWindow
-		if contextWindow == 0 {
-			if profile, ok := provider.LookupProfile(cfg.LLM.Provider, model); ok {
-				contextWindow = profile.ContextWindow
-				log.Info("context window derived from model profile", "model", model, "window", contextWindow)
+		// windowFor derives the context window for a RESOLVED target: the
+		// LLM_CONTEXT_WINDOW override when set, otherwise the model's capability
+		// profile (models.dev-style table), so a known model gets working
+		// compression out of the box. An unknown model with no explicit window
+		// keeps compression disabled. Resolved per request because the model —
+		// and thus its profile — follows the caller's provider assignment.
+		windowFor := func(t providerreg.Target) int {
+			if cfg.LLM.ContextWindow > 0 {
+				return cfg.LLM.ContextWindow
 			}
+			if profile, ok := provider.LookupProfile(t.Vendor, t.Model); ok {
+				return profile.ContextWindow
+			}
+			return 0
 		}
-		compressionEnabled := contextWindow > 0
-
-		// replyBudget reserves response space inside the context window. With a
-		// small window configured, the 64k default would exceed it (the
+		// replyBudgetFor reserves response space inside the context window. With
+		// a small window configured, the 64k default would exceed it (the
 		// provider can reject max_tokens beyond the window) and leave the
 		// compression budget (window - reply) negative, so it is clamped to a
 		// quarter of the window.
-		replyBudget := 65536
-		if contextWindow > 0 && contextWindow/4 < replyBudget {
-			replyBudget = contextWindow / 4
+		replyBudgetFor := func(window int) int {
+			replyBudget := 65536
+			if window > 0 && window/4 < replyBudget {
+				replyBudget = window / 4
+			}
+			return replyBudget
 		}
 
 		// Dreaming worker + the scheduler that drives it (capability-gaps K1+K2).
@@ -487,51 +505,62 @@ func run() error {
 		// console stays available with the schedule off, which is the point of
 		// having it — an operator who wants consolidation to be deliberate rather
 		// than periodic turns the timer off and keeps the button.
-		source := dreaming.NewStoreSource(sessionStore, messageStore)
-		worker := dreaming.NewWorker(source, memPort,
-			dreaming.NewProviderLLM(adapter, model),
-			dreaming.Budget{MaxTokens: cfg.Dreaming.MaxTokens})
-		worker.SetCaps(dreaming.Caps{
-			Facts:     cfg.Dreaming.MaxFacts,
-			Insights:  cfg.Dreaming.MaxInsights,
-			Summaries: cfg.Dreaming.MaxSummaries,
-		})
-		worker.SetPurgeAfter(cfg.Dreaming.PurgeAfter)
-		worker.SetLogger(log)
+		//
+		// Dreaming is a platform background capability, so it consolidates over
+		// the platform default provider resolved at boot — not a caller's team
+		// assignment. When the registry has no servable platform provider,
+		// dreaming stays unavailable (the console's manual trigger answers 503).
+		if plat, err := provResolver.ResolveForTeam(ctx, ""); err == nil {
+			if platAdapter := providerreg.BuildAdapter(plat, recorder, cfg.LLM.StreamIdleTimeout); platAdapter != nil {
+				source := dreaming.NewStoreSource(sessionStore, messageStore)
+				worker := dreaming.NewWorker(source, memPort,
+					dreaming.NewProviderLLM(platAdapter, plat.Model),
+					dreaming.Budget{MaxTokens: cfg.Dreaming.MaxTokens})
+				worker.SetCaps(dreaming.Caps{
+					Facts:     cfg.Dreaming.MaxFacts,
+					Insights:  cfg.Dreaming.MaxInsights,
+					Summaries: cfg.Dreaming.MaxSummaries,
+				})
+				worker.SetPurgeAfter(cfg.Dreaming.PurgeAfter)
+				worker.SetLogger(log)
 
-		// The runner serializes passes. Its base context is the root one, not a
-		// request's: a manually triggered pass outlives the HTTP call that asked for
-		// it, but must still stop when the server does.
-		dreamRunner = dreaming.NewRunner(worker, ctx)
-		dreamRunner.SetLogger(log)
+				// The runner serializes passes. Its base context is the root one, not a
+				// request's: a manually triggered pass outlives the HTTP call that asked for
+				// it, but must still stop when the server does.
+				dreamRunner = dreaming.NewRunner(worker, ctx)
+				dreamRunner.SetLogger(log)
 
-		if cfg.Dreaming.Enabled {
-			sched := scheduler.New(log, scheduler.Job{
-				Name:     "dreaming",
-				Interval: cfg.Dreaming.Interval,
-				Run:      dreamRunner.RunScheduled,
-			})
-			go sched.Start(ctx)
-			log.Info("dreaming scheduler enabled",
-				"interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens,
-				"cap_facts", cfg.Dreaming.MaxFacts, "cap_insights", cfg.Dreaming.MaxInsights,
-				"cap_summaries", cfg.Dreaming.MaxSummaries, "purge_after", cfg.Dreaming.PurgeAfter)
+				if cfg.Dreaming.Enabled {
+					sched := scheduler.New(log, scheduler.Job{
+						Name:     "dreaming",
+						Interval: cfg.Dreaming.Interval,
+						Run:      dreamRunner.RunScheduled,
+					})
+					go sched.Start(ctx)
+					log.Info("dreaming scheduler enabled",
+						"interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens,
+						"cap_facts", cfg.Dreaming.MaxFacts, "cap_insights", cfg.Dreaming.MaxInsights,
+						"cap_summaries", cfg.Dreaming.MaxSummaries, "purge_after", cfg.Dreaming.PurgeAfter)
+				} else {
+					log.Info("dreaming scheduler disabled; manual consolidation still available")
+				}
+			}
 		} else {
-			log.Info("dreaming scheduler disabled; manual consolidation still available")
+			log.Warn("dreaming disabled: no platform provider configured", "err", err)
 		}
 
-		// useStandardMiddleware registers the middleware every agent loop gets,
-		// in canonical order — permission gate, context compression (when
-		// enabled), overflow retry. One assembly point so the chat factory and
-		// the subagent factory cannot drift. callAdapter/modelName select the
-		// compressor's summarizer (the caller-resolved adapter and model).
-		useStandardMiddleware := func(loop *agent.Loop, callAdapter provider.Adapter, modelName string, breaker *agent.CircuitBreaker) {
+		// applyStandardMiddleware registers the middleware every agent loop gets,
+		// in canonical order — permission gate, context compression (when the
+		// resolved model has a window), overflow retry. One assembly point so the
+		// chat factory, the subagent factory, and the schedule trigger cannot
+		// drift. callAdapter/model/window come from the per-request resolution.
+		applyStandardMiddleware := func(loop *agent.Loop, callAdapter provider.Adapter, model string, window int, breaker *agent.CircuitBreaker) {
 			// Tool authorization gates dispatch. The policy (permit) resolves the
 			// per-session permission mode from the run context at call time, so one
 			// registration covers every session and reacts to the live toggle.
 			loop.Use(&agent.PermissionMW{Check: permit})
-			if compressionEnabled {
-				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callAdapter, modelName), Window: contextWindow, MaxTokens: replyBudget, Breaker: breaker})
+			if window > 0 {
+				loop.Use(&agent.CompressMW{Compressor: contextmgmt.NewLLMCompressor(callAdapter, model), Window: window, MaxTokens: replyBudgetFor(window), Breaker: breaker})
 			}
 			loop.Use(&agent.OverflowMW{})
 		}
@@ -562,19 +591,81 @@ func run() error {
 		// so user/team/system definitions take effect without a restart and a
 		// store outage degrades to built-ins rather than failing spawns.
 		subResolver := agentdef.NewResolver(agentdef.NewStore(), agentDefPG)
-		subFactory := func(ctx context.Context, def agentdef.AgentDef, _ int) *agent.Loop {
-			childModel := def.Model
-			if childModel == "" {
-				childModel = model
+		// resolveTarget picks the provider+model for a run: the caller's team
+		// assignment (or the task's team, when teamID is set) falling back to the
+		// platform default. modelOverride names an explicit model on the resolved
+		// provider ("" = the provider's default). Fail-closed: an unknown model
+		// or an empty registry errors, so a run never silently substitutes.
+		resolveTarget := func(ctx context.Context, userID, teamID, modelOverride string) (providerreg.Target, provider.Adapter, string, error) {
+			var (
+				t   providerreg.Target
+				err error
+			)
+			if teamID != "" {
+				t, err = provResolver.ResolveForTeam(ctx, teamID)
+			} else {
+				t, err = provResolver.Resolve(ctx, userID)
+			}
+			if err != nil {
+				return providerreg.Target{}, nil, "", err
+			}
+			adapter := providerreg.BuildAdapter(t, recorder, cfg.LLM.StreamIdleTimeout)
+			if adapter == nil {
+				return providerreg.Target{}, nil, "", fmt.Errorf("unsupported provider vendor %q", t.Vendor)
+			}
+			m, err := provResolver.ResolveModel(ctx, t, modelOverride)
+			if err != nil {
+				return providerreg.Target{}, nil, "", err
+			}
+			return t, adapter, m, nil
+		}
+
+		// buildLoop assembles the loop for a resolved run with the standard
+		// middleware stack. Shared by the chat path, the scheduled-task trigger,
+		// and the subagent factory, so they cannot drift. breaker is the caller's
+		// compression circuit breaker (per-run middleware would reset each loop).
+		buildLoop := func(ctx context.Context, userID, teamID, system, model string, breaker *agent.CircuitBreaker) (*agent.Loop, error) {
+			t, adapter, m, err := resolveTarget(ctx, userID, teamID, model)
+			if err != nil {
+				return nil, err
+			}
+			loop := agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
+				Model:           m,
+				System:          system,
+				MaxTokens:       replyBudgetFor(windowFor(t)),
+				MaxIterations:   25,
+				CacheablePrefix: true,
+				Temperature:     temperature,
+				ThinkingBudget:  cfg.LLM.ThinkingBudget,
+			})
+			applyStandardMiddleware(loop, adapter, m, windowFor(t), breaker)
+			return loop, nil
+		}
+
+		// Subagent factory (subagent capability): builds a child loop for a
+		// resolved definition. System prompt and model come from the definition
+		// (model falls back to the parent caller's resolved default); the child's
+		// tool registry is set by the spawn tool via WithTools. Resolution is per
+		// request: the spawn runs on the parent run's worker context, which
+		// carries the caller, so the child inherits the parent's provider
+		// assignment. An unresolvable target surfaces as an error tool result.
+		subFactory := func(ctx context.Context, def agentdef.AgentDef, _ int) (*agent.Loop, error) {
+			userID := ""
+			if u, ok := identity.UserFromContext(ctx); ok {
+				userID = u.ID
 			}
 			maxIter := 25
 			if def.MaxTurns > 0 {
 				maxIter = def.MaxTurns
 			}
+			t, adapter, m, err := resolveTarget(ctx, userID, "", def.Model)
+			if err != nil {
+				return nil, err
+			}
 			loop := agent.New(adapter, toolruntime.NewRegistry(), agent.Config{
-				Model:           childModel,
+				Model:           m,
 				System:          def.System,
-				MaxTokens:       replyBudget,
+				MaxTokens:       replyBudgetFor(windowFor(t)),
 				MaxIterations:   maxIter,
 				CacheablePrefix: true,
 				Temperature:     temperature,
@@ -583,47 +674,35 @@ func run() error {
 			// The child's permission policy resolves from the spawn context's session
 			// id (set on the run by the registry), so it inherits the parent session's
 			// permission mode.
-			useStandardMiddleware(loop, adapter, childModel, subCompressBreaker)
-			return loop
+			applyStandardMiddleware(loop, adapter, m, windowFor(t), subCompressBreaker)
+			return loop, nil
 		}
 
 		// Loop factory + session tool binder, named so the approval Resume path
 		// can rebuild a parked run's loop after a restart (capability-gap O2).
 		//
-		// Credential resolution happens here, per request (model-routing): the
+		// Provider resolution happens here, per request (provider-registry): the
 		// caller is already on the context (both call sites pass the request
-		// context from a route behind RequireAuth), so a team that configured
-		// its own provider key gets its calls billed to that key instead of the
-		// platform one. Resolution failure falls back to the boot adapter —
-		// chat must not go down because a key lookup hiccuped.
-		// newChatLoopWithModel builds the chat loop for an explicit model. It is
-		// the core both the chat path and the scheduled-task trigger use; the
-		// trigger passes the task's model (falling back to the chat default).
-		newChatLoopWithModel := func(ctx context.Context, system, modelOverride string) *agent.Loop {
-			m := model
-			if modelOverride != "" {
-				m = modelOverride
-			}
-			callerAdapter := adapterForCaller(ctx, cfg, rawRecorder, keyStore, adapter, log)
-			loop := agent.New(
-				callerAdapter,
-				toolruntime.NewRegistry(), agent.Config{
-					Model:           m,
-					System:          system,
-					MaxTokens:       replyBudget,
-					MaxIterations:   25,
-					CacheablePrefix: true,
-					Temperature:     temperature,
-					ThinkingBudget:  cfg.LLM.ThinkingBudget,
-				})
-			// Tool authorization gates dispatch. The policy (permit) resolves the
-			// per-session permission mode from the run context at call time, so one
-			// registration covers every session and reacts to the live toggle.
-			useStandardMiddleware(loop, callerAdapter, m, chatCompressBreaker)
-			return loop
-		}
+		// context from a route behind RequireAuth), so a team that configured its
+		// own provider gets its calls routed to that provider's key instead of the
+		// platform default. Resolution failure fails the run closed — a request
+		// with no servable provider must not silently fall back to a platform key
+		// the operator did not configure.
+		// newChatLoop is the chatapi LoopFactory, whose signature cannot surface
+		// an error. An unresolvable request therefore gets a loop over a stub
+		// adapter that errors on the first model call — the client sees a clear
+		// "no provider available" error frame instead of a hang or a panic.
 		newChatLoop := func(ctx context.Context, system string) *agent.Loop {
-			return newChatLoopWithModel(ctx, system, "")
+			userID := ""
+			if u, ok := identity.UserFromContext(ctx); ok {
+				userID = u.ID
+			}
+			loop, err := buildLoop(ctx, userID, "", system, "", chatCompressBreaker)
+			if err != nil {
+				log.Warn("chat loop build failed", "user", userID, "err", err)
+				return agent.New(noProviderAdapter{}, toolruntime.NewRegistry(), agent.Config{Model: "", System: system, MaxTokens: 1024})
+			}
+			return loop
 		}
 		// buildToolRegistry assembles the full tool registry for a session, then
 		// narrows it to whitelist when that is non-empty (scheduled-tasks D3): a
@@ -718,10 +797,20 @@ func run() error {
 			// view_image (image-input): a dedicated vision model backs a main model
 			// without native image input. The tool resolves the image bytes through
 			// this session's ImageStore, sends them to the vision adapter, and
-			// returns the description as text. Registered only when a vision model
-			// is configured AND an image store exists; RiskReadOnly.
-			if visionAdapter != nil && imageStore != nil {
-				reg.Register(builtin.NewViewImage(visionAdapter, cfg.Vision.Model, imageStore.ResolverFor(sessionID)))
+			// returns the description as text. Registered only when the session
+			// owner's resolved provider has a vision model AND an image store
+			// exists; RiskReadOnly. Resolution follows the session owner (the run
+			// worker context carries the caller), so team assignments apply.
+			if imageStore != nil {
+				if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
+					if t, err := provResolver.Resolve(ctx, sess.UserID); err == nil {
+						if vm, ok := provResolver.VisionModel(ctx, t); ok {
+							if visionAdapter := providerreg.BuildAdapter(t, recorder, cfg.LLM.StreamIdleTimeout); visionAdapter != nil {
+								reg.Register(builtin.NewViewImage(visionAdapter, vm, imageStore.ResolverFor(sessionID)))
+							}
+						}
+					}
+				}
 			}
 			// Subagent spawn tool: children draw from a scoped view of this run's
 			// registry, so nested loops share the session's tools. Registered last.
@@ -763,38 +852,44 @@ func run() error {
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
 		}
-		// Vision gate (image-input): enable only when a vision model is
-		// configured, so non-vision main models get the view_image hint instead
-		// of useless image blocks.
-		if visionAdapter != nil {
-			handler = handler.WithVisionGate(cfg.LLM.Provider)
-		}
+		// Vision gate (image-input): resolves per request — the caller's provider
+		// assignment and whether it has a vision model — so non-vision main models
+		// get the view_image hint instead of useless image blocks, and team
+		// providers are gated by their own model list. The gate self-disables when
+		// the request's provider has no vision model.
+		handler = handler.WithVisionGate(func(ctx context.Context) (string, bool) {
+			u, ok := identity.UserFromContext(ctx)
+			if !ok {
+				return "", false
+			}
+			t, err := provResolver.Resolve(ctx, u.ID)
+			if err != nil {
+				return "", false
+			}
+			_, visionOK := provResolver.VisionModel(ctx, t)
+			return t.Vendor, visionOK
+		})
 		// Incremental memory injection (capability K / context-mgmt): each run's
 		// loop surfaces newly-created memories into the outgoing view (never the
 		// durable history), keeping the system prefix byte-stable for caching.
 		handler = handler.WithMemoryInjector(func(ctx context.Context, user identity.User, query string) agent.MemoryInjector {
 			return chatapi.NewSessionMemoryInjector(memPort, identitySvc, sessionRuntime, user, query)
 		})
-		// Tool binder: attach session-scoped tools to each run. Runs when the
-		// sandbox (file tools), MCP (network tools), memory (recall_memory), or
-		// vision (view_image) is configured — the latter three need no sandbox,
-		// so they must register even when the sandbox is off.
-		if sandboxMgr != nil || mcpClient != nil || memPort != nil || visionAdapter != nil {
-			handler = handler.WithToolBinder(bindChatTools)
-			if sandboxMgr != nil {
-				log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
-			}
-			if execEnabled {
-				log.Info("run_command tool enabled", "backend", cfg.Sandbox.Backend)
-			}
-			if visionAdapter != nil {
-				log.Info("view_image tool enabled", "vision_model", cfg.Vision.Model)
-			}
-			// MCP tool count is logged by reconnectMCP when the async connect
-			// lands; at this point it is still 0, so there is nothing to report.
-			if cfg.Subagent.Enabled {
-				log.Info("subagent tool enabled (spawn_agent)", "max_depth", cfg.Subagent.MaxDepth)
-			}
+		// Tool binder: attach session-scoped tools to each run. Always wired; the
+		// binder registers tools conditionally (sandbox file tools, MCP tools,
+		// recall_memory, view_image, spawn_agent) so a run gets exactly what its
+		// session can serve.
+		handler = handler.WithToolBinder(bindChatTools)
+		if sandboxMgr != nil {
+			log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
+		}
+		if execEnabled {
+			log.Info("run_command tool enabled", "backend", cfg.Sandbox.Backend)
+		}
+		// MCP tool count is logged by reconnectMCP when the async connect lands;
+		// at this point it is still 0, so there is nothing to report.
+		if cfg.Subagent.Enabled {
+			log.Info("subagent tool enabled (spawn_agent)", "max_depth", cfg.Subagent.MaxDepth)
 		}
 		handler.RegisterAuthed(protected)
 
@@ -810,11 +905,13 @@ func run() error {
 		if cfg.Schedule.Enabled {
 			schedStore := schedule.NewPGStore(pool)
 			// Loop builder: rebuild the chat loop with the task's system prompt and
-			// model (modelOverride "" = the chat default). Tools are NOT bound here
-			// — the target session is not yet known — but via WithToolBinder once
-			// the trigger resolves it.
-			buildSchedLoop := func(ctx context.Context, task schedule.Task, system, modelOverride string) *agent.Loop {
-				return newChatLoopWithModel(ctx, system, modelOverride)
+			// model (modelOverride "" = the resolved default), routing through the
+			// task's team assignment. Tools are NOT bound here — the target session
+			// is not yet known — but via WithToolBinder once the trigger resolves
+			// it. An unresolvable provider/model fails the firing (retried next
+			// scan), never a silent platform fallback.
+			buildSchedLoop := func(ctx context.Context, task schedule.Task, system, model string) (*agent.Loop, error) {
+				return buildLoop(ctx, task.UserID, task.TeamID, system, model, chatCompressBreaker)
 			}
 			trigger := schedule.NewTrigger(schedStore, sessionRuntime, handler.Registry(), subResolver.Bound(ctx), identitySvc, buildSchedLoop, pool, cfg.Schedule.ScanInterval)
 			// Tool binder: narrow the session's tool registry to the task's
@@ -831,20 +928,16 @@ func run() error {
 		} else {
 			log.Info("scheduled-task trigger disabled; task CRUD still available")
 		}
-		if compressionEnabled {
-			log.Info("context compression enabled", "window", contextWindow)
-		}
-		log.Info("chat endpoint enabled (auth required)", "provider", adapter.Name(), "model", model)
-	} else {
-		log.Warn("chat endpoint disabled: no LLM provider configured (set LLM_PROVIDER/LLM_API_KEY)")
+		log.Info("chat endpoint enabled (auth required); provider+model resolved per request from the registry")
 	}
 
 	// Management console (admin-console): self-service, team, and platform
 	// routes, all behind the same auth middleware the chat endpoint uses. It is
 	// registered outside the provider branch so the console stays reachable on
-	// a deployment with no LLM configured.
-	adminHandler := adminapi.NewHandler(identitySvc, keyStore, usage.NewStore(pool), memPort).
+	// a deployment with no provider configured.
+	adminHandler := adminapi.NewHandler(identitySvc, usage.NewStore(pool), memPort).
 		WithQuotas(quota.NewStore(pool)).
+		WithProviders(provStore).
 		WithDreaming(dreamRunner).
 		WithAudit(auditLogger)
 	adminHandler.RegisterAuthed(protected)
@@ -958,44 +1051,16 @@ func reconnectMCP(ctx context.Context, c *mcp.Client, log *slog.Logger) {
 	}
 }
 
-// adapterForCaller picks the provider adapter for one chat request
-// (model-routing): the platform adapter, unless the caller belongs to a team
-// that configured its own key for this provider, in which case an adapter bound
-// to that key.
-//
-// Every failure path returns the platform adapter. That is the whole point:
-// this runs on the chat hot path, and a credential lookup that errors — a
-// Postgres blip, a misconfigured row — must degrade to the platform key rather
-// than take chat down. An unauthenticated context does the same, which is what
-// makes this safe to call from paths that have no user.
-func adapterForCaller(
-	ctx context.Context,
-	cfg config.Config,
-	recorder *provider.RawRecorder,
-	keys *routing.PGKeyStore,
-	platform provider.Adapter,
-	log *slog.Logger,
-) provider.Adapter {
-	if keys == nil {
-		return platform
-	}
-	u, ok := identity.UserFromContext(ctx)
-	if !ok {
-		return platform
-	}
-	creds, err := keys.Resolve(ctx, u.ID, cfg.LLM.Provider)
-	if err != nil {
-		log.Warn("credential resolution failed; using platform key", "user", u.ID, "err", err)
-		return platform
-	}
-	if creds.Platform || creds.APIKey == "" {
-		return platform
-	}
-	teamAdapter := buildProviderWithKey(cfg, recorder, creds.APIKey)
-	if teamAdapter == nil {
-		return platform
-	}
-	return teamAdapter
+// noProviderAdapter fails every generation with the resolver's ErrNoProvider.
+// It is the loop's adapter for a chat request that could not be resolved (empty
+// or misconfigured registry), so the client receives a clean error frame
+// instead of a hang or a panic — the chatapi LoopFactory cannot surface an
+// error, so the loop carries the failure instead.
+type noProviderAdapter struct{}
+
+func (noProviderAdapter) Name() string { return "none" }
+func (noProviderAdapter) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	return nil, providerreg.ErrNoProvider
 }
 
 // spaHandler serves static files from dir, falling back to index.html for
@@ -1064,86 +1129,4 @@ func buildEncryptor(cfg config.Config) (*secrets.Encryptor, error) {
 		return nil, nil
 	}
 	return secrets.NewSingle([]byte(cfg.Secrets.MasterKey))
-}
-
-// buildProvider constructs the configured provider adapter from the platform
-// key, or nil if not configured. It also returns the raw recorder so the
-// per-request adapters (built for team keys) share one rather than each opening
-// its own log directory handle.
-func buildProvider(cfg config.Config, log *slog.Logger) (provider.Adapter, *provider.RawRecorder) {
-	recorder := provider.NewRawRecorder(cfg.LLM.RawLogDir)
-	if recorder.Enabled() {
-		log.Info("recording raw LLM request/response", "dir", cfg.LLM.RawLogDir)
-	}
-	return buildProviderWithKey(cfg, recorder, cfg.LLM.APIKey), recorder
-}
-
-// buildProviderWithKey constructs an adapter for a specific API key. It is how
-// a team-configured credential becomes a usable adapter on the request path
-// (model-routing). Adapters hold the shared http.DefaultClient and a few
-// fields, so constructing one per request is a struct literal — connection
-// pooling is preserved through the shared client, and no adapter cache is
-// warranted.
-func buildProviderWithKey(cfg config.Config, recorder *provider.RawRecorder, apiKey string) provider.Adapter {
-	return buildProviderWith(providerSettings{
-		Provider:        cfg.LLM.Provider,
-		Model:           cfg.LLM.Model,
-		APIKey:          apiKey,
-		BaseURL:         cfg.LLM.BaseURL,
-		RawLogDir:       cfg.LLM.RawLogDir,
-		StreamIdle:      cfg.LLM.StreamIdleTimeout,
-	}, recorder)
-}
-
-// providerSettings carries the provider-agnostic knobs shared by the main
-// chat adapter and the dedicated vision adapter (image-input capability).
-type providerSettings struct {
-	Provider   string
-	Model      string
-	APIKey     string
-	BaseURL    string
-	RawLogDir  string
-	StreamIdle time.Duration
-}
-
-// buildVisionProvider constructs the dedicated vision adapter backing the
-// view_image tool. Returns nil when the provider or model is unset, so vision
-// is fully opt-in (the legacy image-degradation path stays when unset).
-func buildVisionProvider(cfg config.Config, recorder *provider.RawRecorder) provider.Adapter {
-	if cfg.Vision.Provider == "" || cfg.Vision.Model == "" {
-		return nil
-	}
-	return buildProviderWith(providerSettings{
-		Provider:   cfg.Vision.Provider,
-		Model:      cfg.Vision.Model,
-		APIKey:     cfg.Vision.APIKey,
-		BaseURL:    cfg.Vision.BaseURL,
-		RawLogDir:  cfg.LLM.RawLogDir,
-		StreamIdle: cfg.LLM.StreamIdleTimeout,
-	}, recorder)
-}
-
-// buildProviderWith constructs an adapter from explicit settings (shared by
-// buildProviderWithKey and buildVisionProvider).
-func buildProviderWith(s providerSettings, recorder *provider.RawRecorder) provider.Adapter {
-	switch s.Provider {
-	case "anthropic":
-		var opts []anthropic.Option
-		if s.BaseURL != "" {
-			opts = append(opts, anthropic.WithEndpoint(s.BaseURL))
-		}
-		opts = append(opts, anthropic.WithRawRecorder(recorder))
-		opts = append(opts, anthropic.WithStreamIdleTimeout(s.StreamIdle))
-		return anthropic.New(s.APIKey, opts...)
-	case "openai":
-		var opts []openai.Option
-		if s.BaseURL != "" {
-			opts = append(opts, openai.WithEndpoint(s.BaseURL))
-		}
-		opts = append(opts, openai.WithRawRecorder(recorder))
-		opts = append(opts, openai.WithStreamIdleTimeout(s.StreamIdle))
-		return openai.New(s.APIKey, opts...)
-	default:
-		return nil
-	}
 }

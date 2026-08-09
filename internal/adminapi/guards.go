@@ -11,6 +11,7 @@ import (
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/providerreg"
 )
 
 // ---- authorization ----
@@ -131,6 +132,20 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "session not found")
 	case errors.Is(err, memory.ErrNotFound):
 		writeError(w, http.StatusNotFound, "memory not found")
+	case errors.Is(err, providerreg.ErrNotFound):
+		writeError(w, http.StatusNotFound, "provider or model not found")
+	case errors.Is(err, providerreg.ErrNameConflict):
+		writeError(w, http.StatusConflict, "a provider or model with that name already exists")
+	case errors.Is(err, providerreg.ErrDefaultConflict):
+		writeError(w, http.StatusConflict, "a default is already set")
+	case errors.Is(err, providerreg.ErrProviderInUse):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, providerreg.ErrModelInUse):
+		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, providerreg.ErrProviderDisabled):
+		writeError(w, http.StatusConflict, "provider or model is disabled")
+	case errors.Is(err, providerreg.ErrModelMismatch):
+		writeError(w, http.StatusBadRequest, "model does not belong to the provider")
 	case identity.IsNotFound(err):
 		writeError(w, http.StatusNotFound, "not found")
 	default:

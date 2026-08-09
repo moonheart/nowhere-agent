@@ -37,8 +37,11 @@ const (
 // base model, and compression config) so the subagent package needs no wiring
 // dependency. The child's system prompt comes from def.System and its model
 // from def.Model (falling back to the parent's); the tool registry is set by
-// the SpawnTool via Loop.WithTools, not by the factory.
-type LoopFactory func(ctx context.Context, def agentdef.AgentDef, depth int) *agent.Loop
+// the SpawnTool via Loop.WithTools, not by the factory. An error means the
+// provider/model could not be resolved (fail-closed); Call surfaces it as an
+// error result so the parent model can self-correct instead of running a child
+// against a wrong model.
+type LoopFactory func(ctx context.Context, def agentdef.AgentDef, depth int) (*agent.Loop, error)
 
 // SpawnTool launches a child agent to handle a delegated task and returns the
 // child's final assistant text as the tool result. It implements
@@ -211,7 +214,11 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 	}
 	scoped := t.parent.Scoped(allow, def.DisallowedTools, exclude...)
 
-	child := t.factory(ctx, def, childDepth).WithTools(scoped)
+	child, err := t.factory(ctx, def, childDepth)
+	if err != nil {
+		return errf("subagent %s could not be started: %v", def.Name, err), nil
+	}
+	child = child.WithTools(scoped)
 	childCtx := withDepth(ctx, childDepth)
 	history := []provider.Message{provider.TextMessage(provider.RoleUser, prompt)}
 

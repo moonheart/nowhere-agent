@@ -1,18 +1,22 @@
-// Command smoketest calls the configured real LLM endpoint once with a trivial
-// prompt and prints the streamed canonical events. It reads LLM_* env vars
-// (source .env first). Used to verify the provider adapter against a live
+// Command smoketest calls the resolved LLM endpoint once with a trivial prompt
+// and prints the streamed canonical events. It resolves provider+model from the
+// Postgres registry — the platform default, or a team's assignment when
+// SMOKE_TEAM_ID is set. Used to verify the provider adapter against a live
 // model — not part of the test suite.
 package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
+
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/provider"
-	"nowhere-agent/internal/provider/anthropic"
-	"nowhere-agent/internal/provider/openai"
+	"nowhere-agent/internal/providerreg"
+	"nowhere-agent/internal/secrets"
 )
 
 func main() {
@@ -27,32 +31,44 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if cfg.LLM.APIKey == "" {
-		return fmt.Errorf("LLM_API_KEY not set (source .env)")
+
+	db, err := sql.Open("pgx", cfg.DB.DSN)
+	if err != nil {
+		return fmt.Errorf("open db: %w", err)
+	}
+	defer db.Close()
+
+	store := providerreg.NewPGStore(db)
+	if cfg.Secrets.MasterKey != "" {
+		enc, err := secrets.NewSingle([]byte(cfg.Secrets.MasterKey))
+		if err != nil {
+			return err
+		}
+		store = store.WithEncryption(enc)
+	}
+	resolver := providerreg.NewResolver(store)
+	recorder := provider.NewRawRecorder(cfg.LLM.RawLogDir)
+
+	ctx := context.Background()
+	teamID := os.Getenv("SMOKE_TEAM_ID")
+	var target providerreg.Target
+	if teamID != "" {
+		target, err = resolver.ResolveForTeam(ctx, teamID)
+	} else {
+		target, err = resolver.Resolve(ctx, os.Getenv("SMOKE_USER_ID"))
+	}
+	if err != nil {
+		return fmt.Errorf("resolve provider: %w (is the DB migrated and a provider configured?)", err)
 	}
 
-	var adapter provider.Adapter
-	switch cfg.LLM.Provider {
-	case "anthropic":
-		var opts []anthropic.Option
-		if cfg.LLM.BaseURL != "" {
-			opts = append(opts, anthropic.WithEndpoint(cfg.LLM.BaseURL))
-		}
-		adapter = anthropic.New(cfg.LLM.APIKey, opts...)
-	case "openai":
-		var opts []openai.Option
-		if cfg.LLM.BaseURL != "" {
-			opts = append(opts, openai.WithEndpoint(cfg.LLM.BaseURL))
-		}
-		adapter = openai.New(cfg.LLM.APIKey, opts...)
-	default:
-		return fmt.Errorf("LLM_PROVIDER must be anthropic|openai, got %q", cfg.LLM.Provider)
+	adapter := providerreg.BuildAdapter(target, recorder, cfg.LLM.StreamIdleTimeout)
+	if adapter == nil {
+		return fmt.Errorf("unsupported vendor %q", target.Vendor)
 	}
+	fmt.Printf("provider=%s vendor=%s model=%s\n", target.ProviderID, target.Vendor, target.Model)
 
-	fmt.Printf("provider=%s model=%s\n", adapter.Name(), cfg.LLM.Model)
-
-	events, err := adapter.Stream(context.Background(), provider.Request{
-		Model: cfg.LLM.Model,
+	events, err := adapter.Stream(ctx, provider.Request{
+		Model: target.Model,
 		Messages: []provider.Message{
 			provider.TextMessage(provider.RoleUser, "Reply with exactly: nowhere-agent online"),
 		},

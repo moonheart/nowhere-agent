@@ -116,8 +116,12 @@ func (h *Handler) bindSessionMiddleware(loop *agent.Loop, r *http.Request, sessI
 	// image block to a text hint BEFORE ImageMW materializes anything, so no
 	// base64 payload is ever built for a model that cannot use it. ImageMW then
 	// materializes only what remains (vision-capable models keep their blocks).
-	if h.visionProvider != "" {
-		loop.Use(&agent.VisionGateMW{ProviderName: h.visionProvider})
+	// The gate is registered only when the request's resolved provider has a
+	// vision model, so the hint always names a tool that exists for this run.
+	if h.visionGate != nil {
+		if vendor, ok := h.visionGate(r.Context()); ok && vendor != "" {
+			loop.Use(&agent.VisionGateMW{ProviderName: vendor})
+		}
 	}
 	if h.images != nil {
 		loop.Use(&agent.ImageMW{Resolver: h.images.ResolverFor(sessID)})

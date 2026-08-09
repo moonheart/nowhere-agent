@@ -5,8 +5,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,136 +13,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-
-	"nowhere-agent/internal/config"
-	"nowhere-agent/internal/identity"
-	"nowhere-agent/internal/provider"
-	"nowhere-agent/internal/routing"
 )
-
-func quietLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
-func testConfig() config.Config {
-	var cfg config.Config
-	cfg.LLM.Provider = "anthropic"
-	cfg.LLM.APIKey = "platform-key"
-	return cfg
-}
-
-// stubAdapter stands in for the boot-time platform adapter, so a test can tell
-// "fell back" from "built a new one" by identity.
-type stubAdapter struct{ name string }
-
-func (s stubAdapter) Name() string { return s.name }
-func (s stubAdapter) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
-	ch := make(chan provider.Event)
-	close(ch)
-	return ch, nil
-}
-
-// A keystore that cannot be reached must not take chat down with it.
-func TestAdapterForCallerFallsBackWhenResolutionFails(t *testing.T) {
-	platform := stubAdapter{name: "platform"}
-	// A closed pool makes every query fail, which is what a Postgres outage
-	// looks like from here.
-	db, err := sql.Open("pgx", "postgres://nobody@127.0.0.1:1/none?sslmode=disable")
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	keys := routing.NewPGKeyStore(db, "platform-key")
-
-	ctx := identity.NewContextWithUser(context.Background(), identity.User{ID: "u1"})
-	got := adapterForCaller(ctx, testConfig(), provider.NewRawRecorder(""), keys, platform, quietLogger())
-
-	if got != provider.Adapter(platform) {
-		t.Errorf("adapter = %v, want the platform adapter as fallback", got)
-	}
-}
-
-// A request with no authenticated user (there is nobody to resolve a team key
-// for) uses the platform adapter rather than erroring.
-func TestAdapterForCallerWithoutUser(t *testing.T) {
-	platform := stubAdapter{name: "platform"}
-	db, _ := sql.Open("pgx", "postgres://nobody@127.0.0.1:1/none?sslmode=disable")
-	db.Close()
-
-	got := adapterForCaller(context.Background(), testConfig(), provider.NewRawRecorder(""),
-		routing.NewPGKeyStore(db, "platform-key"), platform, quietLogger())
-	if got != provider.Adapter(platform) {
-		t.Errorf("adapter = %v, want the platform adapter", got)
-	}
-}
-
-func TestAdapterForCallerWithoutKeyStore(t *testing.T) {
-	platform := stubAdapter{name: "platform"}
-	ctx := identity.NewContextWithUser(context.Background(), identity.User{ID: "u1"})
-	got := adapterForCaller(ctx, testConfig(), provider.NewRawRecorder(""), nil, platform, quietLogger())
-	if got != provider.Adapter(platform) {
-		t.Errorf("adapter = %v, want the platform adapter", got)
-	}
-}
-
-// With a real database and a team key configured for the provider being called,
-// the request gets an adapter bound to that key — not the platform one.
-func TestAdapterForCallerUsesTeamKey(t *testing.T) {
-	db := pgTestDB(t)
-	platform := stubAdapter{name: "platform"}
-
-	var userID, teamID string
-	err := db.QueryRow(`INSERT INTO users (email, password_hash) VALUES ($1,'x') RETURNING id`,
-		"srv-"+randSuffix()+"@test.dev").Scan(&userID)
-	if err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, userID) })
-
-	if err := db.QueryRow(`INSERT INTO teams (name) VALUES ($1) RETURNING id`, "srv-"+randSuffix()).Scan(&teamID); err != nil {
-		t.Fatalf("create team: %v", err)
-	}
-	t.Cleanup(func() { db.Exec(`DELETE FROM teams WHERE id = $1`, teamID) })
-	if _, err := db.Exec(`INSERT INTO team_memberships (team_id, user_id, role) VALUES ($1,$2,'owner')`, teamID, userID); err != nil {
-		t.Fatalf("add member: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO team_api_keys (team_id, provider, api_key) VALUES ($1,'anthropic','team-secret')`, teamID); err != nil {
-		t.Fatalf("add key: %v", err)
-	}
-
-	keys := routing.NewPGKeyStore(db, "platform-key")
-	ctx := identity.NewContextWithUser(context.Background(), identity.User{ID: userID})
-	got := adapterForCaller(ctx, testConfig(), provider.NewRawRecorder(""), keys, platform, quietLogger())
-
-	if got == provider.Adapter(platform) {
-		t.Fatal("a configured team key was ignored; the platform adapter was used")
-	}
-	if got.Name() != "anthropic" {
-		t.Errorf("adapter name = %q, want anthropic", got.Name())
-	}
-}
-
-// A team with no key for the provider being called falls through to the
-// platform adapter.
-func TestAdapterForCallerWithoutTeamKey(t *testing.T) {
-	db := pgTestDB(t)
-	platform := stubAdapter{name: "platform"}
-
-	var userID string
-	if err := db.QueryRow(`INSERT INTO users (email, password_hash) VALUES ($1,'x') RETURNING id`,
-		"srv2-"+randSuffix()+"@test.dev").Scan(&userID); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, userID) })
-
-	keys := routing.NewPGKeyStore(db, "platform-key")
-	ctx := identity.NewContextWithUser(context.Background(), identity.User{ID: userID})
-	got := adapterForCaller(ctx, testConfig(), provider.NewRawRecorder(""), keys, platform, quietLogger())
-
-	if got != provider.Adapter(platform) {
-		t.Errorf("adapter = %v, want the platform adapter when no team key applies", got)
-	}
-}
 
 // ---- SPA fallback ----
 

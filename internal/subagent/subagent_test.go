@@ -120,8 +120,8 @@ func (f funcTool) Call(context.Context, map[string]any) (toolruntime.Result, err
 func TestSpawnBasic(t *testing.T) {
 	store := agentdef.NewStore()
 	reg := toolruntime.NewRegistry()
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(echoProvider{"child result"}, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(echoProvider{"child result"}, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
@@ -137,8 +137,8 @@ func TestSpawnBasic(t *testing.T) {
 
 func TestSpawnUnknownType(t *testing.T) {
 	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(),
-		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
+		func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg()), nil
 		}, 3)
 
 	res, _ := tool.Call(context.Background(), map[string]any{"prompt": "x", "subagent_type": "nope"})
@@ -149,8 +149,8 @@ func TestSpawnUnknownType(t *testing.T) {
 
 func TestSpawnEmptyPrompt(t *testing.T) {
 	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(),
-		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
+		func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg()), nil
 		}, 3)
 
 	res, _ := tool.Call(context.Background(), map[string]any{"prompt": "   "})
@@ -161,8 +161,8 @@ func TestSpawnEmptyPrompt(t *testing.T) {
 
 func TestSpawnDepthGuardDirect(t *testing.T) {
 	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(),
-		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
+		func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg()), nil
 		}, 2)
 
 	// A run already at the maximum depth must not spawn.
@@ -174,9 +174,9 @@ func TestSpawnDepthGuardDirect(t *testing.T) {
 
 func TestSpawnDepthIncrements(t *testing.T) {
 	var gotDepth int
-	factory := func(_ context.Context, _ agentdef.AgentDef, depth int) *agent.Loop {
+	factory := func(_ context.Context, _ agentdef.AgentDef, depth int) (*agent.Loop, error) {
 		gotDepth = depth
-		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
+		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(), factory, 5)
 
@@ -204,8 +204,8 @@ func TestSpawnNesting(t *testing.T) {
 		}},
 		2: echoProvider{"grandchild result"},
 	}
-	factory := func(_ context.Context, _ agentdef.AgentDef, depth int) *agent.Loop {
-		return agent.New(providers[depth], toolruntime.NewRegistry(), childCfg())
+	factory := func(_ context.Context, _ agentdef.AgentDef, depth int) (*agent.Loop, error) {
+		return agent.New(providers[depth], toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
@@ -234,8 +234,8 @@ func TestSpawnAllowListScoping(t *testing.T) {
 		toolUseEvents("t1", "tracker", `{}`),
 		textEvents("done"),
 	}}
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(childProv, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(childProv, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
@@ -275,8 +275,8 @@ func TestSkillToolNames(t *testing.T) {
 
 func TestSpawnCancellation(t *testing.T) {
 	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(),
-		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-			return agent.New(blockingProvider{}, toolruntime.NewRegistry(), childCfg())
+		func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+			return agent.New(blockingProvider{}, toolruntime.NewRegistry(), childCfg()), nil
 		}, 3)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -302,12 +302,12 @@ func TestSpawnGatedChildReturnsError(t *testing.T) {
 	denyAll := func(context.Context, toolruntime.Tool) (bool, string) {
 		return true, agent.ApprovalReasonPrefix + "ask"
 	}
-	factory := func(_ context.Context, _ agentdef.AgentDef, _ int) *agent.Loop {
+	factory := func(_ context.Context, _ agentdef.AgentDef, _ int) (*agent.Loop, error) {
 		childProv := &scriptProvider{script: [][]provider.Event{
 			toolUseEvents("t1", "run_command", `{}`),
 		}}
 		return agent.New(childProv, toolruntime.NewRegistry(), childCfg()).
-			Use(&agent.PermissionMW{Check: denyAll})
+			Use(&agent.PermissionMW{Check: denyAll}), nil
 	}
 	tool := NewSpawnTool(testResolver(store), reg, factory, 3)
 	reg.Register(tool)
@@ -360,8 +360,8 @@ func TestSpawnFoldsChildUsageIntoScope(t *testing.T) {
 	scope := &agent.UsageScope{}
 	ctx := agent.WithUsageScope(context.Background(), scope)
 
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(agentdef.NewStore()), toolruntime.NewRegistry(), factory, 3)
 
@@ -404,8 +404,8 @@ func TestSpawnToolDescriptionListsAgentTypes(t *testing.T) {
 	store := agentdef.NewStore()
 	store.Put(agentdef.AgentDef{Name: "narrow", WhenToUse: "use for narrow things", Tools: []string{"read_file"}, Scope: identity.SystemScope()})
 	tool := NewSpawnTool(testResolver(store), toolruntime.NewRegistry(),
-		func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg())
+		func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg()), nil
 		}, 3)
 
 	desc := tool.Description()
@@ -427,8 +427,8 @@ func (r kindRecorder) Emit(_ context.Context, kind agent.EventKind, _ any) error
 
 func TestSpawnConcurrent(t *testing.T) {
 	reg := toolruntime.NewRegistry()
-	factory := func(context.Context, agentdef.AgentDef, int) *agent.Loop {
-		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg())
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg()), nil
 	}
 	tool := NewSpawnTool(testResolver(agentdef.NewStore()), reg, factory, 3)
 	reg.Register(tool)

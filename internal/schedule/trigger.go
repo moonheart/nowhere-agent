@@ -20,9 +20,11 @@ import (
 // system prompt, and permission/compression middleware. The server implements
 // it by reusing the chat loop factory. system is the resolved system prompt
 // (empty for a free-text task); model overrides the loop's default ("" =
-// inherit). Tools are NOT bound here — the session is not yet known — but via
-// ToolBinder once the trigger resolves the session.
-type LoopBuilder func(ctx context.Context, task Task, system, model string) *agent.Loop
+// inherit). The error return lets a fire fail with a clear log when the
+// provider or model cannot be resolved (e.g. a task naming a model the
+// resolved provider does not serve). Tools are NOT bound here — the session is
+// not yet known — but via ToolBinder once the trigger resolves the session.
+type LoopBuilder func(ctx context.Context, task Task, system, model string) (*agent.Loop, error)
 
 // ToolBinder attaches the session-scoped, whitelist-filtered tools to a loop
 // once the target session is known (design D3). It mirrors chatapi.ToolBinder
@@ -229,8 +231,17 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 	}
 
 	// Build the whitelisted loop and submit through the shared registry — from
-	// here on it is byte-identical to a human chat run.
-	loop := tr.buildLoop(ctx, task, system, model)
+	// here on it is byte-identical to a human chat run. A loop build failure
+	// (unresolvable provider/model) fails this firing; the task stays due and
+	// retries on the next scan once the operator fixes the reference.
+	loop, err := tr.buildLoop(ctx, task, system, model)
+	if err != nil {
+		if fresh {
+			tr.cleanupFreshSession(ctx, task, sessID)
+		}
+		tr.log.Warn("schedule: loop build failed", "task", task.ID, "err", err)
+		return err
+	}
 	if tr.bindTools != nil {
 		tr.bindTools(ctx, loop, sessID, task.ToolWhitelist)
 	}

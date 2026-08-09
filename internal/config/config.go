@@ -17,10 +17,7 @@ type Config struct {
 	DB   DB
 	Log  Log
 	LLM  LLM
-	// Vision configures the dedicated vision model used by the view_image tool
-	// for main models without native image input (image-input capability).
-	Vision Vision
-	Web    Web
+	Web  Web
 	// Workspace configures per-session image storage (persist-raw-messages).
 	Workspace Workspace
 	// Stream configures the live content broker (redis-stream-live).
@@ -216,12 +213,11 @@ type Stream struct {
 	RedisAddr string `envconfig:"REDIS_ADDR" default:"localhost:6379"`
 }
 
-// LLM configures the default model provider for the chat endpoint.
+// LLM configures the chat model knobs that are NOT part of the DB provider
+// registry (provider/model/keys are managed as data now, change provider-
+// registry). These are the model-independent tunables: raw logging, context
+// window override, temperature, thinking budget, and the stream stall guard.
 type LLM struct {
-	Provider string `envconfig:"LLM_PROVIDER" default:""` // anthropic | openai
-	Model    string `envconfig:"LLM_MODEL" default:""`
-	APIKey   string `envconfig:"LLM_API_KEY" default:""`
-	BaseURL  string `envconfig:"LLM_BASE_URL" default:""` // optional override/proxy
 	// RawLogDir, when set, records every raw LLM HTTP request/response pair to
 	// <dir>/<provider>/<timestamp>-<seq>.{req,resp} for offline inspection.
 	// Auth headers are never written. Empty disables recording.
@@ -243,19 +239,6 @@ type LLM struct {
 	// no SSE bytes arrive for this long, the stream fails fast with a stall
 	// error instead of hanging until the run is cancelled. <=0 disables.
 	StreamIdleTimeout time.Duration `envconfig:"LLM_STREAM_IDLE_TIMEOUT" default:"120s"`
-}
-
-// Vision configures the dedicated vision model backing the view_image tool for
-// main models without native image input (image-input capability). Provider and
-// model must BOTH be set for vision to be enabled; unset keeps the legacy
-// behaviour (image blocks degrade to text placeholders, no view_image tool).
-// Vision calls use this platform key, not team keys (the tool is bound per
-// session where no caller key context exists).
-type Vision struct {
-	Provider string `envconfig:"VISION_PROVIDER" default:""` // anthropic | openai
-	Model    string `envconfig:"VISION_MODEL" default:""`
-	APIKey   string `envconfig:"VISION_API_KEY" default:""`
-	BaseURL  string `envconfig:"VISION_BASE_URL" default:""` // optional override/proxy
 }
 
 // Web configures serving the built frontend.

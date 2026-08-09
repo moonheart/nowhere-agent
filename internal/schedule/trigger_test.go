@@ -85,10 +85,10 @@ type loopSpy struct {
 	gate   <-chan struct{} // when set, the run blocks until closed
 }
 
-func (s *loopSpy) build(ctx context.Context, task Task, system, model string) *agent.Loop {
+func (s *loopSpy) build(ctx context.Context, task Task, system, model string) (*agent.Loop, error) {
 	atomic.AddInt32(&s.count, 1)
 	s.system.Store(system)
-	return agent.New(&stubProvider{gate: s.gate}, toolruntime.NewRegistry(), agent.Config{System: system, Model: model, MaxTokens: 100})
+	return agent.New(&stubProvider{gate: s.gate}, toolruntime.NewRegistry(), agent.Config{System: system, Model: model, MaxTokens: 100}), nil
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -386,8 +386,8 @@ func TestTriggerKickoffReachesModel(t *testing.T) {
 	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
 
 	cap := &captureProvider{seen: make(chan []provider.Message, 1)}
-	build := func(ctx context.Context, task Task, system, model string) *agent.Loop {
-		return agent.New(cap, toolruntime.NewRegistry(), agent.Config{System: system, Model: model, MaxTokens: 100})
+	build := func(ctx context.Context, task Task, system, model string) (*agent.Loop, error) {
+		return agent.New(cap, toolruntime.NewRegistry(), agent.Config{System: system, Model: model, MaxTokens: 100}), nil
 	}
 	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, build, db, time.Hour)
 	tr.fireOnce(context.Background(), created)

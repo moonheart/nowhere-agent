@@ -20,7 +20,6 @@ import (
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
-	"nowhere-agent/internal/routing"
 	"nowhere-agent/internal/usage"
 )
 
@@ -78,7 +77,7 @@ func newEnv(t *testing.T) *env {
 	e := &env{t: t, db: db, store: identity.NewStore(db), mem: memory.NewMemPort()}
 	e.svc = identity.NewService(e.store)
 
-	h := NewHandler(e.svc, routing.NewPGKeyStore(db, "platform-key"), usage.NewStore(db), e.mem)
+	h := NewHandler(e.svc, usage.NewStore(db), e.mem)
 	e.mux = http.NewServeMux()
 	// Stand-in for identity's RequireAuth: it puts the current actor on the
 	// context exactly as the real middleware does, without needing a token.
@@ -382,10 +381,6 @@ func TestTeamRoutesAuthorizationMatrix(t *testing.T) {
 			wantOutsider: 404, wantMember: 200, wantTeamAdmin: 200, wantPlatformOK: true,
 		},
 		{
-			name: "read keys", method: "GET", path: "/api/teams/" + tm.ID + "/keys",
-			wantOutsider: 404, wantMember: 403, wantTeamAdmin: 200, wantPlatformOK: true,
-		},
-		{
 			name: "read usage", method: "GET", path: "/api/teams/" + tm.ID + "/usage",
 			wantOutsider: 404, wantMember: 403, wantTeamAdmin: 200, wantPlatformOK: true,
 		},
@@ -538,67 +533,6 @@ func TestLastOwnerCannotLeave(t *testing.T) {
 	rec := e.as(owner, "DELETE", "/api/teams/"+tm.ID+"/members/"+owner.ID, nil)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("last owner leaving = %d (%s), want 409", rec.Code, rec.Body.String())
-	}
-}
-
-// ---- provider keys ----
-
-func TestTeamKeysNeverReturnPlaintext(t *testing.T) {
-	e := newEnv(t)
-	owner := e.user(identity.PlatformRoleUser)
-	tm := e.team(owner)
-	const secret = "sk-ant-do-not-echo-me-9999"
-
-	rec := e.as(owner, "PUT", "/api/teams/"+tm.ID+"/keys/anthropic", map[string]string{"api_key": secret})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("put key = %d (%s), want 200", rec.Code, rec.Body.String())
-	}
-	if strings.Contains(rec.Body.String(), "do-not-echo-me") {
-		t.Errorf("the write response echoed the secret: %s", rec.Body.String())
-	}
-
-	rec = e.as(owner, "GET", "/api/teams/"+tm.ID+"/keys", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list keys = %d", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), "do-not-echo-me") {
-		t.Errorf("the listing returned the secret: %s", rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "9999") {
-		t.Errorf("the listing has no masked fragment to tell keys apart: %s", rec.Body.String())
-	}
-}
-
-func TestPutKeyRejectsUnknownProvider(t *testing.T) {
-	e := newEnv(t)
-	owner := e.user(identity.PlatformRoleUser)
-	tm := e.team(owner)
-
-	rec := e.as(owner, "PUT", "/api/teams/"+tm.ID+"/keys/nonesuch", map[string]string{"api_key": "x"})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("unknown provider = %d, want 400", rec.Code)
-	}
-}
-
-func TestPutKeyRejectsEmptyValue(t *testing.T) {
-	e := newEnv(t)
-	owner := e.user(identity.PlatformRoleUser)
-	tm := e.team(owner)
-
-	rec := e.as(owner, "PUT", "/api/teams/"+tm.ID+"/keys/anthropic", map[string]string{"api_key": "   "})
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("blank key = %d, want 400", rec.Code)
-	}
-}
-
-func TestDeleteMissingKeyIs404(t *testing.T) {
-	e := newEnv(t)
-	owner := e.user(identity.PlatformRoleUser)
-	tm := e.team(owner)
-
-	rec := e.as(owner, "DELETE", "/api/teams/"+tm.ID+"/keys/openai", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("deleting an unconfigured provider = %d, want 404", rec.Code)
 	}
 }
 
