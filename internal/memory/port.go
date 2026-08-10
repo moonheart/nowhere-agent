@@ -1,7 +1,9 @@
 // Package memory implements the memory capability (design D5): read/write-split
 // long-term memory behind MemoryPort. The agent loop reads online (fast,
-// cacheable); the dreaming worker is the only writer. Short-term memory is the
-// in-context conversation and does NOT go through this port.
+// cacheable); the dreaming worker consolidates offline and the agent's memory
+// tools (write_memory/edit_memory/forget_memory) maintain it online on the
+// caller's behalf. Short-term memory is the in-context conversation and does
+// NOT go through this port.
 package memory
 
 import (
@@ -56,7 +58,8 @@ type Port interface {
 	// uses it with a zero `since` for full relevance recall of chosen kinds.
 	RecallSince(ctx context.Context, since time.Time, query string, scopes []identity.ScopeRef, kinds []Kind, limit int) ([]Memory, error)
 
-	// ---- write side (offline, called ONLY by the dreaming worker) ----
+	// ---- write side (offline by the dreaming worker, online by the agent's
+	// memory tools — both scoped to what their caller may touch) ----
 
 	// Store persists a new memory.
 	Store(ctx context.Context, m Memory) (Memory, error)

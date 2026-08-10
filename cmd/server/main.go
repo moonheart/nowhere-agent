@@ -784,14 +784,24 @@ func run() error {
 			// recall_memory (type-split active-query side, capability K /
 			// context-mgmt): the model fetches summary/insight and other memories
 			// NOT auto-injected. Read-only; scopes mirror the context builder.
+			// write_memory / edit_memory / forget_memory let the agent maintain
+			// the caller's long-term memory online: all pinned to the session
+			// owner's USER scope (never a model-chosen scope), with edit/forget
+			// verifying the target memory's ownership before touching it.
 			if memPort != nil {
 				scopes := []identity.ScopeRef{identity.SystemScope()}
-				if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
+				sess, err := sessionRuntime.GetSession(ctx, sessionID)
+				if err == nil {
 					if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
 						scopes = sc
 					}
 				}
 				reg.Register(memory.NewRecallTool(memPort, scopes))
+				if err == nil {
+					reg.Register(memory.NewWriteMemoryTool(memPort, sess.UserID))
+					reg.Register(memory.NewEditMemoryTool(memPort, sess.UserID))
+					reg.Register(memory.NewForgetMemoryTool(memPort, sess.UserID))
+				}
 			}
 			if sandboxMgr != nil {
 				h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{

@@ -91,7 +91,9 @@ func (t *RecallTool) Call(ctx context.Context, args map[string]any) (toolruntime
 	}
 	var b strings.Builder
 	for _, m := range mems {
-		b.WriteString(fmt.Sprintf("- [%s] (%s) %s\n", m.CreatedAt.Format("2006-01-02"), m.Kind, m.Content))
+		// The trailing id lets the model reference the memory with the
+		// edit_memory / forget_memory tools.
+		b.WriteString(fmt.Sprintf("- [%s] (%s) %s [id: %s]\n", m.CreatedAt.Format("2006-01-02"), m.Kind, m.Content, m.ID))
 	}
 	return toolruntime.Result{Content: b.String()}, nil
 }

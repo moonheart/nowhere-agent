@@ -89,13 +89,15 @@ type Redact struct {
 // Permission maps each tool risk class to a decision for the execution-permission
 // gate: allow (run), deny (block), or ask (headless server has no interactive
 // approver, so ask is treated as deny). Defaults permit read-only, sandbox-write,
-// and network (the wired web-search tool) and deny external-write; tighten
-// network to deny for stricter multi-tenant isolation.
+// and network (the wired web-search tool); external-write (long-term memory
+// tools, future out-of-workspace writers) asks first — the user approves or
+// rejects each call. Tighten network to deny for stricter multi-tenant
+// isolation, or flip external-write to allow/deny to relax/harden it.
 type Permission struct {
 	ReadOnly      string `envconfig:"PERMISSION_READ_ONLY" default:"allow"`
 	SandboxWrite  string `envconfig:"PERMISSION_SANDBOX_WRITE" default:"allow"`
 	Network       string `envconfig:"PERMISSION_NETWORK" default:"allow"`
-	ExternalWrite string `envconfig:"PERMISSION_EXTERNAL_WRITE" default:"deny"`
+	ExternalWrite string `envconfig:"PERMISSION_EXTERNAL_WRITE" default:"ask"`
 }
 
 // MCP configures the built-in SearXNG MCP integration. Enabled is off by
