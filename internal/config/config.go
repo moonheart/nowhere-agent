@@ -121,12 +121,18 @@ type Permission struct {
 	ExternalWrite string `envconfig:"PERMISSION_EXTERNAL_WRITE" default:"ask"`
 }
 
-// MCP configures the built-in SearXNG MCP integration. Enabled is off by
-// default; when on, the server connects to the SearXNG MCP endpoint over
-// Streamable HTTP and registers its tools into each run's tool registry.
-// SearxngURL defaults to the hosted instance and may be overridden for a
-// self-hosted deployment.
+// MCP configures the MCP client integrations. The modern form is MCP_SERVERS:
+// a JSON array of servers (see internal/mcp.ServerConfig), so any number of
+// enterprise MCP servers — knowledge bases, ITSM, internal tooling — can be
+// attached. The legacy MCP_ENABLED + MCP_SEARXNG_URL pair still works as the
+// single-server SearXNG integration; it maps to one server named "searxng"
+// when MCP_SERVERS is empty.
 type MCP struct {
+	// Servers is a JSON array of {name, url, headers, timeout}. When set it
+	// replaces the legacy single-server configuration entirely.
+	Servers string `envconfig:"MCP_SERVERS" default:""`
+	// Enabled gates the built-in SearXNG integration (legacy form; ignored
+	// when Servers is set).
 	Enabled    bool   `envconfig:"MCP_ENABLED" default:"false"`
 	SearxngURL string `envconfig:"MCP_SEARXNG_URL" default:"https://searxng-mcp.moonheart.dev/mcp"`
 }

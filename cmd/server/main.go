@@ -471,19 +471,38 @@ func run() error {
 			log.Info("PII/secret redaction enabled", "strategy", cfg.Redact.Strategy, "categories", cfg.Redact.Categories)
 		}
 
-		// MCP integration (mcp capability): connect to the configured SearXNG MCP
-		// server over Streamable HTTP and list its tools. The client is shared
-		// across runs; the ToolBinder registers its tools into each run's registry
-		// so subagents inherit them via the scoped view. The connect runs async
-		// (reconnectMCP, below): an unreachable/slow server is a degraded
-		// capability, not a boot failure — a transient network or TLS blip must
-		// not take the whole server down. Tools stay unregistered until the
-		// handshake lands; a config mistake surfaces as a clear startup warning
-		// and keeps retrying rather than exiting.
-		var mcpClient *mcp.Client
-		if cfg.MCP.Enabled {
-			mcpClient = mcp.NewSearxng(cfg.MCP.SearxngURL, 0)
-			go reconnectMCP(ctx, mcpClient, log)
+		// MCP integration (mcp capability): connect to the configured MCP
+		// servers over Streamable HTTP and list their tools. Servers come from
+		// MCP_SERVERS (JSON array — any number of enterprise MCP servers), or
+		// the legacy MCP_ENABLED + MCP_SEARXNG_URL SearXNG integration. The
+		// manager is shared across runs; the ToolBinder registers its tools
+		// into each run's registry so subagents inherit them via the scoped
+		// view. The connects run async (reconnectMCP, below): an unreachable/
+		// slow server is a degraded capability, not a boot failure — a
+		// transient network or TLS blip must not take the whole server down.
+		// Tools stay unregistered until the handshake lands; a config mistake
+		// surfaces as a clear startup warning and keeps retrying rather than
+		// exiting.
+		var mcpManager *mcp.Manager
+		mcpRaw := cfg.MCP.Servers
+		if mcpRaw == "" && cfg.MCP.Enabled {
+			// Legacy single-server SearXNG form.
+			b, err := json.Marshal([]mcp.ServerConfig{{Name: "searxng", URL: cfg.MCP.SearxngURL}})
+			if err != nil {
+				return fmt.Errorf("mcp legacy config: %w", err)
+			}
+			mcpRaw = string(b)
+		}
+		if mcpRaw != "" {
+			var err error
+			mcpManager, err = mcp.NewManagerFromJSON(mcpRaw)
+			if err != nil {
+				return fmt.Errorf("mcp config: %w", err)
+			}
+			log.Info("mcp servers configured", "servers", mcpManager.ServerNames())
+			for _, c := range mcpManager.Clients() {
+				go reconnectMCP(ctx, c, log)
+			}
 		}
 		// Context compression (context-compression): the loop compresses its
 		// working view as it approaches the model's context window, using a
@@ -839,8 +858,8 @@ func run() error {
 			}
 			// MCP tools (network): registered into the same run registry so
 			// children scoped from it inherit them.
-			if mcpClient != nil {
-				for _, t := range mcpClient.Tools() {
+			if mcpManager != nil {
+				for _, t := range mcpManager.Tools() {
 					reg.Register(t)
 				}
 			}

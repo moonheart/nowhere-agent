@@ -42,13 +42,19 @@ type Client struct {
 // server is the short name used to prefix adapted tool names. timeout bounds a
 // single tool call; zero uses a default.
 func New(server, endpoint string, timeout time.Duration) *Client {
+	return NewWithHeaders(server, endpoint, timeout, nil)
+}
+
+// NewWithHeaders is New with per-request headers (bearer tokens, api keys,
+// custom tracing headers an enterprise MCP server requires).
+func NewWithHeaders(server, endpoint string, timeout time.Duration, headers map[string]string) *Client {
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
 	return &Client{
 		server:   server,
 		endpoint: endpoint,
-		hc:       &http.Client{},
+		hc:       &http.Client{Transport: headerTransport{base: http.DefaultTransport, headers: headers}},
 		timeout:  timeout,
 	}
 }
@@ -60,6 +66,23 @@ func NewSearxng(endpoint string, timeout time.Duration) *Client {
 
 // Server returns the server name used to prefix tool names.
 func (c *Client) Server() string { return c.server }
+
+// headerTransport injects fixed per-request headers (bearer tokens, api keys)
+// into every request a Client makes. It is used when the server config carries
+// headers; nil headers is a plain passthrough.
+type headerTransport struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if len(t.headers) > 0 {
+		for k, v := range t.headers {
+			req.Header.Set(k, v)
+		}
+	}
+	return t.base.RoundTrip(req)
+}
 
 // Connect performs the initialize handshake and lists the server's tools,
 // building the adapted toolruntime.Tool set. It must be called before Tools or
