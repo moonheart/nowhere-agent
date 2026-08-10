@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -33,9 +34,19 @@ type Handler struct {
 	// audit records authentication events (signup/login/logout); nil disables
 	// recording while the handler keeps serving normally.
 	audit *audit.Logger
+	// throttle, when set, locks a (email, ip) pair after repeated login
+	// failures (credential-stuffing defense).
+	throttle *LoginThrottler
 }
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+
+// WithThrottle wires login failure throttling. Left nil, /api/auth/login has
+// no per-pair lockout (the gateway's global request limiter still applies).
+func (h *Handler) WithThrottle(t *LoginThrottler) *Handler {
+	h.throttle = t
+	return h
+}
 
 // WithAudit wires the audit trail so authentication events are recorded.
 // Recording is best-effort: a write failure is logged, never surfaced to the
@@ -143,16 +154,32 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	// Login throttling gate: a locked (email, ip) pair is refused before any
+	// credential work, with Retry-After so the client knows when to retry.
+	// A nil throttler keeps the endpoint unthrottled.
+	if h.throttle != nil {
+		if allowed, retryAfter := h.throttle.Check(req.Email, audit.ClientIP(r)); !allowed {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
+			writeError(w, http.StatusTooManyRequests, "too many login attempts; try again later")
+			return
+		}
+	}
 	token, u, err := h.svc.Login(r.Context(), req.Email, req.Password)
 	if errors.Is(err, ErrInvalidCredentials) {
 		// Record the attempted email but no actor id: a failed login has no
 		// authenticated identity, and logging the address (not the password) is
 		// what a credential-stuffing review needs.
+		if h.throttle != nil {
+			h.throttle.Fail(req.Email, audit.ClientIP(r))
+		}
 		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"email": req.Email, "reason": "invalid_credentials"}))
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 	if errors.Is(err, ErrUserDisabled) {
+		if h.throttle != nil {
+			h.throttle.Fail(req.Email, audit.ClientIP(r))
+		}
 		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).Detail(map[string]any{"reason": "account_disabled"}))
 		writeError(w, http.StatusForbidden, "account is disabled")
 		return
@@ -161,6 +188,9 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"email": req.Email, "reason": "internal"}))
 		writeError(w, http.StatusInternalServerError, "login failed")
 		return
+	}
+	if h.throttle != nil {
+		h.throttle.Success(req.Email, audit.ClientIP(r))
 	}
 	h.record(audit.Success(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).Target("user", u.ID))
 	writeJSON(w, http.StatusOK, authResponse{Token: token, User: toDTO(u)})

@@ -119,7 +119,7 @@ func run() error {
 
 	identityStore := identity.NewStore(pool)
 	identitySvc := identity.NewService(identityStore)
-	identityHandler := identity.NewHandler(identitySvc)
+	identityHandler := identity.NewHandler(identitySvc).WithThrottle(identity.NewLoginThrottler())
 	identityHandler.Register(mux)
 
 	// Protected route tier (httpx.Router): auth — and any future per-route
