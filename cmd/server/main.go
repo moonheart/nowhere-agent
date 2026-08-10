@@ -33,6 +33,7 @@ import (
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/observability"
 	"nowhere-agent/internal/oidc"
+	"nowhere-agent/internal/openapi"
 	"nowhere-agent/internal/permission"
 	"nowhere-agent/internal/platform/db"
 	"nowhere-agent/internal/provider"
@@ -99,6 +100,21 @@ func run() error {
 	// /api/users/{id} stays one series regardless of how many ids exist.
 	metrics := observability.NewMetrics()
 	mux.Handle("GET /metrics", metrics.Handler())
+
+	// OpenAPI contract (enterprise integration): the embeddable API surface as
+	// a machine-readable document, so external systems generate typed clients
+	// instead of reverse-engineering the routes. Open (no auth): it describes
+	// the API, it does not expose it.
+	if spec, err := openapi.JSON(); err != nil {
+		return fmt.Errorf("openapi spec: %w", err)
+	} else {
+		mux.HandleFunc("GET /openapi.json", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(spec)
+		})
+	}
+	log.Info("openapi contract served at /openapi.json")
 
 	identityStore := identity.NewStore(pool)
 	identitySvc := identity.NewService(identityStore)
