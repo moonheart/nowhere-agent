@@ -24,6 +24,8 @@ type Config struct {
 	Stream Stream
 	// Sandbox configures the per-session sandbox backend for built-in tools.
 	Sandbox Sandbox
+	// HTTPTool configures the http_request tool (external API allowlist).
+	HTTPTool HTTPTool
 	// Subagent configures the spawn_agent tool (subagent capability).
 	Subagent Subagent
 	// MCP configures the MCP client integrations (mcp capability).
@@ -255,6 +257,20 @@ type Sandbox struct {
 	// run_command. Empty auto-detects (bash on PATH; Git Bash on Windows). Set it
 	// to your Git Bash bash.exe if auto-detection fails.
 	Shell string `envconfig:"SANDBOX_SHELL" default:""`
+}
+
+// HTTPTool configures the http_request built-in tool (enterprise integration):
+// the agent calling external HTTP APIs — internal ERP/CRM/knowledge services —
+// confined to an explicit host allowlist. Empty allowlist disables the tool
+// entirely (fail-closed): a deployment that never allows a host gets no tool.
+type HTTPTool struct {
+	// Allowlist is a comma-separated list of host patterns the tool may call:
+	// api.example.com (exact), *.example.com (subdomains), 10.0.0.0/8 (CIDR),
+	// or * (full open). Hosts are matched case-insensitively; ports follow the
+	// host (api.example.com:8443 matches that exact port only).
+	Allowlist string `envconfig:"HTTP_TOOL_ALLOWLIST" default:""`
+	// Timeout bounds a single tool call; the model may lower it per call.
+	Timeout time.Duration `envconfig:"HTTP_TOOL_TIMEOUT" default:"30s"`
 }
 
 // Stream selects the live content broker that fans run output out to clients.

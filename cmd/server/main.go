@@ -761,6 +761,19 @@ func run() error {
 		// narrows it to whitelist when that is non-empty (scheduled-tasks D3): a
 		// tool not on the whitelist is never registered into the loop, so the
 		// model cannot call it. A nil whitelist keeps the full set (chat).
+		//
+		// http_request allowlist (enterprise integration): compiled once from
+		// HTTP_TOOL_ALLOWLIST. A malformed pattern fails boot — a typo'd allowlist
+		// must not silently disable the tool (or worse, match nothing).
+		var httpAllow builtin.AllowlistFunc
+		if list := splitComma(cfg.HTTPTool.Allowlist); len(list) > 0 {
+			fn, err := builtin.Allowlist(list)
+			if err != nil {
+				return fmt.Errorf("http tool allowlist: %w", err)
+			}
+			httpAllow = fn
+			log.Info("http_request tool enabled", "allowlist", list)
+		}
 		buildToolRegistry := func(ctx context.Context, sessionID string, whitelist []string) *toolruntime.Registry {
 			full := toolruntime.NewRegistry()
 			reg := full
@@ -789,6 +802,14 @@ func run() error {
 			// Live progress-card demo: the tool streams progress frames through
 			// the loop's generative-UI pusher while it runs.
 			reg.Register(builtin.NewProgressUI())
+			// http_request (enterprise integration): the agent calls external
+			// HTTP APIs (internal ERP/CRM/knowledge services) confined to the
+			// configured host allowlist. RiskNetwork, so the permission gate
+			// governs it like MCP tools. Registered only when the allowlist is
+			// non-empty — no allowlist, no tool (fail-closed).
+			if httpAllow != nil {
+				reg.Register(builtin.NewHTTPRequest(httpAllow, cfg.HTTPTool.Timeout))
+			}
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
 			// present (independent of the sandbox); scopes mirror the context
@@ -1287,4 +1308,16 @@ func buildEncryptor(cfg config.Config) (*secrets.Encryptor, error) {
 		return nil, nil
 	}
 	return secrets.NewSingle([]byte(cfg.Secrets.MasterKey))
+}
+
+// splitComma splits a comma-separated list, trimming whitespace and dropping
+// empty entries.
+func splitComma(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
