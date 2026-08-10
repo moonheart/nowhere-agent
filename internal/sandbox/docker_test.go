@@ -103,7 +103,8 @@ func TestDockerPortIntegration(t *testing.T) {
 	defer cancel()
 
 	// Probe daemon.
-	if _, err := p.cli.Ping(ctx); err != nil {
+	ping, err := p.cli.Ping(ctx)
+	if err != nil {
 		p.cli.Close()
 		t.Skipf("no docker daemon: %v", err)
 	}
@@ -113,7 +114,11 @@ func TestDockerPortIntegration(t *testing.T) {
 	// Linux-only HostConfig like the read-only rootfs). A daemon serving
 	// Windows containers (Docker Desktop on Windows CI) cannot run it — skip
 	// rather than fail on "read-only mode is not supported for Windows
-	// containers".
+	// containers". Both the ping's OSType and /version's Os report it; check
+	// each (one may be missing depending on engine/API version).
+	if strings.EqualFold(ping.OSType, "windows") {
+		t.Skipf("docker daemon serves %s containers; the integration test targets linux", ping.OSType)
+	}
 	if ver, err := p.cli.ServerVersion(ctx); err == nil && strings.EqualFold(ver.Os, "windows") {
 		t.Skipf("docker daemon serves %s containers; the integration test targets linux", ver.Os)
 	}
