@@ -1,27 +1,25 @@
-import { useMemo, useState, type FC } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FC,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   FolderTree,
-  Activity,
-  Brain,
   Blocks,
   File,
   FileCode2,
   FileText,
-  CheckCircle2,
-  XCircle,
-  Loader2,
   ChevronRight,
-  Bot,
   type LucideIcon,
 } from "lucide-react";
-import { useActivity, type ToolActivity, type SubagentRun } from "@/lib/activity";
+import { useActivity } from "@/lib/activity";
+import { listSkills, enableSkill, disableSkill, type Skill } from "@/lib/skills";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import {
   Empty,
   EmptyDescription,
@@ -30,26 +28,80 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
-type TabId = "workspace" | "runs" | "memory" | "skills";
+type TabId = "workspace" | "skills";
 
 const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
   { id: "workspace", label: "Workspace", icon: FolderTree },
-  { id: "runs", label: "Runs", icon: Activity },
-  { id: "memory", label: "Memory", icon: Brain },
   { id: "skills", label: "Skills", icon: Blocks },
 ];
 
 /**
- * Right-hand inspector panel. Four tabs: Workspace (files the agent touched),
- * Runs (tool-call log), Memory and Skills (placeholders for upcoming backend
- * features). Data comes from the in-app activity feed the thread publishes.
+ * Right-hand inspector panel. Two tabs: Workspace (files the agent touched in
+ * this conversation) and Skills (the caller's user-scope skills, toggleable).
+ * Workspace data comes from the in-app activity feed the thread publishes;
+ * Skills loads from the self-service API on tab activation. Long-term memory
+ * management lives in the Console (My page), not here.
  */
+// Panel width bounds (px) for the drag resize. The default sits between them;
+// the user's last drag is remembered in localStorage.
+const PANEL_MIN_WIDTH = 320;
+const PANEL_MAX_WIDTH = 720;
+const PANEL_DEFAULT_WIDTH = 448;
+const PANEL_WIDTH_KEY = "right-panel-width";
+
+function storedPanelWidth(): number {
+  try {
+    const v = Number(localStorage.getItem(PANEL_WIDTH_KEY));
+    if (Number.isFinite(v)) {
+      return Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, v));
+    }
+  } catch {
+    // private mode etc. — fall through to the default
+  }
+  return PANEL_DEFAULT_WIDTH;
+}
+
 export const RightPanel: FC = () => {
   const [tab, setTab] = useState<TabId>("workspace");
   const [collapsed, setCollapsed] = useState(false);
+  const [width, setWidth] = useState(storedPanelWidth);
+  // The drag's anchor: the pointer's start x and the panel width at grab time.
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+
+  // Pointer-capture drag on the left edge: dragging left widens the panel
+  // (it sits on the right of the screen). Text selection is suppressed for
+  // the duration so a fast drag doesn't select the content underneath.
+  const onHandlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    dragRef.current = { startX: e.clientX, startW: width };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    document.body.style.userSelect = "none";
+  };
+  const onHandlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const w = Math.min(
+      PANEL_MAX_WIDTH,
+      Math.max(PANEL_MIN_WIDTH, drag.startW + (drag.startX - e.clientX)),
+    );
+    setWidth(w);
+  };
+  const endDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    document.body.style.userSelect = "";
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    try {
+      localStorage.setItem(PANEL_WIDTH_KEY, String(width));
+    } catch {
+      // private mode etc. — the width just isn't remembered
+    }
+  };
 
   if (collapsed) {
     return (
@@ -79,7 +131,21 @@ export const RightPanel: FC = () => {
   }
 
   return (
-    <aside className="flex w-72 flex-col border-l border-border bg-background">
+    <aside
+      className="relative flex shrink-0 flex-col border-l border-border bg-background"
+      style={{ width }}
+    >
+      {/* Drag handle: the panel's left edge. */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize panel"
+        onPointerDown={onHandlePointerDown}
+        onPointerMove={onHandlePointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        className="absolute top-0 bottom-0 left-0 z-10 w-1.5 cursor-col-resize touch-none select-none bg-transparent transition-colors hover:bg-border/70 active:bg-border"
+      />
       <Tabs
         value={tab}
         onValueChange={(v) => setTab(v as TabId)}
@@ -92,7 +158,7 @@ export const RightPanel: FC = () => {
                 key={id}
                 value={id}
                 title={label}
-                className="h-auto flex-col gap-1 py-1.5 text-[11px]"
+                className="h-auto py-1.5 pr-2 text-[11px]"
               >
                 <Icon />
                 {label}
@@ -114,14 +180,10 @@ export const RightPanel: FC = () => {
           <TabsContent value="workspace">
             <WorkspaceTab />
           </TabsContent>
-          <TabsContent value="runs">
-            <RunsTab />
-          </TabsContent>
-          <TabsContent value="memory">
-            <MemoryTab />
-          </TabsContent>
           <TabsContent value="skills">
-            <SkillsTab />
+            {/* Tabs keep inactive content mounted, so the tab passes its
+                activation down to trigger a refresh. */}
+            <SkillsTab active={tab === "skills"} />
           </TabsContent>
         </ScrollArea>
       </Tabs>
@@ -198,184 +260,102 @@ const FileIcon: FC<{ path: string }> = ({ path }) => {
   return <Icon className="size-4 shrink-0 text-muted-foreground" />;
 };
 
-/* ---------- Runs ---------- */
+/* ---------- Skills ---------- */
 
-const RunsTab: FC = () => {
-  const { tools, subagents } = useActivity();
-  if (tools.length === 0 && subagents.length === 0) {
+const SkillsTab: FC<{ active: boolean }> = ({ active }) => {
+  const [skills, setSkills] = useState<Skill[] | null>(null);
+  const [error, setError] = useState("");
+  // id of the skill whose toggle request is in flight.
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const { skills } = await listSkills({ kind: "me" });
+      setSkills(skills.sort((a, b) => a.name.localeCompare(b.name)));
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (active) void load();
+  }, [active, load]);
+
+  const toggle = async (s: Skill) => {
+    if (busy) return;
+    setBusy(s.id);
+    try {
+      await (s.enabled ? disableSkill({ kind: "me" }, s.id) : enableSkill({ kind: "me" }, s.id));
+      setSkills((prev) =>
+        prev ? prev.map((x) => (x.id === s.id ? { ...x, enabled: !s.enabled } : x)) : prev,
+      );
+    } catch {
+      // keep the previous state on failure
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (skills === null && !error) {
+    return <TabLoading label="Loading skills…" />;
+  }
+  if (skills !== null && skills.length === 0) {
     return (
       <TabEmpty
-        icon={Activity}
-        title="No runs yet"
-        hint="Tool calls the agent makes will stream here as they run."
+        icon={Blocks}
+        title="No skills yet"
+        hint="Skills you author in the Console appear here. Team and system skills are managed there too."
       />
     );
   }
   return (
     <div className="p-2">
-      {subagents.length > 0 && (
-        <div className="mb-2">
-          <div className="px-1 pb-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
-            Subagents
-          </div>
-          <ul>
-            {[...subagents].reverse().map((s) => (
-              <SubagentRow key={s.id} run={s} />
-            ))}
-          </ul>
-        </div>
+      {error && (
+        <p className="px-1 pb-2 text-[11px] text-destructive">Failed to load skills: {error}</p>
       )}
-      {tools.length > 0 && (
-        <ul>
-          {[...tools].reverse().map((t) => (
-            <RunRow key={t.id} tool={t} />
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-};
-
-// StatusIcon is the running / error / done glyph shared by both row kinds.
-const StatusIcon: FC<{ status: string }> = ({ status }) =>
-  status === "running" ? (
-    <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
-  ) : status === "error" ? (
-    <XCircle className="size-3.5 shrink-0 text-destructive" />
-  ) : (
-    <CheckCircle2 className="size-3.5 shrink-0 text-emerald-500" />
-  );
-
-const SubagentRow: FC<{ run: SubagentRun }> = ({ run }) => (
-  <li className="mb-1 rounded-lg border border-primary/20 bg-primary/5 px-2.5 py-2">
-    <div className="flex items-center gap-2">
-      <StatusIcon status={run.status} />
-      <Bot className="size-3.5 shrink-0 text-primary" />
-      <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground">
-        {run.agentType}
-      </span>
-      {run.depth > 1 && (
-        <Badge variant="secondary" className="h-4 px-1 text-[10px]">
-          L{run.depth}
-        </Badge>
-      )}
-    </div>
-    {run.tools.length > 0 && (
-      <div className="mt-1 pl-6 font-mono text-[10px] text-muted-foreground">
-        {run.tools.join(" · ")}
-      </div>
-    )}
-  </li>
-);
-
-const RunRow: FC<{ tool: ToolActivity }> = ({ tool }) => {
-  const [open, setOpen] = useState(false);
-  const resultText =
-    tool.result === undefined || tool.result === null
-      ? ""
-      : typeof tool.result === "string"
-        ? tool.result
-        : JSON.stringify(tool.result, null, 2);
-  return (
-    <li className="mb-1">
-      <Collapsible
-        open={open}
-        onOpenChange={setOpen}
-        className="rounded-lg border border-border"
-      >
-        <CollapsibleTrigger className="flex w-full items-center gap-2 px-2.5 py-2 text-left">
-          <StatusIcon status={tool.status} />
-          <span className="min-w-0 flex-1 truncate font-mono text-xs font-medium text-foreground">
-            {tool.toolName}
-          </span>
-          <span className="text-[10px] text-muted-foreground">
-            {new Date(tool.at).toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-              second: "2-digit",
-            })}
-          </span>
-        </CollapsibleTrigger>
-        <CollapsibleContent className="space-y-1.5 border-t border-border px-2.5 py-2 font-mono text-[11px] leading-relaxed">
-          {tool.argsText && (
-            <pre className="break-all whitespace-pre-wrap text-muted-foreground">
-              {tool.argsText}
-            </pre>
-          )}
-          {resultText && (
-            <pre
-              className={cn(
-                "break-all whitespace-pre-wrap",
-                tool.isError ? "text-destructive" : "text-foreground/70",
+      <ul className="space-y-1">
+        {skills?.map((s) => (
+          <li
+            key={s.id}
+            className={cn(
+              "flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-2.5 py-2",
+              !s.enabled && "opacity-60",
+            )}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-xs font-medium text-foreground">
+                  {s.name}
+                </span>
+                <Badge variant="secondary" className="h-4 shrink-0 px-1 text-[10px]">
+                  v{s.current_version}
+                </Badge>
+              </div>
+              {s.description && (
+                <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                  {s.description}
+                </p>
               )}
-            >
-              {resultText}
-            </pre>
-          )}
-        </CollapsibleContent>
-      </Collapsible>
-    </li>
+            </div>
+            <Switch
+              size="sm"
+              checked={s.enabled}
+              disabled={busy === s.id}
+              onCheckedChange={() => void toggle(s)}
+              aria-label={`${s.enabled ? "Disable" : "Enable"} ${s.name}`}
+            />
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 };
 
-/* ---------- Memory / Skills (placeholders) ---------- */
+/* ---------- shared ---------- */
 
-const MemoryTab: FC = () => (
-  <Placeholder
-    icon={Brain}
-    title="Memory"
-    lines={[
-      { k: "preference", v: "回复用中文" },
-      { k: "pet", v: "养了一只叫豆豆的猫" },
-    ]}
-    hint="Long-term memory recall is on the roadmap — facts the agent remembers about you will be listed and editable here."
-  />
-);
-
-const SkillsTab: FC = () => (
-  <Placeholder
-    icon={Blocks}
-    title="Skills"
-    lines={[
-      { k: "file-tools", v: "read / write / list workspace files" },
-      { k: "run-command", v: "execute shell in the sandbox (soon)" },
-    ]}
-    hint="Skill and script registration (SkillTool / ScriptTool) is planned — installed skills will be browsable and toggleable here."
-  />
-);
-
-const Placeholder: FC<{
-  icon: LucideIcon;
-  title: string;
-  lines: { k: string; v: string }[];
-  hint: string;
-}> = ({ icon: Icon, title, lines, hint }) => (
-  <div className="p-3">
-    <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
-      <Icon className="size-4 text-primary" />
-      {title}
-      <Badge
-        variant="outline"
-        className="border-amber-500/40 text-amber-700 dark:text-amber-400"
-      >
-        preview
-      </Badge>
-    </div>
-    <ul className="mb-3 space-y-1.5">
-      {lines.map((l) => (
-        <li
-          key={l.k}
-          className="rounded-lg border border-dashed border-border bg-muted/50 px-2.5 py-2"
-        >
-          <div className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">
-            {l.k}
-          </div>
-          <div className="text-xs text-foreground/80">{l.v}</div>
-        </li>
-      ))}
-    </ul>
-    <p className="text-[11px] leading-relaxed text-muted-foreground">{hint}</p>
-  </div>
+const TabLoading: FC<{ label: string }> = ({ label }) => (
+  <div className="p-4 text-center text-xs text-muted-foreground">{label}</div>
 );
 
 const TabEmpty: FC<{ icon: LucideIcon; title: string; hint: string }> = ({
