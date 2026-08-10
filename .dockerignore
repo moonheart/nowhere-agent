@@ -1,0 +1,16 @@
+# Build context exclusions for docker build.
+.git
+.github
+node_modules
+web/node_modules
+web/dist
+logs
+data
+cmd/e2e
+*.exe
+*.log
+.env
+docs
+openspec
+playwright-report
+test-results

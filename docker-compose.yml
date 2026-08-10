@@ -1,0 +1,87 @@
+# nowhere-agent — one-command enterprise deployment.
+#
+#   docker compose up -d --build
+#
+# brings up Postgres (durable state), Redis (live fan-out across instances),
+# and the gateway serving the SPA at http://localhost:8080. Scale the gateway
+# horizontally with `docker compose up -d --scale server=3` once Redis is up.
+#
+# Production notes:
+#   - Set SECRETS_MASTER_KEY (openssl rand -base64 32) — without it provider
+#     keys are stored plaintext.
+#   - LLM_PROVIDER/LLM_API_KEY/LLM_MODEL are legacy env knobs; the modern path
+#     is the admin console provider registry, which needs SECRETS_MASTER_KEY.
+#   - Uncomment the mockllm service for a no-key smoke run (mock endpoint).
+#   - For docker sandboxing, mount /var/run/docker.sock and set
+#     SANDBOX_BACKEND=docker — the docker SDK needs the host socket.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nowhere
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nowhere"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    entrypoint: ["/usr/local/bin/migrate"]
+    environment:
+      DB_DSN: postgres://postgres:postgres@postgres:5432/nowhere?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  server:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      ENV: prod
+      DB_DSN: postgres://postgres:postgres@postgres:5432/nowhere?sslmode=disable
+      STREAM_BROKER: redis
+      REDIS_ADDR: redis:6379
+      # SECRETS_MASTER_KEY: change me (openssl rand -base64 32)
+      # OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URL: enterprise SSO
+      # WEBHOOK_URL: outbound run-completion notifications
+      # MCP_ENABLED: "true"
+      # SANDBOX_BACKEND: local  (or docker with the socket mount below)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # --- optional: fake LLM for a no-key smoke run ---
+  mockllm:
+    build: .
+    entrypoint: ["/usr/local/bin/mockllm"]
+    ports:
+      - "9090:9090"
+
+volumes:
+  pgdata:
+  redisdata:
