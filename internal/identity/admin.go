@@ -275,5 +275,6 @@ func (s *Service) Stats(ctx context.Context) (PlatformStats, error) {
 func IsNotFound(err error) bool {
 	return errors.Is(err, ErrUserNotFound) ||
 		errors.Is(err, ErrTeamNotFound) ||
-		errors.Is(err, ErrNotMember)
+		errors.Is(err, ErrNotMember) ||
+		errors.Is(err, ErrKeyNotFound)
 }

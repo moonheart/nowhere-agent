@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -14,6 +15,9 @@ import (
 const (
 	// tokenTTL is how long an issued auth token remains valid.
 	tokenTTL = 30 * 24 * time.Hour
+	// serviceKeyPrefix marks programmatic credentials (admin-issued, long-lived,
+	// revocable). The prefix makes lookup cheap and logs/UI unambiguous.
+	serviceKeyPrefix = "sk_"
 )
 
 // Service provides authentication and team operations over the Store.
@@ -76,15 +80,34 @@ func (s *Service) IssueToken(ctx context.Context, u User) (string, error) {
 	return raw, nil
 }
 
-// Authenticate resolves a bearer token to its user. Disabling an account
-// revokes its tokens, so this rarely fires — but a token issued in the same
-// instant as the disable would otherwise slip through, and re-checking is one
-// field comparison on a row already fetched.
+// Authenticate resolves a bearer token to its user. Two credential classes:
+// user auth tokens (30-day TTL sessions) and admin-issued service keys (sk_,
+// long-lived programmatic credentials). Disabling an account revokes its
+// tokens, so this rarely fires — but a token issued in the same instant as the
+// disable would otherwise slip through, and re-checking is one field comparison
+// on a row already fetched.
 func (s *Service) Authenticate(ctx context.Context, token string) (User, error) {
+	if strings.HasPrefix(token, serviceKeyPrefix) {
+		return s.authenticateServiceKey(ctx, token)
+	}
 	userID, err := s.store.UserIDByTokenHash(ctx, hashToken(token), s.now())
 	if err != nil {
 		return User{}, err
 	}
+	return s.userIfEnabled(ctx, userID)
+}
+
+// authenticateServiceKey resolves a service key (sk_...) to its owner account.
+func (s *Service) authenticateServiceKey(ctx context.Context, token string) (User, error) {
+	userID, err := s.store.UserIDByServiceKeyHash(ctx, hashToken(token), s.now())
+	if err != nil {
+		return User{}, err
+	}
+	return s.userIfEnabled(ctx, userID)
+}
+
+// userIfEnabled loads a user and rejects disabled accounts.
+func (s *Service) userIfEnabled(ctx context.Context, userID string) (User, error) {
 	u, err := s.store.UserByID(ctx, userID)
 	if err != nil {
 		return User{}, err
@@ -93,6 +116,49 @@ func (s *Service) Authenticate(ctx context.Context, token string) (User, error) 
 		return User{}, ErrUserDisabled
 	}
 	return u, nil
+}
+
+// CreateServiceKey issues a long-lived programmatic credential for userID.
+// ttl <= 0 means the key never expires. The raw token is returned once; only
+// its hash is stored. Returns ErrUserNotFound when userID matches no account.
+func (s *Service) CreateServiceKey(ctx context.Context, name, userID string, ttl time.Duration) (raw string, key ServiceKey, err error) {
+	if _, err := s.store.UserByID(ctx, userID); err != nil {
+		return "", ServiceKey{}, err
+	}
+	var expiresAt *time.Time
+	if ttl > 0 {
+		t := s.now().Add(ttl)
+		expiresAt = &t
+	}
+	raw, err = generateServiceKey()
+	if err != nil {
+		return "", ServiceKey{}, err
+	}
+	key, err = s.store.CreateServiceKey(ctx, name, userID, hashToken(raw), expiresAt)
+	if err != nil {
+		return "", ServiceKey{}, err
+	}
+	return raw, key, nil
+}
+
+// ListServiceKeys returns the (optionally revoked) service keys of one user,
+// or all keys when userID is empty (admin view).
+func (s *Service) ListServiceKeys(ctx context.Context, userID string, includeRevoked bool) ([]ServiceKey, error) {
+	return s.store.ListServiceKeys(ctx, userID, includeRevoked)
+}
+
+// RevokeServiceKey invalidates a service key (soft delete for audit).
+func (s *Service) RevokeServiceKey(ctx context.Context, id string) error {
+	return s.store.RevokeServiceKey(ctx, id)
+}
+
+// generateServiceKey returns an opaque sk_-prefixed bearer token.
+func generateServiceKey() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("rand service key: %w", err)
+	}
+	return serviceKeyPrefix + hex.EncodeToString(b), nil
 }
 
 // Logout invalidates a token.

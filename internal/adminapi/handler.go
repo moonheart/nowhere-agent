@@ -163,6 +163,9 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	route(g, "DELETE /api/admin/memories/{id}", h.requireAdmin(h.adminDeleteMemory))
 	route(g, "POST /api/admin/memories/{id}/deprecate", h.requireAdmin(h.adminDeprecateMemory))
 	route(g, "GET /api/admin/audit", h.requireAdmin(h.listAudit))
+	route(g, "GET /api/admin/service-keys", h.requireAdmin(h.listServiceKeys))
+	route(g, "POST /api/admin/service-keys", h.requireAdmin(h.createServiceKey))
+	route(g, "DELETE /api/admin/service-keys/{id}", h.requireAdmin(h.revokeServiceKey))
 
 	// Provider registry, platform tier (change provider-registry): system
 	// providers and their models are platform-managed; one of them is the

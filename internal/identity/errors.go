@@ -37,4 +37,6 @@ var (
 	// ErrSelfTarget is returned when an administrator aims a lock-out operation
 	// (demote, disable, delete) at their own account.
 	ErrSelfTarget = newStatus("operation cannot target your own account", 409)
+	// ErrKeyNotFound is returned for a service-key id that matches nothing.
+	ErrKeyNotFound = newStatus("service key not found", 404)
 )

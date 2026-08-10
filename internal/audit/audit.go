@@ -96,6 +96,10 @@ const (
 	// Memory administration.
 	ActionMemoryDelete    Action = "memory.delete"
 	ActionMemoryDeprecate Action = "memory.deprecate"
+
+	// Service-key administration (the token itself is never recorded).
+	ActionServiceKeyCreate Action = "service_key.create"
+	ActionServiceKeyRevoke Action = "service_key.revoke"
 )
 
 // Event is one auditable occurrence, built fluently and handed to Logger.Log.

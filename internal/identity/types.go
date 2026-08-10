@@ -141,3 +141,18 @@ type Token struct {
 	ExpiresAt time.Time
 	CreatedAt time.Time
 }
+
+// ServiceKey is a long-lived programmatic credential (enterprise integration):
+// issued by an admin, scoped to a user (inheriting that user's permissions),
+// optionally non-expiring, revocable independently of the account's tokens.
+type ServiceKey struct {
+	ID         string
+	Name       string
+	UserID     string
+	CreatedAt  time.Time
+	ExpiresAt  *time.Time
+	LastUsedAt *time.Time
+	// RevokedAt is set when an admin revoked the key; revoked keys never
+	// authenticate (soft delete keeps the audit trail).
+	RevokedAt *time.Time
+}
