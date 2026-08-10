@@ -249,10 +249,12 @@ type Sandbox struct {
 	Network string `envconfig:"SANDBOX_NETWORK" default:"deny"` // deny | open | allowlist
 	// LocalExec enables the run_command tool on the local backend. The local
 	// backend runs commands on the host (confined only to the workspace working
-	// dir), so this is a trusted single-tenant switch; multi-tenant deployments
-	// should use the docker backend, where run_command is always available and
+	// dir), so this is a trusted single-tenant switch and defaults OFF — a
+	// multi-tenant deployment that forgets to configure the docker backend must
+	// not silently gain host command execution. Multi-tenant deployments should
+	// use the docker backend, where run_command is always available and
 	// contained. Ignored by the docker (always on) and off backends.
-	LocalExec bool `envconfig:"SANDBOX_LOCAL_EXEC" default:"true"`
+	LocalExec bool `envconfig:"SANDBOX_LOCAL_EXEC" default:"false"`
 	// Shell overrides the bash executable used by the local backend's
 	// run_command. Empty auto-detects (bash on PATH; Git Bash on Windows). Set it
 	// to your Git Bash bash.exe if auto-detection fails.
