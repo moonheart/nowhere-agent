@@ -75,17 +75,56 @@ var modelProfiles = []profileEntry{
 	{"openai", "deepseek-reasoner", ModelProfile{ContextWindow: 65536, MaxOutputTokens: 8192, Reasoning: true, ToolCalling: true, Sampling: false}},
 	{"openai", "deepseek-chat", ModelProfile{ContextWindow: 65536, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
 	{"openai", "deepseek-v3", ModelProfile{ContextWindow: 65536, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+	{"openai", "deepseek-v3.1", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "deepseek-v3.2", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "deepseek-r1", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: false}},
 
 	// Moonshot / Kimi (OpenAI-compatible).
 	{"openai", "kimi-k2", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+	{"openai", "kimi-k2.5", ModelProfile{ContextWindow: 262144, MaxOutputTokens: 16384, ToolCalling: true, Sampling: true}},
+	{"openai", "kimi-thinking", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, Reasoning: true, ToolCalling: true, Sampling: false}},
 	{"openai", "moonshot-v1-8k", ModelProfile{ContextWindow: 8192, MaxOutputTokens: 4096, ToolCalling: true, Sampling: true}},
 	{"openai", "moonshot-v1-32k", ModelProfile{ContextWindow: 32768, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
 	{"openai", "moonshot-v1-128k", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
 
-	// Qwen (OpenAI-compatible).
+	// Qwen (OpenAI-compatible). qwen3 / qwq are reasoning-capable; the
+	// "qwen3" prefix is matched before "qwen" by longest-prefix resolution.
+	{"openai", "qwen3-max", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "qwen3", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "qwq", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: false}},
 	{"openai", "qwen-turbo", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
 	{"openai", "qwen-plus", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
 	{"openai", "qwen-max", ModelProfile{ContextWindow: 32768, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+
+	// Zhipu GLM (OpenAI-compatible). glm-4.5 is extended-thinking capable.
+	{"openai", "glm-4.6", ModelProfile{ContextWindow: 204800, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "glm-4.5-air", ModelProfile{ContextWindow: 204800, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "glm-4.5", ModelProfile{ContextWindow: 204800, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "glm-4-plus", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+	{"openai", "glm-4-air", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+	{"openai", "glm-4", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+
+	// ByteDance Doubao (OpenAI-compatible, Volcano Engine).
+	{"openai", "doubao-seed", ModelProfile{ContextWindow: 262144, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "doubao-1.5", ModelProfile{ContextWindow: 262144, MaxOutputTokens: 16384, Reasoning: true, ToolCalling: true, Sampling: true}},
+	{"openai", "doubao", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+
+	// Baidu ERNIE (OpenAI-compatible). ernie-4.5/3.5 are tool-calling chat
+	// models; x1 is the reasoning line.
+	{"openai", "ernie-4.5", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+	{"openai", "ernie-3.5", ModelProfile{ContextWindow: 32768, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+	{"openai", "ernie-x1", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, Reasoning: true, ToolCalling: true, Sampling: false}},
+
+	// MiniMax (OpenAI-compatible).
+	{"openai", "minimax", ModelProfile{ContextWindow: 262144, MaxOutputTokens: 16384, ToolCalling: true, Sampling: true}},
+	{"openai", "abab", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+
+	// 01.AI Yi (OpenAI-compatible).
+	{"openai", "yi-", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+	{"openai", "yi-lightning", ModelProfile{ContextWindow: 65536, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
+
+	// Baichuan (OpenAI-compatible).
+	{"openai", "baichuan", ModelProfile{ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: true, Sampling: true}},
 }
 
 // LookupProfile returns the capability profile for a provider+model, matching
