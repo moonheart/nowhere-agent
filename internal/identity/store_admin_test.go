@@ -344,20 +344,20 @@ func TestChangePassword(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Exec(`DELETE FROM users WHERE id = $1`, u.ID) })
 
-	if err := svc.ChangePassword(ctx, u.ID, "wrong", "new-pw"); !errors.Is(err, ErrInvalidCredentials) {
+	if err := svc.ChangePassword(ctx, u.ID, "wrong", "new-pw-1234"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("wrong current password = %v, want ErrInvalidCredentials", err)
 	}
 	if _, _, err := svc.Login(ctx, u.Email, "old-pw"); err != nil {
 		t.Fatalf("old password should still work after a refused change: %v", err)
 	}
 
-	if err := svc.ChangePassword(ctx, u.ID, "old-pw", "new-pw"); err != nil {
+	if err := svc.ChangePassword(ctx, u.ID, "old-pw", "new-pw-1234"); err != nil {
 		t.Fatalf("ChangePassword: %v", err)
 	}
 	if _, _, err := svc.Login(ctx, u.Email, "old-pw"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Error("old password still authenticates after the change")
 	}
-	if _, _, err := svc.Login(ctx, u.Email, "new-pw"); err != nil {
+	if _, _, err := svc.Login(ctx, u.Email, "new-pw-1234"); err != nil {
 		t.Errorf("new password does not authenticate: %v", err)
 	}
 }
@@ -380,7 +380,7 @@ func TestChangePasswordRevokesExistingTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.ChangePassword(ctx, u.ID, "old-pw", "new-pw"); err != nil {
+	if err := svc.ChangePassword(ctx, u.ID, "old-pw", "new-pw-1234"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Authenticate(ctx, token); err == nil {

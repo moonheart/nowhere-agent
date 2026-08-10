@@ -30,8 +30,26 @@ func NewService(store *Store) *Service {
 	return &Service{store: store, now: time.Now}
 }
 
+// minPasswordLen is the platform's password policy floor. Eight characters is
+// a weak-but-reasonable baseline for an internal platform whose real strength
+// is SSO; it keeps the password path from being the weakest link without
+// imposing the complexity rules that push users onto password managers.
+const minPasswordLen = 8
+
+// validatePassword applies the password policy. Returns ErrWeakPassword when
+// the password does not meet it.
+func validatePassword(password string) error {
+	if len(password) < minPasswordLen {
+		return ErrWeakPassword
+	}
+	return nil
+}
+
 // Signup registers a new user and returns it.
 func (s *Service) Signup(ctx context.Context, email, password, displayName string) (User, error) {
+	if err := validatePassword(password); err != nil {
+		return User{}, err
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return User{}, fmt.Errorf("hash password: %w", err)

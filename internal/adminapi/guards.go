@@ -131,6 +131,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "current password is incorrect")
 	case errors.Is(err, identity.ErrInvalidToken):
 		writeError(w, http.StatusNotFound, "session not found")
+	case errors.Is(err, identity.ErrWeakPassword):
+		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, memory.ErrNotFound):
 		writeError(w, http.StatusNotFound, "memory not found")
 	case errors.Is(err, providerreg.ErrNotFound):

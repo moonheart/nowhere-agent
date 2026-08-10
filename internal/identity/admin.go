@@ -68,6 +68,9 @@ func (s *Service) DeleteAccount(ctx context.Context, actorID, userID string) err
 // the administrator's path; an account changing its own password goes through
 // ChangePassword, which verifies the current one.
 func (s *Service) ResetPassword(ctx context.Context, userID, password string) error {
+	if err := validatePassword(password); err != nil {
+		return err
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("hash password: %w", err)
@@ -81,6 +84,9 @@ func (s *Service) ResetPassword(ctx context.Context, userID, password string) er
 // one. Every token the account holds is revoked, so a password changed because
 // it leaked also ends the sessions opened with it.
 func (s *Service) ChangePassword(ctx context.Context, userID, current, next string) error {
+	if err := validatePassword(next); err != nil {
+		return err
+	}
 	u, err := s.store.UserByID(ctx, userID)
 	if err != nil {
 		return err

@@ -39,4 +39,7 @@ var (
 	ErrSelfTarget = newStatus("operation cannot target your own account", 409)
 	// ErrKeyNotFound is returned for a service-key id that matches nothing.
 	ErrKeyNotFound = newStatus("service key not found", 404)
+	// ErrWeakPassword is returned when a password fails the platform policy
+	// (minimum length).
+	ErrWeakPassword = newStatus("password must be at least 8 characters", 400)
 )

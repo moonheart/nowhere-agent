@@ -139,6 +139,10 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "user already exists")
 		return
 	}
+	if errors.Is(err, ErrWeakPassword) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err != nil {
 		h.record(audit.Failure(audit.ActionAuthSignup).FromRequest(r).Detail(map[string]any{"reason": "internal"}))
 		writeError(w, http.StatusInternalServerError, "signup failed")
