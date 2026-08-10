@@ -57,6 +57,7 @@ import {
 } from "@/components/admin/common";
 import { ConfirmButton } from "@/components/admin/confirm";
 import { MemoryTable, UsageRowsTable } from "@/components/admin/SelfPages";
+import { OwnerPicker, type Owner } from "@/components/admin/QuotasPage";
 import {
   ApproximationNotice,
   DateRangePicker,
@@ -602,7 +603,10 @@ export function PlatformUsagePage() {
 
 export function PlatformMemoriesPage() {
   const [scope, setScope] = useState<"system" | "user" | "team">("system");
-  const [ownerId, setOwnerId] = useState("");
+  // The owner is picked from the searchable dropdown (accounts by email, teams
+  // by name), never typed as a raw id — the combobox carries the id for the
+  // API but shows a human label. Switching scope clears a stale selection.
+  const [owner, setOwner] = useState<Owner | null>(null);
   const [applied, setApplied] = useState<{ scope: typeof scope; id: string }>({
     scope: "system",
     id: "",
@@ -628,6 +632,11 @@ export function PlatformMemoriesPage() {
     }
   };
 
+  const changeScope = (next: "system" | "user" | "team") => {
+    setScope(next);
+    setOwner(null);
+  };
+
   return (
     <>
       <PageHeader
@@ -637,7 +646,7 @@ export function PlatformMemoriesPage() {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          setApplied({ scope, id: ownerId.trim() });
+          setApplied({ scope, id: scope === "system" ? "" : owner?.id ?? "" });
         }}
         className="flex flex-wrap items-end gap-2"
       >
@@ -646,7 +655,7 @@ export function PlatformMemoriesPage() {
           <NativeSelect
             id="scope"
             value={scope}
-            onChange={(e) => setScope(e.target.value as typeof scope)}
+            onChange={(e) => changeScope(e.target.value as typeof scope)}
           >
             <NativeSelectOption value="system">System</NativeSelectOption>
             <NativeSelectOption value="user">Account</NativeSelectOption>
@@ -654,17 +663,7 @@ export function PlatformMemoriesPage() {
           </NativeSelect>
         </div>
         {scope !== "system" && (
-          <div className="space-y-1.5">
-            <Label htmlFor="owner-id">
-              {scope === "user" ? "Account id" : "Team id"}
-            </Label>
-            <Input
-              id="owner-id"
-              value={ownerId}
-              onChange={(e) => setOwnerId(e.target.value)}
-              className="w-80 font-mono text-sm"
-            />
-          </div>
+          <OwnerPicker scope={scope} value={owner} onChange={setOwner} />
         )}
         <Button type="submit" variant="outline" size="sm">
           Show

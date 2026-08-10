@@ -2,9 +2,16 @@
 // tokens and long-term memory.
 
 import { useEffect, useState, type ReactNode } from "react";
-import { Loader2, Sparkles, Trash2 } from "lucide-react";
+import { Eye, Loader2, Sparkles, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -13,6 +20,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   deleteMyMemory,
   dreamStatus,
@@ -242,6 +250,16 @@ function DreamNote({ state, running }: { state: DreamState | null; running: bool
 // set misrepresents the store, and the dreaming worker retires enough of them
 // that they can outnumber the memories that still count. They stay one click
 // away because superseding is reversible until the purge window closes.
+// Memory kind filter tabs: every memory belongs to exactly one kind, so the
+// views split cleanly by type.
+const MEMORY_KIND_TABS = [
+  { id: "all", label: "All" },
+  { id: "fact", label: "Fact" },
+  { id: "preference", label: "Preference" },
+  { id: "insight", label: "Insight" },
+  { id: "summary", label: "Summary" },
+] as const;
+
 export function MemoryTable({
   memories,
   emptyMessage,
@@ -256,10 +274,12 @@ export function MemoryTable({
   readOnly?: boolean;
 }) {
   const [showSuperseded, setShowSuperseded] = useState(false);
+  const [kindTab, setKindTab] = useState<string>("all");
 
   const superseded = memories.filter((m) => m.deprecated).length;
   const live = memories.length - superseded;
-  const rows = showSuperseded ? memories : memories.filter((m) => !m.deprecated);
+  const rows = (showSuperseded ? memories : memories.filter((m) => !m.deprecated))
+    .filter((m) => kindTab === "all" || m.kind === kindTab);
 
   if (memories.length === 0) {
     return <EmptyNote>{emptyMessage}</EmptyNote>;
@@ -284,11 +304,24 @@ export function MemoryTable({
         )}
       </div>
 
+      <Tabs value={kindTab} onValueChange={setKindTab}>
+        <TabsList variant="line">
+          {MEMORY_KIND_TABS.map((t) => (
+            <TabsTrigger key={t.id} value={t.id}>
+              {t.label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
+
       {rows.length === 0 ? (
-        // Every memory here is superseded. Falling through to emptyMessage would
-        // claim nothing was ever remembered, which is the opposite of true.
+        // Either every memory here is superseded, or the kind tab filtered
+        // everything out. Falling through to emptyMessage would claim nothing
+        // was ever remembered, which is the opposite of true.
         <EmptyNote>
-          Every memory in this scope has been superseded. Show them to review or delete them.
+          {kindTab === "all"
+            ? "Every memory in this scope has been superseded. Show them to review or delete them."
+            : `No ${kindTab} memories in this view.`}
         </EmptyNote>
       ) : (
         <MemoryRows
@@ -328,59 +361,140 @@ function MemoryRows({
           <TableHead className="w-28">Kind</TableHead>
           <TableHead>Content</TableHead>
           <TableHead className="w-28">Created</TableHead>
+          <TableHead className="w-16" />
           {!readOnly && <TableHead className="w-40" />}
         </TableRow>
       </TableHeader>
       <TableBody>
         {rows.map((m) => (
-          <TableRow key={m.id} className={m.deprecated ? "opacity-60" : undefined}>
-            <TableCell>
-              <Badge variant="outline" className="capitalize">
-                {m.kind}
-              </Badge>
-            </TableCell>
-            {/* whitespace-normal is required: TableCell sets whitespace-nowrap,
-                which makes max-w-* a no-op — the text overflows the cell and
-                paints over the Created column instead of wrapping. */}
-            <TableCell className="max-w-md whitespace-normal">
-              <span className="text-sm">{m.content}</span>
-              {m.deprecated && (
-                <Badge variant="secondary" className="ml-2">
-                  Superseded
-                </Badge>
-              )}
-            </TableCell>
-            <TableCell className="text-sm text-muted-foreground">
-              {formatDate(m.created_at)}
-            </TableCell>
-            {!readOnly && (
-              <TableCell className="text-right">
-                <div className="flex justify-end gap-1">
-                  {onDeprecate && !m.deprecated && (
-                    <Button variant="ghost" size="sm" onClick={() => void onDeprecate(m)}>
-                      Supersede
-                    </Button>
-                  )}
-                  {onDelete && (
-                    <ConfirmButton
-                      title="Delete this memory?"
-                      description="The memory is erased permanently. Superseding instead keeps the record but excludes it from recall."
-                      confirmLabel="Delete"
-                      onConfirm={() => onDelete(m)}
-                      trigger={
-                        <Button variant="ghost" size="icon-sm" aria-label="Delete memory">
-                          <Trash2 />
-                        </Button>
-                      }
-                    />
-                  )}
-                </div>
-              </TableCell>
-            )}
-          </TableRow>
+          <MemoryRow
+            key={m.id}
+            memory={m}
+            onDelete={onDelete}
+            onDeprecate={onDeprecate}
+            readOnly={readOnly}
+          />
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+// MemoryRow is one memory row: a clamped content preview (fixed height), a
+// details button opening a dialog with the full memory, and the optional
+// supersede/delete actions.
+function MemoryRow({
+  memory,
+  onDelete,
+  onDeprecate,
+  readOnly,
+}: {
+  memory: Memory;
+  onDelete?: (m: Memory) => void | Promise<void>;
+  onDeprecate?: (m: Memory) => void | Promise<void>;
+  readOnly?: boolean;
+}) {
+  const [detailOpen, setDetailOpen] = useState(false);
+  const m = memory;
+  return (
+    <>
+      <TableRow key={m.id} className={m.deprecated ? "opacity-60" : undefined}>
+        <TableCell>
+          <Badge variant="outline" className="capitalize">
+            {m.kind}
+          </Badge>
+        </TableCell>
+        {/* whitespace-normal is required: TableCell sets whitespace-nowrap,
+            which makes max-w-* a no-op — the text overflows the cell and
+            paints over the Created column instead of wrapping. line-clamp-2
+            caps the row height; the full text lives in the details dialog. */}
+        <TableCell className="max-w-md whitespace-normal">
+          <span className="line-clamp-2 text-sm">{m.content}</span>
+          {m.deprecated && (
+            <Badge variant="secondary" className="ml-2">
+              Superseded
+            </Badge>
+          )}
+        </TableCell>
+        <TableCell className="text-sm text-muted-foreground">
+          {formatDate(m.created_at)}
+        </TableCell>
+        <TableCell>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="View details"
+            aria-label="View details"
+            onClick={() => setDetailOpen(true)}
+          >
+            <Eye />
+          </Button>
+        </TableCell>
+        {!readOnly && (
+          <TableCell className="text-right">
+            <div className="flex justify-end gap-1">
+              {onDeprecate && !m.deprecated && (
+                <Button variant="ghost" size="sm" onClick={() => void onDeprecate(m)}>
+                  Supersede
+                </Button>
+              )}
+              {onDelete && (
+                <ConfirmButton
+                  title="Delete this memory?"
+                  description="The memory is erased permanently. Superseding instead keeps the record but excludes it from recall."
+                  confirmLabel="Delete"
+                  onConfirm={() => onDelete(m)}
+                  trigger={
+                    <Button variant="ghost" size="icon-sm" aria-label="Delete memory">
+                      <Trash2 />
+                    </Button>
+                  }
+                />
+              )}
+            </div>
+          </TableCell>
+        )}
+      </TableRow>
+      <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>
+              <span className="capitalize">{m.kind}</span> memory
+            </DialogTitle>
+            <DialogDescription>
+              {m.scope}
+              {m.user_id && ` · user ${m.user_id}`}
+              {m.team_id && ` · team ${m.team_id}`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="max-h-64 overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap">
+              {m.content}
+            </p>
+            <dl className="grid gap-1.5 border-t border-border pt-3 font-mono text-xs text-muted-foreground">
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0">id</dt>
+                <dd className="min-w-0 break-all">{m.id}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0">status</dt>
+                <dd className={m.deprecated ? "text-amber-600 dark:text-amber-400" : ""}>
+                  {m.deprecated ? "superseded" : "live"}
+                </dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0">created</dt>
+                <dd>{formatDateTime(m.created_at)}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0">updated</dt>
+                <dd>{formatDateTime(m.updated_at)}</dd>
+              </div>
+            </dl>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

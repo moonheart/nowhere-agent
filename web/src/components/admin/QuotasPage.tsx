@@ -52,11 +52,11 @@ import {
 } from "@/components/admin/common";
 import { ConfirmButton } from "@/components/admin/confirm";
 
-type Scope = "user" | "team";
+export type Scope = "user" | "team";
 
 // Owner is one pickable quota target: an account or a team. `id` is what the
 // quota API needs; the rest is for display and filtering.
-type Owner = {
+export type Owner = {
   id: string;
   // label is the primary text (email for an account, name for a team);
   // sublabel is a secondary hint (display name / member count).
@@ -270,8 +270,9 @@ export function PlatformQuotasPage() {
 // OwnerPicker is the searchable account/team dropdown. It fetches matches from
 // the platform list endpoints as the operator types (server-side `q` filter),
 // aborting a superseded request, and keeps the picked owner in the items list
-// so it stays selected while results for a new query stream in.
-function OwnerPicker({
+// so it stays selected while results for a new query stream in. Shared with
+// the platform memories page, which picks an owner the same way.
+export function OwnerPicker({
   scope,
   value,
   onChange,
