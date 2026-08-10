@@ -109,6 +109,15 @@ func TestDockerPortIntegration(t *testing.T) {
 	}
 	defer p.cli.Close()
 
+	// This test targets LINUX containers (alpine image, /workspace paths, a
+	// Linux-only HostConfig like the read-only rootfs). A daemon serving
+	// Windows containers (Docker Desktop on Windows CI) cannot run it — skip
+	// rather than fail on "read-only mode is not supported for Windows
+	// containers".
+	if ver, err := p.cli.ServerVersion(ctx); err == nil && strings.EqualFold(ver.Os, "windows") {
+		t.Skipf("docker daemon serves %s containers; the integration test targets linux", ver.Os)
+	}
+
 	wsDir := t.TempDir()
 	h, err := p.Create(ctx, "itest-session", Options{WorkspaceDir: wsDir, Network: NetworkPolicy{Mode: NetworkDeny}})
 	if err != nil {

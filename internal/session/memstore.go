@@ -199,19 +199,26 @@ func (m *MemStore) ListSessionsByUser(_ context.Context, userID string, limit in
 			out = append(out, *s)
 		}
 	}
-	// Most-recently-active first; id breaks ties (mirrors the PG ordering).
+	// Most-recently-active first; id breaks ties. WALL-CLOCK only (UnixNano):
+	// the sort and the keyset filter must share one basis. A cursor round-trips
+	// through JSON (RFC3339Nano), which strips the monotonic reading, so a
+	// monotonic-based sort could disagree with the wall-based filter when the
+	// host clock is adjusted mid-run (NTP/VM time sync on CI) — a row would
+	// straddle the page boundary and appear on BOTH pages. PG compares
+	// timestamptz (wall), so this mirrors it exactly.
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
-			return out[i].ID > out[j].ID
+		ui, uj := out[i].UpdatedAt.UnixNano(), out[j].UpdatedAt.UnixNano()
+		if ui != uj {
+			return ui > uj
 		}
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		return out[i].ID > out[j].ID
 	})
 	// Keyset: keep only rows strictly below the cursor in that ordering.
 	if cursor != nil {
+		cu := cursor.UpdatedAt.UnixNano()
 		kept := out[:0]
 		for _, s := range out {
-			if s.UpdatedAt.Before(cursor.UpdatedAt) ||
-				(s.UpdatedAt.Equal(cursor.UpdatedAt) && s.ID < cursor.ID) {
+			if su := s.UpdatedAt.UnixNano(); su < cu || (su == cu && s.ID < cursor.ID) {
 				kept = append(kept, s)
 			}
 		}
