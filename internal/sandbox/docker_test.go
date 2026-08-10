@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -114,6 +115,21 @@ func TestDockerPortIntegration(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	defer p.Destroy(ctx, h)
+
+	// The container must run as the workspace's owner uid, so exec-side
+	// operations on the bind mount (parent-dir mkdir, ls, find) work under
+	// user-namespace-remapped Docker (e.g. GitHub runners), where the remapped
+	// container user cannot touch a workspace it does not own. Skipped when
+	// there is no meaningful uid to map (Windows host, root-owned workspace).
+	if uid, ok := workspaceOwnerUID(wsDir); ok && uid > 0 {
+		inspect, err := p.cli.ContainerInspect(ctx, h.ID)
+		if err != nil {
+			t.Fatalf("inspect: %v", err)
+		}
+		if want := strconv.Itoa(uid); inspect.Config.User != want {
+			t.Errorf("container user = %q, want %q (workspace owner)", inspect.Config.User, want)
+		}
+	}
 
 	// Exec.
 	res, err := p.Exec(ctx, h, []string{"sh", "-c", "echo hello"})

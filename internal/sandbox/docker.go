@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,6 +70,19 @@ func (p *DockerPort) Create(ctx context.Context, sessionID string, opts Options)
 		Image:      img,
 		Cmd:        []string{"sleep", "infinity"},
 		WorkingDir: p.workMt,
+	}
+	// Run the container as the workspace's owner uid, so EXEC-side operations on
+	// the bind mount (WriteFile's parent-dir mkdir, Move/Copy, ls, find) work
+	// under Docker user-namespace remapping: on such hosts the daemon-side copy
+	// API writes as the host user, but execs run as the remapped container user,
+	// which cannot touch a workspace it does not own (0700 temp dirs, or any
+	// owner-mismatched workspace). UID-matching the container to the mount owner
+	// keeps every operation in one permission context. Skipped when the owner
+	// cannot be determined (Windows hosts, or a root-owned workspace).
+	if opts.WorkspaceDir != "" {
+		if uid, ok := workspaceOwnerUID(opts.WorkspaceDir); ok && uid > 0 {
+			cfg.User = strconv.Itoa(uid)
+		}
 	}
 	hostCfg, err := p.hostConfig(opts)
 	if err != nil {
