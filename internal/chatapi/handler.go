@@ -131,6 +131,16 @@ func (h *Handler) WithRegistry(rg *session.RunRegistry) *Handler {
 	return h
 }
 
+// WithRunDoneHook registers a run-completion hook on the shared registry
+// (webhook notifications and other out-of-band consumers). Call after
+// WithRuntime/WithRegistry; the hook fires asynchronously on run terminal.
+func (h *Handler) WithRunDoneHook(hook session.RunDoneHook) *Handler {
+	if h.registry != nil {
+		h.registry.WithRunDoneHook(hook)
+	}
+	return h
+}
+
 // Registry returns the handler's run-execution registry (nil until WithRuntime/
 // WithRegistry). The server uses it to wire cross-cutting run behaviour (e.g.
 // the approval Resume loop source) that must live on the shared registry.

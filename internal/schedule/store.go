@@ -84,7 +84,7 @@ func NewPGStore(db *sql.DB) *PGStore { return &PGStore{db: db} }
 // taskCols is the canonical column list shared by every read, in scan order.
 const taskCols = `id, user_id, COALESCE(team_id::text,''), COALESCE(agent_def_name,''), COALESCE(prompt,''),
 	tool_whitelist, cron, timezone, COALESCE(target_session_id::text,''), on_run_completed, multitask_strategy,
-	end_time, enabled, next_run_at, last_run_at, metadata, created_at, updated_at`
+	COALESCE(webhook_url,''), end_time, enabled, next_run_at, last_run_at, metadata, created_at, updated_at`
 
 // Create inserts a validated task with its first NextRunAt seeded.
 func (s *PGStore) Create(ctx context.Context, t Task) (Task, error) {
@@ -104,14 +104,14 @@ func (s *PGStore) Create(ctx context.Context, t Task) (Task, error) {
 	row := s.db.QueryRowContext(ctx, `
 		INSERT INTO scheduled_task
 			(user_id, team_id, agent_def_name, prompt, tool_whitelist, cron, timezone,
-			 target_session_id, on_run_completed, multitask_strategy, end_time, enabled,
+			 target_session_id, on_run_completed, multitask_strategy, webhook_url, end_time, enabled,
 			 next_run_at, metadata)
 		VALUES ($1, NULLIF($2,'')::uuid, NULLIF($3,''), NULLIF($4,''), $5::text[], $6, $7,
-			 NULLIF($8,'')::uuid, $9, $10, $11, $12, $13, $14)
+			 NULLIF($8,'')::uuid, $9, $10, NULLIF($11,''), $12, $13, $14, $15)
 		RETURNING `+taskCols,
 		t.UserID, t.TeamID, t.AgentDefName, t.Prompt, formatTextArray(t.ToolWhitelist), t.Cron, tzOr(t.Timezone),
 		t.TargetSessionID, orDefault(string(t.OnRunCompleted), string(OnRunKeep)),
-		orDefault(string(t.Multitask), string(MultitaskReject)), t.EndTime, t.Enabled, t.NextRunAt, meta,
+		orDefault(string(t.Multitask), string(MultitaskReject)), t.WebhookURL, t.EndTime, t.Enabled, t.NextRunAt, meta,
 	)
 	return scanTask(row)
 }
@@ -139,13 +139,13 @@ func (s *PGStore) Update(ctx context.Context, t Task) (Task, error) {
 		UPDATE scheduled_task SET
 			agent_def_name = NULLIF($2,''), prompt = NULLIF($3,''), tool_whitelist = $4::text[],
 			cron = $5, timezone = $6, target_session_id = NULLIF($7,'')::uuid,
-			on_run_completed = $8, multitask_strategy = $9, end_time = $10,
-			enabled = $11, next_run_at = $12, metadata = $13, updated_at = now()
+			on_run_completed = $8, multitask_strategy = $9, webhook_url = NULLIF($10,''), end_time = $11,
+			enabled = $12, next_run_at = $13, metadata = $14, updated_at = now()
 		WHERE id = $1
 		RETURNING `+taskCols,
 		t.ID, t.AgentDefName, t.Prompt, formatTextArray(t.ToolWhitelist), t.Cron, tzOr(t.Timezone),
 		t.TargetSessionID, orDefault(string(t.OnRunCompleted), string(OnRunKeep)),
-		orDefault(string(t.Multitask), string(MultitaskReject)), t.EndTime, t.Enabled, next, meta,
+		orDefault(string(t.Multitask), string(MultitaskReject)), t.WebhookURL, t.EndTime, t.Enabled, next, meta,
 	)
 	return scanTask(row)
 }
@@ -345,6 +345,7 @@ func scanOneTask(row rowScanner) (Task, error) {
 	err := row.Scan(
 		&t.ID, &t.UserID, &t.TeamID, &t.AgentDefName, &t.Prompt, &whitelist,
 		&t.Cron, &t.Timezone, &t.TargetSessionID, &t.OnRunCompleted, &t.Multitask,
+		&t.WebhookURL,
 		&endTime, &t.Enabled, &t.NextRunAt, &lastRun, &meta, &t.CreatedAt, &t.UpdatedAt,
 	)
 	if err != nil {

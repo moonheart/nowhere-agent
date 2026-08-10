@@ -1,0 +1,166 @@
+// Package webhook delivers outbound run-completion notifications to external
+// systems (enterprise integration): when a run reaches a terminal state, the
+// platform POSTs a JSON payload to the task's webhook URL (or the global
+// WEBHOOK_URL). This is the notification half of the "agent finishes work →
+// enterprise system learns about it" loop that scheduled tasks otherwise
+// cannot close — a fire-and-forget run would leave its result only in a
+// session row nobody polls.
+//
+// Delivery is deliberately best-effort and out-of-band: it runs on its own
+// goroutine with a bounded timeout and a few retries, and a failure only logs.
+// A notification must never block or fail the run that produced it.
+package webhook
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"time"
+)
+
+// RunCompletedPayload is the JSON body POSTed to a webhook URL when a run
+// reaches a terminal state. It carries identity and a text summary — enough
+// for an enterprise system (IM bot, ITSM, workflow engine) to route the
+// notification — but never tool internals, PII, or secret material.
+type RunCompletedPayload struct {
+	// Event discriminates payload kinds; always "run.completed" today, the
+	// field exists so the contract can grow without breaking consumers.
+	Event     string `json:"event"`
+	RunID     string `json:"run_id"`
+	SessionID string `json:"session_id"`
+	UserID    string `json:"user_id,omitempty"`
+	// TaskID links the notification to the scheduled task that produced the
+	// run; empty for an interactive (chat) run.
+	TaskID string `json:"task_id,omitempty"`
+	// Status is the terminal run status: done | failed | cancelled.
+	Status string `json:"status"`
+	TeamID string `json:"team_id,omitempty"`
+	Model  string `json:"model,omitempty"`
+	// EndedAt is the instant the run reached its terminal state (UTC).
+	EndedAt time.Time `json:"ended_at"`
+	// Summary is the last assistant text of the run, truncated; empty when the
+	// run produced no assistant text (a failed fire, say).
+	Summary string `json:"summary,omitempty"`
+}
+
+// Notifier delivers payloads to webhook URLs with a bounded timeout and a few
+// retries. It is safe for concurrent use; one instance is shared by every run.
+type Notifier struct {
+	client  *http.Client
+	timeout time.Duration
+	retries int
+	log     *slog.Logger
+}
+
+// Options tunes delivery. Zero values pick safe defaults.
+type Options struct {
+	// Timeout bounds one HTTP attempt; 0 defaults to 10s.
+	Timeout time.Duration
+	// Retries is the number of attempts after the first; 0 defaults to 3.
+	Retries int
+	// Logger receives delivery outcomes; nil uses slog.Default().
+	Logger *slog.Logger
+}
+
+// New builds a Notifier with the given options.
+func New(opts Options) *Notifier {
+	if opts.Timeout <= 0 {
+		opts.Timeout = 10 * time.Second
+	}
+	if opts.Retries < 0 {
+		opts.Retries = 0
+	}
+	if opts.Retries == 0 {
+		opts.Retries = 3
+	}
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
+	return &Notifier{
+		client:  &http.Client{Timeout: opts.Timeout},
+		timeout: opts.Timeout,
+		retries: opts.Retries,
+		log:     opts.Logger,
+	}
+}
+
+// Deliver posts payload to url. An empty url is a no-op (no notifications
+// configured). Delivery runs synchronously on the caller's goroutine, bounded
+// by the notifier's timeout; run-completion hooks call it in their own
+// goroutine. Transient failures (5xx, network errors) retry with exponential
+// backoff; a 2xx/4xx response is final (a rejected notification will not be
+// hammered — the operator fixes the consumer, not the sender).
+func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompletedPayload) error {
+	if url == "" {
+		return nil
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	backoff := 500 * time.Millisecond
+	var lastErr error
+	for attempt := 0; attempt <= n.retries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "nowhere-agent-webhook/1")
+		req.Header.Set("X-Nowhere-Event", payload.Event)
+		req.Header.Set("X-Nowhere-Run-Id", payload.RunID)
+		resp, err := n.client.Do(req)
+		if err != nil {
+			lastErr = err
+			n.log.Warn("webhook delivery attempt failed", "url", url, "run", payload.RunID, "attempt", attempt, "err", err)
+			continue // network/transport error: retryable
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			n.log.Debug("webhook delivered", "url", url, "run", payload.RunID, "status", resp.StatusCode)
+			return nil
+		}
+		lastErr = errUnexpectedStatus(resp.StatusCode)
+		if resp.StatusCode < 500 {
+			// A 4xx means the consumer rejected the payload — retrying is
+			// noise, not recovery. Report and stop.
+			n.log.Warn("webhook delivery rejected", "url", url, "run", payload.RunID, "status", resp.StatusCode)
+			return lastErr
+		}
+		n.log.Warn("webhook delivery attempt failed", "url", url, "run", payload.RunID, "attempt", attempt, "status", resp.StatusCode)
+	}
+	return lastErr
+}
+
+func errUnexpectedStatus(code int) error {
+	return &statusError{code: code}
+}
+
+type statusError struct{ code int }
+
+func (e *statusError) Error() string { return "webhook: unexpected status " + itoa(e.code) }
+
+// itoa is a tiny int formatter keeping the package import-light.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}

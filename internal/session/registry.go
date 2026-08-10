@@ -58,6 +58,14 @@ type RunWork struct {
 	Model string
 }
 
+// RunDoneHook is notified when a run reaches a terminal state (done, failed,
+// or cancelled), after the run is settled. It is the integration seam for
+// out-of-band consumers of run completion — the webhook notifier, for
+// example. Hooks run on their own goroutine with the run's context; they must
+// never block or fail the run path, and must tolerate the context being
+// cancelled.
+type RunDoneHook func(ctx context.Context, sessionID string, run Run, status RunStatus)
+
 // RunRegistry owns run execution. Where Runtime owns run state (the
 // single-active-run lock, statuses, the durable log), the registry owns the run's
 // context and the goroutine driving the loop, so a run survives the client that
@@ -79,6 +87,9 @@ type RunRegistry struct {
 	// result into a tool_result on resume (general interrupt). Defaults wire the
 	// three built-in kinds; RegisterInteractionHandler adds/overrides kinds.
 	interactionHandlers map[string]InteractionHandler
+
+	// doneHooks are notified (async) when a run reaches a terminal state.
+	doneHooks []RunDoneHook
 }
 
 // runWorker tracks one in-flight run's execution handle.
@@ -115,6 +126,15 @@ func (rg *RunRegistry) RegisterInteractionHandler(kind string, h InteractionHand
 // WithMessageStore wires full-block message persistence and returns the registry.
 func (rg *RunRegistry) WithMessageStore(ms MessageStore) *RunRegistry {
 	rg.msgStore = ms
+	return rg
+}
+
+// WithRunDoneHook registers a hook to be notified — asynchronously, on its own
+// goroutine — when a run reaches a terminal state. Hooks run after the run is
+// settled and are fire-and-forget: a slow or panicking hook is logged, never
+// propagated to the run path. Call before any Submit.
+func (rg *RunRegistry) WithRunDoneHook(h RunDoneHook) *RunRegistry {
+	rg.doneHooks = append(rg.doneHooks, h)
 	return rg
 }
 
@@ -304,6 +324,22 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 		}
 	}
 	_ = rg.rt.CompleteRun(bg, sessionID, status)
+
+	// Run-completion hooks (webhook notifications and friends): fire each on
+	// its own goroutine so a slow consumer can never delay the next run on the
+	// session or the registry's teardown. A panicking hook is recovered and
+	// logged — out-of-band consumers must not take the run path down.
+	for _, hook := range rg.doneHooks {
+		hook := hook
+		go func() {
+			defer func() {
+				if p := recover(); p != nil {
+					log.Error("run done hook panicked", "panic", p, "session", sessionID, "run", run.ID)
+				}
+			}()
+			hook(runCtx, sessionID, run, status)
+		}()
+	}
 }
 
 // appendEvent is append but surfaces the persistence error (for the terminal

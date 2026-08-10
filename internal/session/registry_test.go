@@ -230,3 +230,71 @@ func TestSubscriberSeesLiveEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestRunDoneHookFiresOnTerminal(t *testing.T) {
+	_, rg, sess := newRegistrySession(t)
+	type seen struct {
+		sessionID string
+		status    RunStatus
+	}
+	got := make(chan seen, 4)
+	rg.WithRunDoneHook(func(ctx context.Context, sessionID string, run Run, status RunStatus) {
+		got <- seen{sessionID: sessionID, status: status}
+	})
+	if _, err := rg.Submit(context.Background(), sess.ID, RunWork{
+		Loop: registryLoop(&stubProvider{deltas: []string{"hi"}}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case s := <-got:
+		if s.sessionID != sess.ID || s.status != RunDone {
+			t.Errorf("hook = %+v want session %s status %s", s, sess.ID, RunDone)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("done hook never fired")
+	}
+}
+
+type failingProvider struct{}
+
+func (p *failingProvider) Name() string { return "failing" }
+
+func (p *failingProvider) Stream(ctx context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	return nil, context.Canceled
+}
+
+func TestRunDoneHookFiresOnFailed(t *testing.T) {
+	_, rg, sess := newRegistrySession(t)
+	got := make(chan RunStatus, 1)
+	rg.WithRunDoneHook(func(ctx context.Context, sessionID string, run Run, status RunStatus) {
+		got <- status
+	})
+	failing := &failingProvider{}
+	if _, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: registryLoop(failing)}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case s := <-got:
+		if s != RunFailed {
+			t.Errorf("hook status = %s want failed", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("done hook never fired")
+	}
+}
+
+func TestRunDoneHookPanicIsContained(t *testing.T) {
+	rt, rg, sess := newRegistrySession(t)
+	rg.WithRunDoneHook(func(ctx context.Context, sessionID string, run Run, status RunStatus) {
+		panic("boom")
+	})
+	if _, err := rg.Submit(context.Background(), sess.ID, RunWork{
+		Loop: registryLoop(&stubProvider{deltas: []string{"hi"}}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Errorf("final status = %v want done (hook panic must not affect the run)", got)
+	}
+}

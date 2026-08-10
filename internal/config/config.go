@@ -52,6 +52,27 @@ type Config struct {
 	// tool output are replaced before the result reaches the model context or
 	// the durable record. See internal/redact for the detector catalog.
 	Redact Redact
+	// Webhook configures outbound run-completion notifications (enterprise
+	// integration): when a run reaches a terminal state, the platform POSTs a
+	// JSON payload to a webhook URL. The per-task webhook_url (scheduled-task
+	// CRUD) wins when set; otherwise this global URL applies. Empty disables
+	// notifications for runs that name no task-level URL.
+	Webhook Webhook
+}
+
+// Webhook configures the outbound run-completion notifier. Delivery is
+// best-effort and out-of-band: a slow or unreachable consumer never blocks or
+// fails a run.
+type Webhook struct {
+	// URL is the global notification target for run completion. A scheduled
+	// task's own webhook_url takes precedence over it. Empty disables the
+	// global target (task-level URLs still work).
+	URL string `envconfig:"WEBHOOK_URL" default:""`
+	// Timeout bounds one HTTP delivery attempt.
+	Timeout time.Duration `envconfig:"WEBHOOK_TIMEOUT" default:"10s"`
+	// Retries is the number of delivery attempts after the first (exponential
+	// backoff between attempts; 4xx responses are final).
+	Retries int `envconfig:"WEBHOOK_RETRIES" default:"3"`
 }
 
 // Secrets holds the master key that encrypts stored credentials (the team LLM

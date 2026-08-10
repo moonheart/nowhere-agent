@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,6 +52,7 @@ import (
 	"nowhere-agent/internal/toolruntime/builtin"
 	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/usage"
+	"nowhere-agent/internal/webhook"
 	"nowhere-agent/internal/workspace"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -931,6 +933,91 @@ func run() error {
 		// recall_memory, view_image, spawn_agent) so a run gets exactly what its
 		// session can serve.
 		handler = handler.WithToolBinder(bindChatTools)
+
+		// Outbound run-completion notifications (enterprise integration): one
+		// shared notifier, registered as a run-done hook on the chat registry
+		// (which also serves scheduled-task runs). Target resolution happens
+		// per run so a task's own webhook_url wins over the global WEBHOOK_URL —
+		// and runs with neither stay silent.
+		notifier := webhook.New(webhook.Options{
+			Timeout: cfg.Webhook.Timeout,
+			Retries: cfg.Webhook.Retries,
+			Logger:  log,
+		})
+		notifyTarget := func(ctx context.Context, sessionID string) (string, error) {
+			var taskID sql.NullString
+			if err := pool.QueryRowContext(ctx, `SELECT task_id FROM sessions WHERE id = $1`, sessionID).Scan(&taskID); err != nil {
+				return "", err
+			}
+			if taskID.Valid && taskID.String != "" {
+				var u sql.NullString
+				if err := pool.QueryRowContext(ctx, `SELECT webhook_url FROM scheduled_task WHERE id = $1`, taskID.String).Scan(&u); err == nil && u.Valid && u.String != "" {
+					return u.String, nil
+				}
+			}
+			return cfg.Webhook.URL, nil
+		}
+		// runSummary returns the last assistant text of the session, truncated,
+		// for the notification payload. Read from the durable message store so
+		// the payload works even for a run whose live content already aged out.
+		runSummary := func(ctx context.Context, sessionID string) string {
+			msgs, err := messageStore.MessagesFor(ctx, sessionID)
+			if err != nil {
+				return ""
+			}
+			for i := len(msgs) - 1; i >= 0; i-- {
+				if msgs[i].Role != provider.RoleAssistant {
+					continue
+				}
+				var b strings.Builder
+				for _, blk := range msgs[i].Content {
+					if blk.Type == provider.BlockText {
+						b.WriteString(blk.Text)
+					}
+				}
+				if s := strings.TrimSpace(b.String()); s != "" {
+					r := []rune(s)
+					if len(r) > 2000 {
+						return string(r[:2000]) + "…"
+					}
+					return s
+				}
+			}
+			return ""
+		}
+		if cfg.Webhook.URL != "" {
+			log.Info("run-completion webhooks enabled", "global_url", cfg.Webhook.URL, "timeout", cfg.Webhook.Timeout, "retries", cfg.Webhook.Retries)
+		} else {
+			log.Info("run-completion webhooks: no global WEBHOOK_URL; task-level webhook_url still applies")
+		}
+		handler.WithRunDoneHook(func(ctx context.Context, sessionID string, run session.Run, status session.RunStatus) {
+			// The run context may be cancelled (a cancelled run); notifications
+			// still want to fire, so delivery runs on an uncancelled view.
+			deliverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Webhook.Timeout)
+			defer cancel()
+			target, err := notifyTarget(deliverCtx, sessionID)
+			if err != nil || target == "" {
+				return // no URL (or a lookup hiccup): nothing to notify
+			}
+			var userID string
+			if sess, err := sessionRuntime.GetSession(deliverCtx, sessionID); err == nil {
+				userID = sess.UserID
+			}
+			payload := webhook.RunCompletedPayload{
+				Event:     "run.completed",
+				RunID:     run.ID,
+				SessionID: sessionID,
+				UserID:    userID,
+				Status:    string(status),
+				TeamID:    run.TeamID,
+				Model:     run.Model,
+				EndedAt:   time.Now().UTC(),
+				Summary:   runSummary(deliverCtx, sessionID),
+			}
+			if err := notifier.Deliver(deliverCtx, target, payload); err != nil {
+				log.Warn("webhook delivery failed", "run", run.ID, "session", sessionID, "target", target, "err", err)
+			}
+		})
 		if sandboxMgr != nil {
 			log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
 		}

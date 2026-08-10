@@ -81,6 +81,9 @@ func TestValidate(t *testing.T) {
 		{"bad timezone", Task{Prompt: "x", Cron: "0 9 * * *", Timezone: "Mars/Olympus", OnRunCompleted: OnRunKeep, Multitask: MultitaskReject}, false},
 		{"bad multitask", Task{Prompt: "x", Cron: "0 9 * * *", OnRunCompleted: OnRunKeep, Multitask: "explode"}, false},
 		{"bad on_run_completed", Task{Prompt: "x", Cron: "0 9 * * *", OnRunCompleted: "archive", Multitask: MultitaskReject}, false},
+		{"valid webhook url", Task{Prompt: "x", Cron: "0 9 * * *", OnRunCompleted: OnRunKeep, Multitask: MultitaskReject, WebhookURL: "https://hooks.example.com/cb"}, true},
+		{"bad webhook scheme", Task{Prompt: "x", Cron: "0 9 * * *", OnRunCompleted: OnRunKeep, Multitask: MultitaskReject, WebhookURL: "file:///etc/passwd"}, false},
+		{"bare webhook host", Task{Prompt: "x", Cron: "0 9 * * *", OnRunCompleted: OnRunKeep, Multitask: MultitaskReject, WebhookURL: "hooks.example.com/cb"}, false},
 	}
 	for _, c := range cases {
 		err := c.task.Validate()

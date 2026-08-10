@@ -8,6 +8,7 @@ package schedule
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -61,6 +62,11 @@ type Task struct {
 	TargetSessionID string
 	OnRunCompleted  OnRunCompleted
 	Multitask       MultitaskStrategy
+	// WebhookURL, when set, receives a POST notification when one of this
+	// task's runs reaches a terminal state (run completion → enterprise system).
+	// Empty falls back to the global WEBHOOK_URL, and no URL at all disables
+	// outbound notifications for the task.
+	WebhookURL string
 	// EndTime, when non-nil, stops the task from firing after that instant.
 	EndTime *time.Time
 	Enabled bool
@@ -122,7 +128,22 @@ func (t Task) Validate() error {
 	default:
 		return fmt.Errorf("%w: unknown on_run_completed %q", ErrInvalid, t.OnRunCompleted)
 	}
+	if t.WebhookURL != "" && !validWebhookURL(t.WebhookURL) {
+		return fmt.Errorf("%w: webhook_url must be an absolute http(s) URL", ErrInvalid)
+	}
 	return nil
+}
+
+// validWebhookURL reports whether u is an absolute http(s) URL — the only
+// targets the notifier will POST to. Anything else (javascript:, file:, a bare
+// hostname) is refused at write time so a task can never point notifications at
+// a non-HTTP endpoint.
+func validWebhookURL(u string) bool {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return false
+	}
+	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
 }
 
 // Schedule parses the task's cron expression in its timezone. The returned

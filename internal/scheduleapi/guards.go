@@ -23,6 +23,7 @@ type taskDTO struct {
 	TargetSessionID  string         `json:"target_session_id,omitempty"`
 	OnRunCompleted   string         `json:"on_run_completed"`
 	Multitask        string         `json:"multitask_strategy"`
+	WebhookURL       string         `json:"webhook_url"`
 	EndTime          *time.Time     `json:"end_time,omitempty"`
 	Enabled          bool           `json:"enabled"`
 	NextRunAt        time.Time      `json:"next_run_at"`
@@ -43,6 +44,7 @@ func taskDTOOf(t schedule.Task) taskDTO {
 		TargetSessionID: t.TargetSessionID,
 		OnRunCompleted:  string(t.OnRunCompleted),
 		Multitask:       string(t.Multitask),
+		WebhookURL:      t.WebhookURL,
 		EndTime:         t.EndTime,
 		Enabled:         t.Enabled,
 		NextRunAt:       t.NextRunAt,
@@ -72,6 +74,7 @@ type taskRequest struct {
 	TargetSessionID string         `json:"target_session_id"`
 	OnRunCompleted  string         `json:"on_run_completed"`
 	Multitask       string         `json:"multitask_strategy"`
+	WebhookURL      string         `json:"webhook_url"`
 	EndTime         *time.Time     `json:"end_time"`
 	Metadata        map[string]any `json:"metadata"`
 }
@@ -89,6 +92,7 @@ func (req taskRequest) toTask(userID string) (schedule.Task, error) {
 		TargetSessionID: req.TargetSessionID,
 		OnRunCompleted:  schedule.OnRunCompleted(req.OnRunCompleted),
 		Multitask:       schedule.MultitaskStrategy(req.Multitask),
+		WebhookURL:      req.WebhookURL,
 		EndTime:         req.EndTime,
 		Enabled:         true,
 		Metadata:        req.Metadata,

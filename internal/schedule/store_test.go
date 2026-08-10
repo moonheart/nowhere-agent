@@ -74,6 +74,52 @@ func validTask(userID string) Task {
 	}
 }
 
+func TestPGStoreWebhookURLRoundTrip(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ctx := context.Background()
+	userID := pgNewUser(t, db)
+
+	created, err := store.Create(ctx, validTask(userID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+	if created.WebhookURL != "" {
+		t.Fatalf("created with no webhook_url should read empty, got %q", created.WebhookURL)
+	}
+
+	created.WebhookURL = "https://hooks.example.com/schedule/notify"
+	updated, err := store.Update(ctx, created)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.WebhookURL != "https://hooks.example.com/schedule/notify" {
+		t.Fatalf("update did not persist webhook_url: %+v", updated)
+	}
+
+	got, err := store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.WebhookURL != "https://hooks.example.com/schedule/notify" {
+		t.Fatalf("webhook_url round-trip: %q", got.WebhookURL)
+	}
+
+	// Clearing the URL back to empty persists as NULL, not a broken value.
+	got.WebhookURL = ""
+	if _, err := store.Update(ctx, got); err != nil {
+		t.Fatalf("update clear webhook_url: %v", err)
+	}
+	got, err = store.Get(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.WebhookURL != "" {
+		t.Fatalf("cleared webhook_url should read empty, got %q", got.WebhookURL)
+	}
+}
+
 func TestPGStoreCRUD(t *testing.T) {
 	db := pgTestDB(t)
 	store := NewPGStore(db)
