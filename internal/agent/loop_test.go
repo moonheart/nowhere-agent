@@ -152,6 +152,59 @@ func TestLoopToolResultEmitsGenerativeUI(t *testing.T) {
 	t.Fatalf("no tool-result block for tu1 in produced messages: %+v", produced)
 }
 
+// progressTool pushes N generative-UI specs through the loop's ctx pusher, the
+// way the builtin ui_progress tool streams a live progress card.
+type progressTool struct {
+	mu    sync.Mutex
+	pushN int
+}
+
+func (t *progressTool) Name() string           { return "progress" }
+func (t *progressTool) Description() string    { return "pushes progress cards" }
+func (t *progressTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (t *progressTool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
+func (t *progressTool) Timeout() time.Duration { return time.Second }
+func (t *progressTool) Call(ctx context.Context, _ map[string]any) (toolruntime.Result, error) {
+	push := toolruntime.GenerativeUIFrom(ctx)
+	if push != nil {
+		for i := 1; i <= 3; i++ {
+			push(&provider.GenerativeUISpec{Root: []provider.GenerativeUINode{
+				{Component: "test-ui-card", Props: map[string]any{"percent": i * 25}},
+			}})
+		}
+		t.mu.Lock()
+		t.pushN = 3
+		t.mu.Unlock()
+	}
+	return toolruntime.Result{Content: "done"}, nil
+}
+
+// TestLoopToolPushesProgressFrames verifies the loop injects the generative-UI
+// pusher into the tool call ctx: each mid-call push becomes a live
+// KindGenerativeUI frame (a progress card updates while the tool runs), and a
+// tool without the pusher simply gets nil.
+func TestLoopToolPushesProgressFrames(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{
+		toolUseResponse("tu1", "progress", `{}`),
+		textResponse("final answer"),
+	}}
+	reg := toolruntime.NewRegistry()
+	tool := &progressTool{}
+	reg.Register(tool)
+	emit := &memEmitter{}
+	loop := New(p, reg, Config{Model: "m", MaxTokens: 100})
+
+	if _, err := loop.Run(context.Background(), []provider.Message{provider.TextMessage(provider.RoleUser, "go")}, emit); err != nil {
+		t.Fatal(err)
+	}
+	if tool.pushN != 3 {
+		t.Errorf("pusher invoked %d times, want 3", tool.pushN)
+	}
+	if emit.count(KindGenerativeUI) != 3 {
+		t.Errorf("KindGenerativeUI emitted %d times, want 3 (one per mid-call push)", emit.count(KindGenerativeUI))
+	}
+}
+
 func TestLoopSingleTurn(t *testing.T) {
 	p := &scriptProvider{script: [][]provider.Event{textResponse("hello world")}}
 	reg := toolruntime.NewRegistry()

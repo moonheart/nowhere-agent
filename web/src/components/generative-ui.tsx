@@ -10,13 +10,16 @@ import { cn } from "@/lib/utils";
 // "generative-ui" on both the live stream (data-generative-ui frame) and
 // history reloads (same shape), so one renderer covers both.
 
-// TestUiCard is the demo card the test_ui tool pushes.
+// TestUiCard is the demo card the test_ui / ui_progress tools push. It renders
+// a progress bar when the spec carries a `percent`.
 const TestUiCard: FC<{
   title?: string;
   body?: string;
   variant?: string;
+  percent?: number;
+  stage?: string;
   children?: ReactNode;
-}> = ({ title, body, variant, children }) => (
+}> = ({ title, body, variant, percent, stage, children }) => (
   <div
     className={cn(
       "my-1 rounded-lg border p-3",
@@ -29,6 +32,19 @@ const TestUiCard: FC<{
   >
     <p className="text-sm font-semibold">{title ?? "Agent UI"}</p>
     {body && <p className="mt-0.5 text-sm text-muted-foreground">{body}</p>}
+    {typeof percent === "number" && (
+      <div className="mt-2">
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-foreground/10">
+          <div
+            className="h-full rounded-full bg-primary transition-all duration-300"
+            style={{ width: `${Math.min(100, Math.max(0, percent))}%` }}
+          />
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {percent}%{stage ? ` · ${stage}` : ""}
+        </p>
+      </div>
+    )}
     {children && <div className="mt-2 flex flex-col gap-1">{children}</div>}
   </div>
 );
@@ -91,22 +107,24 @@ export const DataUI: FC<{ name: string; data: unknown }> = ({ name, data }) => {
   return <SpecTree spec={spec} />;
 };
 
-// pickGenerativeUISpec finds the generative-ui entry carried in a message's
-// metadata.unstable_data — where the LIVE data-generative-ui frame lands: the
-// assistant-stream 0.3.26 accumulator routes non-transient data frames into
-// metadata, never into content parts (the same channel the data-usage frame
-// and data-session-state use).
+// pickGenerativeUISpec finds the NEWEST generative-ui entry carried in a
+// message's metadata.unstable_data — where the LIVE data-generative-ui frames
+// land: the assistant-stream 0.3.26 accumulator routes non-transient data
+// frames into metadata (appending one entry per frame), never into content
+// parts (the same channel the data-usage frame and data-session-state use).
+// A progress card pushes many frames, so the LAST matching entry wins.
 function pickGenerativeUISpec(metadata: unknown): GenerativeUISpec | null {
   const list = (metadata as { unstable_data?: unknown[] } | undefined)
     ?.unstable_data;
   if (!Array.isArray(list)) return null;
+  let found: GenerativeUISpec | null = null;
   for (const entry of list) {
     const e = entry as
       | { name?: string; data?: { spec?: GenerativeUISpec } }
       | undefined;
-    if (e?.name === "generative-ui" && e.data?.spec) return e.data.spec;
+    if (e?.name === "generative-ui" && e.data?.spec) found = e.data.spec;
   }
-  return null;
+  return found;
 }
 
 // GenerativeUIFromMetadata renders the live-pushed generative UI (from the

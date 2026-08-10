@@ -644,7 +644,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		}
 
 		// Dispatch tool calls (concurrently) and append results.
-		l.recordToolResults(ctx, emit, state, res.Calls, l.dispatch(ctx, res.Calls))
+		l.recordToolResults(ctx, emit, state, res.Calls, l.dispatch(ctx, emit, res.Calls))
 		l.emitStepFinish(ctx, emit, res, "tool-calls", true)
 	}
 
@@ -1085,7 +1085,7 @@ func (l *Loop) interactionGate(ctx context.Context, calls []toolruntime.Call) []
 // each call must be wrapped by WrapToolCall middleware and toolruntime cannot
 // import this package. The screen resolves every live call's Tool up front, so
 // middleware is guaranteed a non-nil ToolCall.Tool.
-func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolruntime.Result {
+func (l *Loop) dispatch(ctx context.Context, emit Emitter, calls []toolruntime.Call) []toolruntime.Result {
 	results := make([]toolruntime.Result, len(calls))
 	live := make([]*ToolCall, 0, len(calls))
 	liveIdx := make([]int, 0, len(calls))
@@ -1129,12 +1129,19 @@ func (l *Loop) dispatch(ctx context.Context, calls []toolruntime.Call) []toolrun
 	// composed handler is shared and must be safe for concurrent use (the same
 	// contract the tools themselves carry).
 	handler := chainTool(l.toolWrap, l.realToolCall())
+	// Tools that want live agent-driven UI (a progress card) receive a pusher in
+	// their ctx: each push emits a KindGenerativeUI frame immediately, so the
+	// client renders progress while the tool still runs. Pushes are live-only;
+	// the tool's final Result.GenerativeUI lands durable via recordToolResults.
+	toolCtx := toolruntime.ContextWithGenerativeUI(ctx, func(spec *provider.GenerativeUISpec) {
+		_ = emit.Emit(ctx, KindGenerativeUI, map[string]any{"spec": spec})
+	})
 	var wg sync.WaitGroup
 	for j, tc := range live {
 		wg.Add(1)
 		go func(j int, tc *ToolCall) {
 			defer wg.Done()
-			results[liveIdx[j]] = handler(ctx, tc)
+			results[liveIdx[j]] = handler(toolCtx, tc)
 		}(j, tc)
 	}
 	wg.Wait()

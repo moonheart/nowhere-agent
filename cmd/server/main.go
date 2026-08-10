@@ -765,6 +765,9 @@ func run() error {
 			// Generative-UI smoke test (agent-driven UI): the tool pushes a fixed
 			// test card. Always available (sandbox-independent), RiskReadOnly.
 			reg.Register(builtin.NewTestUI())
+			// Live progress-card demo: the tool streams progress frames through
+			// the loop's generative-UI pusher while it runs.
+			reg.Register(builtin.NewProgressUI())
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
 			// present (independent of the sandbox); scopes mirror the context

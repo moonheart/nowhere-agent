@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"nowhere-agent/internal/provider"
 )
 
 const defaultTimeout = 30 * time.Second
@@ -131,4 +133,27 @@ func ContextWithCallID(ctx context.Context, id string) context.Context {
 func CallIDFrom(ctx context.Context) string {
 	s, _ := ctx.Value(callIDKey{}).(string)
 	return s
+}
+
+// generativeUIKey is the ctx key carrying a pusher for live agent-driven UI
+// updates (the loop's emitter, threaded into the tool call).
+type generativeUIKey struct{}
+
+// GenerativeUIPusher pushes one generative-UI spec to the client DURING a tool
+// call. Pushes are live-only (broker frames); the durable spec still rides the
+// tool's final Result.GenerativeUI, so a reload re-renders the settled state.
+type GenerativeUIPusher func(spec *provider.GenerativeUISpec)
+
+// ContextWithGenerativeUI returns ctx carrying a pusher the tool can call to
+// stream live agent-driven UI updates (e.g. a progress card) while it runs.
+func ContextWithGenerativeUI(ctx context.Context, push GenerativeUIPusher) context.Context {
+	return context.WithValue(ctx, generativeUIKey{}, push)
+}
+
+// GenerativeUIFrom returns the pusher placed by ContextWithGenerativeUI, or
+// nil when the caller did not dispatch through the loop (e.g. a direct
+// registry call in a test).
+func GenerativeUIFrom(ctx context.Context) GenerativeUIPusher {
+	p, _ := ctx.Value(generativeUIKey{}).(GenerativeUIPusher)
+	return p
 }
