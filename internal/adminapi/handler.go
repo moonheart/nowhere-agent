@@ -15,6 +15,7 @@ import (
 
 	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/dreaming"
+	"nowhere-agent/internal/export"
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
@@ -39,6 +40,9 @@ type Handler struct {
 	uploads upload.Uploader
 	// audit records administrative actions; nil disables recording.
 	audit *audit.Logger
+	// exporter assembles a user's data footprint for /api/me/export. Nil
+	// disables the route with a 503 (see WithExporter).
+	exporter *export.Service
 }
 
 // NewHandler builds the console handler. usage and memories may be nil; the
@@ -60,6 +64,13 @@ func (h *Handler) WithQuotas(q *quota.Store) *Handler {
 // Recording is best-effort and never changes a response (see record).
 func (h *Handler) WithAudit(l *audit.Logger) *Handler {
 	h.audit = l
+	return h
+}
+
+// WithExporter wires the user data-export service, enabling GET /api/me/export.
+// Left nil, the route answers 503 — the console still serves everything else.
+func (h *Handler) WithExporter(e *export.Service) *Handler {
+	h.exporter = e
 	return h
 }
 
@@ -110,6 +121,7 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	route(g, "DELETE /api/me/tokens/{id}", h.revokeToken)
 	route(g, "GET /api/me/uploads", h.listUploads)
 	route(g, "DELETE /api/me/uploads/{id}", h.deleteUpload)
+	route(g, "GET /api/me/export", h.exportData)
 
 	// ---- teams ----
 	route(g, "GET /api/teams", h.myTeams)

@@ -26,6 +26,7 @@ import (
 	"nowhere-agent/internal/config"
 	"nowhere-agent/internal/contextmgmt"
 	"nowhere-agent/internal/dreaming"
+	"nowhere-agent/internal/export"
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/logging"
@@ -1134,7 +1135,8 @@ func run() error {
 		WithProviders(provStore).
 		WithUploads(uploadSvc).
 		WithDreaming(dreamRunner).
-		WithAudit(auditLogger)
+		WithAudit(auditLogger).
+		WithExporter(export.New(pool, messageStore, memPort, uploadSvc, schedule.NewPGStore(pool)))
 	adminHandler.RegisterAuthed(protected)
 	log.Info("admin console endpoints enabled (auth required)")
 

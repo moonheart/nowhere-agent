@@ -54,6 +54,8 @@ const (
 	ActionMeTokenRevoke    Action = "me.token.revoke"
 	// Self-service file uploads (change user-image-uploads).
 	ActionMeUploadDelete Action = "me.upload.delete"
+	// Self-service data export (data governance).
+	ActionMeExport Action = "me.export"
 
 	// Platform administration of accounts.
 	ActionAdminUserCreate        Action = "admin.user.create"
