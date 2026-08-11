@@ -2,6 +2,10 @@ package webhook
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -194,5 +198,62 @@ func TestDeliverAllowsPublicTarget(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("consumer never received the delivery")
+	}
+}
+
+// TestDeliverSignsPayload proves the HMAC signature header: with a signing
+// secret configured, the consumer can verify the body's authenticity.
+func TestDeliverSignsPayload(t *testing.T) {
+	const secret = "webhook-signing-secret"
+	sigCh := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sigCh <- r.Header.Get("X-Nowhere-Signature")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g := testGuard(t, []string{"127.0.0.0/8"}, nil)
+	n := New(Options{SSRF: g, Timeout: 2 * time.Second, SigningSecret: secret, Logger: testLogger(t)})
+	payload := RunCompletedPayload{Event: "run.completed", RunID: "r1", Status: "done"}
+	if err := n.Deliver(context.Background(), srv.URL+"/hook", payload); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+
+	got := <-sigCh
+	if !strings.HasPrefix(got, "sha256=") {
+		t.Fatalf("signature header = %q, want sha256= prefix", got)
+	}
+	// Recompute the expected signature over the same JSON the notifier sent.
+	body, _ := json.Marshal(payload)
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write(body)
+	want := "sha256=" + hex.EncodeToString(m.Sum(nil))
+	if !hmac.Equal([]byte(got), []byte(want)) {
+		t.Fatalf("signature %q != expected %q", got, want)
+	}
+	// A wrong secret must not verify.
+	bad := hmac.New(sha256.New, []byte("wrong"))
+	bad.Write(body)
+	if hmac.Equal([]byte(got), []byte("sha256="+hex.EncodeToString(bad.Sum(nil)))) {
+		t.Fatal("signature verifies under the wrong secret")
+	}
+}
+
+// TestDeliverUnsignedWithoutSecret proves no signature header is sent when no
+// signing secret is configured (legacy behavior).
+func TestDeliverUnsignedWithoutSecret(t *testing.T) {
+	sigCh := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sigCh <- r.Header.Get("X-Nowhere-Signature")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	g := testGuard(t, []string{"127.0.0.0/8"}, nil)
+	n := New(Options{SSRF: g, Timeout: 2 * time.Second, Logger: testLogger(t)})
+	if err := n.Deliver(context.Background(), srv.URL+"/hook", RunCompletedPayload{Event: "run.completed"}); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got := <-sigCh; got != "" {
+		t.Fatalf("signature header present without a secret: %q", got)
 	}
 }

@@ -1062,11 +1062,15 @@ func run() error {
 			log.Info("webhook SSRF guard enabled with allowlist", "entries", list)
 		}
 		notifier := webhook.New(webhook.Options{
-			Timeout: cfg.Webhook.Timeout,
-			Retries: cfg.Webhook.Retries,
-			SSRF:    webhookGuard,
-			Logger:  log,
+			Timeout:        cfg.Webhook.Timeout,
+			Retries:        cfg.Webhook.Retries,
+			SSRF:           webhookGuard,
+			SigningSecret:  cfg.Webhook.SigningSecret,
+			Logger:         log,
 		})
+		if cfg.Webhook.SigningSecret != "" {
+			log.Info("run-completion webhooks signed (X-Nowhere-Signature)")
+		}
 		notifyTarget := func(ctx context.Context, sessionID string) (string, error) {
 			var taskID sql.NullString
 			var source sql.NullString

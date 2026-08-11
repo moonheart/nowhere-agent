@@ -84,6 +84,10 @@ type Webhook struct {
 	// private/loopback is refused unless it falls in an allowlisted CIDR or its
 	// hostname is allowlisted. Empty = strict: only public targets.
 	SSRFAllowlist string `envconfig:"WEBHOOK_SSRF_ALLOWLIST" default:""`
+	// SigningSecret, when set, HMAC-SHA256-signs every notification payload
+	// (X-Nowhere-Signature header); consumers share the secret and verify, so
+	// a notification cannot be forged. Empty = unsigned (legacy).
+	SigningSecret string `envconfig:"WEBHOOK_SIGNING_SECRET" default:""`
 }
 
 // Secrets holds the master key that encrypts stored credentials (the team LLM

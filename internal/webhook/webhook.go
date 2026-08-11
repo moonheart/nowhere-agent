@@ -14,6 +14,9 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -52,7 +55,10 @@ type Notifier struct {
 	timeout time.Duration
 	retries int
 	ssrf    *Guard // nil = no SSRF screening (tests/legacy)
-	log     *slog.Logger
+	// signingSecret, when set, HMAC-SHA256-signs every payload body; the
+	// consumer verifies authenticity via the X-Nowhere-Signature header.
+	signingSecret []byte
+	log           *slog.Logger
 }
 
 // Options tunes delivery. Zero values pick safe defaults.
@@ -66,6 +72,11 @@ type Options struct {
 	// Sites that legitimately notify internal systems add allowlisted CIDRs/
 	// hosts via NewGuard.
 	SSRF *Guard
+	// SigningSecret, when set, signs every payload with HMAC-SHA256
+	// (X-Nowhere-Signature: sha256=<hex> over the raw body). The consumer
+	// shares the secret and verifies, so a notification cannot be forged by
+	// anyone who can reach the webhook URL.
+	SigningSecret string
 	// Logger receives delivery outcomes; nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -85,11 +96,12 @@ func New(opts Options) *Notifier {
 		opts.Logger = slog.Default()
 	}
 	n := &Notifier{
-		client:  &http.Client{Timeout: opts.Timeout},
-		timeout: opts.Timeout,
-		retries: opts.Retries,
-		ssrf:    opts.SSRF,
-		log:     opts.Logger,
+		client:        &http.Client{Timeout: opts.Timeout},
+		timeout:       opts.Timeout,
+		retries:       opts.Retries,
+		ssrf:          opts.SSRF,
+		signingSecret: []byte(opts.SigningSecret),
+		log:           opts.Logger,
 	}
 	if opts.SSRF != nil {
 		// Re-validate every redirect hop with the same guard, so a public URL
@@ -143,6 +155,14 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 		req.Header.Set("User-Agent", "nowhere-agent-webhook/1")
 		req.Header.Set("X-Nowhere-Event", payload.Event)
 		req.Header.Set("X-Nowhere-Run-Id", payload.RunID)
+		if len(n.signingSecret) > 0 {
+			// Sign the raw body: the consumer shares the secret and verifies
+			// sha256=<hex HMAC-SHA256(body)> in constant time, so a
+			// notification cannot be forged by anyone who can reach the URL.
+			m := hmac.New(sha256.New, n.signingSecret)
+			m.Write(body)
+			req.Header.Set("X-Nowhere-Signature", "sha256="+hex.EncodeToString(m.Sum(nil)))
+		}
 		resp, err := n.client.Do(req)
 		if err != nil {
 			lastErr = err
