@@ -322,19 +322,21 @@ func paths() map[string]PathItem {
 		"/api/inbound/{id}": {
 			"post": Operation{
 				Summary:     "Trigger an agent run from an external system",
-				Description: "Starts an asynchronous agent run owned by the webhook's user. The request must carry X-Nowhere-Timestamp (unix seconds, within 5 minutes) and X-Nowhere-Signature: sha256=<hex HMAC-SHA256 over \"<ts>.<raw body>\" with the webhook secret>. The run executes on the platform's shared registry and completion is delivered to the webhook's notify_url (or the global WEBHOOK_URL).",
+				Description: "Starts an asynchronous agent run owned by the webhook's user. The request must carry X-Nowhere-Timestamp (unix seconds, within 5 minutes), X-Nowhere-Nonce (client-generated, deduplicated — replaying the same timestamp+nonce+signature starts no second run), and X-Nowhere-Signature: sha256=<hex HMAC-SHA256 over \"<ts>.<nonce>.<body>\" with the webhook secret>. The run executes on the platform's shared registry and completion is delivered to the webhook's notify_url (or the global WEBHOOK_URL).",
 				Tags:        []string{"inbound"},
 				Parameters: []Parameter{
 					{Name: "id", In: "path", Required: true, Description: "webhook id from /api/me/inbound", Schema: map[string]any{"type": "string"}},
 					{Name: "X-Nowhere-Timestamp", In: "header", Required: true, Description: "unix seconds; accepted within a 5-minute window", Schema: map[string]any{"type": "integer"}},
-					{Name: "X-Nowhere-Signature", In: "header", Required: true, Description: "sha256=<hex HMAC-SHA256 over \"<timestamp>.<body>\" with the webhook secret>", Schema: map[string]any{"type": "string"}},
+					{Name: "X-Nowhere-Nonce", In: "header", Required: true, Description: "client-generated idempotency nonce (<= 128 chars), folded into the signature and deduplicated", Schema: map[string]any{"type": "string"}},
+					{Name: "X-Nowhere-Signature", In: "header", Required: true, Description: "sha256=<hex HMAC-SHA256 over \"<timestamp>.<nonce>.<body>\" with the webhook secret>", Schema: map[string]any{"type": "string"}},
 				},
 				RequestBody: jsonBody(ref("InboundTriggerRequest")),
 				Responses: map[string]Response{
 					"202": {Description: "run started; {run_id, session_id, status}", Content: map[string]Content{"application/json": {Schema: map[string]any{"type": "object", "properties": map[string]any{"run_id": map[string]any{"type": "string"}, "session_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}}}}}},
 					"400": {Description: "invalid payload"},
 					"401": {Description: "invalid signature, expired timestamp, or disabled webhook"},
-					"409": {Description: "target session has pending human interactions"},
+					"403": {Description: "target session belongs to another user"},
+					"409": {Description: "replayed nonce, or target session has pending human interactions"},
 					"413": {Description: "payload too large"},
 					"429": {Description: "monthly token budget exceeded"},
 				},

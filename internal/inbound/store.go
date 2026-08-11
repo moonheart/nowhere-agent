@@ -222,6 +222,38 @@ func (s *Store) TouchLastUsed(ctx context.Context, id string) error {
 	return err
 }
 
+// ErrReplay is returned when a trigger's nonce was already seen within the
+// signature window — the same signed event was delivered twice.
+var ErrReplay = errors.New("replayed nonce")
+
+// ClaimNonce deduplicates a trigger's nonce: it records (webhook_id, nonce)
+// and reports false — with ErrReplay — when the pair was already claimed.
+// Expired rows are pruned opportunistically on each claim, keeping the table
+// bounded to the signature window.
+func (s *Store) ClaimNonce(ctx context.Context, webhookID, nonce string, now time.Time) error {
+	cutoff := now.Add(-signatureWindow - time.Minute)
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM inbound_webhook_nonces WHERE seen_at < $1`, cutoff); err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO inbound_webhook_nonces (webhook_id, nonce, seen_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (webhook_id, nonce) DO NOTHING`,
+		webhookID, nonce, now)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrReplay
+	}
+	return nil
+}
+
 func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil

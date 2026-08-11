@@ -105,20 +105,30 @@ func (e *env) do(u identity.User, method, path string, body any) *httptest.Respo
 	return rec
 }
 
-// trigger posts a signed request to the public trigger endpoint.
+// trigger posts a signed request to the public trigger endpoint. Each call
+// draws a fresh nonce unless one is given.
 func (e *env) trigger(payload string, ts int64, secret string) *httptest.ResponseRecorder {
 	e.t.Helper()
+	return e.triggerWithNonce(payload, ts, secret, "")
+}
+
+func (e *env) triggerWithNonce(payload string, ts int64, secret, nonce string) *httptest.ResponseRecorder {
+	e.t.Helper()
+	if nonce == "" {
+		nonce = fmt.Sprintf("n-%d-%d", ts, time.Now().UnixNano())
+	}
 	req := httptest.NewRequest("POST", "/api/inbound/"+e.webhook.ID, strings.NewReader(payload))
 	req.Header.Set("X-Nowhere-Timestamp", fmt.Sprintf("%d", ts))
-	req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(payload, ts, secret))
+	req.Header.Set("X-Nowhere-Nonce", nonce)
+	req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(payload, ts, nonce, secret))
 	rec := httptest.NewRecorder()
 	e.mux.ServeHTTP(rec, req)
 	return rec
 }
 
-func (e *env) sign(payload string, ts int64, secret string) string {
+func (e *env) sign(payload string, ts int64, nonce, secret string) string {
 	m := hmac.New(sha256.New, []byte(secret))
-	m.Write([]byte(fmt.Sprintf("%d.%s", ts, payload)))
+	m.Write([]byte(fmt.Sprintf("%d.%s.%s", ts, nonce, payload)))
 	return hex.EncodeToString(m.Sum(nil))
 }
 
@@ -140,16 +150,25 @@ func TestTriggerHappyPath(t *testing.T) {
 func TestTriggerRejectsBadSignature(t *testing.T) {
 	e := newEnv(t)
 	now := time.Now().Unix()
+	nonce := "n-test-1"
 	cases := []struct {
 		name   string
 		mutate func(req *http.Request)
 	}{
-		{"wrong secret", func(req *http.Request) { req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(`{"prompt":"x"}`, now, "wh_wrong")) }},
+		{"wrong secret", func(req *http.Request) { req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(`{"prompt":"x"}`, now, nonce, "wh_wrong")) }},
 		{"missing signature", func(req *http.Request) { req.Header.Del("X-Nowhere-Signature") }},
 		{"missing timestamp", func(req *http.Request) { req.Header.Del("X-Nowhere-Timestamp") }},
+		{"missing nonce", func(req *http.Request) { req.Header.Del("X-Nowhere-Nonce") }},
+		{"oversized nonce", func(req *http.Request) { req.Header.Set("X-Nowhere-Nonce", strings.Repeat("a", 129)) }},
 		{"tampered body", func(req *http.Request) {
 			// Signed over a DIFFERENT body than the one sent: must fail.
-			req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(`{"prompt":"y"}`, now, e.secret))
+			req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(`{"prompt":"y"}`, now, nonce, e.secret))
+		}},
+		{"nonce not in signature", func(req *http.Request) {
+			// Signature over ts.body without the nonce: must fail.
+			m := hmac.New(sha256.New, []byte(e.secret))
+			m.Write([]byte(fmt.Sprintf("%d.%s", now, `{"prompt":"x"}`)))
+			req.Header.Set("X-Nowhere-Signature", "sha256="+hex.EncodeToString(m.Sum(nil)))
 		}},
 		{"expired timestamp", func(req *http.Request) {
 			req.Header.Set("X-Nowhere-Timestamp", fmt.Sprintf("%d", now-6*60))
@@ -167,7 +186,8 @@ func TestTriggerRejectsBadSignature(t *testing.T) {
 			payload := `{"prompt":"x"}`
 			req := httptest.NewRequest("POST", "/api/inbound/"+e.webhook.ID, strings.NewReader(payload))
 			req.Header.Set("X-Nowhere-Timestamp", fmt.Sprintf("%d", now))
-			req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(payload, now, e.secret))
+			req.Header.Set("X-Nowhere-Nonce", nonce)
+			req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(payload, now, nonce, e.secret))
 			c.mutate(req)
 			rec := httptest.NewRecorder()
 			e.mux.ServeHTTP(rec, req)
@@ -175,6 +195,28 @@ func TestTriggerRejectsBadSignature(t *testing.T) {
 				t.Errorf("%s: status %d, want 401", c.name, rec.Code)
 			}
 		})
+	}
+}
+
+func TestTriggerRejectsReplay(t *testing.T) {
+	e := newEnv(t)
+	now := time.Now().Unix()
+	payload := `{"prompt":"x"}`
+	nonce := "n-replay-42"
+
+	first := e.triggerWithNonce(payload, now, e.secret, nonce)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first delivery: %d %s", first.Code, first.Body)
+	}
+	// Same timestamp + nonce + signature replayed: dedupe must refuse it.
+	replay := e.triggerWithNonce(payload, now, e.secret, nonce)
+	if replay.Code != http.StatusConflict {
+		t.Fatalf("replayed nonce: %d, want 409", replay.Code)
+	}
+	// A fresh nonce within the same window is fine.
+	fresh := e.triggerWithNonce(payload, now, e.secret, "n-fresh-99")
+	if fresh.Code != http.StatusAccepted {
+		t.Fatalf("fresh nonce: %d, want 202", fresh.Code)
 	}
 }
 

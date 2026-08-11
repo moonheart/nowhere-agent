@@ -136,6 +136,16 @@ func (h *Handler) serveTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
+	// Replay guard: the nonce is folded into the signature and deduplicated,
+	// so the same signed event can only start one run within the window.
+	if err := h.store.ClaimNonce(r.Context(), wh.ID, r.Header.Get("X-Nowhere-Nonce"), h.now()); err != nil {
+		if errors.Is(err, ErrReplay) {
+			http.Error(w, "replayed nonce", http.StatusConflict)
+			return
+		}
+		http.Error(w, "dedupe failed", http.StatusInternalServerError)
+		return
+	}
 
 	var p triggerPayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -177,13 +187,16 @@ func (h *Handler) serveTrigger(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// verifySignature checks X-Nowhere-Timestamp + X-Nowhere-Signature over
-// "<ts>.<body>" with the webhook's plaintext secret (decrypted at read time
-// from its encrypted-at-rest envelope).
+// verifySignature checks X-Nowhere-Timestamp + X-Nowhere-Nonce +
+// X-Nowhere-Signature. The signature is HMAC-SHA256 over
+// "<ts>.<nonce>.<body>" with the webhook's plaintext secret (decrypted at
+// read time from its encrypted-at-rest envelope); the nonce is required and
+// deduplicated by the store, which bounds replay.
 func verifySignature(r *http.Request, secret string, body []byte, now time.Time) bool {
 	tsStr := r.Header.Get("X-Nowhere-Timestamp")
+	nonce := r.Header.Get("X-Nowhere-Nonce")
 	sig := r.Header.Get("X-Nowhere-Signature")
-	if tsStr == "" || sig == "" {
+	if tsStr == "" || nonce == "" || sig == "" || len(nonce) > 128 {
 		return false
 	}
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
@@ -193,7 +206,7 @@ func verifySignature(r *http.Request, secret string, body []byte, now time.Time)
 	if delta := now.Unix() - ts; delta < -int64(signatureWindow/time.Second) || delta > int64(signatureWindow/time.Second) {
 		return false
 	}
-	expected := hmacSHA256Hex(secret, tsStr+"."+string(body))
+	expected := hmacSHA256Hex(secret, tsStr+"."+nonce+"."+string(body))
 	// Constant-time compare against the received signature, whatever its form.
 	got := strings.TrimPrefix(sig, "sha256=")
 	return hmac.Equal([]byte(got), []byte(expected))
