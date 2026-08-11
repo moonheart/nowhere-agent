@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -15,8 +16,11 @@ import (
 // decoding — useful for debugging adapters and auditing what was actually sent.
 //
 // Recording is opt-in via a non-empty root dir. Auth headers are never
-// recorded (bodies only). The zero value is a no-op recorder.
+// recorded (bodies only). The zero value is a no-op recorder. The root is
+// mutable via SetRoot so the admin console can turn recording on/off and
+// retarget it without a restart; Exchange snapshots the current root.
 type RawRecorder struct {
+	mu   sync.RWMutex
 	root string
 	seq  atomic.Uint64
 }
@@ -27,19 +31,34 @@ func NewRawRecorder(root string) *RawRecorder {
 	return &RawRecorder{root: root}
 }
 
+// SetRoot retunes the recording root live. An empty root disables recording;
+// a non-empty root enables it for subsequent exchanges.
+func (r *RawRecorder) SetRoot(root string) {
+	r.mu.Lock()
+	r.root = root
+	r.mu.Unlock()
+}
+
 // Enabled reports whether recording is active.
-func (r *RawRecorder) Enabled() bool { return r != nil && r.root != "" }
+func (r *RawRecorder) Enabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r != nil && r.root != ""
+}
 
 // Exchange captures one request/response pair. Call it with the marshalled
 // request body; it returns a WriteCloser to tee the streaming response into.
 // The returned closer finalizes the pair. On any filesystem error the exchange
 // degrades to a pass-through (recording must never break a live request).
 func (r *RawRecorder) Exchange(provider string, reqBody []byte) io.WriteCloser {
-	if !r.Enabled() {
+	r.mu.RLock()
+	root := r.root
+	r.mu.RUnlock()
+	if root == "" {
 		return nopWriteCloser{}
 	}
 	seq := r.seq.Add(1)
-	base := filepath.Join(r.root, provider, fmt.Sprintf("%s-%06d", time.Now().UTC().Format("20060102T150405.000000000"), seq))
+	base := filepath.Join(root, provider, fmt.Sprintf("%s-%06d", time.Now().UTC().Format("20060102T150405.000000000"), seq))
 	if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
 		return nopWriteCloser{}
 	}

@@ -127,12 +127,54 @@ func run() error {
 	// overridden from the admin console (platform_settings table). Each read
 	// path below consults this snapshot, so a change applies on the next use.
 	settingsRuntime := settings.NewRuntime(settings.NewStore(pool), map[string]json.RawMessage{
+		// Tools.
 		settings.KeyHTTPToolAllowlist: mustJSON(cfg.HTTPTool.Allowlist),
+		settings.KeyHTTPToolTimeout:   mustJSON(int(cfg.HTTPTool.Timeout.Seconds())),
 		settings.KeyQueryDBDsns:       mustJSON(cfg.QueryDB.DSNS),
-		settings.KeyWebhookURL:        mustJSON(cfg.Webhook.URL),
-		settings.KeySystemLang:        mustJSON(cfg.LLM.SystemLang),
-		settings.KeyRateLimitRPS:      mustJSON(cfg.HTTP.RateLimitRPS),
-		settings.KeyRateLimitBurst:    mustJSON(cfg.HTTP.RateLimitBurst),
+		settings.KeyQueryDBTimeout:    mustJSON(int(cfg.QueryDB.Timeout.Seconds())),
+		// Webhooks.
+		settings.KeyWebhookURL:          mustJSON(cfg.Webhook.URL),
+		settings.KeyWebhookTimeout:      mustJSON(int(cfg.Webhook.Timeout.Seconds())),
+		settings.KeyWebhookRetries:      mustJSON(cfg.Webhook.Retries),
+		settings.KeyWebhookSSRFAllowlist: mustJSON(cfg.Webhook.SSRFAllowlist),
+		settings.KeyWebhookSigningSecret: mustJSON(cfg.Webhook.SigningSecret),
+		// LLM.
+		settings.KeySystemLang:           mustJSON(cfg.LLM.SystemLang),
+		settings.KeyLLMContextWindow:     mustJSON(cfg.LLM.ContextWindow),
+		settings.KeyLLMTemperature:       mustJSON(cfg.LLM.Temperature),
+		settings.KeyLLMThinkingBudget:    mustJSON(cfg.LLM.ThinkingBudget),
+		settings.KeyLLMStreamIdleTimeout: mustJSON(int(cfg.LLM.StreamIdleTimeout.Seconds())),
+		settings.KeyLLMRawLogDir:         mustJSON(cfg.LLM.RawLogDir),
+		// Sandbox.
+		settings.KeySandboxNetwork:   mustJSON(cfg.Sandbox.Network),
+		settings.KeySandboxLocalExec: mustJSON(cfg.Sandbox.LocalExec),
+		// Permissions.
+		settings.KeyPermissionReadOnly:      mustJSON(cfg.Permission.ReadOnly),
+		settings.KeyPermissionSandboxWrite:  mustJSON(cfg.Permission.SandboxWrite),
+		settings.KeyPermissionNetwork:       mustJSON(cfg.Permission.Network),
+		settings.KeyPermissionExternalWrite: mustJSON(cfg.Permission.ExternalWrite),
+		// Redaction.
+		settings.KeyRedactEnabled:    mustJSON(cfg.Redact.Enabled),
+		settings.KeyRedactStrategy:   mustJSON(cfg.Redact.Strategy),
+		settings.KeyRedactCategories: mustJSON(cfg.Redact.Categories),
+		// Subagents.
+		settings.KeySubagentEnabled:       mustJSON(cfg.Subagent.Enabled),
+		settings.KeySubagentMaxDepth:      mustJSON(cfg.Subagent.MaxDepth),
+		settings.KeySubagentMaxTotal:      mustJSON(cfg.Subagent.MaxTotal),
+		settings.KeySubagentMaxConcurrent: mustJSON(cfg.Subagent.MaxConcurrent),
+		// Background tasks.
+		settings.KeyDreamingEnabled:      mustJSON(cfg.Dreaming.Enabled),
+		settings.KeyDreamingInterval:     mustJSON(int(cfg.Dreaming.Interval.Seconds())),
+		settings.KeyDreamingMaxTokens:    mustJSON(cfg.Dreaming.MaxTokens),
+		settings.KeyDreamingMaxFacts:     mustJSON(cfg.Dreaming.MaxFacts),
+		settings.KeyDreamingMaxInsights:  mustJSON(cfg.Dreaming.MaxInsights),
+		settings.KeyDreamingMaxSummaries: mustJSON(cfg.Dreaming.MaxSummaries),
+		settings.KeyDreamingPurgeAfter:   mustJSON(int(cfg.Dreaming.PurgeAfter.Hours())),
+		settings.KeyScheduleEnabled:      mustJSON(cfg.Schedule.Enabled),
+		settings.KeyScheduleScanInterval: mustJSON(int(cfg.Schedule.ScanInterval.Seconds())),
+		// HTTP layer.
+		settings.KeyRateLimitRPS:   mustJSON(cfg.HTTP.RateLimitRPS),
+		settings.KeyRateLimitBurst: mustJSON(cfg.HTTP.RateLimitBurst),
 	}, log)
 	if err := settingsRuntime.Load(ctx); err != nil {
 		log.Warn("platform settings load failed; env defaults in effect", "err", err)
@@ -374,9 +416,16 @@ func run() error {
 
 	// run_command availability: the docker backend always offers it (the command
 	// is contained in the Linux container); the local backend only when
-	// explicitly enabled via SANDBOX_LOCAL_EXEC, since there it runs on the host.
-	execEnabled := cfg.Sandbox.Backend == "docker" ||
-		(cfg.Sandbox.Backend == "local" && cfg.Sandbox.LocalExec)
+	// explicitly enabled via SANDBOX_LOCAL_EXEC (runtime-settable from the
+	// admin console as sandbox_local_exec), since there it runs on the host.
+	// Resolved per session inside the tool registry, so the switch applies to
+	// the next run.
+	execEnabledFor := func() bool {
+		if cfg.Sandbox.Backend == "docker" {
+			return true
+		}
+		return cfg.Sandbox.Backend == "local" && settingsRuntime.Bool(settings.KeySandboxLocalExec)
+	}
 
 	// Memory (PG+vector) and skill engine feed the loop's system prompt:
 	// L0 skill index + recalled memories, scoped to the caller (task 4.5).
@@ -476,13 +525,17 @@ func run() error {
 		// Execution-permission gate (D10): authorize each tool call by the tool's
 		// risk before dispatch. This server is headless, so an "ask" decision
 		// denies (no interactive approver). Defaults allow read-only/sandbox-write/
-		// network and deny external-write; tighten via PERMISSION_* env.
-		permChecker := permission.NewChecker(permission.Policy{
-			ReadOnly:      permission.Decision(cfg.Permission.ReadOnly),
-			SandboxWrite:  permission.Decision(cfg.Permission.SandboxWrite),
-			Network:       permission.Decision(cfg.Permission.Network),
-			ExternalWrite: permission.Decision(cfg.Permission.ExternalWrite),
-		})
+		// network and deny external-write; tighten via PERMISSION_* env. The
+		// policy is re-resolved from the runtime settings on EVERY check, so the
+		// admin console retunes it live.
+		policyFor := func() permission.Policy {
+			return permission.Policy{
+				ReadOnly:      permission.Decision(settingsRuntime.String(settings.KeyPermissionReadOnly)),
+				SandboxWrite:  permission.Decision(settingsRuntime.String(settings.KeyPermissionSandboxWrite)),
+				Network:       permission.Decision(settingsRuntime.String(settings.KeyPermissionNetwork)),
+				ExternalWrite: permission.Decision(settingsRuntime.String(settings.KeyPermissionExternalWrite)),
+			}
+		}
 		// permissionMode reads the session's permission mode from its state store.
 		// An empty session id (a run with no session binding), a read error, or an
 		// unknown value all fall back to auto — the safe default.
@@ -513,7 +566,7 @@ func run() error {
 		// this approval gate — the env deny gate below still blocks, and
 		// ask_user/client_tool are unaffected.
 		permitAsk := func(ctx context.Context, t toolruntime.Tool) (bool, string) {
-			if permChecker.Check(t) != permission.Ask {
+			if permission.NewChecker(policyFor()).Check(t) != permission.Ask {
 				return false, "" // not an ask-risk tool; defer to the next gate
 			}
 			if sessionLiftsAsk(ctx) {
@@ -524,7 +577,7 @@ func run() error {
 		// permitEnv is the hard env-deny gate: an env "deny" decision blocks the
 		// tool outright, and the reason is fed back to the model.
 		permitEnv := func(ctx context.Context, t toolruntime.Tool) (bool, string) {
-			if permChecker.Check(t) != permission.Deny {
+			if permission.NewChecker(policyFor()).Check(t) != permission.Deny {
 				return false, ""
 			}
 			return true, fmt.Sprintf("%s (risk: %s) is not permitted by policy", t.Name(), t.Risk())
@@ -546,22 +599,31 @@ func run() error {
 			"read_only", cfg.Permission.ReadOnly, "sandbox_write", cfg.Permission.SandboxWrite,
 			"network", cfg.Permission.Network, "external_write", cfg.Permission.ExternalWrite)
 
-		// PII/secret redaction (enterprise-readiness): one Redactor is built once
-		// and shared by every loop the platform constructs (chat, subagents,
-		// scheduled tasks). It is immutable after construction, so the shared
-		// instance is safe across concurrent tool dispatches. Disabled by
-		// default; an invalid strategy/category fails startup rather than
-		// silently redacting nothing.
-		redactor, err := redact.New(redact.Config{
+		// PII/secret redaction (enterprise-readiness): a Redactor is built per
+		// loop from the runtime settings, so the admin console turns redaction
+		// on/off or retunes strategy/categories live — the next run applies
+		// the change. Boot validates the env values once (a bad env still
+		// fails startup); a malformed RUNTIME value degrades to "no redaction"
+		// with a log line — a console typo must not take the server down, but
+		// it should be loud.
+		if _, err := redact.New(redact.Config{
 			Enabled:    cfg.Redact.Enabled,
 			Strategy:   redact.Strategy(cfg.Redact.Strategy),
 			Categories: cfg.Redact.Categories,
-		})
-		if err != nil {
+		}); err != nil {
 			return fmt.Errorf("redact config: %w", err)
 		}
-		if redactor != nil {
-			log.Info("PII/secret redaction enabled", "strategy", cfg.Redact.Strategy, "categories", cfg.Redact.Categories)
+		redactorFor := func() *redact.Redactor {
+			r, err := redact.New(redact.Config{
+				Enabled:    settingsRuntime.Bool(settings.KeyRedactEnabled),
+				Strategy:   redact.Strategy(settingsRuntime.String(settings.KeyRedactStrategy)),
+				Categories: settingsRuntime.String(settings.KeyRedactCategories),
+			})
+			if err != nil {
+				log.Warn("redaction config invalid; redaction disabled for this run", "err", err)
+				return nil
+			}
+			return r
 		}
 
 		// MCP integration (mcp capability): connect to the configured MCP
@@ -609,14 +671,16 @@ func run() error {
 		// so a known model gets working compression out of the box. An unknown
 		// model with no explicit window keeps compression disabled.
 		// windowFor derives the context window for a RESOLVED target: the
-		// LLM_CONTEXT_WINDOW override when set, otherwise the model's capability
-		// profile (models.dev-style table), so a known model gets working
-		// compression out of the box. An unknown model with no explicit window
-		// keeps compression disabled. Resolved per request because the model —
-		// and thus its profile — follows the caller's provider assignment.
+		// runtime LLM_CONTEXT_WINDOW override when set, otherwise the model's
+		// capability profile (models.dev-style table), so a known model gets
+		// working compression out of the box. An unknown model with no explicit
+		// window keeps compression disabled. Resolved per request because the
+		// model — and thus its profile — follows the caller's provider
+		// assignment; the override is re-read per request from the runtime
+		// settings (admin console can tune it without a restart).
 		windowFor := func(t providerreg.Target) int {
-			if cfg.LLM.ContextWindow > 0 {
-				return cfg.LLM.ContextWindow
+			if w := settingsRuntime.Int(settings.KeyLLMContextWindow); w > 0 {
+				return w
 			}
 			if profile, ok := provider.LookupProfile(t.Vendor, t.Model); ok {
 				return profile.ContextWindow
@@ -635,6 +699,13 @@ func run() error {
 			}
 			return replyBudget
 		}
+		// idleTimeoutFor bounds streaming generations: if no SSE bytes arrive
+		// within the runtime LLM_STREAM_IDLE_TIMEOUT, the stream fails fast.
+		// 0 disables the stall guard. Defined here (before the dreaming block)
+		// because the dreaming adapter is built below with the same knob.
+		idleTimeoutFor := func() time.Duration {
+			return settingsRuntime.Duration(settings.KeyLLMStreamIdleTimeout)
+		}
 
 		// Dreaming worker + the scheduler that drives it (capability-gaps K1+K2).
 		// The worker consolidates sessions' episodes into long-term memory; the
@@ -647,14 +718,17 @@ func run() error {
 		// governs the schedule, not the capability. Manual consolidation from the
 		// console stays available with the schedule off, which is the point of
 		// having it — an operator who wants consolidation to be deliberate rather
-		// than periodic turns the timer off and keeps the button.
+		// than periodic turns the timer off and keeps the button. Both the
+		// schedule and the per-pass knobs (max tokens, caps, purge window) are
+		// re-read from the runtime settings on every pass, so the admin console
+		// tunes them without a restart.
 		//
 		// Dreaming is a platform background capability, so it consolidates over
 		// the platform default provider resolved at boot — not a caller's team
 		// assignment. When the registry has no servable platform provider,
 		// dreaming stays unavailable (the console's manual trigger answers 503).
 		if plat, err := provResolver.ResolveForTeam(ctx, ""); err == nil {
-			if platAdapter := providerreg.BuildAdapter(plat, recorder, cfg.LLM.StreamIdleTimeout); platAdapter != nil {
+			if platAdapter := providerreg.BuildAdapter(plat, recorder, idleTimeoutFor()); platAdapter != nil {
 				source := dreaming.NewStoreSource(sessionStore, messageStore)
 				worker := dreaming.NewWorker(source, memPort,
 					dreaming.NewProviderLLM(platAdapter, plat.Model),
@@ -673,20 +747,52 @@ func run() error {
 				dreamRunner = dreaming.NewRunner(worker, ctx)
 				dreamRunner.SetLogger(log)
 
-				if cfg.Dreaming.Enabled {
-					sched := scheduler.New(log, scheduler.Job{
-						Name:     "dreaming",
-						Interval: cfg.Dreaming.Interval,
-						Run:      dreamRunner.RunScheduled,
+				// syncDreamKnobs applies the runtime-settable budget/caps/purge
+				// to the worker before each pass (scheduled AND manual — the
+				// console's trigger runs through the same runner).
+				dreamRunner.SetKnobSync(func() {
+					worker.SetBudget(dreaming.Budget{MaxTokens: settingsRuntime.Int(settings.KeyDreamingMaxTokens)})
+					worker.SetCaps(dreaming.Caps{
+						Facts:     settingsRuntime.Int(settings.KeyDreamingMaxFacts),
+						Insights:  settingsRuntime.Int(settings.KeyDreamingMaxInsights),
+						Summaries: settingsRuntime.Int(settings.KeyDreamingMaxSummaries),
 					})
-					go sched.Start(ctx)
-					log.Info("dreaming scheduler enabled",
-						"interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens,
-						"cap_facts", cfg.Dreaming.MaxFacts, "cap_insights", cfg.Dreaming.MaxInsights,
-						"cap_summaries", cfg.Dreaming.MaxSummaries, "purge_after", cfg.Dreaming.PurgeAfter)
-				} else {
-					log.Info("dreaming scheduler disabled; manual consolidation still available")
+					worker.SetPurgeAfter(time.Duration(settingsRuntime.Int(settings.KeyDreamingPurgeAfter)) * 24 * time.Hour)
+				})
+				// runDreaming gates the scheduled pass on the runtime
+				// dreaming_enabled switch (off = the console's manual trigger
+				// still works).
+				runDreaming := func(ctx context.Context) error {
+					if !settingsRuntime.Bool(settings.KeyDreamingEnabled) {
+						return nil
+					}
+					return dreamRunner.RunScheduled(ctx)
 				}
+				sched := scheduler.New(log, scheduler.Job{
+					Name:     "dreaming",
+					Interval: cfg.Dreaming.Interval,
+					Run:      runDreaming,
+				})
+				go sched.Start(ctx)
+				go func() {
+					// Retune the cadence live: the scheduler re-reads the job's
+					// interval each tick, and this goroutine keeps it in sync
+					// with the admin console within a few seconds.
+					ticker := time.NewTicker(5 * time.Second)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							sched.SetInterval("dreaming", settingsRuntime.Duration(settings.KeyDreamingInterval))
+						}
+					}
+				}()
+				log.Info("dreaming scheduler enabled",
+					"interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens,
+					"cap_facts", cfg.Dreaming.MaxFacts, "cap_insights", cfg.Dreaming.MaxInsights,
+					"cap_summaries", cfg.Dreaming.MaxSummaries, "purge_after", cfg.Dreaming.PurgeAfter)
 			}
 		} else {
 			log.Warn("dreaming disabled: no platform provider configured", "err", err)
@@ -702,7 +808,9 @@ func run() error {
 			// per-session permission mode from the run context at call time, so one
 			// registration covers every session and reacts to the live toggle.
 			loop.Use(&agent.PermissionMW{Check: permit})
-			if redactor != nil {
+			// Redaction is rebuilt per loop from the runtime settings, so a
+			// console change to redact_* applies to the NEXT run.
+			if redactor := redactorFor(); redactor != nil {
 				loop.Use(&agent.RedactMW{Redactor: redactor})
 			}
 			if window > 0 {
@@ -726,17 +834,27 @@ func run() error {
 		// Sampling/reasoning knobs shared by every loop the platform builds:
 		// LLM_TEMPERATURE (negative = provider default) and LLM_THINKING_BUDGET
 		// (0 = no extended thinking). Adapters gate them per model profile.
-		var temperature *float64
-		if cfg.LLM.Temperature >= 0 {
-			t := cfg.LLM.Temperature
-			temperature = &t
+		// Both are re-read from the runtime settings per loop build, so the
+		// admin console tunes them without a restart.
+		temperatureFor := func() *float64 {
+			t := settingsRuntime.Float64(settings.KeyLLMTemperature)
+			if t < 0 {
+				return nil
+			}
+			return &t
 		}
-
+		thinkingBudgetFor := func() int {
+			return settingsRuntime.Int(settings.KeyLLMThinkingBudget)
+		}
 		// Agent definitions resolve through the layered store (persist-agent-defs):
 		// durable PG-backed authored definitions overlaid on the code built-ins,
 		// so user/team/system definitions take effect without a restart and a
-		// store outage degrades to built-ins rather than failing spawns.
-		subResolver := agentdef.NewResolver(agentdef.NewStore(cfg.LLM.SystemLang), agentDefPG)
+		// store outage degrades to built-ins rather than failing spawns. The
+		// built-in prompt language is re-read from the runtime settings, so
+		// switching llm_system_lang applies to newly built resolvers.
+		subResolverFor := func() *agentdef.Resolver {
+			return agentdef.NewResolver(agentdef.NewStore(settingsRuntime.String(settings.KeySystemLang)), agentDefPG)
+		}
 		// resolveTarget picks the provider+model for a run: the caller's team
 		// assignment (or the task's team, when teamID is set) falling back to the
 		// platform default. modelOverride names an explicit model on the resolved
@@ -755,7 +873,11 @@ func run() error {
 			if err != nil {
 				return providerreg.Target{}, nil, "", err
 			}
-			adapter := providerreg.BuildAdapter(t, recorder, cfg.LLM.StreamIdleTimeout)
+			// Raw-wire recording retargets live (admin console): each run syncs
+			// the recorder root from the runtime settings before building the
+			// adapter, so turning LLM_RAW_LOG_DIR on/off needs no restart.
+			recorder.SetRoot(settingsRuntime.String(settings.KeyLLMRawLogDir))
+			adapter := providerreg.BuildAdapter(t, recorder, idleTimeoutFor())
 			if adapter == nil {
 				return providerreg.Target{}, nil, "", fmt.Errorf("unsupported provider vendor %q", t.Vendor)
 			}
@@ -781,8 +903,8 @@ func run() error {
 				MaxTokens:       replyBudgetFor(windowFor(t)),
 				MaxIterations:   25,
 				CacheablePrefix: true,
-				Temperature:     temperature,
-				ThinkingBudget:  cfg.LLM.ThinkingBudget,
+				Temperature:     temperatureFor(),
+				ThinkingBudget:  thinkingBudgetFor(),
 			})
 			// Token metrics (nowhere_llm_tokens_total): report the run's
 			// aggregate usage once at run end. Only root loops carry the hook —
@@ -820,8 +942,8 @@ func run() error {
 				MaxTokens:       replyBudgetFor(windowFor(t)),
 				MaxIterations:   maxIter,
 				CacheablePrefix: true,
-				Temperature:     temperature,
-				ThinkingBudget:  cfg.LLM.ThinkingBudget,
+				Temperature:     temperatureFor(),
+				ThinkingBudget:  thinkingBudgetFor(),
 			})
 			// The child's permission policy resolves from the spawn context's session
 			// id (set on the run by the registry), so it inherits the parent session's
@@ -899,7 +1021,7 @@ func run() error {
 				dsns[name] = dsn
 			}
 			tool := builtin.NewQueryDB(dsns, builtin.QueryDBOptions{
-				Timeout: cfg.QueryDB.Timeout,
+				Timeout: settingsRuntime.Duration(settings.KeyQueryDBTimeout),
 				Logf: func(format string, args ...any) {
 					log.Info("query_db: " + fmt.Sprintf(format, args...))
 				},
@@ -941,7 +1063,7 @@ func run() error {
 			// non-empty — no allowlist, no tool (fail-closed). The allowlist
 			// is re-read per session from the runtime settings.
 			if httpAllow := httpAllowFor(); httpAllow != nil {
-				reg.Register(builtin.NewHTTPRequest(httpAllow, cfg.HTTPTool.Timeout))
+				reg.Register(builtin.NewHTTPRequest(httpAllow, settingsRuntime.Duration(settings.KeyHTTPToolTimeout)))
 			}
 			// query_db (enterprise integration): read-only SQL against the
 			// named business databases. RiskReadOnly (the tool cannot mutate
@@ -987,7 +1109,10 @@ func run() error {
 			}
 			if sandboxMgr != nil {
 				h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
-					Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(cfg.Sandbox.Network)},
+					// Egress policy is re-read from the runtime settings per
+					// session, so the admin console retunes SANDBOX_NETWORK for
+					// new sessions without a restart.
+					Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(settingsRuntime.String(settings.KeySandboxNetwork))},
 				})
 				if err != nil {
 					log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
@@ -995,7 +1120,7 @@ func run() error {
 					for _, t := range builtin.FileTools(sandboxPort, h) {
 						reg.Register(t)
 					}
-					if execEnabled {
+					if execEnabledFor() {
 						reg.Register(builtin.NewRunCommand(sandboxPort, h))
 						// Skill L2 script execution (capability-gap K3b): ONE fixed
 						// run_skill_script tool runs any visible skill's script by
@@ -1035,7 +1160,7 @@ func run() error {
 				if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
 					if t, err := provResolver.Resolve(ctx, sess.UserID); err == nil {
 						if vm, ok := provResolver.VisionModel(ctx, t); ok {
-							if visionAdapter := providerreg.BuildAdapter(t, recorder, cfg.LLM.StreamIdleTimeout); visionAdapter != nil {
+							if visionAdapter := providerreg.BuildAdapter(t, recorder, idleTimeoutFor()); visionAdapter != nil {
 								reg.Register(builtin.NewViewImage(visionAdapter, vm, imageStore.ResolverFor(sessionID, sess.UserID)))
 							}
 						}
@@ -1043,10 +1168,16 @@ func run() error {
 				}
 			}
 			// Subagent spawn tool: children draw from a scoped view of this run's
-			// registry, so nested loops share the session's tools. Registered last.
-			if cfg.Subagent.Enabled {
-				reg.Register(subagent.NewSpawnTool(subResolver, reg, subFactory, cfg.Subagent.MaxDepth).
-					WithBudget(cfg.Subagent.MaxTotal, cfg.Subagent.MaxConcurrent))
+			// registry, so nested loops share the session's tools. Registered
+			// last. Every knob is re-read from the runtime settings per session,
+			// so the admin console retunes the capability live; the definition
+			// resolver is rebuilt per session so llm_system_lang applies to
+			// built-in subagent prompts too.
+			if settingsRuntime.Bool(settings.KeySubagentEnabled) {
+				reg.Register(subagent.NewSpawnTool(subResolverFor(), reg, subFactory,
+					settingsRuntime.Int(settings.KeySubagentMaxDepth)).
+					WithBudget(settingsRuntime.Int(settings.KeySubagentMaxTotal),
+						settingsRuntime.Int(settings.KeySubagentMaxConcurrent)))
 			}
 			// Whitelist filter (scheduled-tasks D3): narrow the registry to the
 			// task's granted tools. Nil whitelist = the full set (chat). Unknown
@@ -1144,6 +1275,37 @@ func run() error {
 		if cfg.Webhook.SigningSecret != "" {
 			log.Info("run-completion webhooks signed (X-Nowhere-Signature)")
 		}
+		// applyWebhookPolicy retunes the notifier from the runtime settings
+		// (admin console): timeout/retries/signing secret change immediately,
+		// and the SSRF allowlist swaps the guard (a malformed runtime list
+		// keeps the previous guard and logs — unlike the boot allowlist,
+		// which fails startup).
+		applyWebhookPolicy := func() {
+			notifier.SetPolicy(
+				settingsRuntime.Duration(settings.KeyWebhookTimeout),
+				settingsRuntime.Int(settings.KeyWebhookRetries),
+				settingsRuntime.String(settings.KeyWebhookSigningSecret),
+			)
+			if list := splitComma(settingsRuntime.String(settings.KeyWebhookSSRFAllowlist)); len(list) > 0 {
+				g, err := webhook.NewGuard(list, nil)
+				if err != nil {
+					log.Warn("webhook SSRF allowlist invalid; keeping previous guard", "err", err)
+					return
+				}
+				notifier.SetGuard(g)
+			} else {
+				notifier.SetGuard(nil)
+			}
+		}
+		// webhookTimeoutFor bounds one delivery attempt (and the outbox
+		// context), falling back to 10s when unset — a console 0 must not
+		// abort deliveries instantly.
+		webhookTimeoutFor := func() time.Duration {
+			if d := settingsRuntime.Duration(settings.KeyWebhookTimeout); d > 0 {
+				return d
+			}
+			return 10 * time.Second
+		}
 		notifyTarget := func(ctx context.Context, sessionID string) (string, error) {
 			var taskID sql.NullString
 			var source sql.NullString
@@ -1219,8 +1381,10 @@ func run() error {
 		outbox := webhook.NewDeliveryStore(pool)
 		handler.WithRunDoneHook(func(ctx context.Context, sessionID string, run session.Run, status session.RunStatus) {
 			// The run context may be cancelled (a cancelled run); notifications
-			// still want to fire, so delivery runs on an uncancelled view.
-			deliverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.Webhook.Timeout)
+			// still want to fire, so delivery runs on an uncancelled view. The
+			// timeout is re-read from the runtime settings so a console retune
+			// applies to new notifications.
+			deliverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookTimeoutFor())
 			defer cancel()
 			target, err := notifyTarget(deliverCtx, sessionID)
 			if err != nil || target == "" {
@@ -1324,16 +1488,31 @@ func run() error {
 		}
 		go scheduler.New(log, scheduler.Job{Name: "webhook-outbox", Interval: 30 * time.Second, Run: outboxSweep}).Start(ctx)
 		log.Info("webhook outbox sweeper enabled (interval 30s, backoff to dead-letter)")
+		// Keep the notifier's policy in sync with the runtime settings: the
+		// admin console's webhook_* keys (timeout, retries, signing secret,
+		// SSRF allowlist) apply to new deliveries within a few seconds.
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					applyWebhookPolicy()
+				}
+			}
+		}()
 		if sandboxMgr != nil {
 			log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
 		}
-		if execEnabled {
+		if execEnabledFor() {
 			log.Info("run_command tool enabled", "backend", cfg.Sandbox.Backend)
 		}
 		// MCP tool count is logged by reconnectMCP when the async connect lands;
 		// at this point it is still 0, so there is nothing to report.
-		if cfg.Subagent.Enabled {
-			log.Info("subagent tool enabled (spawn_agent)", "max_depth", cfg.Subagent.MaxDepth)
+		if settingsRuntime.Bool(settings.KeySubagentEnabled) {
+			log.Info("subagent tool enabled (spawn_agent)", "max_depth", settingsRuntime.Int(settings.KeySubagentMaxDepth))
 		}
 		handler.RegisterAuthed(protected)
 
@@ -1345,8 +1524,11 @@ func run() error {
 		// The trigger is declared at function scope (above) but built here, inside
 		// the provider branch; the CRUD routes are wired below, outside this
 		// branch, so task management stays available with no LLM configured. Only
-		// firing (scheduled sweep and run-now) needs a provider.
-		if cfg.Schedule.Enabled {
+		// firing (scheduled sweep and run-now) needs a provider. The trigger runs
+		// whenever a provider exists; whether it FIRES due tasks is the runtime
+		// schedule_enabled switch (admin console), so toggling it needs no
+		// restart, and the scan cadence is retuned live.
+		{
 			schedStore := schedule.NewPGStore(pool)
 			// Loop builder: rebuild the chat loop with the task's system prompt and
 			// model (modelOverride "" = the resolved default), routing through the
@@ -1357,7 +1539,7 @@ func run() error {
 			buildSchedLoop := func(ctx context.Context, task schedule.Task, system, model string) (*agent.Loop, error) {
 				return buildLoop(ctx, task.UserID, task.TeamID, system, model, chatCompressBreaker)
 			}
-			trigger := schedule.NewTrigger(schedStore, sessionRuntime, handler.Registry(), subResolver.Bound(ctx), identitySvc, buildSchedLoop, pool, cfg.Schedule.ScanInterval)
+			trigger := schedule.NewTrigger(schedStore, sessionRuntime, handler.Registry(), subResolverFor().Bound(ctx), identitySvc, buildSchedLoop, pool, cfg.Schedule.ScanInterval)
 			// Tool binder: narrow the session's tool registry to the task's
 			// whitelist (D3) once the trigger has resolved the session id.
 			trigger.WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string, whitelist []string) {
@@ -1365,12 +1547,28 @@ func run() error {
 			})
 			trigger.WithTeamAttributor(teamAttributor)
 			trigger.WithBudgetGate(schedule.BudgetChecker(budgetGate))
+			// Auto-firing gates on the runtime schedule_enabled switch (off =
+			// CRUD and run-now still work).
+			trigger.WithEnabledFunc(func() bool {
+				return settingsRuntime.Bool(settings.KeyScheduleEnabled)
+			})
 			trigger.SetLogger(log)
 			go trigger.Start(ctx)
+			go func() {
+				// Keep the scan cadence in sync with the admin console.
+				ticker := time.NewTicker(5 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						trigger.SetScanInterval(settingsRuntime.Duration(settings.KeyScheduleScanInterval))
+					}
+				}
+			}()
 			schedTrigger = trigger
-			log.Info("scheduled-task trigger enabled", "scan_interval", cfg.Schedule.ScanInterval)
-		} else {
-			log.Info("scheduled-task trigger disabled; task CRUD still available")
+			log.Info("scheduled-task trigger enabled (runtime schedule_enabled switch)", "scan_interval", cfg.Schedule.ScanInterval)
 		}
 
 		// Inbound webhooks (enterprise integration): a per-user endpoint that
@@ -1386,7 +1584,7 @@ func run() error {
 			inboundStore.WithEncryption(enc)
 		}
 		inboundDispatcher := inbound.NewDispatcher(inboundStore, sessionRuntime, handler.Registry(),
-			subResolver.Bound(ctx), identitySvc,
+			subResolverFor().Bound(ctx), identitySvc,
 			func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
 				return buildLoop(ctx, userID, teamID, system, model, chatCompressBreaker)
 			},
@@ -1435,7 +1633,7 @@ func run() error {
 	// run_skill_script registration rule (exec enabled + some visible skill has
 	// scripts), so a definition declaring unusable skills is flagged on write.
 	skillsRunnable := func(ctx context.Context, scopes []identity.ScopeRef) bool {
-		if !execEnabled {
+		if !execEnabledFor() {
 			return false
 		}
 		l0, err := skillEngine.LoadL0(ctx, scopes)
@@ -1486,7 +1684,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:         cfg.HTTP.Addr,
-		Handler:      httpHandler(cfg, log, metrics, settingsRuntime, mux),
+		Handler:      httpHandler(ctx, cfg, log, metrics, settingsRuntime, mux),
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 	}
@@ -1645,7 +1843,7 @@ func spaHandler(dir string) http.Handler {
 //   - metrics then recovery, innermost around the mux: a panic is recovered,
 //     logged with a stack, and answered 500 — and because recovery sits inside
 //     metrics, that 500 is counted like any other status.
-func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Metrics, settingsRuntime *settings.Runtime, mux *http.ServeMux) http.Handler {
+func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metrics *observability.Metrics, settingsRuntime *settings.Runtime, mux *http.ServeMux) http.Handler {
 	limiter := quota.NewRateLimiter(cfg.HTTP.RateLimitRPS, cfg.HTTP.RateLimitBurst,
 		func(r *http.Request) string {
 			// Never throttle probes: a flooded API must not blind the operator.
@@ -1655,11 +1853,28 @@ func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Met
 			return quota.ClientIPKey(r)
 		})
 	// Live retune: pick up the runtime settings (0/0 = disabled); existing
-	// buckets converge within the limiter's sweep TTL.
+	// buckets converge within the limiter's sweep TTL. A background loop keeps
+	// the rate in sync with the admin console, so retuning rate_limit_rps /
+	// rate_limit_burst needs no restart.
 	limiter.SetRate(
 		float64(settingsRuntime.Int(settings.KeyRateLimitRPS)),
 		settingsRuntime.Int(settings.KeyRateLimitBurst),
 	)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				limiter.SetRate(
+					float64(settingsRuntime.Int(settings.KeyRateLimitRPS)),
+					settingsRuntime.Int(settings.KeyRateLimitBurst),
+				)
+			}
+		}
+	}()
 	return observability.StandardStack(mux, log, metrics, limiter.Middleware)
 }
 

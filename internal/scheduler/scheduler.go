@@ -18,13 +18,15 @@ type Job struct {
 	Run func(ctx context.Context) error
 }
 
-// Scheduler runs jobs on their intervals with catch-up semantics.
+// Scheduler runs jobs on their intervals with catch-up semantics. Intervals
+// are mutable via SetInterval, so an operator can retune a job's cadence
+// without a restart; due checks read the CURRENT interval each tick.
 type Scheduler struct {
-	jobs   []Job
 	log    *slog.Logger
 	now    func() time.Time
 
 	mu      sync.Mutex
+	jobs    map[string]Job
 	lastRun map[string]time.Time
 }
 
@@ -33,7 +35,31 @@ func New(log *slog.Logger, jobs ...Job) *Scheduler {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Scheduler{jobs: jobs, log: log, now: func() time.Time { return time.Now().UTC() }, lastRun: map[string]time.Time{}}
+	s := &Scheduler{
+		jobs:    map[string]Job{},
+		log:     log,
+		now:     func() time.Time { return time.Now().UTC() },
+		lastRun: map[string]time.Time{},
+	}
+	for _, j := range jobs {
+		s.jobs[j.Name] = j
+	}
+	return s
+}
+
+// SetInterval retunes a job's cadence live. A non-positive interval is
+// ignored. The next due check uses the new interval.
+func (s *Scheduler) SetInterval(name string, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	j, ok := s.jobs[name]
+	if ok {
+		j.Interval = d
+		s.jobs[name] = j
+	}
+	s.mu.Unlock()
 }
 
 // tick is injectable for tests.
@@ -60,25 +86,29 @@ func (s *Scheduler) Start(ctx context.Context) {
 // catchUp runs jobs that are overdue at startup (never ran, or interval passed).
 func (s *Scheduler) catchUp(ctx context.Context) {
 	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, j := range s.jobs {
 		last, ok := s.lastRun[j.Name]
 		if !ok || now.Sub(last) >= j.Interval {
-			s.runJob(ctx, j)
+			s.runJobLocked(ctx, j)
 		}
 	}
 }
 
-// runDue runs any jobs whose interval has elapsed since their last run.
+// runDue runs any jobs whose interval has elapsed since their last run. The
+// CURRENT interval (possibly retuned by SetInterval) applies, so a retune
+// takes effect at the next tick.
 func (s *Scheduler) runDue(ctx context.Context, now time.Time) {
-	for _, j := range s.jobs {
-		s.mu.Lock()
-		last, ok := s.lastRun[j.Name]
-		s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for name, j := range s.jobs {
+		last, ok := s.lastRun[name]
 		if !ok {
 			continue // catchUp already handled first run
 		}
 		if now.Sub(last) >= j.Interval {
-			s.runJob(ctx, j)
+			s.runJobLocked(ctx, j)
 		}
 	}
 }
@@ -86,8 +116,12 @@ func (s *Scheduler) runDue(ctx context.Context, now time.Time) {
 // runJob executes one job and records its completion time.
 func (s *Scheduler) runJob(ctx context.Context, j Job) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runJobLocked(ctx, j)
+}
+
+func (s *Scheduler) runJobLocked(ctx context.Context, j Job) {
 	s.lastRun[j.Name] = s.now()
-	s.mu.Unlock()
 
 	if err := j.Run(ctx); err != nil {
 		s.log.Error("scheduled job failed", "job", j.Name, "error", err)

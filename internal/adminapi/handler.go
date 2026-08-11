@@ -62,6 +62,8 @@ type SettingStore interface {
 	Keys() []string
 	String(key string) string
 	Int(key string) int
+	Bool(key string) bool
+	Float64(key string) float64
 	Set(ctx context.Context, key string, value json.RawMessage) error
 }
 

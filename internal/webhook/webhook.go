@@ -21,6 +21,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -51,7 +52,11 @@ type RunCompletedPayload struct {
 
 // Notifier delivers payloads to webhook URLs with a bounded timeout and a few
 // retries. It is safe for concurrent use; one instance is shared by every run.
+// The delivery policy (timeout, retries, signing secret, SSRF guard) is
+// mutable via SetPolicy/SetGuard so the admin console can retune it without a
+// restart; readers snapshot the current values under a RWMutex per delivery.
 type Notifier struct {
+	mu      sync.RWMutex
 	client  *http.Client
 	timeout time.Duration
 	retries int
@@ -101,7 +106,7 @@ func New(opts Options) *Notifier {
 		opts.Logger = slog.Default()
 	}
 	n := &Notifier{
-		client:        &http.Client{Timeout: opts.Timeout},
+		client:        httpClientFor(opts.SSRF, opts.Timeout),
 		timeout:       opts.Timeout,
 		retries:       opts.Retries,
 		ssrf:          opts.SSRF,
@@ -109,14 +114,53 @@ func New(opts Options) *Notifier {
 		imHosts:       imBotHosts,
 		log:           opts.Logger,
 	}
-	if opts.SSRF != nil {
+	return n
+}
+
+// httpClientFor builds the shared HTTP client. The client's own Timeout stays
+// zero — per-delivery timeouts come from a context bound to the CURRENT
+// policy (SetPolicy retunes live, so a stale client timeout would win).
+func httpClientFor(g *Guard, _ time.Duration) *http.Client {
+	c := &http.Client{}
+	if g != nil {
 		// Re-validate every redirect hop with the same guard, so a public URL
 		// cannot smuggle the request into a private network via a 302.
-		n.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			return opts.SSRF.CheckRedirect(req, via)
+		c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return g.CheckRedirect(req, via)
 		}
 	}
-	return n
+	return c
+}
+
+// SetPolicy retunes the delivery policy live (admin console): timeout bounds
+// one attempt, retries bounds the attempts after the first, and signingSecret
+// (may be empty to stop signing) signs every payload. Zero timeout/retries
+// fall back to the 10s/3 defaults. The next delivery uses the new policy.
+func (n *Notifier) SetPolicy(timeout time.Duration, retries int, signingSecret string) {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	if retries < 0 {
+		retries = 0
+	}
+	if retries == 0 {
+		retries = 3
+	}
+	n.mu.Lock()
+	n.timeout = timeout
+	n.retries = retries
+	n.signingSecret = []byte(signingSecret)
+	n.mu.Unlock()
+}
+
+// SetGuard swaps the SSRF screen live. A nil guard disables screening (only
+// meaningful for tests/legacy); a guard's CheckRedirect binding is rebuilt
+// with the client, so redirect screening follows the new guard.
+func (n *Notifier) SetGuard(g *Guard) {
+	n.mu.Lock()
+	n.ssrf = g
+	n.client = httpClientFor(g, n.timeout)
+	n.mu.Unlock()
 }
 
 // Deliver posts payload to url. An empty url is a no-op (no notifications
@@ -129,11 +173,19 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 	if url == "" {
 		return nil
 	}
+	// Snapshot the policy once: a console retune mid-delivery applies to the
+	// next delivery, keeping this one internally consistent.
+	n.mu.RLock()
+	timeout, retries, ssrf := n.timeout, n.retries, n.ssrf
+	signingSecret, client := n.signingSecret, n.client
+	n.mu.RUnlock()
+	deliverCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	// SSRF screen before anything else: a blocked target is refused without a
 	// single connection attempt. Resolution happens per attempt (DNS can
 	// change between runs), so a rebinding host cannot slip through.
-	if n.ssrf != nil {
-		if err := n.ssrf.CheckURL(ctx, url); err != nil {
+	if ssrf != nil {
+		if err := ssrf.CheckURL(deliverCtx, url); err != nil {
 			n.log.Warn("webhook delivery blocked by SSRF guard", "url", url, "run", payload.RunID, "err", err)
 			return err
 		}
@@ -141,7 +193,7 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 	// Domestic IM bots (DingTalk/WeCom/Feishu) take their own payload schema
 	// and need no retry amplification (a 4xx from the bot API is permanent).
 	if n.isIMBotURL(url) {
-		return n.deliverIM(ctx, url, payload)
+		return n.deliverIM(deliverCtx, url, payload)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -149,16 +201,16 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 	}
 	backoff := 500 * time.Millisecond
 	var lastErr error
-	for attempt := 0; attempt <= n.retries; attempt++ {
+	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-deliverCtx.Done():
+				return deliverCtx.Err()
 			case <-time.After(backoff):
 			}
 			backoff *= 2
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(deliverCtx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
@@ -166,15 +218,15 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 		req.Header.Set("User-Agent", "nowhere-agent-webhook/1")
 		req.Header.Set("X-Nowhere-Event", payload.Event)
 		req.Header.Set("X-Nowhere-Run-Id", payload.RunID)
-		if len(n.signingSecret) > 0 {
+		if len(signingSecret) > 0 {
 			// Sign the raw body: the consumer shares the secret and verifies
 			// sha256=<hex HMAC-SHA256(body)> in constant time, so a
 			// notification cannot be forged by anyone who can reach the URL.
-			m := hmac.New(sha256.New, n.signingSecret)
+			m := hmac.New(sha256.New, signingSecret)
 			m.Write(body)
 			req.Header.Set("X-Nowhere-Signature", "sha256="+hex.EncodeToString(m.Sum(nil)))
 		}
-		resp, err := n.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
 			n.log.Warn("webhook delivery attempt failed", "url", url, "run", payload.RunID, "attempt", attempt, "err", err)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"nowhere-agent/internal/agent"
@@ -77,8 +78,13 @@ type Trigger struct {
 	db  *sql.DB
 	log *slog.Logger
 	now func() time.Time
-	// scanInterval is how often the trigger looks for due tasks.
+	// scanInterval is how often the trigger looks for due tasks. Mutable via
+	// SetScanInterval; Start re-reads it every tick.
 	scanInterval time.Duration
+	// mu guards scanInterval against concurrent SetScanInterval reads.
+	mu sync.Mutex
+	// enabledFunc, when set, gates sweeps (live schedule_enabled switch).
+	enabledFunc func() bool
 	// fireTimeout bounds one fire's environment construction; the run itself is
 	// unbounded (registry-owned), this only guards the pre-submit work.
 	fireTimeout time.Duration
@@ -137,24 +143,56 @@ func (tr *Trigger) SetClock(now func() time.Time) {
 }
 
 // Start runs the scan loop until ctx is cancelled. It fires once immediately
-// (catching up anything due) then ticks on scanInterval.
+// (catching up anything due) then ticks on scanInterval. The interval is
+// re-read on every tick, so a SetScanInterval retune takes effect at the next
+// tick (the ticker is rebuilt when it changes).
 func (tr *Trigger) Start(ctx context.Context) {
 	tr.sweep(ctx)
 	ticker := time.NewTicker(tr.scanInterval)
+	applied := tr.scanInterval
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			tr.mu.Lock()
+			cur := tr.scanInterval
+			tr.mu.Unlock()
+			if cur != applied {
+				applied = cur
+				ticker.Reset(applied)
+			}
 			tr.sweep(ctx)
 		}
 	}
 }
 
+// SetScanInterval retunes the scan cadence live (admin console). A
+// non-positive value is ignored.
+func (tr *Trigger) SetScanInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	tr.mu.Lock()
+	tr.scanInterval = d
+	tr.mu.Unlock()
+}
+
+// WithEnabledFunc wires a live auto-trigger switch (admin console's
+// schedule_enabled): when it returns false, sweeps skip firing entirely (task
+// CRUD and run-now stay available). Nil leaves the trigger always on.
+func (tr *Trigger) WithEnabledFunc(f func() bool) *Trigger {
+	tr.enabledFunc = f
+	return tr
+}
+
 // sweep finds due tasks and fires each. A single task's failure is logged and
 // never aborts the sweep.
 func (tr *Trigger) sweep(ctx context.Context) {
+	if tr.enabledFunc != nil && !tr.enabledFunc() {
+		return // auto-trigger switched off from the admin console
+	}
 	due, err := tr.store.ListDue(ctx, tr.now())
 	if err != nil {
 		tr.log.Error("schedule: due scan failed", "err", err)

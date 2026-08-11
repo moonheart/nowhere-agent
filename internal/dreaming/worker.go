@@ -152,6 +152,15 @@ func (w *Worker) SetCaps(c Caps) {
 	}
 }
 
+// SetBudget overrides the token budget for subsequent runs (config
+// DREAMING_MAX_TOKENS). A non-positive MaxTokens is ignored, matching the
+// "there is no 'unbounded' setting" rule.
+func (w *Worker) SetBudget(b Budget) {
+	if b.MaxTokens > 0 {
+		w.budget.MaxTokens = b.MaxTokens
+	}
+}
+
 // SetPurgeAfter overrides the retention window for deprecated memories
 // (config DREAMING_PURGE_AFTER). Zero or negative disables purging.
 func (w *Worker) SetPurgeAfter(d time.Duration) { w.purgeAfter = d }

@@ -132,3 +132,119 @@ func TestSettingsIntKeys(t *testing.T) {
 		t.Fatalf("runtime int = %d, want 30", got)
 	}
 }
+
+func TestSettingsTypesAndValidation(t *testing.T) {
+	e, rt := settingsEnv(t)
+	admin := e.user(identity.PlatformRoleAdmin)
+	ctx := context.Background()
+	t.Cleanup(func() {
+		rt.Set(ctx, settings.KeyLLMTemperature, json.RawMessage("null"))
+		rt.Set(ctx, settings.KeyDreamingEnabled, json.RawMessage("null"))
+		rt.Set(ctx, settings.KeyPermissionNetwork, json.RawMessage("null"))
+		rt.Set(ctx, settings.KeyWebhookSigningSecret, json.RawMessage("null"))
+	})
+
+	// Float key accepts a float and rounds nothing.
+	if rec := e.as(admin, "PUT", "/api/admin/settings/"+settings.KeyLLMTemperature, map[string]any{"value": 0.7}); rec.Code != http.StatusNoContent {
+		t.Fatalf("put float: %d (%s)", rec.Code, rec.Body)
+	}
+	if got := rt.Float64(settings.KeyLLMTemperature); got != 0.7 {
+		t.Fatalf("runtime float = %v, want 0.7", got)
+	}
+
+	// Bool key accepts true.
+	if rec := e.as(admin, "PUT", "/api/admin/settings/"+settings.KeyDreamingEnabled, map[string]any{"value": true}); rec.Code != http.StatusNoContent {
+		t.Fatalf("put bool: %d (%s)", rec.Code, rec.Body)
+	}
+	if !rt.Bool(settings.KeyDreamingEnabled) {
+		t.Fatal("runtime bool = false, want true")
+	}
+
+	// Enum-constrained key rejects a typo with 400.
+	if rec := e.as(admin, "PUT", "/api/admin/settings/"+settings.KeyPermissionNetwork, map[string]any{"value": "maybe"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("put bad enum: %d, want 400", rec.Code)
+	}
+	if got := rt.String(settings.KeyPermissionNetwork); got != "" && got != "allow" {
+		t.Fatalf("rejected enum leaked into runtime: %q", got)
+	}
+
+	// Kind mismatch is rejected (string where a number is expected).
+	if rec := e.as(admin, "PUT", "/api/admin/settings/"+settings.KeyRateLimitBurst, map[string]any{"value": "many"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("put wrong kind: %d, want 400", rec.Code)
+	}
+
+	// Negative integers are rejected.
+	if rec := e.as(admin, "PUT", "/api/admin/settings/"+settings.KeyRateLimitBurst, map[string]any{"value": -5}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("put negative: %d, want 400", rec.Code)
+	}
+}
+
+func TestSettingsSecretNeverEchoed(t *testing.T) {
+	e, rt := settingsEnv(t)
+	admin := e.user(identity.PlatformRoleAdmin)
+	ctx := context.Background()
+	key := settings.KeyWebhookSigningSecret
+	t.Cleanup(func() {
+		rt.Set(ctx, key, json.RawMessage("null"))
+	})
+
+	rec := e.as(admin, "PUT", "/api/admin/settings/"+key, map[string]any{"value": "s3cr3t"})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("put: %d (%s)", rec.Code, rec.Body)
+	}
+	rec = e.as(admin, "GET", "/api/admin/settings", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d", rec.Code)
+	}
+	body := decodeBody(t, rec)
+	found := false
+	for _, s := range body["settings"].([]any) {
+		smap := s.(map[string]any)
+		if smap["key"] == key {
+			found = true
+			if smap["value"] != nil {
+				t.Fatalf("secret leaked: %v", smap["value"])
+			}
+			if smap["secret"] != true {
+				t.Fatalf("secret flag not set: %v", smap["secret"])
+			}
+			if smap["kind"] != "string" {
+				t.Fatalf("kind = %v, want string", smap["kind"])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("signing secret not listed")
+	}
+}
+
+func TestSettingsListGrouped(t *testing.T) {
+	e, _ := settingsEnv(t)
+	admin := e.user(identity.PlatformRoleAdmin)
+	rec := e.as(admin, "GET", "/api/admin/settings", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d", rec.Code)
+	}
+	body := decodeBody(t, rec)
+	groups := map[string]bool{}
+	kinds := map[string]bool{}
+	for _, s := range body["settings"].([]any) {
+		smap := s.(map[string]any)
+		if g, ok := smap["group"].(string); ok {
+			groups[g] = true
+		}
+		if k, ok := smap["kind"].(string); ok {
+			kinds[k] = true
+		}
+	}
+	for _, want := range []string{"tools", "webhooks", "llm", "sandbox", "permissions", "redaction", "subagents", "background"} {
+		if !groups[want] {
+			t.Fatalf("group %q missing from list", want)
+		}
+	}
+	for _, want := range []string{"string", "int", "float", "bool"} {
+		if !kinds[want] {
+			t.Fatalf("kind %q missing from list", want)
+		}
+	}
+}

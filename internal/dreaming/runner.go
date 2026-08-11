@@ -48,6 +48,10 @@ type Runner struct {
 	timeout time.Duration
 	log     *slog.Logger
 	now     func() time.Time
+	// knobSync, when set, is invoked before every pass (scheduled AND manual)
+	// so runtime-settable knobs (budget, caps, purge window) apply to whatever
+	// path starts the pass.
+	knobSync func()
 
 	mu      sync.Mutex
 	wg      sync.WaitGroup
@@ -92,6 +96,20 @@ func (r *Runner) SetClock(now func() time.Time) {
 	}
 }
 
+// SetKnobSync wires a function applied before every pass, scheduled or
+// manual. It lets the server retune the worker's budget/caps/purge from the
+// runtime settings right before each run.
+func (r *Runner) SetKnobSync(f func()) {
+	r.knobSync = f
+}
+
+// syncKnobs runs the knob-sync hook (nil-safe).
+func (r *Runner) syncKnobs() {
+	if r.knobSync != nil {
+		r.knobSync()
+	}
+}
+
 // TriggerForUser starts a pass over one account's sessions in the background,
 // returning immediately. It returns ErrBusy when a pass is already running —
 // the caller is told to wait rather than being queued, because a queued
@@ -107,6 +125,7 @@ func (r *Runner) TriggerForUser(userID string) error {
 		ctx, cancel := context.WithTimeout(r.base, r.timeout)
 		defer cancel()
 		start := r.now()
+		r.syncKnobs()
 		res, err := r.worker.RunForUser(ctx, userID)
 		r.finish(userID, start, res, err)
 	}()
@@ -123,6 +142,7 @@ func (r *Runner) RunScheduled(ctx context.Context) error {
 		return nil
 	}
 	start := r.now()
+	r.syncKnobs()
 	res, err := r.worker.Run(ctx)
 	r.finish("", start, res, err)
 	return err
