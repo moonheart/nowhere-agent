@@ -90,8 +90,14 @@ func TestResolvePlatformDefaultFallback(t *testing.T) {
 }
 
 func TestResolveNoProvider(t *testing.T) {
-	// A store with nothing enabled resolves to ErrNoProvider.
+	// A store with nothing enabled resolves to ErrNoProvider. The shared dev
+	// registry may already hold enabled system providers (bootstrap fallback),
+	// so temporarily disable all of them and restore the exact prior state —
+	// this test must pass on a fresh database and on a dev database alike.
 	s, db := newPGStore(t, nil)
+	restore := disableSystemProviders(t, db)
+	defer restore()
+
 	ctx := context.Background()
 	r := NewResolver(s)
 
@@ -99,6 +105,42 @@ func TestResolveNoProvider(t *testing.T) {
 		t.Fatalf("resolve on empty registry: %v", err)
 	}
 	_ = db
+}
+
+// disableSystemProviders flips every system provider to disabled + non-default
+// so a resolver sees an empty registry, returning a restore func that puts
+// back the exact prior state of each row.
+func disableSystemProviders(t *testing.T, db *sql.DB) func() {
+	t.Helper()
+	type row struct {
+		id      string
+		def     bool
+		enabled bool
+	}
+	rows, err := db.Query(`SELECT id::text, is_default, enabled FROM providers WHERE scope = 'system'`)
+	if err != nil {
+		t.Fatalf("snapshot system providers: %v", err)
+	}
+	var snap []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.def, &r.enabled); err != nil {
+			rows.Close()
+			t.Fatalf("scan provider snapshot: %v", err)
+		}
+		snap = append(snap, r)
+	}
+	rows.Close()
+	if _, err := db.Exec(`UPDATE providers SET is_default = false, enabled = false WHERE scope = 'system'`); err != nil {
+		t.Fatalf("disable system providers: %v", err)
+	}
+	return func() {
+		for _, r := range snap {
+			if _, err := db.Exec(`UPDATE providers SET is_default = $2, enabled = $3 WHERE id = $1`, r.id, r.def, r.enabled); err != nil {
+				t.Errorf("restore provider %s: %v", r.id, err)
+			}
+		}
+	}
 }
 
 func TestResolveModelFailClosed(t *testing.T) {
