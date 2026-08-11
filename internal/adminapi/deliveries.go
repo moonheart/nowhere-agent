@@ -15,6 +15,7 @@ type deliveryDTO struct {
 	ID            string          `json:"id"`
 	RunID         string          `json:"run_id"`
 	SessionID     string          `json:"session_id"`
+	UserID        string          `json:"user_id,omitempty"`
 	TargetURL     string          `json:"target_url"`
 	Payload       json.RawMessage `json:"payload"`
 	Status        string          `json:"status"`
@@ -27,9 +28,9 @@ type deliveryDTO struct {
 
 func deliveryDTOOf(d webhook.Delivery) deliveryDTO {
 	return deliveryDTO{
-		ID: d.ID, RunID: d.RunID, SessionID: d.SessionID, TargetURL: d.TargetURL,
-		Payload: d.Payload, Status: d.Status, Attempts: d.Attempts,
-		NextAttemptAt: d.NextAttemptAt, LastError: d.LastError,
+		ID: d.ID, RunID: d.RunID, SessionID: d.SessionID, UserID: d.UserID,
+		TargetURL: d.TargetURL, Payload: d.Payload, Status: d.Status,
+		Attempts: d.Attempts, NextAttemptAt: d.NextAttemptAt, LastError: d.LastError,
 		CreatedAt: d.CreatedAt, DeliveredAt: d.DeliveredAt,
 	}
 }

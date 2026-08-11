@@ -14,6 +14,7 @@ type Delivery struct {
 	ID            string
 	RunID         string
 	SessionID     string
+	UserID        string
 	TargetURL     string
 	Payload       json.RawMessage
 	Status        string // pending | delivered | failed
@@ -46,33 +47,43 @@ func NewDeliveryStore(db *sql.DB) *DeliveryStore {
 	return &DeliveryStore{db: db}
 }
 
-// Enqueue records a delivery and returns the row.
-func (s *DeliveryStore) Enqueue(ctx context.Context, runID, sessionID, targetURL string, payload any) (Delivery, error) {
+// Enqueue records a delivery and returns the row. userID links the row to
+// the account it notifies about (ON DELETE CASCADE — deleting the account
+// erases its outbox rows, PIPL §47); empty when unresolvable.
+func (s *DeliveryStore) Enqueue(ctx context.Context, runID, sessionID, targetURL, userID string, payload any) (Delivery, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return Delivery{}, err
 	}
 	return scanDelivery(s.db.QueryRowContext(ctx, `
-		INSERT INTO webhook_deliveries (run_id, session_id, target_url, payload)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, run_id, session_id, target_url, payload, status, attempts,
+		INSERT INTO webhook_deliveries (run_id, session_id, target_url, user_id, payload)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, run_id, session_id, user_id, target_url, payload, status, attempts,
 		          next_attempt_at, last_error, created_at, delivered_at`,
-		runID, sessionID, targetURL, raw))
+		runID, sessionID, targetURL, nullIfEmpty(userID), raw))
 }
 
-// ClaimNext atomically claims one due delivery (or ErrNoPending).
+// claimLease is how long a claimed delivery stays reserved: the claim moves
+// next_attempt_at forward by the lease, so a slow in-flight attempt is not
+// re-claimed by another instance (at-least-once with a bounded duplicate
+// window instead of unbounded double-sends).
+const claimLease = 5 * time.Minute
+
+// ClaimNext atomically claims one due delivery (or ErrNoPending). The claim
+// increments attempts and pushes next_attempt_at out by the lease, making the
+// row invisible to other sweepers while it is in flight.
 func (s *DeliveryStore) ClaimNext(ctx context.Context, now time.Time) (Delivery, error) {
 	d, err := scanDelivery(s.db.QueryRowContext(ctx, `
 		UPDATE webhook_deliveries
-		SET attempts = attempts + 1
+		SET attempts = attempts + 1, next_attempt_at = $2
 		WHERE id = (
 			SELECT id FROM webhook_deliveries
 			WHERE status = 'pending' AND next_attempt_at <= $1
 			ORDER BY next_attempt_at LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, run_id, session_id, target_url, payload, status, attempts,
-		          next_attempt_at, last_error, created_at, delivered_at`, now))
+		RETURNING id, run_id, session_id, user_id, target_url, payload, status, attempts,
+		          next_attempt_at, last_error, created_at, delivered_at`, now, now.Add(claimLease)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Delivery{}, ErrNoPending
 	}
@@ -104,7 +115,7 @@ func (s *DeliveryStore) List(ctx context.Context, status string, limit, offset i
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, run_id, session_id, target_url, payload, status, attempts,
+		SELECT id, run_id, session_id, user_id, target_url, payload, status, attempts,
 		       next_attempt_at, last_error, created_at, delivered_at
 		FROM webhook_deliveries
 		WHERE ($1 = '' OR status = $1)
@@ -142,9 +153,31 @@ func (s *DeliveryStore) Requeue(ctx context.Context, id string) error {
 	return err
 }
 
+// PurgeDeadLetters removes dead-lettered rows older than cutoff, keeping the
+// outbox table bounded (delivery history that old has no operational value).
+// It returns the number of rows removed.
+func (s *DeliveryStore) PurgeDeadLetters(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM webhook_deliveries
+		WHERE status = 'failed' AND created_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func scanDelivery(row interface{ Scan(...any) error }) (Delivery, error) {
 	var d Delivery
-	err := row.Scan(&d.ID, &d.RunID, &d.SessionID, &d.TargetURL, &d.Payload,
+	var userID sql.NullString
+	err := row.Scan(&d.ID, &d.RunID, &d.SessionID, &userID, &d.TargetURL, &d.Payload,
 		&d.Status, &d.Attempts, &d.NextAttemptAt, &d.LastError, &d.CreatedAt, &d.DeliveredAt)
+	d.UserID = userID.String
 	return d, err
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

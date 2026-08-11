@@ -1192,8 +1192,10 @@ func run() error {
 				Summary:   runSummary(deliverCtx, sessionID),
 			}
 			// Commit to the outbox first (best-effort — a DB hiccup must not
-			// break the run path); a persisted row survives this process.
-			d, err := outbox.Enqueue(deliverCtx, run.ID, sessionID, target, payload)
+			// break the run path); a persisted row survives this process and
+			// is linked to the account (ON DELETE CASCADE), so deleting the
+			// account also erases its notification history.
+			d, err := outbox.Enqueue(deliverCtx, run.ID, sessionID, target, userID, payload)
 			if err != nil {
 				log.Warn("webhook outbox enqueue failed; falling back to fire-and-forget", "run", run.ID, "err", err)
 				if derr := notifier.Deliver(deliverCtx, target, payload); derr != nil {
@@ -1212,10 +1214,15 @@ func run() error {
 			}
 		})
 		// Outbox sweeper: retries pending deliveries with backoff
-		// (1m → 5m → 15m → 1h → 4h → 12h → 24h, then dead-letter). Claims are
-		// atomic, so extra instances only speed the sweep, never double-send.
+		// (1m → 5m → 15m → 1h → 4h → 12h → 24h, then dead-letter), and purges
+		// dead letters older than 30 days. Claims carry a 5-minute lease, so
+		// a slow in-flight attempt is not re-claimed by another instance;
+		// claims are atomic, so concurrent sweepers never double-send.
 		webhookBackoffs := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour, 4 * time.Hour, 12 * time.Hour, 24 * time.Hour}
 		outboxSweep := func(ctx context.Context) error {
+			if _, err := outbox.PurgeDeadLetters(ctx, time.Now().UTC().Add(-30*24*time.Hour)); err != nil {
+				log.Warn("webhook outbox purge failed", "err", err)
+			}
 			for {
 				d, err := outbox.ClaimNext(ctx, time.Now().UTC())
 				if errors.Is(err, webhook.ErrNoPending) {
@@ -1231,7 +1238,16 @@ func run() error {
 					continue
 				}
 				if err := notifier.Deliver(ctx, d.TargetURL, payload); err != nil {
-					next := time.Now().UTC().Add(webhookBackoffs[min(d.Attempts-1, len(webhookBackoffs)-1)])
+					// Past the backoff list → dead-letter (failed, final). The
+					// MarkFailed CASE reads the timestamp, so a past time flips
+					// the status; an in-list failure stays pending for the next
+					// sweep.
+					if d.Attempts > len(webhookBackoffs) {
+						_ = outbox.MarkFailed(ctx, d.ID, time.Now().Add(-time.Minute), err.Error())
+						log.Warn("webhook outbox delivery dead-lettered", "delivery", d.ID, "attempts", d.Attempts, "err", err)
+						continue
+					}
+					next := time.Now().UTC().Add(webhookBackoffs[d.Attempts-1])
 					_ = outbox.MarkFailed(ctx, d.ID, next, err.Error())
 					log.Warn("webhook outbox retry failed", "delivery", d.ID, "attempt", d.Attempts, "next", next, "err", err)
 					continue
