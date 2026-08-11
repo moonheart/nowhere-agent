@@ -6,7 +6,25 @@
 > **方法**:三路并行实地探查(运行时接线 / openspec 规格与归档 / 企业就绪逐项),所有结论以代码 `file:line` 为据。
 > **姊妹文档**:`docs/backend-architecture-review-2026-07.md`(韧性/多实例/安全视角)、`docs/agent-capability-gaps-2026-07.md`(agent 功能完备性视角)、`docs/claude-code-comparison/00-overview.md`(对标 Claude Code 的机制差距)。本文聚焦"企业级非功能性"这一此前三份文档都未系统覆盖的层面。
 
----
+> ## 复核更新(2026-08-11,`master` @ `57ec4d6`)
+>
+> 本文原稿在 8-08 评估的若干"缺失"项已在此后落地,以下为逐项复核:
+>
+> | 原稿位置 | 原判定 | 现状(2026-08-11) |
+> |---|---|---|
+> | §2.1 认证授权 | "无密码策略/服务 API key/登录节流" | ✅ 密码策略(≥8 位)、`sk_` 服务密钥(管理端点 + OpenAPI 契约)、登录节流(5 次/15 分钟锁定)均已落地 |
+> | §2.3 可观测 | "runs/llm_tokens 计数器待启用" | ✅ `nowhere_runs_total{outcome}` 与 `nowhere_llm_tokens_total{provider,model,direction}` 已接线(RunDoneHook + 每 run usage observer,`cmd/server/main.go`);tracing/pprof 仍缺 |
+> | §2.6 部署交付 | "无 Dockerfile/compose/CI web lint" | ✅ Dockerfile + docker-compose 已存在;CI 新增前端门禁(oxlint + tsc);根目录 `*.exe` 已 gitignore |
+> | §2.8 外部集成 | "webhook 全缺;MCP 硬编码 SearXNG" | ✅ 出站 run-completion webhook、**入站 webhook 触发端点**(`POST /api/inbound/{id}`,HMAC+时间窗+nonce 防重放,secret AES-256-GCM 静态加密,`internal/inbound`)、通用多 server MCP(`MCP_SERVERS`)均已落地 |
+> | §2.9 数据治理 | "无导出端点" | ✅ `GET /api/me/export` 用户数据导出已落地 |
+> | §2.10 韧性/机密 | "webhook 无 SSRF 防护" | ✅ 统一 SSRF guard(`internal/webhook/ssrf.go`):投递前逐次解析 + 重定向逐跳校验 + `WEBHOOK_SSRF_ALLOWLIST` 逃生口,覆盖调度/入站/全局三条投递路径 |
+> | 技术债 §4 | "A1 recover / A2 重试 / C17 沙箱转义" | ✅ panic recover 中间件、provider 重试(双适配器)、`SANDBOX_LOCAL_EXEC` 默认 false 均已解决/缓解 |
+>
+> **新增能力(原稿未覆盖)**:`query_db` 只读 SQL 工具(`QUERY_DB_DSNS`,语句守卫 + READ ONLY 事务 + 行/列/字节上限,支持 postgres/mysql 即 OceanBase/TiDB 兼容库);`LLM_SYSTEM_LANG=zh` 中文系统提示词;前端按浏览器语言中文化(登录/会话/输入区);`WEBHOOK_SSRF_ALLOWLIST`。
+>
+> **仍缺(与后续批次相关)**:MFA、RLS、备份/恢复工具、tracing/pprof、k8s/Helm 交付、多架构镜像(amd64 单平台)。
+>
+> ---
 
 ## 0. 总体判断
 
