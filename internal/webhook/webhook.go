@@ -58,7 +58,11 @@ type Notifier struct {
 	// signingSecret, when set, HMAC-SHA256-signs every payload body; the
 	// consumer verifies authenticity via the X-Nowhere-Signature header.
 	signingSecret []byte
-	log           *slog.Logger
+	// imHosts is the set of domestic IM-bot hosts whose payloads are
+	// reformatted (DingTalk/WeCom/Feishu); tests swap it to route deliveries
+	// at a local server.
+	imHosts map[string]bool
+	log     *slog.Logger
 }
 
 // Options tunes delivery. Zero values pick safe defaults.
@@ -101,6 +105,7 @@ func New(opts Options) *Notifier {
 		retries:       opts.Retries,
 		ssrf:          opts.SSRF,
 		signingSecret: []byte(opts.SigningSecret),
+		imHosts:       imBotHosts,
 		log:           opts.Logger,
 	}
 	if opts.SSRF != nil {
@@ -131,6 +136,11 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 			n.log.Warn("webhook delivery blocked by SSRF guard", "url", url, "run", payload.RunID, "err", err)
 			return err
 		}
+	}
+	// Domestic IM bots (DingTalk/WeCom/Feishu) take their own payload schema
+	// and need no retry amplification (a 4xx from the bot API is permanent).
+	if n.isIMBotURL(url) {
+		return n.deliverIM(ctx, url, payload)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
