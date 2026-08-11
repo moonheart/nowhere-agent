@@ -122,6 +122,10 @@ var ErrDisabled = errors.New("inbound webhook disabled")
 // approvals — a trigger must not bury a human's pending decision.
 var ErrPendingInteraction = errors.New("session has pending interactions")
 
+// ErrNotOwner is returned when a trigger targets a session the webhook's
+// owner does not own (cross-tenant boundary, IDOR guard).
+var ErrNotOwner = errors.New("webhook owner does not own the target session")
+
 // Dispatch is the trigger request's call into run construction. It verifies
 // the webhook is enabled, resolves the prompt source, resolves or creates the
 // target session, gates the budget, builds the loop, and submits the run. It
@@ -218,8 +222,16 @@ func (d *Dispatcher) resolvePrompt(ctx context.Context, wh Webhook) (system, mod
 // tagged session recording the trigger provenance.
 func (d *Dispatcher) resolveSession(ctx context.Context, wh Webhook, prompt string, metadata map[string]any) (sessID string, fresh bool, err error) {
 	if wh.TargetSessionID != "" {
-		if _, err := d.runtime.GetSession(ctx, wh.TargetSessionID); err != nil {
+		sess, err := d.runtime.GetSession(ctx, wh.TargetSessionID)
+		if err != nil {
 			return "", false, err
+		}
+		// Ownership gate (IDOR): a webhook may only inject runs into the
+		// owner's own sessions. A webhook-owned run in someone else's session
+		// would read/write that user's conversation and workspace — the same
+		// cross-tenant boundary chatapi.enforceSessionVisibleTo guards.
+		if sess.UserID != wh.UserID {
+			return "", false, ErrNotOwner
 		}
 		return wh.TargetSessionID, false, nil
 	}

@@ -161,6 +161,8 @@ func (h *Handler) serveTrigger(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusUnauthorized
 		case errors.Is(err, ErrPendingInteraction):
 			status = http.StatusConflict
+		case errors.Is(err, ErrNotOwner):
+			status = http.StatusForbidden
 		case errors.Is(err, quota.ErrBudgetExceeded):
 			status = http.StatusTooManyRequests
 		}

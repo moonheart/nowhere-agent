@@ -103,6 +103,20 @@ func TestDispatchRejectsPendingInteraction(t *testing.T) {
 	}
 }
 
+func TestDispatchRejectsForeignTargetSession(t *testing.T) {
+	d, rt, _, _ := memEnv(t)
+	// A session owned by user "victim" — the webhook belongs to "u".
+	victimSess, err := rt.CreateSession(context.Background(), "victim", "private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wh := testWebhook("u")
+	wh.TargetSessionID = victimSess.ID
+	if _, _, err := d.Dispatch(context.Background(), wh, "hello", nil); !errors.Is(err, ErrNotOwner) {
+		t.Fatalf("dispatch into foreign session: %v, want ErrNotOwner", err)
+	}
+}
+
 // ScopeResolver stub used by the agent-def resolution path.
 type stubScopes struct{}
 
