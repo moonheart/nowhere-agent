@@ -14,15 +14,20 @@ import (
 
 // PhoneHandler serves the phone/OTP auth routes: POST /api/auth/phone/
 // request-code and POST /api/auth/phone/verify. Both are OPEN routes (no
-// bearer token — the caller has none yet). When no SMS provider is wired the
-// handler is not registered at all (the login page hides the phone tab).
+// bearer token — the caller has none yet). The handler is always registered;
+// whether phone login is AVAILABLE resolves per request from the enabled
+// func (the runtime phone_sms_url setting), so the login page's probe and the
+// code request both follow the current channel.
 type PhoneHandler struct {
 	svc      *Service
 	provider SMSProvider
-	throttle *OTPThrottler
-	audit    *audit.Logger
-	log      *slog.Logger
-	now      func() time.Time
+	// enabledFor, when set, reports whether phone login is currently
+	// available; nil keeps it always on (tests).
+	enabledFor func() bool
+	throttle   *OTPThrottler
+	audit      *audit.Logger
+	log        *slog.Logger
+	now        func() time.Time
 }
 
 // NewPhoneHandler builds the phone-auth handler over the service and the
@@ -32,6 +37,13 @@ func NewPhoneHandler(svc *Service, provider SMSProvider) *PhoneHandler {
 		svc: svc, provider: provider, throttle: NewOTPThrottler(), log: slog.Default(),
 		now: func() time.Time { return time.Now().UTC() },
 	}
+}
+
+// WithEnabledFunc wires the live availability probe (the login page hides
+// the phone tab and the request-code route 404s when it reports false).
+func (h *PhoneHandler) WithEnabledFunc(f func() bool) *PhoneHandler {
+	h.enabledFor = f
+	return h
 }
 
 // WithAudit wires the audit trail (best-effort).
@@ -65,12 +77,22 @@ type phoneVerifyRequest struct {
 }
 
 // serveEnabled lets the login page probe whether phone login exists (404 when
-// not wired), mirroring the OIDC probe.
-func (h *PhoneHandler) serveEnabled(w http.ResponseWriter, _ *http.Request) {
+// not available), mirroring the OIDC probe. Availability resolves live from
+// the enabled func, so turning phone login off in the admin console hides it
+// immediately.
+func (h *PhoneHandler) serveEnabled(w http.ResponseWriter, r *http.Request) {
+	if h.enabledFor != nil && !h.enabledFor() {
+		http.NotFound(w, r)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func (h *PhoneHandler) serveRequestCode(w http.ResponseWriter, r *http.Request) {
+	if h.enabledFor != nil && !h.enabledFor() {
+		http.NotFound(w, r)
+		return
+	}
 	var req phoneRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)

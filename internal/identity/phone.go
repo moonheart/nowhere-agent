@@ -114,17 +114,53 @@ func NewHTTPSMSProvider(url string, timeout time.Duration, log *slog.Logger) *HT
 	return &HTTPSMSProvider{url: url, client: &http.Client{Timeout: timeout}, log: log}
 }
 
-func (p *HTTPSMSProvider) Send(ctx context.Context, phone, code string) error {
+// RuntimeSMSProvider resolves the delivery channel from the runtime settings
+// on EVERY send, so the admin console can switch gateways, switch to the log
+// provider, or disable phone login without a restart: "log://" prints the
+// code to the server log, an http(s) URL POSTs to the gateway, and "" fails
+// closed (phone login disabled). A malformed URL fails the send with a clear
+// error rather than guessing.
+type RuntimeSMSProvider struct {
+	urlFor     func() string
+	timeoutFor func() time.Duration
+	log        *slog.Logger
+}
+
+// NewRuntimeSMSProvider builds the runtime-resolved provider. urlFor must
+// return "" (disabled), "log://", or an http(s) URL; timeoutFor bounds one
+// gateway call (<= 0 falls back to 10s).
+func NewRuntimeSMSProvider(urlFor func() string, timeoutFor func() time.Duration, log *slog.Logger) *RuntimeSMSProvider {
+	return &RuntimeSMSProvider{urlFor: urlFor, timeoutFor: timeoutFor, log: log}
+}
+
+// Send resolves the current channel and delivers (or fails closed).
+func (p *RuntimeSMSProvider) Send(ctx context.Context, phone, code string) error {
+	url := strings.TrimSpace(p.urlFor())
+	switch {
+	case url == "":
+		return errors.New("phone login disabled: no SMS gateway configured")
+	case url == "log://":
+		p.log.Warn("phone OTP (log provider — dev only, NOT a delivery channel)",
+			"phone", maskPhone(phone), "code", code)
+		return nil
+	case !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://"):
+		return fmt.Errorf("sms gateway: unsupported URL %q (want http(s):// or log://)", url)
+	}
+	timeout := p.timeoutFor()
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
 	body, err := json.Marshal(map[string]string{"phone": phone, "code": code})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url, bytes.NewReader(body))
+	client := &http.Client{Timeout: timeout}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("sms gateway: %w", err)
 	}

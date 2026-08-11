@@ -162,7 +162,7 @@ func TestCatalogCoversAllGroupsAndKinds(t *testing.T) {
 			t.Fatalf("incomplete entry %q (group=%q kind=%q)", i.Key, i.Group, i.Kind)
 		}
 	}
-	for _, g := range []Group{GroupTools, GroupWebhooks, GroupLLM, GroupSandbox, GroupPermissions, GroupRedaction, GroupSubagents, GroupBackground, GroupHTTP} {
+	for _, g := range []Group{GroupTools, GroupWebhooks, GroupLLM, GroupSandbox, GroupPermissions, GroupRedaction, GroupSubagents, GroupBackground, GroupHTTP, GroupAuth, GroupIntegrations} {
 		found := false
 		for _, i := range infos {
 			if i.Group == g {

@@ -234,6 +234,8 @@ const (
 	GroupSubagents   Group = "subagents"
 	GroupBackground  Group = "background"
 	GroupHTTP        Group = "http"
+	GroupAuth        Group = "auth"
+	GroupIntegrations Group = "integrations"
 )
 
 // KeyInfo describes one known setting for the admin surface.
@@ -307,6 +309,13 @@ func Catalog() []KeyInfo {
 		// HTTP layer (gateway).
 		{Key: KeyRateLimitRPS, Group: GroupHTTP, Kind: KindFloat, Description: "Per-IP HTTP rate limit, requests per second (overrides HTTP_RATE_LIMIT_RPS). 0 = disabled. Retuned live within a few seconds."},
 		{Key: KeyRateLimitBurst, Group: GroupHTTP, Kind: KindInt, Description: "Per-IP HTTP rate limit burst size (overrides HTTP_RATE_LIMIT_BURST). 0 = disabled. Retuned live within a few seconds."},
+
+		// Auth / SSO.
+		{Key: KeyPhoneSMSURL, Group: GroupAuth, Kind: KindString, Description: "SMS-OTP gateway for phone login (overrides PHONE_SMS_URL): an http(s) URL that receives {\"phone\",\"code\"}, or log:// to print codes to the server log (dev only). Empty disables phone login on the login page. Applies to the next code request."},
+		{Key: KeyPhoneSMSTimeout, Group: GroupAuth, Kind: KindInt, Description: "Timeout of one SMS gateway call in seconds (overrides PHONE_SMS_TIMEOUT)."},
+
+		// Integrations.
+		{Key: KeyMCPServers, Group: GroupIntegrations, Kind: KindString, Secret: true, Description: "MCP servers as a JSON array of {\"name\",\"url\",\"headers\",\"timeout\"} (overrides MCP_SERVERS). Add/remove/retune servers live; unchanged servers keep their session. Headers may carry bearer tokens — the value is never echoed back. Empty disables MCP tools."},
 	}
 }
 
@@ -429,4 +438,19 @@ const (
 	// disabled; overrides HTTP_RATE_LIMIT_*).
 	KeyRateLimitRPS   = "rate_limit_rps"
 	KeyRateLimitBurst = "rate_limit_burst"
+
+	// Auth / SSO.
+	// KeyPhoneSMSURL is the SMS-OTP gateway for phone login (overrides
+	// PHONE_SMS_URL): http(s) URL or "log://" (dev); empty disables phone
+	// login. Applied to the next code request.
+	KeyPhoneSMSURL = "phone_sms_url"
+	// KeyPhoneSMSTimeout bounds one SMS gateway call in seconds (overrides
+	// PHONE_SMS_TIMEOUT).
+	KeyPhoneSMSTimeout = "phone_sms_timeout"
+
+	// Integrations.
+	// KeyMCPServers is the MCP server list as MCP_SERVERS JSON (overrides
+	// MCP_SERVERS; legacy MCP_ENABLED/MCP_SEARXNG_URL map to a single
+	// "searxng" server). Secret: headers may carry bearer tokens.
+	KeyMCPServers = "mcp_servers"
 )

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"nowhere-agent/internal/audit"
+	"nowhere-agent/internal/mcp"
 	"nowhere-agent/internal/settings"
 )
 
@@ -145,6 +146,11 @@ func validateSettingValue(info settings.KeyInfo, raw json.RawMessage) error {
 		if !allowedSettingString(info.Key, s) {
 			return errInvalidSetting("invalid value; allowed: " + allowedSettingValues(info.Key))
 		}
+		if info.Key == settings.KeyMCPServers {
+			if err := validateMCPServers(s); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -163,6 +169,15 @@ func allowedSettingString(key, s string) bool {
 		return s == "allow" || s == "ask" || s == "deny"
 	}
 	return true
+}
+
+// validateMCPServers checks the MCP_SERVERS JSON shape early so a console typo
+// is rejected with a 400 instead of silently keeping the previous server set.
+func validateMCPServers(s string) error {
+	if _, err := mcp.ParseServers(s); err != nil {
+		return errInvalidSetting(err.Error())
+	}
+	return nil
 }
 
 // allowedSettingValues returns the human-readable enum for error messages.

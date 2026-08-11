@@ -175,6 +175,12 @@ func run() error {
 		// HTTP layer.
 		settings.KeyRateLimitRPS:   mustJSON(cfg.HTTP.RateLimitRPS),
 		settings.KeyRateLimitBurst: mustJSON(cfg.HTTP.RateLimitBurst),
+		// Auth / SSO.
+		settings.KeyPhoneSMSURL:     mustJSON(cfg.Phone.SMSURL),
+		settings.KeyPhoneSMSTimeout: mustJSON(int(cfg.Phone.Timeout.Seconds())),
+		// Integrations (MCP_SERVERS or the legacy SearXNG form; headers may
+		// carry bearer tokens, so the runtime value is treated as a secret).
+		settings.KeyMCPServers: mustJSON(initialMCPServers(cfg)),
 	}, log)
 	if err := settingsRuntime.Load(ctx); err != nil {
 		log.Warn("platform settings load failed; env defaults in effect", "err", err)
@@ -243,28 +249,28 @@ func run() error {
 	}
 
 	// Phone + SMS-OTP authentication (domestic enterprise account convention):
-	// when PHONE_SMS_URL is set, users register/sign in with a mobile number +
-	// one-time code. The SMS gateway is deployment-owned (the platform POSTs
-	// {phone, code} to the URL); "log://" prints codes to the server log for
-	// dev/self-host. Verification provisions/resolves the account and issues
-	// the platform's own bearer token — downstream (RequireAuth/teams/quotas)
-	// is unchanged. A misconfigured gateway URL fails the boot.
+	// users register/sign in with a mobile number + one-time code. The SMS
+	// gateway is deployment-owned (the platform POSTs {phone, code} to the
+	// URL); "log://" prints codes to the server log for dev/self-host.
+	// Verification provisions/resolves the account and issues the platform's
+	// own bearer token — downstream (RequireAuth/teams/quotas) is unchanged.
+	// The channel resolves from the RUNTIME settings on every send
+	// (phone_sms_url, phone_sms_timeout), so the admin console switches
+	// gateways or disables phone login without a restart; the boot env value
+	// is still validated once (a malformed boot URL fails the boot).
+	if url := cfg.Phone.SMSURL; url != "" && url != "log://" &&
+		!strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return fmt.Errorf("phone sms: PHONE_SMS_URL must be an http(s) URL or log://, got %q", url)
+	}
+	phoneHandler := identity.NewPhoneHandler(identitySvc, identity.NewRuntimeSMSProvider(
+		func() string { return settingsRuntime.String(settings.KeyPhoneSMSURL) },
+		func() time.Duration { return settingsRuntime.Duration(settings.KeyPhoneSMSTimeout) },
+		log)).WithAudit(auditLogger).
+		WithEnabledFunc(func() bool { return settingsRuntime.String(settings.KeyPhoneSMSURL) != "" })
+	phoneHandler.SetLogger(log)
+	phoneHandler.Register(mux)
 	if cfg.Phone.Enabled() {
-		var sms identity.SMSProvider
-		switch {
-		case cfg.Phone.SMSURL == "log://":
-			sms = identity.NewLogSMSProvider(log)
-			log.Warn("phone OTP enabled with the LOG provider — codes are printed to the server log; set PHONE_SMS_URL to a real gateway for production")
-		default:
-			if !strings.HasPrefix(cfg.Phone.SMSURL, "http://") && !strings.HasPrefix(cfg.Phone.SMSURL, "https://") {
-				return fmt.Errorf("phone sms: PHONE_SMS_URL must be an http(s) URL or log://, got %q", cfg.Phone.SMSURL)
-			}
-			sms = identity.NewHTTPSMSProvider(cfg.Phone.SMSURL, cfg.Phone.Timeout, log)
-		}
-		phoneHandler := identity.NewPhoneHandler(identitySvc, sms).WithAudit(auditLogger)
-		phoneHandler.SetLogger(log)
-		phoneHandler.Register(mux)
-		log.Info("phone OTP auth enabled (POST /api/auth/phone/*)")
+		log.Info("phone OTP auth enabled (POST /api/auth/phone/*)", "channel", cfg.Phone.SMSURL)
 	}
 
 	// Platform-admin bootstrap (admin-console): the first account to sign up on
@@ -435,18 +441,9 @@ func run() error {
 	// the spawn resolver (inside the provider branch) and the management API
 	// (outside it, so the console works with no LLM configured).
 	agentDefPG := agentdef.NewPGStore(pool)
-	// Seed the skill store from disk (capability-gap K3): each SKILL.md under
-	// SKILLS_DIR becomes a system-scope skill, lighting up the L0 index in the
-	// system prompt. Empty SKILLS_DIR leaves the runtime dormant. Scripts are
-	// loaded too and run in the session sandbox (C17 fixed: interpreter-per-
-	// extension, no sh -c concatenation).
-	if cfg.Skills.Dir != "" {
-		n, err := skill.LoadDir(ctx, skillStore, cfg.Skills.Dir)
-		if err != nil {
-			return fmt.Errorf("load skills from %s: %w", cfg.Skills.Dir, err)
-		}
-		log.Info("skills seeded from disk", "dir", cfg.Skills.Dir, "count", n)
-	}
+	// Skills are managed entirely through the skill console (skillapi) now —
+	// the old SKILLS_DIR disk-seed path was removed, so there is no boot-time
+	// import to keep in sync with the management surface.
 	skillEngine := skill.NewEngine(skillStore)
 	// System prompt language (LLM_SYSTEM_LANG / admin settings): Chinese-first
 	// deployments set "zh" so the chat base prompt and the built-in subagent
@@ -639,15 +636,7 @@ func run() error {
 		// surfaces as a clear startup warning and keeps retrying rather than
 		// exiting.
 		var mcpManager *mcp.Manager
-		mcpRaw := cfg.MCP.Servers
-		if mcpRaw == "" && cfg.MCP.Enabled {
-			// Legacy single-server SearXNG form.
-			b, err := json.Marshal([]mcp.ServerConfig{{Name: "searxng", URL: cfg.MCP.SearxngURL}})
-			if err != nil {
-				return fmt.Errorf("mcp legacy config: %w", err)
-			}
-			mcpRaw = string(b)
-		}
+		mcpRaw := initialMCPServers(cfg)
 		if mcpRaw != "" {
 			var err error
 			mcpManager, err = mcp.NewManagerFromJSON(mcpRaw)
@@ -659,6 +648,48 @@ func run() error {
 				go reconnectMCP(ctx, c, log)
 			}
 		}
+		// Runtime MCP reconfigure (admin console): a background loop keeps the
+		// manager reconciled with the mcp_servers setting. Unchanged servers
+		// keep their live session and tools; added servers get a reconnect
+		// loop; removed servers' loops are cancelled. A malformed runtime
+		// value is rejected by the PUT validation and, should one ever reach
+		// here, keeps the previous set with a loud log.
+		mcpCancels := map[string]context.CancelFunc{}
+		applyMCP := func() {
+			if mcpManager == nil {
+				return
+			}
+			added, removed, err := mcpManager.Apply(settingsRuntime.String(settings.KeyMCPServers))
+			if err != nil {
+				log.Warn("mcp servers config invalid; keeping previous set", "err", err)
+				return
+			}
+			for _, name := range removed {
+				if cancel, ok := mcpCancels[name]; ok {
+					cancel()
+					delete(mcpCancels, name)
+				}
+				log.Info("mcp server removed", "server", name)
+			}
+			for _, c := range added {
+				cctx, cancel := context.WithCancel(ctx)
+				mcpCancels[c.Server()] = cancel
+				go reconnectMCP(cctx, c, log)
+				log.Info("mcp server added, connecting", "server", c.Server())
+			}
+		}
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					applyMCP()
+				}
+			}
+		}()
 		// Context compression (context-compression): the loop compresses its
 		// working view as it approaches the model's context window, using a
 		// no-tools summarize call (LLMCompressor). The compressor is built
@@ -1785,6 +1816,24 @@ func mustJSON(v any) json.RawMessage {
 		panic(err)
 	}
 	return b
+}
+
+// initialMCPServers resolves the boot MCP server list: MCP_SERVERS when set,
+// otherwise the legacy MCP_ENABLED + MCP_SEARXNG_URL SearXNG integration
+// mapped to a single "searxng" server. It seeds the runtime default AND
+// builds the boot manager, so both stay in lockstep.
+func initialMCPServers(cfg config.Config) string {
+	if cfg.MCP.Servers != "" {
+		return cfg.MCP.Servers
+	}
+	if cfg.MCP.Enabled {
+		b, err := json.Marshal([]mcp.ServerConfig{{Name: "searxng", URL: cfg.MCP.SearxngURL}})
+		if err != nil {
+			return ""
+		}
+		return string(b)
+	}
+	return ""
 }
 
 // noProviderAdapter fails every generation with the resolver's ErrNoProvider.

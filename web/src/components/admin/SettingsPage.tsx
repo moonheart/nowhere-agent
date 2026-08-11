@@ -51,6 +51,8 @@ const GROUPS: { id: string; label: string }[] = [
   { id: "subagents", label: "Subagents" },
   { id: "background", label: "Background tasks" },
   { id: "http", label: "HTTP / gateway" },
+  { id: "auth", label: "Auth / SSO" },
+  { id: "integrations", label: "Integrations" },
 ];
 
 const listSettings = () =>
