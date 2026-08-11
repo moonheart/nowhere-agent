@@ -999,9 +999,25 @@ func run() error {
 		// (which also serves scheduled-task runs). Target resolution happens
 		// per run so a task's own webhook_url wins over the global WEBHOOK_URL —
 		// and runs with neither stay silent.
+		//
+		// SSRF guard: webhook URLs are user-written, so every delivery target
+		// is screened against private/loopback ranges before any connection
+		// (WEBHOOK_SSRF_ALLOWLIST opens legitimately internal targets). A
+		// malformed allowlist CIDR fails boot — a typo must not silently
+		// disable the guard.
+		var webhookGuard *webhook.Guard
+		if list := splitComma(cfg.Webhook.SSRFAllowlist); len(list) > 0 {
+			g, err := webhook.NewGuard(list, nil)
+			if err != nil {
+				return err
+			}
+			webhookGuard = g
+			log.Info("webhook SSRF guard enabled with allowlist", "entries", list)
+		}
 		notifier := webhook.New(webhook.Options{
 			Timeout: cfg.Webhook.Timeout,
 			Retries: cfg.Webhook.Retries,
+			SSRF:    webhookGuard,
 			Logger:  log,
 		})
 		notifyTarget := func(ctx context.Context, sessionID string) (string, error) {
@@ -1163,6 +1179,9 @@ func run() error {
 		inboundDispatcher.SetLogger(log)
 		inboundHandler := inbound.NewHandler(inboundStore, inboundDispatcher).
 			WithAudit(auditLogger)
+		if webhookGuard != nil {
+			inboundHandler.WithURLGuard(webhookGuard)
+		}
 		inboundHandler.SetLogger(log)
 		inboundHandler.RegisterPublic(mux)
 		inboundHandler.RegisterAuthed(protected)

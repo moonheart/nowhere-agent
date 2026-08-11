@@ -51,6 +51,7 @@ type Notifier struct {
 	client  *http.Client
 	timeout time.Duration
 	retries int
+	ssrf    *Guard // nil = no SSRF screening (tests/legacy)
 	log     *slog.Logger
 }
 
@@ -60,6 +61,11 @@ type Options struct {
 	Timeout time.Duration
 	// Retries is the number of attempts after the first; 0 defaults to 3.
 	Retries int
+	// SSRF, when set, screens every delivery target (and every redirect hop)
+	// against private/loopback network ranges before any connection is made.
+	// Sites that legitimately notify internal systems add allowlisted CIDRs/
+	// hosts via NewGuard.
+	SSRF *Guard
 	// Logger receives delivery outcomes; nil uses slog.Default().
 	Logger *slog.Logger
 }
@@ -78,12 +84,21 @@ func New(opts Options) *Notifier {
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
-	return &Notifier{
+	n := &Notifier{
 		client:  &http.Client{Timeout: opts.Timeout},
 		timeout: opts.Timeout,
 		retries: opts.Retries,
+		ssrf:    opts.SSRF,
 		log:     opts.Logger,
 	}
+	if opts.SSRF != nil {
+		// Re-validate every redirect hop with the same guard, so a public URL
+		// cannot smuggle the request into a private network via a 302.
+		n.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return opts.SSRF.CheckRedirect(req, via)
+		}
+	}
+	return n
 }
 
 // Deliver posts payload to url. An empty url is a no-op (no notifications
@@ -95,6 +110,15 @@ func New(opts Options) *Notifier {
 func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompletedPayload) error {
 	if url == "" {
 		return nil
+	}
+	// SSRF screen before anything else: a blocked target is refused without a
+	// single connection attempt. Resolution happens per attempt (DNS can
+	// change between runs), so a rebinding host cannot slip through.
+	if n.ssrf != nil {
+		if err := n.ssrf.CheckURL(ctx, url); err != nil {
+			n.log.Warn("webhook delivery blocked by SSRF guard", "url", url, "run", payload.RunID, "err", err)
+			return err
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

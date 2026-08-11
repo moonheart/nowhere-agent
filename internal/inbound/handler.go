@@ -19,6 +19,7 @@ import (
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/quota"
+	"nowhere-agent/internal/webhook"
 )
 
 const (
@@ -35,8 +36,12 @@ type Handler struct {
 	store      *Store
 	dispatcher *Dispatcher
 	audit      *audit.Logger
-	log        *slog.Logger
-	now        func() time.Time
+	// urlGuard, when set, applies the outbound webhook SSRF guard to
+	// notify_url at write time (the delivery-time guard in the notifier is
+	// the backstop). Nil keeps the basic http(s) scheme check.
+	urlGuard *webhook.Guard
+	log      *slog.Logger
+	now      func() time.Time
 }
 
 // NewHandler creates an inbound Handler over the store and dispatcher.
@@ -50,6 +55,13 @@ func NewHandler(st *Store, d *Dispatcher) *Handler {
 // WithAudit wires the audit trail (best-effort, never fails the action).
 func (h *Handler) WithAudit(l *audit.Logger) *Handler {
 	h.audit = l
+	return h
+}
+
+// WithURLGuard wires the outbound webhook SSRF guard into notify_url write
+// validation.
+func (h *Handler) WithURLGuard(g *webhook.Guard) *Handler {
+	h.urlGuard = g
 	return h
 }
 
@@ -254,7 +266,7 @@ func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "agent_def and system_prompt are mutually exclusive", http.StatusBadRequest)
 		return
 	}
-	if req.NotifyURL != "" && !validNotifyURL(req.NotifyURL) {
+	if req.NotifyURL != "" && !validNotifyURL(req.NotifyURL, h.urlGuard) {
 		http.Error(w, "notify_url must be an http(s) URL", http.StatusBadRequest)
 		return
 	}
@@ -369,14 +381,21 @@ func generateSecret() (string, error) {
 	return secretPrefix + hex.EncodeToString(b), nil
 }
 
-// validNotifyURL accepts only http(s) URLs with a host — the SSRF guard for
-// outbound delivery lives in the notifier.
-func validNotifyURL(u string) bool {
+// validNotifyURL accepts http(s) URLs with a host — the SSRF guard for
+// outbound delivery lives in the notifier; when one is wired it also screens
+// private/loopback targets at write time.
+func validNotifyURL(u string, g *webhook.Guard) bool {
 	parsed, err := url.Parse(u)
 	if err != nil {
 		return false
 	}
-	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return false
+	}
+	if g != nil {
+		return g.ValidateURL(u) == nil
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

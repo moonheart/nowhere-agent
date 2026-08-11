@@ -75,6 +75,12 @@ type Webhook struct {
 	// Retries is the number of delivery attempts after the first (exponential
 	// backoff between attempts; 4xx responses are final).
 	Retries int `envconfig:"WEBHOOK_RETRIES" default:"3"`
+	// SSRFAllowlist is the comma-separated escape hatch for legitimately
+	// internal notification targets: CIDR blocks ("10.0.0.0/8") and/or exact
+	// hostnames ("im.example.internal"). Delivery to any address that resolves
+	// private/loopback is refused unless it falls in an allowlisted CIDR or its
+	// hostname is allowlisted. Empty = strict: only public targets.
+	SSRFAllowlist string `envconfig:"WEBHOOK_SSRF_ALLOWLIST" default:""`
 }
 
 // Secrets holds the master key that encrypts stored credentials (the team LLM
