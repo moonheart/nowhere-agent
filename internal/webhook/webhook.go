@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -203,6 +204,15 @@ func errUnexpectedStatus(code int) error {
 type statusError struct{ code int }
 
 func (e *statusError) Error() string { return "webhook: unexpected status " + itoa(e.code) }
+
+// IsRejected reports whether err is a permanent consumer rejection (a 4xx
+// from the target — the consumer answered, it refuses this payload). Callers
+// (the outbox sweeper) dead-letter these immediately instead of retrying a
+// rejection for days.
+func IsRejected(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code >= 400 && se.code < 500
+}
 
 // itoa is a tiny int formatter keeping the package import-light.
 func itoa(n int) string {

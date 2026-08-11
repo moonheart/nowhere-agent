@@ -153,13 +153,24 @@ func (s *DeliveryStore) Requeue(ctx context.Context, id string) error {
 	return err
 }
 
-// PurgeDeadLetters removes dead-lettered rows older than cutoff, keeping the
-// outbox table bounded (delivery history that old has no operational value).
-// It returns the number of rows removed.
-func (s *DeliveryStore) PurgeDeadLetters(ctx context.Context, cutoff time.Time) (int64, error) {
+// Retention defaults: dead letters keep for 30 days (enough to diagnose and
+// requeue), delivered rows for 90 (a bounded audit window — the payload
+// carries a conversation summary, so unbounded retention would violate data
+// minimization).
+const (
+	DeadLetterRetention = 30 * 24 * time.Hour
+	DeliveredRetention  = 90 * 24 * time.Hour
+)
+
+// PurgeExpired removes rows past their retention window — dead letters after
+// DeadLetterRetention, delivered rows after DeliveredRetention — keeping the
+// outbox table bounded. It returns the number of rows removed.
+func (s *DeliveryStore) PurgeExpired(ctx context.Context, now time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM webhook_deliveries
-		WHERE status = 'failed' AND created_at < $1`, cutoff)
+		WHERE (status = 'failed' AND created_at < $1)
+		   OR (status = 'delivered' AND created_at < $2)`,
+		now.Add(-DeadLetterRetention), now.Add(-DeliveredRetention))
 	if err != nil {
 		return 0, err
 	}
@@ -168,10 +179,11 @@ func (s *DeliveryStore) PurgeDeadLetters(ctx context.Context, cutoff time.Time) 
 
 func scanDelivery(row interface{ Scan(...any) error }) (Delivery, error) {
 	var d Delivery
-	var userID sql.NullString
+	var userID, lastError sql.NullString
 	err := row.Scan(&d.ID, &d.RunID, &d.SessionID, &userID, &d.TargetURL, &d.Payload,
-		&d.Status, &d.Attempts, &d.NextAttemptAt, &d.LastError, &d.CreatedAt, &d.DeliveredAt)
+		&d.Status, &d.Attempts, &d.NextAttemptAt, &lastError, &d.CreatedAt, &d.DeliveredAt)
 	d.UserID = userID.String
+	d.LastError = lastError.String
 	return d, err
 }
 

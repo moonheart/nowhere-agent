@@ -1203,6 +1203,13 @@ func run() error {
 				}
 				return
 			}
+			// Claim the row we just enqueued (it is the only due one): the
+			// claim holds the lease, so the background sweeper cannot race us
+			// and double-send the same delivery.
+			if _, err := outbox.ClaimNext(deliverCtx, time.Now().UTC()); err != nil {
+				log.Warn("webhook outbox claim failed; queued for retry", "delivery", d.ID, "err", err)
+				return
+			}
 			// First attempt now; on failure the row stays pending and the
 			// sweeper retries with backoff.
 			if err := notifier.Deliver(deliverCtx, target, payload); err != nil {
@@ -1220,7 +1227,7 @@ func run() error {
 		// claims are atomic, so concurrent sweepers never double-send.
 		webhookBackoffs := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour, 4 * time.Hour, 12 * time.Hour, 24 * time.Hour}
 		outboxSweep := func(ctx context.Context) error {
-			if _, err := outbox.PurgeDeadLetters(ctx, time.Now().UTC().Add(-30*24*time.Hour)); err != nil {
+			if _, err := outbox.PurgeExpired(ctx, time.Now().UTC()); err != nil {
 				log.Warn("webhook outbox purge failed", "err", err)
 			}
 			for {
@@ -1238,11 +1245,13 @@ func run() error {
 					continue
 				}
 				if err := notifier.Deliver(ctx, d.TargetURL, payload); err != nil {
+					// A 4xx is a PERMANENT consumer rejection — dead-letter
+					// right away rather than hammering the consumer for days.
 					// Past the backoff list → dead-letter (failed, final). The
 					// MarkFailed CASE reads the timestamp, so a past time flips
 					// the status; an in-list failure stays pending for the next
 					// sweep.
-					if d.Attempts > len(webhookBackoffs) {
+					if webhook.IsRejected(err) || d.Attempts > len(webhookBackoffs) {
 						_ = outbox.MarkFailed(ctx, d.ID, time.Now().Add(-time.Minute), err.Error())
 						log.Warn("webhook outbox delivery dead-lettered", "delivery", d.ID, "attempts", d.Attempts, "err", err)
 						continue

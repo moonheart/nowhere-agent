@@ -7,8 +7,14 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+// outboxTestDB opens the dev database. The shared dev PG can hold rows from
+// earlier interrupted runs, so each test cleans up by its own run_id prefix
+// (rows the test created — never anyone else's) and ClaimNext assertions stay
+// deterministic.
 func outboxTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("DB_DSN")
@@ -29,11 +35,23 @@ func outboxTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// cleanTestDeliveries removes rows whose run_id matches the given prefixes —
+// only rows this package's tests created.
+func cleanTestDeliveries(t *testing.T, db *sql.DB, prefixes ...string) {
+	t.Helper()
+	for _, p := range prefixes {
+		if _, err := db.Exec(`DELETE FROM webhook_deliveries WHERE run_id LIKE $1`, p+"%"); err != nil {
+			t.Fatalf("clean deliveries %q: %v", p, err)
+		}
+	}
+}
+
 func TestDeliveryEnqueueClaimDeliver(t *testing.T) {
 	store := NewDeliveryStore(outboxTestDB(t))
 	ctx := context.Background()
 	now := time.Now().UTC()
 	runID := "run-" + time.Now().Format("150405.000000000")
+	cleanTestDeliveries(t, store.db, runID)
 
 	d, err := store.Enqueue(ctx, runID, "sess-1", "https://hooks.example.com/x", "",
 		RunCompletedPayload{Event: "run.completed", RunID: runID, Status: "done"})
@@ -93,6 +111,7 @@ func TestDeliveryFailureBackoffAndRequeue(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	runID := "run-fail-" + time.Now().Format("150405.000000000")
+	cleanTestDeliveries(t, store.db, runID)
 
 	d, err := store.Enqueue(ctx, runID, "sess-2", "https://hooks.example.com/x", "", RunCompletedPayload{Event: "run.completed", RunID: runID})
 	if err != nil {
@@ -108,13 +127,14 @@ func TestDeliveryFailureBackoffAndRequeue(t *testing.T) {
 	if _, err := store.ClaimNext(ctx, now.Add(30*time.Second)); !errors.Is(err, ErrNoPending) {
 		t.Fatalf("claim before backoff: %v, want ErrNoPending", err)
 	}
-	// Due → claimable again, attempts incremented.
+	// Due → claimable again. The pre-backoff claim was refused (ErrNoPending)
+	// and never consumed an attempt, so this first successful claim sees 1.
 	claimed, err := store.ClaimNext(ctx, now.Add(2*time.Minute))
 	if err != nil {
 		t.Fatalf("claim after backoff: %v", err)
 	}
-	if claimed.Attempts != 2 {
-		t.Fatalf("attempts = %d, want 2", claimed.Attempts)
+	if claimed.Attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (the refused pre-backoff claim did not count)", claimed.Attempts)
 	}
 	// A failure with no future window dead-letters the row.
 	if err := store.MarkFailed(ctx, d.ID, now.Add(-time.Minute), "final"); err != nil {
@@ -158,6 +178,7 @@ func TestDeliveryFailureBackoffAndRequeue(t *testing.T) {
 func TestDeliveryCascadesWithUser(t *testing.T) {
 	store := NewDeliveryStore(outboxTestDB(t))
 	ctx := context.Background()
+	cleanTestDeliveries(t, store.db, "run-cascade")
 
 	var userID string
 	if err := store.db.QueryRow(
@@ -183,41 +204,57 @@ func TestDeliveryCascadesWithUser(t *testing.T) {
 	}
 }
 
-// TestPurgeDeadLetters removes only old dead-lettered rows.
-func TestPurgeDeadLetters(t *testing.T) {
+// TestPurgeExpired removes old dead letters AND old delivered rows, keeping
+// the table bounded.
+func TestPurgeExpired(t *testing.T) {
 	store := NewDeliveryStore(outboxTestDB(t))
 	ctx := context.Background()
 	now := time.Now().UTC()
+	cleanTestDeliveries(t, store.db, "run-old", "run-fresh", "run-dlv")
 
-	old := mustEnqueue(t, store, ctx, "run-old")
-	fresh := mustEnqueue(t, store, ctx, "run-fresh")
+	oldFailed := mustEnqueue(t, store, ctx, "run-old-failed")
+	oldDelivered := mustEnqueue(t, store, ctx, "run-old-delivered")
+	freshFailed := mustEnqueue(t, store, ctx, "run-fresh-failed")
+	freshDelivered := mustEnqueue(t, store, ctx, "run-fresh-delivered")
 	t.Cleanup(func() {
-		store.db.Exec(`DELETE FROM webhook_deliveries WHERE id = $1`, old)
-		store.db.Exec(`DELETE FROM webhook_deliveries WHERE id = $1`, fresh)
+		for _, id := range []string{oldFailed, oldDelivered, freshFailed, freshDelivered} {
+			store.db.Exec(`DELETE FROM webhook_deliveries WHERE id = $1`, id)
+		}
 	})
-	if _, err := store.db.Exec(`UPDATE webhook_deliveries SET status='failed', created_at = $2 WHERE id = $1`, old, now.Add(-40*24*time.Hour)); err != nil {
+	if _, err := store.db.Exec(`
+		UPDATE webhook_deliveries SET status = 'failed', created_at = $2 WHERE id = $1`,
+		oldFailed, now.Add(-40*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`UPDATE webhook_deliveries SET status='failed' WHERE id = $1`, fresh); err != nil {
+	if _, err := store.db.Exec(`
+		UPDATE webhook_deliveries SET status = 'delivered', created_at = $2, delivered_at = now() WHERE id = $1`,
+		oldDelivered, now.Add(-100*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE webhook_deliveries SET status = 'failed' WHERE id = $1`, freshFailed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE webhook_deliveries SET status = 'delivered', delivered_at = now() WHERE id = $1`, freshDelivered); err != nil {
 		t.Fatal(err)
 	}
 
-	n, err := store.PurgeDeadLetters(ctx, now.Add(-30*24*time.Hour))
+	n, err := store.PurgeExpired(ctx, now)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("purged %d rows, want 1 (only the old one)", n)
+	if n != 2 {
+		t.Fatalf("purged %d rows, want 2 (old failed + old delivered)", n)
 	}
-	got, _, _ := store.List(ctx, DeliveryFailed, 10, 0)
-	found := false
+	got, _, _ := store.List(ctx, "", 10, 0)
+	remaining := map[string]bool{}
 	for _, row := range got {
-		if row.ID == fresh {
-			found = true
-		}
+		remaining[row.ID] = true
 	}
-	if !found {
-		t.Fatal("fresh dead letter was purged")
+	if !remaining[freshFailed] || !remaining[freshDelivered] {
+		t.Fatal("fresh rows were purged")
+	}
+	if remaining[oldFailed] || remaining[oldDelivered] {
+		t.Fatal("old rows survived the purge")
 	}
 }
 
