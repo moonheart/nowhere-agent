@@ -2,6 +2,8 @@ package scheduleapi
 
 import (
 	"net/http"
+
+	"nowhere-agent/internal/schedule"
 )
 
 // Self-service routes (/api/me/scheduled-tasks/**). They need no tier guard
@@ -32,6 +34,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	t, err := req.toTask(caller(r).ID)
 	if err != nil {
 		writeStoreError(w, err)
+		return
+	}
+	if !h.checkTargetSession(w, r, t) {
 		return
 	}
 	saved, err := h.store.Create(r.Context(), t)
@@ -74,6 +79,9 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 	t.ID = existing.ID
 	t.Enabled = existing.Enabled // an update does not flip the enable gate
+	if !h.checkTargetSession(w, r, t) {
+		return
+	}
 	saved, err := h.store.Update(r.Context(), t)
 	if err != nil {
 		writeStoreError(w, err)
@@ -94,6 +102,20 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// checkTargetSession applies the write-time target-session ownership check
+// (IDOR guard) when the task names a target session: a task may only point at
+// the OWNER's sessions. It reports whether the task may be stored.
+func (h *Handler) checkTargetSession(w http.ResponseWriter, r *http.Request, t schedule.Task) bool {
+	if t.TargetSessionID == "" || h.targetValidator == nil {
+		return true
+	}
+	if err := h.targetValidator(r.Context(), t.UserID, t.TargetSessionID); err != nil {
+		writeError(w, http.StatusBadRequest, "target_session_id must be a session you own")
+		return false
+	}
+	return true
 }
 
 func (h *Handler) enable(w http.ResponseWriter, r *http.Request) {

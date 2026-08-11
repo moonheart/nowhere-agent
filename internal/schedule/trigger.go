@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -322,8 +323,16 @@ func (tr *Trigger) resolvePrompt(ctx context.Context, task Task) (system, model,
 // (fresh=true) recording task_id/source/metadata (design D7).
 func (tr *Trigger) resolveSession(ctx context.Context, task Task, kickoff string) (sessID string, fresh bool, err error) {
 	if task.TargetSessionID != "" {
-		if _, err := tr.runtime.GetSession(ctx, task.TargetSessionID); err != nil {
+		sess, err := tr.runtime.GetSession(ctx, task.TargetSessionID)
+		if err != nil {
 			return "", false, err
+		}
+		// Ownership gate (IDOR, mirror of inbound.Dispatcher): a task may only
+		// fire into its OWNER's sessions. A task pointing at someone else's
+		// session would read/write that user's conversation and workspace —
+		// and MultitaskInterrupt could even cancel their running job.
+		if sess.UserID != task.UserID {
+			return "", false, fmt.Errorf("target session %s belongs to user %s, not task owner %s", task.TargetSessionID, sess.UserID, task.UserID)
 		}
 		return task.TargetSessionID, false, nil
 	}

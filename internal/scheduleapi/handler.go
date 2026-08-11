@@ -42,6 +42,12 @@ type Runner interface {
 type Handler struct {
 	store  Store
 	runner Runner
+	// targetValidator, when set, checks that a task's target_session_id (when
+	// non-empty) belongs to the task owner BEFORE the task is stored. The
+	// authoritative ownership gate runs again at fire time (schedule.Trigger.
+	// resolveSession); this write-time check surfaces the error as a 400
+	// instead of a confusing failed fire later.
+	targetValidator func(ctx context.Context, userID, sessionID string) error
 }
 
 // NewHandler builds the handler. store may be nil; the routes then answer 503
@@ -49,6 +55,13 @@ type Handler struct {
 // rest.
 func NewHandler(store Store) *Handler {
 	return &Handler{store: store}
+}
+
+// WithTargetValidator wires the write-time target-session ownership check
+// (the server implements it over the session runtime). Nil skips the check.
+func (h *Handler) WithTargetValidator(f func(ctx context.Context, userID, sessionID string) error) *Handler {
+	h.targetValidator = f
+	return h
 }
 
 // WithRunner wires the manual-run path (run-now). Nil leaves the route

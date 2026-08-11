@@ -1282,7 +1282,17 @@ func run() error {
 	// agent runs. Registered outside the provider branch so tasks can be managed
 	// on a deployment with no LLM; only firing needs a provider, so run-now is
 	// wired to the trigger when one was built above and answers 503 otherwise.
-	scheduleapi.NewHandler(schedule.NewPGStore(pool)).WithRunner(schedTrigger).RegisterAuthed(protected)
+	scheduleapi.NewHandler(schedule.NewPGStore(pool)).WithRunner(schedTrigger).
+		WithTargetValidator(func(ctx context.Context, userID, sessionID string) error {
+			sess, err := sessionRuntime.GetSession(ctx, sessionID)
+			if err != nil {
+				return err
+			}
+			if sess.UserID != userID {
+				return fmt.Errorf("session %s is not owned by %s", sessionID, userID)
+			}
+			return nil
+		}).RegisterAuthed(protected)
 	log.Info("scheduled-task endpoints enabled (auth required)")
 
 	// Mount the protected tier once: every authed route above is now behind the

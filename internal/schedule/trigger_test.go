@@ -105,6 +105,45 @@ func newRuntime(t *testing.T, db *sql.DB) (*session.Runtime, *session.RunRegistr
 
 // --- tests -----------------------------------------------------------------
 
+// TestTriggerRejectsForeignTargetSession pins the IDOR gate (mirror of the
+// inbound-webhook ownership check): a task may only fire into the OWNER's
+// sessions — pointing it at another user's session must fail the fire without
+// building a loop or touching the foreign session.
+func TestTriggerRejectsForeignTargetSession(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	victimID := pgNewUser(t, db)
+	victimSess, err := rt.CreateSession(context.Background(), victimID, "victim's private session")
+	if err != nil {
+		t.Fatalf("create victim session: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, victimSess.ID) })
+
+	task := validTask(userID)
+	task.TargetSessionID = victimSess.ID
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), task)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	spy := &loopSpy{}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+	if err := tr.submit(context.Background(), created); err == nil {
+		t.Fatal("fire into a foreign session must fail")
+	}
+	if atomic.LoadInt32(&spy.count) != 0 {
+		t.Fatalf("loop built for a foreign session: %d", spy.count)
+	}
+	// The victim's session must be untouched (no new runs).
+	runs, err := rt.RunsForSession(context.Background(), victimSess.ID)
+	if err != nil || len(runs) != 0 {
+		t.Fatalf("victim session saw %d runs, want 0 (err %v)", len(runs), err)
+	}
+}
+
 // TestTriggerFiresDueTask is the end-to-end path: a due task is claimed and a
 // run is submitted, producing a session tagged with the task.
 func TestTriggerFiresDueTask(t *testing.T) {
