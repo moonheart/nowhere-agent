@@ -48,6 +48,8 @@ const (
 	ActionAuthSignup Action = "auth.signup"
 	ActionAuthLogin  Action = "auth.login"
 	ActionAuthLogout Action = "auth.logout"
+	// Phone/OTP code delivery (the code itself is never recorded).
+	ActionPhoneOTPRequest Action = "auth.otp.request"
 
 	// Self-service account management.
 	ActionMePasswordChange Action = "me.password.change"
@@ -56,6 +58,8 @@ const (
 	ActionMeUploadDelete Action = "me.upload.delete"
 	// Self-service data export (data governance).
 	ActionMeExport Action = "me.export"
+	// Self-service account deletion (PIPL §47 erasure right).
+	ActionMeDelete Action = "me.delete"
 
 	// Platform administration of accounts.
 	ActionAdminUserCreate        Action = "admin.user.create"

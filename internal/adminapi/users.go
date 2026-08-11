@@ -164,6 +164,20 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteMe is the self-service account deletion (PIPL §47 erasure right): the
+// account owner removes their own account and its data. It reuses the same
+// DeleteAccount cascade an admin delete uses, and the caller's tokens die
+// with the account — the client clears its stored token afterwards.
+func (h *Handler) deleteMe(w http.ResponseWriter, r *http.Request) {
+	u := caller(r)
+	if err := h.identity.DeleteAccount(r.Context(), u.ID, u.ID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	h.record(r, audit.Success(audit.ActionMeDelete).Target("user", u.ID))
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handler) listAllTeams(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	limit := intParam(r, "limit", 50, 200)

@@ -153,6 +153,11 @@ export const changePassword = (current_password: string, new_password: string) =
     body: { current_password, new_password },
   });
 
+// deleteMeAccount removes the caller's own account and its data (PIPL §47
+// erasure right). The server revokes every token with the account.
+export const deleteMeAccount = () =>
+  api<void>("/api/me", { method: "DELETE" });
+
 export const myUsage = (range: DateRange = {}) =>
   api<UsageReport>(`/api/me/usage${qs(range)}`);
 

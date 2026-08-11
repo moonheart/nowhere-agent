@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -18,6 +19,7 @@ import (
 type PhoneHandler struct {
 	svc      *Service
 	provider SMSProvider
+	throttle *OTPThrottler
 	audit    *audit.Logger
 	log      *slog.Logger
 	now      func() time.Time
@@ -27,7 +29,7 @@ type PhoneHandler struct {
 // configured SMS provider.
 func NewPhoneHandler(svc *Service, provider SMSProvider) *PhoneHandler {
 	return &PhoneHandler{
-		svc: svc, provider: provider, log: slog.Default(),
+		svc: svc, provider: provider, throttle: NewOTPThrottler(), log: slog.Default(),
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -74,7 +76,21 @@ func (h *PhoneHandler) serveRequestCode(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	err := h.svc.RequestPhoneOTP(r.Context(), req.Phone, h.provider)
+	phone := NormalizePhone(req.Phone)
+	if phone == "" {
+		http.Error(w, "invalid phone number", http.StatusBadRequest)
+		return
+	}
+	ip := audit.ClientIP(r)
+	// Anti-SMS-bombing: daily quotas per phone and per IP (the per-code 60s
+	// cooldown in the service is the fine-grained wall underneath).
+	if err := h.throttle.AllowSend(phone, ip); err != nil {
+		h.record(audit.Failure(audit.ActionPhoneOTPRequest).FromRequest(r).
+			Detail(map[string]any{"phone": maskPhone(phone), "reason": "daily_quota"}))
+		http.Error(w, "daily verification-code quota exceeded", http.StatusTooManyRequests)
+		return
+	}
+	err := h.svc.RequestPhoneOTP(r.Context(), phone, h.provider)
 	switch {
 	case errors.Is(err, ErrInvalidPhone):
 		http.Error(w, "invalid phone number", http.StatusBadRequest)
@@ -84,6 +100,9 @@ func (h *PhoneHandler) serveRequestCode(w http.ResponseWriter, r *http.Request) 
 		h.log.Warn("phone otp request failed", "err", err)
 		http.Error(w, "failed to send code", http.StatusInternalServerError)
 	default:
+		h.throttle.RecordSend(phone, ip)
+		h.record(audit.Success(audit.ActionPhoneOTPRequest).FromRequest(r).
+			Detail(map[string]any{"phone": maskPhone(phone)}))
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -95,8 +114,20 @@ func (h *PhoneHandler) serveVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	phone := NormalizePhone(req.Phone)
+	if phone == "" {
+		http.Error(w, "invalid phone number", http.StatusBadRequest)
+		return
+	}
+	ip := audit.ClientIP(r)
+	// Verify throttle per (phone, ip): a locked pair waits out the retry.
+	if allowed, retryAfter := h.throttle.CheckVerify(phone, ip); !allowed {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
+		http.Error(w, "too many failed attempts", http.StatusTooManyRequests)
+		return
+	}
 	token, u, err := h.svc.VerifyPhoneOTP(r.Context(), phone, req.Code)
 	if err != nil {
+		h.throttle.FailVerify(phone, ip)
 		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"method": "phone"}))
 		switch {
 		case errors.Is(err, ErrInvalidPhone):
@@ -111,6 +142,7 @@ func (h *PhoneHandler) serveVerify(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	h.throttle.SuccessVerify(phone, ip)
 	h.record(audit.Success(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).
 		Target("user", u.ID).Detail(map[string]any{"method": "phone", "phone": maskPhone(phone)}))
 	writeJSON(w, http.StatusOK, authResponse{Token: token, User: toDTO(u)})

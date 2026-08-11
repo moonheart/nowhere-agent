@@ -110,6 +110,7 @@ func (h *Handler) WithUploads(u upload.Uploader) *Handler {
 func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	// ---- self ----
 	route(g, "PATCH /api/me", h.updateMe)
+	route(g, "DELETE /api/me", h.deleteMe)
 	route(g, "POST /api/me/password", h.changePassword)
 	route(g, "GET /api/me/usage", h.myUsage)
 	route(g, "GET /api/me/memories", h.myMemories)

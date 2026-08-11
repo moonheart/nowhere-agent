@@ -19,6 +19,7 @@ import { api } from "@/lib/api";
 import { t } from "@/lib/i18n";
 import {
   changePassword,
+  deleteMeAccount,
   myTokens,
   revokeOtherTokens,
   revokeToken,
@@ -55,7 +56,63 @@ export function ProfilePage() {
       <DataCard />
       <TeamsCard teams={me.teams} />
       <SessionsCard />
+      <DangerCard />
     </>
+  );
+}
+
+// DangerCard is the self-service erasure entry point (PIPL §47): deleting the
+// account removes the account and its data irreversibly. The export reminder
+// steers the user to the portability copy first.
+function DangerCard() {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const doDelete = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteMeAccount();
+      clearToken();
+      window.location.assign("/");
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="border-destructive/40">
+      <CardHeader>
+        <CardTitle>Delete account</CardTitle>
+        <CardDescription>
+          Removes your account and all of its data — conversations, memories,
+          uploads — irreversibly. Export your data first if you may need it.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {error && <ErrorNotice message={error} />}
+        {confirming ? (
+          <div className="flex items-center gap-3">
+            <Button variant="destructive" disabled={busy} onClick={doDelete}>
+              {busy ? "Deleting…" : "Yes, delete my account and data"}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        ) : (
+          <Button variant="outline" onClick={() => setConfirming(true)}>
+            Delete my account…
+          </Button>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
