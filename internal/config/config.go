@@ -26,6 +26,9 @@ type Config struct {
 	Sandbox Sandbox
 	// HTTPTool configures the http_request tool (external API allowlist).
 	HTTPTool HTTPTool
+	// QueryDB configures the query_db tool (read-only business-database
+	// access).
+	QueryDB QueryDB
 	// Subagent configures the spawn_agent tool (subagent capability).
 	Subagent Subagent
 	// MCP configures the MCP client integrations (mcp capability).
@@ -279,6 +282,24 @@ type HTTPTool struct {
 	Allowlist string `envconfig:"HTTP_TOOL_ALLOWLIST" default:""`
 	// Timeout bounds a single tool call; the model may lower it per call.
 	Timeout time.Duration `envconfig:"HTTP_TOOL_TIMEOUT" default:"30s"`
+}
+
+// QueryDB configures the query_db built-in tool (enterprise integration): the
+// agent running read-only SQL against operator-named business databases (an
+// ERP/OA order table, say) without waiting for an HTTP API to exist. Empty
+// DSN list disables the tool entirely (fail-closed).
+type QueryDB struct {
+	// DSNS is a comma-separated list of "name=DSN" entries naming the
+	// databases the agent may query: e.g.
+	// "erp=postgres://ro:secret@pg.internal:5432/erp?sslmode=require,crm=mysql://ro:secret@mysql.internal:3306/crm".
+	// Names are lowercase [a-z0-9_-]; DSN schemes postgres:// (pgx) and
+	// mysql:// (go-sql-driver; covers OceanBase/TiDB-compatible business
+	// databases) are supported. Every call runs in a READ ONLY transaction
+	// behind a statement guard (SELECT/WITH/EXPLAIN/SHOW/VALUES only), with
+	// row/column/byte caps and a per-call timeout.
+	DSNS string `envconfig:"QUERY_DB_DSNS" default:""`
+	// Timeout bounds a single tool call.
+	Timeout time.Duration `envconfig:"QUERY_DB_TIMEOUT" default:"15s"`
 }
 
 // Stream selects the live content broker that fans run output out to clients.

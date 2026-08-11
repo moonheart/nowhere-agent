@@ -807,6 +807,26 @@ func run() error {
 			httpAllow = fn
 			log.Info("http_request tool enabled", "allowlist", list)
 		}
+		// query_db (enterprise integration): the agent runs read-only SQL
+		// against operator-named business databases (QUERY_DB_DSNS). Every DSN
+		// is validated at boot — an unknown scheme, a bad name, or an
+		// unopenable database is a hard failure, never a silently absent tool.
+		var queryDBTool toolruntime.Tool
+		if list := splitComma(cfg.QueryDB.DSNS); len(list) > 0 {
+			dsns := map[string]string{}
+			for _, entry := range list {
+				name, dsn, ok := strings.Cut(entry, "=")
+				if !ok || !validDBName(name) || !validDBDSN(dsn) {
+					return fmt.Errorf("query_db DSN entry %q: want name=dsn with name in [a-z0-9_-] and a postgres:// or mysql:// URL", entry)
+				}
+				dsns[name] = dsn
+			}
+			queryDBTool = builtin.NewQueryDB(dsns, builtin.QueryDBOptions{Timeout: cfg.QueryDB.Timeout})
+			if queryDBTool == nil {
+				return fmt.Errorf("query_db: no DSN could be opened; fix QUERY_DB_DSNS or remove it")
+			}
+			log.Info("query_db tool enabled", "databases", len(dsns))
+		}
 		buildToolRegistry := func(ctx context.Context, sessionID string, whitelist []string) *toolruntime.Registry {
 			full := toolruntime.NewRegistry()
 			reg := full
@@ -842,6 +862,12 @@ func run() error {
 			// non-empty — no allowlist, no tool (fail-closed).
 			if httpAllow != nil {
 				reg.Register(builtin.NewHTTPRequest(httpAllow, cfg.HTTPTool.Timeout))
+			}
+			// query_db (enterprise integration): read-only SQL against the
+			// named business databases. RiskReadOnly (the tool cannot mutate
+			// anything by construction). Registered only when DSNs exist.
+			if queryDBTool != nil {
+				reg.Register(queryDBTool)
 			}
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
@@ -1347,6 +1373,26 @@ func usageObserver(vendor, model string, metrics *observability.Metrics) agent.M
 		metrics.RecordTokens(vendor, model, "cache_write", s.Usage.CacheWriteTokens)
 		return nil
 	})
+}
+
+// validDBName reports whether name is a safe query_db database identifier
+// ([a-z0-9_-], no dots, slashes, or whitespace — it is used as a map key and
+// surfaced in tool output).
+func validDBName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// validDBDSN reports whether dsn is a scheme the query_db tool can open.
+func validDBDSN(dsn string) bool {
+	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") || strings.HasPrefix(dsn, "mysql://")
 }
 
 // noProviderAdapter fails every generation with the resolver's ErrNoProvider.
