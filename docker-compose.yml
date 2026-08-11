@@ -57,7 +57,15 @@ services:
       DB_DSN: postgres://postgres:postgres@postgres:5432/nowhere?sslmode=disable
       STREAM_BROKER: redis
       REDIS_ADDR: redis:6379
-      # SECRETS_MASTER_KEY: change me (openssl rand -base64 32)
+      # Production defaults: a sane per-IP rate limit is ON unless you opt out
+      # (HTTP_RATE_LIMIT_RPS=0), and the SSRF guard protects outbound webhook
+      # delivery. Override both deliberately, not by omission.
+      HTTP_RATE_LIMIT_RPS: "20"
+      HTTP_RATE_LIMIT_BURST: "40"
+      # SECRETS_MASTER_KEY: REQUIRED in production (openssl rand -base64 32) —
+      # without it provider keys and webhook secrets are stored plaintext and
+      # the server only warns. Set it in your .env / secrets manager; the
+      # compose file deliberately does NOT bake a default.
       # OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET / OIDC_REDIRECT_URL: enterprise SSO
       # WEBHOOK_URL: outbound run-completion notifications
       # MCP_ENABLED: "true"
