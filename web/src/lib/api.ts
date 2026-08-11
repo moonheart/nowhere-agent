@@ -24,6 +24,9 @@ type Options = {
   // payloads like the image upload endpoint, which reads the request body
   // directly rather than parsing JSON).
   contentType?: string;
+  // raw returns the response body as a Blob instead of JSON-parsing it (the
+  // data-export download, say).
+  raw?: boolean;
   // signal lets a component abandon an in-flight request when it unmounts or
   // when a newer request supersedes it.
   signal?: AbortSignal;
@@ -52,6 +55,22 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
   });
 
   if (res.status === 204) return undefined as T;
+  if (opts.raw) {
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(
+        (() => {
+          try {
+            return (JSON.parse(text) as { error?: string }).error ?? `request failed (${res.status})`;
+          } catch {
+            return text.slice(0, 200) || `request failed (${res.status})`;
+          }
+        })(),
+        res.status,
+      );
+    }
+    return (await res.blob()) as T;
+  }
 
   const text = await res.text();
   let data: unknown = undefined;

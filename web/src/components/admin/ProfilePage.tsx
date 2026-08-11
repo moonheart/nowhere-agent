@@ -1,7 +1,7 @@
 // Self-service settings: display name, password, teams, and active sessions.
 
 import { useState } from "react";
-import { LogOut, ShieldCheck } from "lucide-react";
+import { Download, LogOut, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -15,6 +15,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { api } from "@/lib/api";
+import { t } from "@/lib/i18n";
 import {
   changePassword,
   myTokens,
@@ -50,9 +52,54 @@ export function ProfilePage() {
         onSaved={reload}
       />
       <PasswordCard />
+      <DataCard />
       <TeamsCard teams={me.teams} />
       <SessionsCard />
     </>
+  );
+}
+
+// DataCard is the self-service data-portability entry point (PIPL §45 export
+// right): the account owner downloads their full data footprint as JSON.
+function DataCard() {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const exportData = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const blob = await api<Blob>("/api/me/export", { raw: true });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `nowhere-agent-export-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>My data</CardTitle>
+        <CardDescription>
+          Download your conversations, memories, uploads, and usage — the
+          portability copy of your data on this platform.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {error && <ErrorNotice message={error} />}
+        <Button variant="outline" disabled={busy} onClick={exportData}>
+          <Download />
+          {busy ? "Preparing…" : t("profile.exportData")}
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 

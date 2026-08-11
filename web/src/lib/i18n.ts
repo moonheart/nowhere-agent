@@ -31,7 +31,8 @@ export type I18nKey =
   | "chat.removeImage"
   | "chat.stop"
   | "chat.loading"
-  | "chat.error";
+  | "chat.error"
+  | "profile.exportData";
 
 const zh: Record<I18nKey, string> = {
   "login.title": "登录",
@@ -57,6 +58,7 @@ const zh: Record<I18nKey, string> = {
   "chat.stop": "停止",
   "chat.loading": "加载中…",
   "chat.error": "出错了",
+  "profile.exportData": "导出我的数据",
 };
 
 const en: Record<I18nKey, string> = {
@@ -83,6 +85,7 @@ const en: Record<I18nKey, string> = {
   "chat.stop": "Stop",
   "chat.loading": "Loading…",
   "chat.error": "Something went wrong",
+  "profile.exportData": "Export my data",
 };
 
 // lang resolves the UI language from the browser locale once (zh-* → zh).
