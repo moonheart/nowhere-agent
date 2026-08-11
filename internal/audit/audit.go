@@ -102,6 +102,12 @@ const (
 	// Service-key administration (the token itself is never recorded).
 	ActionServiceKeyCreate Action = "service_key.create"
 	ActionServiceKeyRevoke Action = "service_key.revoke"
+
+	// Inbound-webhook administration (the secret itself is never recorded).
+	ActionInboundWebhookCreate Action = "inbound_webhook.create"
+	ActionInboundWebhookDelete Action = "inbound_webhook.delete"
+	ActionInboundWebhookRotate Action = "inbound_webhook.rotate"
+	ActionInboundWebhookToggle Action = "inbound_webhook.toggle"
 )
 
 // Event is one auditable occurrence, built fluently and handed to Logger.Log.

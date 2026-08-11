@@ -317,6 +317,88 @@ func paths() map[string]PathItem {
 			},
 		},
 
+		// ---- inbound webhooks (enterprise integration) ----
+		// The trigger endpoint is public; every management route requires auth.
+		"/api/inbound/{id}": {
+			"post": Operation{
+				Summary:     "Trigger an agent run from an external system",
+				Description: "Starts an asynchronous agent run owned by the webhook's user. The request must carry X-Nowhere-Timestamp (unix seconds, within 5 minutes) and X-Nowhere-Signature: sha256=<hex HMAC-SHA256 over \"<ts>.<raw body>\" with the webhook secret>. The run executes on the platform's shared registry and completion is delivered to the webhook's notify_url (or the global WEBHOOK_URL).",
+				Tags:        []string{"inbound"},
+				Parameters: []Parameter{
+					{Name: "id", In: "path", Required: true, Description: "webhook id from /api/me/inbound", Schema: map[string]any{"type": "string"}},
+					{Name: "X-Nowhere-Timestamp", In: "header", Required: true, Description: "unix seconds; accepted within a 5-minute window", Schema: map[string]any{"type": "integer"}},
+					{Name: "X-Nowhere-Signature", In: "header", Required: true, Description: "sha256=<hex HMAC-SHA256 over \"<timestamp>.<body>\" with the webhook secret>", Schema: map[string]any{"type": "string"}},
+				},
+				RequestBody: jsonBody(ref("InboundTriggerRequest")),
+				Responses: map[string]Response{
+					"202": {Description: "run started; {run_id, session_id, status}", Content: map[string]Content{"application/json": {Schema: map[string]any{"type": "object", "properties": map[string]any{"run_id": map[string]any{"type": "string"}, "session_id": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}}}}}},
+					"400": {Description: "invalid payload"},
+					"401": {Description: "invalid signature, expired timestamp, or disabled webhook"},
+					"409": {Description: "target session has pending human interactions"},
+					"413": {Description: "payload too large"},
+					"429": {Description: "monthly token budget exceeded"},
+				},
+			},
+		},
+		"/api/me/inbound": {
+			"get": Operation{
+				Summary:  "List my inbound webhooks",
+				Tags:     []string{"inbound"},
+				Security: bearer,
+				Responses: jsonResp("inbound_webhooks", map[string]any{"type": "object", "properties": map[string]any{"inbound_webhooks": map[string]any{"type": "array", "items": ref("InboundWebhook")}}}),
+			},
+			"post": Operation{
+				Summary:     "Create an inbound webhook (secret returned once)",
+				Description: "Creates a trigger endpoint. agent_def and system_prompt are mutually exclusive. The plaintext secret appears in the response exactly once; it is stored AES-256-GCM encrypted at rest.",
+				Tags:        []string{"inbound"},
+				Security:    bearer,
+				RequestBody: jsonBody(ref("InboundWebhookRequest")),
+				Responses: map[string]Response{
+					"201": {Description: "created; secret visible once", Content: map[string]Content{"application/json": {Schema: map[string]any{"type": "object", "properties": map[string]any{"inbound_webhook": ref("InboundWebhook"), "secret": map[string]any{"type": "string"}}}}}},
+					"400": {Description: "invalid request"},
+					"401": {Description: "invalid or missing bearer token"},
+				},
+			},
+		},
+		"/api/me/inbound/{id}": {
+			"patch": Operation{
+				Summary:  "Enable or disable an inbound webhook",
+				Tags:     []string{"inbound"},
+				Security: bearer,
+				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
+				RequestBody: jsonBody(map[string]any{"type": "object", "required": []string{"enabled"}, "properties": map[string]any{"enabled": map[string]any{"type": "boolean"}}}),
+				Responses: map[string]Response{
+					"204": {Description: "updated"},
+					"401": {Description: "invalid or missing bearer token"},
+					"404": {Description: "webhook not found"},
+				},
+			},
+			"delete": Operation{
+				Summary:  "Delete an inbound webhook",
+				Tags:     []string{"inbound"},
+				Security: bearer,
+				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
+				Responses: map[string]Response{
+					"204": {Description: "deleted"},
+					"401": {Description: "invalid or missing bearer token"},
+					"404": {Description: "webhook not found"},
+				},
+			},
+		},
+		"/api/me/inbound/{id}/rotate": {
+			"post": Operation{
+				Summary:  "Rotate an inbound webhook secret (old secret dies immediately)",
+				Tags:     []string{"inbound"},
+				Security: bearer,
+				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
+				Responses: map[string]Response{
+					"200": {Description: "new secret (visible once)", Content: map[string]Content{"application/json": {Schema: map[string]any{"type": "object", "properties": map[string]any{"secret": map[string]any{"type": "string"}}}}}},
+					"401": {Description: "invalid or missing bearer token"},
+					"404": {Description: "webhook not found"},
+				},
+			},
+		},
+
 		// ---- meta (open) ----
 		"/healthz": {
 			"get": Operation{
@@ -474,6 +556,39 @@ func schemas() map[string]any {
 				"name":     map[string]any{"type": "string"},
 				"user_id":  map[string]any{"type": "string"},
 				"ttl_days": map[string]any{"type": "integer", "description": "0/omitted = never expires"},
+			},
+		},
+		"InboundTriggerRequest": map[string]any{
+			"type":     "object",
+			"required": []string{"prompt"},
+			"properties": map[string]any{
+				"prompt": map[string]any{"type": "string", "description": "the user turn that starts the run"},
+				"metadata": map[string]any{"type": "object", "description": "free-form provenance carried into the session (ticket id, source system, ...)"},
+			},
+		},
+		"InboundWebhookRequest": map[string]any{
+			"type":     "object",
+			"required": []string{"name"},
+			"properties": map[string]any{
+				"name":              map[string]any{"type": "string"},
+				"agent_def":         map[string]any{"type": "string", "description": "agent definition name; mutually exclusive with system_prompt"},
+				"system_prompt":     map[string]any{"type": "string", "description": "fixed system prompt override; mutually exclusive with agent_def"},
+				"target_session_id": map[string]any{"type": "string", "description": "reuse an existing session; empty = new tagged session per trigger"},
+				"notify_url":        map[string]any{"type": "string", "description": "run-completion notification target; empty = global WEBHOOK_URL"},
+			},
+		},
+		"InboundWebhook": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id":                map[string]any{"type": "string"},
+				"name":              map[string]any{"type": "string"},
+				"agent_def":         map[string]any{"type": "string"},
+				"system_prompt":     map[string]any{"type": "string"},
+				"target_session_id": map[string]any{"type": "string"},
+				"notify_url":        map[string]any{"type": "string"},
+				"enabled":           map[string]any{"type": "boolean"},
+				"last_used_at":      map[string]any{"type": "string", "nullable": true},
+				"created_at":        map[string]any{"type": "string"},
 			},
 		},
 		"QuotaBudget": map[string]any{

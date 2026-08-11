@@ -29,6 +29,7 @@ import (
 	"nowhere-agent/internal/export"
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
+	"nowhere-agent/internal/inbound"
 	"nowhere-agent/internal/logging"
 	"nowhere-agent/internal/mcp"
 	"nowhere-agent/internal/memory"
@@ -188,9 +189,11 @@ func run() error {
 	// provider; every decision is resolved per request, so registry edits and
 	// reassignments take effect without a restart.
 	provStore := providerreg.NewPGStore(pool)
-	if enc, err := buildEncryptor(cfg); err != nil {
+	enc, err := buildEncryptor(cfg)
+	if err != nil {
 		return fmt.Errorf("secrets: %w", err)
-	} else if enc != nil {
+	}
+	if enc != nil {
 		provStore.WithEncryption(enc)
 		log.Info("provider registry keys encrypted at rest (AES-256-GCM)")
 	} else {
@@ -1003,12 +1006,24 @@ func run() error {
 		})
 		notifyTarget := func(ctx context.Context, sessionID string) (string, error) {
 			var taskID sql.NullString
-			if err := pool.QueryRowContext(ctx, `SELECT task_id FROM sessions WHERE id = $1`, sessionID).Scan(&taskID); err != nil {
+			var source sql.NullString
+			var webhookID string
+			if err := pool.QueryRowContext(ctx,
+				`SELECT task_id, source, COALESCE(metadata->>'webhook_id','') FROM sessions WHERE id = $1`, sessionID).
+				Scan(&taskID, &source, &webhookID); err != nil {
 				return "", err
 			}
 			if taskID.Valid && taskID.String != "" {
 				var u sql.NullString
 				if err := pool.QueryRowContext(ctx, `SELECT webhook_url FROM scheduled_task WHERE id = $1`, taskID.String).Scan(&u); err == nil && u.Valid && u.String != "" {
+					return u.String, nil
+				}
+			}
+			// An inbound-webhook run (sessions.source = 'inbound') notifies its
+			// own notify_url when set, before falling back to the global URL.
+			if source.String == "inbound" && webhookID != "" {
+				var u sql.NullString
+				if err := pool.QueryRowContext(ctx, `SELECT notify_url FROM inbound_webhooks WHERE id = $1`, webhookID).Scan(&u); err == nil && u.Valid && u.String != "" {
 					return u.String, nil
 				}
 			}
@@ -1123,6 +1138,36 @@ func run() error {
 		} else {
 			log.Info("scheduled-task trigger disabled; task CRUD still available")
 		}
+
+		// Inbound webhooks (enterprise integration): a per-user endpoint that
+		// lets external systems (ERP/OA/ITSM/IM bots) start an agent run with an
+		// authenticated POST — no interactive client and no SSE connection. The
+		// dispatcher reuses the chat loop builder and the shared RunRegistry, so
+		// a triggered run is byte-identical to a human chat run (streaming,
+		// persistence, permission, compression). Completion notifications flow
+		// back through the RunDoneHook above, which resolves the webhook's
+		// notify_url from the session's provenance metadata.
+		inboundStore := inbound.NewStore(pool)
+		if enc != nil {
+			inboundStore.WithEncryption(enc)
+		}
+		inboundDispatcher := inbound.NewDispatcher(inboundStore, sessionRuntime, handler.Registry(),
+			subResolver.Bound(ctx), identitySvc,
+			func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
+				return buildLoop(ctx, userID, teamID, system, model, chatCompressBreaker)
+			},
+			baseSystem, pool).
+			WithToolBinder(bindChatTools).
+			WithTeamAttributor(teamAttributor).
+			WithBudgetGate(inbound.BudgetChecker(budgetGate))
+		inboundDispatcher.SetLogger(log)
+		inboundHandler := inbound.NewHandler(inboundStore, inboundDispatcher).
+			WithAudit(auditLogger)
+		inboundHandler.SetLogger(log)
+		inboundHandler.RegisterPublic(mux)
+		inboundHandler.RegisterAuthed(protected)
+		log.Info("inbound webhook endpoint enabled (POST /api/inbound/{id}, HMAC-signed)")
+
 		log.Info("chat endpoint enabled (auth required); provider+model resolved per request from the registry")
 	}
 
