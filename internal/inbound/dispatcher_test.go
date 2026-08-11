@@ -40,7 +40,7 @@ func memEnv(t *testing.T) (*Dispatcher, *session.Runtime, *session.RunRegistry, 
 	d := NewDispatcher(nil, rt, rg, nil, nil,
 		func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
 			return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}), nil
-		}, "base", nil)
+		}, func() string { return "base" }, nil)
 	d.SetClock(func() time.Time { return time.Now().UTC() })
 	return d, rt, rg, store
 }

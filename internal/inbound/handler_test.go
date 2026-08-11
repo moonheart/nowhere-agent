@@ -41,7 +41,7 @@ func newEnv(t *testing.T) *env {
 	d := NewDispatcher(s, rt, rg, nil, nil,
 		func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
 			return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}), nil
-		}, "base", nil)
+		}, func() string { return "base" }, nil)
 
 	h := NewHandler(s, d)
 	e := &env{t: t, h: h, mux: http.NewServeMux(), user: identity.User{ID: uid, Email: "inb@test.dev"}}

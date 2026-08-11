@@ -119,6 +119,9 @@ const (
 
 	// Outbound delivery outbox administration.
 	ActionWebhookDeliveryRequeue Action = "webhook_delivery.requeue"
+
+	// Runtime platform settings (no-restart configuration).
+	ActionSettingUpdate Action = "setting.update"
 )
 
 // Event is one auditable occurrence, built fluently and handed to Logger.Log.

@@ -47,6 +47,7 @@ import (
 	"nowhere-agent/internal/scheduleapi"
 	"nowhere-agent/internal/scheduler"
 	"nowhere-agent/internal/secrets"
+	"nowhere-agent/internal/settings"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/skillapi"
@@ -120,6 +121,24 @@ func run() error {
 
 	identityStore := identity.NewStore(pool)
 	identitySvc := identity.NewService(identityStore)
+
+	// Runtime-settable platform settings (no-restart configuration): operator
+	// knobs that used to be env-only now default from env at boot and can be
+	// overridden from the admin console (platform_settings table). Each read
+	// path below consults this snapshot, so a change applies on the next use.
+	settingsRuntime := settings.NewRuntime(settings.NewStore(pool), map[string]json.RawMessage{
+		settings.KeyHTTPToolAllowlist: mustJSON(cfg.HTTPTool.Allowlist),
+		settings.KeyQueryDBDsns:       mustJSON(cfg.QueryDB.DSNS),
+		settings.KeyWebhookURL:        mustJSON(cfg.Webhook.URL),
+		settings.KeySystemLang:        mustJSON(cfg.LLM.SystemLang),
+		settings.KeyRateLimitRPS:      mustJSON(cfg.HTTP.RateLimitRPS),
+		settings.KeyRateLimitBurst:    mustJSON(cfg.HTTP.RateLimitBurst),
+	}, log)
+	if err := settingsRuntime.Load(ctx); err != nil {
+		log.Warn("platform settings load failed; env defaults in effect", "err", err)
+	} else {
+		log.Info("platform settings loaded", "keys", len(settings.Keys()))
+	}
 	identityHandler := identity.NewHandler(identitySvc).WithThrottle(identity.NewLoginThrottler())
 	identityHandler.Register(mux)
 
@@ -380,15 +399,22 @@ func run() error {
 		log.Info("skills seeded from disk", "dir", cfg.Skills.Dir, "count", n)
 	}
 	skillEngine := skill.NewEngine(skillStore)
-	// System prompt language (LLM_SYSTEM_LANG): Chinese-first deployments set
-	// "zh" so the chat base prompt and the built-in subagent definition are
-	// phrased for Chinese users. Custom prompts (skills, agent definitions,
-	// system_prompt overrides) always win over these defaults.
-	baseSystem := "You are nowhere-agent, a helpful AI assistant."
-	if cfg.LLM.SystemLang == "zh" {
-		baseSystem = "你是 nowhere-agent,一名乐于助人的 AI 助手。请用中文思考并回复,除非用户明确要求其他语言。"
+	// System prompt language (LLM_SYSTEM_LANG / admin settings): Chinese-first
+	// deployments set "zh" so the chat base prompt and the built-in subagent
+	// definition are phrased for Chinese users. Custom prompts (skills, agent
+	// definitions, system_prompt overrides) always win over these defaults.
+	// The base prompt is resolved PER REQUEST from the runtime settings, so
+	// switching the language in the admin console applies to the next run —
+	// no restart.
+	baseSystemEn := "You are nowhere-agent, a helpful AI assistant."
+	baseSystemZh := "你是 nowhere-agent,一名乐于助人的 AI 助手。请用中文思考并回复,除非用户明确要求其他语言。"
+	baseSystemFor := func() string {
+		if settingsRuntime.String(settings.KeySystemLang) == "zh" {
+			return baseSystemZh
+		}
+		return baseSystemEn
 	}
-	ctxBuilder := chatapi.NewContextBuilder(baseSystem, identitySvc, memPort, skillEngine)
+	ctxBuilder := chatapi.NewContextBuilder(baseSystemFor, identitySvc, memPort, skillEngine)
 
 	// The consolidation runner is declared out here because the console's manual
 	// trigger needs it, and the console is wired below regardless of whether a
@@ -835,45 +861,50 @@ func run() error {
 		// tool not on the whitelist is never registered into the loop, so the
 		// model cannot call it. A nil whitelist keeps the full set (chat).
 		//
-		// http_request allowlist (enterprise integration): compiled once from
-		// HTTP_TOOL_ALLOWLIST. A malformed pattern fails boot — a typo'd allowlist
-		// must not silently disable the tool (or worse, match nothing).
-		var httpAllow builtin.AllowlistFunc
-		if list := splitComma(cfg.HTTPTool.Allowlist); len(list) > 0 {
+		// http_request allowlist (enterprise integration): resolved PER SESSION
+		// from the runtime settings (default: HTTP_TOOL_ALLOWLIST), so editing
+		// the allowlist in the admin console applies to the next run — no
+		// restart. A malformed pattern is logged and treated as "no tool"
+		// rather than failing the run.
+		httpAllowFor := func() builtin.AllowlistFunc {
+			list := splitComma(settingsRuntime.String(settings.KeyHTTPToolAllowlist))
+			if len(list) == 0 {
+				return nil
+			}
 			fn, err := builtin.Allowlist(list)
 			if err != nil {
-				return fmt.Errorf("http tool allowlist: %w", err)
+				log.Warn("http tool allowlist invalid; tool disabled", "allowlist", list, "err", err)
+				return nil
 			}
-			httpAllow = fn
-			log.Info("http_request tool enabled", "allowlist", list)
+			return fn
 		}
 		// query_db (enterprise integration): the agent runs read-only SQL
-		// against operator-named business databases (QUERY_DB_DSNS). Every DSN
-		// is validated at boot — an unknown scheme, a bad name, or an
-		// unopenable database is a hard failure, never a silently absent tool.
-		var queryDBTool toolruntime.Tool
-		if list := splitComma(cfg.QueryDB.DSNS); len(list) > 0 {
+		// against operator-named business databases (default: QUERY_DB_DSNS).
+		// The tool is rebuilt PER SESSION from the runtime settings, so adding
+		// a database in the admin console applies to the next run — no
+		// restart. A malformed entry logs and disables the tool for that run
+		// only.
+		queryDBFor := func() toolruntime.Tool {
+			list := splitComma(settingsRuntime.String(settings.KeyQueryDBDsns))
+			if len(list) == 0 {
+				return nil
+			}
 			dsns := map[string]string{}
 			for _, entry := range list {
 				name, dsn, ok := strings.Cut(entry, "=")
 				if !ok || !validDBName(name) || !validDBDSN(dsn) {
-					return fmt.Errorf("query_db DSN entry %q: want name=dsn with name in [a-z0-9_-] and a postgres:// or mysql:// URL", entry)
+					log.Warn("query_db DSN entry invalid; tool disabled", "entry", entry)
+					return nil
 				}
 				dsns[name] = dsn
 			}
-			queryDBTool = builtin.NewQueryDB(dsns, builtin.QueryDBOptions{
+			tool := builtin.NewQueryDB(dsns, builtin.QueryDBOptions{
 				Timeout: cfg.QueryDB.Timeout,
-				// Every statement the agent runs against a business database
-				// is server-logged — the audit trail DBA/合规 reviewers
-				// expect for agent access to production data.
 				Logf: func(format string, args ...any) {
 					log.Info("query_db: " + fmt.Sprintf(format, args...))
 				},
 			})
-			if queryDBTool == nil {
-				return fmt.Errorf("query_db: no DSN could be opened; fix QUERY_DB_DSNS or remove it")
-			}
-			log.Info("query_db tool enabled", "databases", len(dsns))
+			return tool
 		}
 		buildToolRegistry := func(ctx context.Context, sessionID string, whitelist []string) *toolruntime.Registry {
 			full := toolruntime.NewRegistry()
@@ -907,15 +938,17 @@ func run() error {
 			// HTTP APIs (internal ERP/CRM/knowledge services) confined to the
 			// configured host allowlist. RiskNetwork, so the permission gate
 			// governs it like MCP tools. Registered only when the allowlist is
-			// non-empty — no allowlist, no tool (fail-closed).
-			if httpAllow != nil {
+			// non-empty — no allowlist, no tool (fail-closed). The allowlist
+			// is re-read per session from the runtime settings.
+			if httpAllow := httpAllowFor(); httpAllow != nil {
 				reg.Register(builtin.NewHTTPRequest(httpAllow, cfg.HTTPTool.Timeout))
 			}
 			// query_db (enterprise integration): read-only SQL against the
 			// named business databases. RiskReadOnly (the tool cannot mutate
-			// anything by construction). Registered only when DSNs exist.
-			if queryDBTool != nil {
-				reg.Register(queryDBTool)
+			// anything by construction). Registered only when DSNs exist; the
+			// DSN list is re-read per session from the runtime settings.
+			if qdb := queryDBFor(); qdb != nil {
+				reg.Register(qdb)
 			}
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
@@ -1040,7 +1073,7 @@ func run() error {
 			loop.WithTools(buildToolRegistry(ctx, sessionID, nil))
 		}
 
-		handler := chatapi.NewHandler(newChatLoop, baseSystem).
+		handler := chatapi.NewHandler(newChatLoop, baseSystemFor()).
 			WithRuntime(sessionRuntime).
 			WithMessageStore(messageStore).
 			WithContextBuilder(ctxBuilder).
@@ -1134,7 +1167,9 @@ func run() error {
 					return u.String, nil
 				}
 			}
-			return cfg.Webhook.URL, nil
+			// Global target: read live from the runtime settings (admin console
+			// can retarget all notifications without a restart).
+			return settingsRuntime.String(settings.KeyWebhookURL), nil
 		}
 		// runSummary returns the last assistant text of the session, truncated,
 		// for the notification payload. Read from the durable message store so
@@ -1355,7 +1390,7 @@ func run() error {
 			func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
 				return buildLoop(ctx, userID, teamID, system, model, chatCompressBreaker)
 			},
-			baseSystem, pool).
+			baseSystemFor, pool).
 			WithToolBinder(bindChatTools).
 			WithTeamAttributor(teamAttributor).
 			WithBudgetGate(inbound.BudgetChecker(budgetGate))
@@ -1384,7 +1419,8 @@ func run() error {
 		WithDreaming(dreamRunner).
 		WithAudit(auditLogger).
 		WithExporter(export.New(pool, messageStore, memPort, uploadSvc, schedule.NewPGStore(pool))).
-		WithWebhookDeliveries(webhook.NewDeliveryStore(pool))
+		WithWebhookDeliveries(webhook.NewDeliveryStore(pool)).
+		WithRuntimeSettings(settingsRuntime)
 	adminHandler.RegisterAuthed(protected)
 	log.Info("admin console endpoints enabled (auth required)")
 
@@ -1450,7 +1486,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:         cfg.HTTP.Addr,
-		Handler:      httpHandler(cfg, log, metrics, mux),
+		Handler:      httpHandler(cfg, log, metrics, settingsRuntime, mux),
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 	}
@@ -1543,6 +1579,16 @@ func validDBDSN(dsn string) bool {
 	return strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") || strings.HasPrefix(dsn, "mysql://")
 }
 
+// mustJSON encodes v as a settings value; the values are constants from
+// config at boot, so an encoding error cannot happen.
+func mustJSON(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 // noProviderAdapter fails every generation with the resolver's ErrNoProvider.
 // It is the loop's adapter for a chat request that could not be resolved (empty
 // or misconfigured registry), so the client receives a clean error frame
@@ -1599,7 +1645,7 @@ func spaHandler(dir string) http.Handler {
 //   - metrics then recovery, innermost around the mux: a panic is recovered,
 //     logged with a stack, and answered 500 — and because recovery sits inside
 //     metrics, that 500 is counted like any other status.
-func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Metrics, mux *http.ServeMux) http.Handler {
+func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Metrics, settingsRuntime *settings.Runtime, mux *http.ServeMux) http.Handler {
 	limiter := quota.NewRateLimiter(cfg.HTTP.RateLimitRPS, cfg.HTTP.RateLimitBurst,
 		func(r *http.Request) string {
 			// Never throttle probes: a flooded API must not blind the operator.
@@ -1608,6 +1654,12 @@ func httpHandler(cfg config.Config, log *slog.Logger, metrics *observability.Met
 			}
 			return quota.ClientIPKey(r)
 		})
+	// Live retune: pick up the runtime settings (0/0 = disabled); existing
+	// buckets converge within the limiter's sweep TTL.
+	limiter.SetRate(
+		float64(settingsRuntime.Int(settings.KeyRateLimitRPS)),
+		settingsRuntime.Int(settings.KeyRateLimitBurst),
+	)
 	return observability.StandardStack(mux, log, metrics, limiter.Middleware)
 }
 

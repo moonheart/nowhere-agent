@@ -62,9 +62,11 @@ type Dispatcher struct {
 	identity  ScopeResolver
 	buildLoop LoopBuilder
 	bindTools ToolBinder
-	// baseSystem is the platform default system prompt, used when the webhook
-	// has neither an agent_def nor a fixed system_prompt.
-	baseSystem string
+	// baseSystem resolves the platform default system prompt per dispatch,
+	// used when the webhook carries neither an agent_def nor a fixed
+	// system_prompt — a func so a runtime language change applies to the next
+	// triggered run without a restart.
+	baseSystem func() string
 	attributor TeamAttributor
 	budgetGate BudgetChecker
 	// db is used to tag the sessions a trigger produces (source/metadata).
@@ -75,7 +77,7 @@ type Dispatcher struct {
 
 // NewDispatcher wires a Dispatcher over a Store, the shared runtime and
 // registry, and the server's loop builder.
-func NewDispatcher(st *Store, rt *session.Runtime, rg *session.RunRegistry, defs DefResolver, ids ScopeResolver, build LoopBuilder, baseSystem string, db *sql.DB) *Dispatcher {
+func NewDispatcher(st *Store, rt *session.Runtime, rg *session.RunRegistry, defs DefResolver, ids ScopeResolver, build LoopBuilder, baseSystem func() string, db *sql.DB) *Dispatcher {
 	return &Dispatcher{
 		store: st, runtime: rt, registry: rg, defs: defs, identity: ids,
 		buildLoop: build, baseSystem: baseSystem, db: db, log: slog.Default(),
@@ -141,8 +143,8 @@ func (d *Dispatcher) Dispatch(ctx context.Context, wh Webhook, prompt string, me
 	// the platform default. agent_def and system_prompt cannot both be set
 	// (create enforces it), so the order is deterministic.
 	system, model := d.resolvePrompt(ctx, wh)
-	if system == "" {
-		system = d.baseSystem
+	if system == "" && d.baseSystem != nil {
+		system = d.baseSystem()
 	}
 
 	// Resolve or create the target session.

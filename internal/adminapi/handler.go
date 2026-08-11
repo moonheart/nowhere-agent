@@ -12,6 +12,7 @@ package adminapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 
 	"nowhere-agent/internal/audit"
@@ -48,6 +49,20 @@ type Handler struct {
 	// deliveries exposes the persistent webhook outbox (delivery history +
 	// manual requeue) to platform admins. Nil disables the routes (503).
 	deliveries DeliveryStore
+	// runtimeSettings exposes the no-restart platform settings (tool
+	// allowlists, webhook target, language, rate limits) to platform admins.
+	// Nil disables the routes (503).
+	runtimeSettings SettingStore
+}
+
+// SettingStore is the runtime-settings surface the admin routes need.
+// *settings.Runtime satisfies it; an interface keeps the console free of a
+// settings dependency.
+type SettingStore interface {
+	Keys() []string
+	String(key string) string
+	Int(key string) int
+	Set(ctx context.Context, key string, value json.RawMessage) error
 }
 
 // DeliveryStore is the outbox surface the admin routes need. *webhook.
@@ -84,6 +99,13 @@ func (h *Handler) WithAudit(l *audit.Logger) *Handler {
 // (delivery history + manual requeue). Left nil, the routes answer 503.
 func (h *Handler) WithWebhookDeliveries(s DeliveryStore) *Handler {
 	h.deliveries = s
+	return h
+}
+
+// WithRuntimeSettings wires the no-restart platform settings admin routes.
+// Left nil, the routes answer 503.
+func (h *Handler) WithRuntimeSettings(s SettingStore) *Handler {
+	h.runtimeSettings = s
 	return h
 }
 
@@ -205,6 +227,9 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 
 	route(g, "GET /api/admin/webhook-deliveries", h.requireAdmin(h.listDeliveries))
 	route(g, "POST /api/admin/webhook-deliveries/{id}/retry", h.requireAdmin(h.requeueDelivery))
+
+	route(g, "GET /api/admin/settings", h.requireAdmin(h.listSettings))
+	route(g, "PUT /api/admin/settings/{key}", h.requireAdmin(h.putSetting))
 
 	// Provider registry, platform tier (change provider-registry): system
 	// providers and their models are platform-managed; one of them is the

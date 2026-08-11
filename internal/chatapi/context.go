@@ -21,8 +21,12 @@ type ScopeResolver interface {
 // message view (never the durable history) by the sessionMemoryInjector, so the
 // system prompt stays byte-stable across requests and the LLM prompt prefix can
 // be cached. (design D5; injection is capability K / context-mgmt)
+// contextBuilder composes skills + memory into the system prompt.
 type contextBuilder struct {
-	base     string
+	// base resolves the base prompt per request — a func so the operator can
+	// switch the system-prompt language (LLM_SYSTEM_LANG / the admin settings
+	// page) without restarting: each request reads the current value.
+	base func() string
 	scopes   ScopeResolver
 	memory   memory.Port
 	skills   *skill.Engine
@@ -30,9 +34,20 @@ type contextBuilder struct {
 	recallLimit int
 }
 
-// NewContextBuilder composes skills + memory into the system prompt.
-func NewContextBuilder(base string, scopes ScopeResolver, mem memory.Port, skills *skill.Engine) ContextBuilder {
-	return &contextBuilder{base: base, scopes: scopes, memory: mem, skills: skills, recallLimit: 8}
+// NewContextBuilder composes skills + memory into the system prompt. base is
+// either a static string or a func() string resolved per request (so runtime
+// settings changes apply to the next run without a restart); nil = no base
+// section.
+func NewContextBuilder(base any, scopes ScopeResolver, mem memory.Port, skills *skill.Engine) ContextBuilder {
+	var baseFn func() string
+	switch v := base.(type) {
+	case string:
+		s := v
+		baseFn = func() string { return s }
+	case func() string:
+		baseFn = v
+	}
+	return &contextBuilder{base: baseFn, scopes: scopes, memory: mem, skills: skills, recallLimit: 8}
 }
 
 // SystemPrompt builds: base + available skills (L0). Memory is deliberately
@@ -45,8 +60,10 @@ func (c *contextBuilder) SystemPrompt(ctx context.Context, user identity.User, q
 	}
 
 	var sections []string
-	if s := strings.TrimSpace(c.base); s != "" {
-		sections = append(sections, s)
+	if c.base != nil {
+		if s := strings.TrimSpace(c.base()); s != "" {
+			sections = append(sections, s)
+		}
 	}
 	if c.skills != nil {
 		// A store error must not break the prompt: fall back to no skill index

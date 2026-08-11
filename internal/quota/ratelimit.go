@@ -76,6 +76,21 @@ func (rl *RateLimiter) bucketFor(key string) *rate.Limiter {
 	return b.lim
 }
 
+// SetRate retunes the limiter live (no restart): rps/burst take effect for
+// NEW buckets immediately, and every existing bucket's rate is adjusted
+// (x/time/rate's SetLimit). Burst changes apply to new buckets; existing
+// buckets keep their burst until the sweeper evicts them (≤10 minutes), which
+// is the documented convergence window for a live retune.
+func (rl *RateLimiter) SetRate(rps float64, burst int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.rps = rate.Limit(rps)
+	rl.burst = burst
+	for _, b := range rl.buckets {
+		b.lim.SetLimit(rl.rps)
+	}
+}
+
 // sweep periodically evicts buckets idle longer than the TTL so a long-lived
 // process does not accumulate a bucket per key it has ever seen. A key whose
 // bucket is evicted simply gets a fresh (full) bucket on its next request, which
