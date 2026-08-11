@@ -237,7 +237,7 @@ func TestSettingsListGrouped(t *testing.T) {
 			kinds[k] = true
 		}
 	}
-	for _, want := range []string{"tools", "webhooks", "llm", "sandbox", "permissions", "redaction", "subagents", "background"} {
+	for _, want := range []string{"tools", "webhooks", "llm", "sandbox", "permissions", "redaction", "subagents", "background", "http"} {
 		if !groups[want] {
 			t.Fatalf("group %q missing from list", want)
 		}

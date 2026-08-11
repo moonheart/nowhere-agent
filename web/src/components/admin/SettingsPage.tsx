@@ -50,6 +50,7 @@ const GROUPS: { id: string; label: string }[] = [
   { id: "redaction", label: "Redaction" },
   { id: "subagents", label: "Subagents" },
   { id: "background", label: "Background tasks" },
+  { id: "http", label: "HTTP / gateway" },
 ];
 
 const listSettings = () =>

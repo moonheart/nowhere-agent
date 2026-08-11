@@ -233,6 +233,7 @@ const (
 	GroupRedaction   Group = "redaction"
 	GroupSubagents   Group = "subagents"
 	GroupBackground  Group = "background"
+	GroupHTTP        Group = "http"
 )
 
 // KeyInfo describes one known setting for the admin surface.
@@ -303,9 +304,9 @@ func Catalog() []KeyInfo {
 		{Key: KeyScheduleEnabled, Group: GroupBackground, Kind: KindBool, Description: "Run due scheduled tasks automatically (overrides SCHEDULE_ENABLED). Off keeps task CRUD and run-now."},
 		{Key: KeyScheduleScanInterval, Group: GroupBackground, Kind: KindInt, Description: "How often the scheduled-task trigger scans for due tasks, in seconds (overrides SCHEDULE_SCAN_INTERVAL). Takes effect within a few seconds."},
 
-		// HTTP layer.
-		{Key: KeyRateLimitRPS, Group: GroupBackground, Kind: KindFloat, Description: "Per-IP HTTP rate limit, requests per second (overrides HTTP_RATE_LIMIT_RPS). 0 = disabled. Retuned live within a few seconds."},
-		{Key: KeyRateLimitBurst, Group: GroupBackground, Kind: KindInt, Description: "Per-IP HTTP rate limit burst size (overrides HTTP_RATE_LIMIT_BURST). 0 = disabled. Retuned live within a few seconds."},
+		// HTTP layer (gateway).
+		{Key: KeyRateLimitRPS, Group: GroupHTTP, Kind: KindFloat, Description: "Per-IP HTTP rate limit, requests per second (overrides HTTP_RATE_LIMIT_RPS). 0 = disabled. Retuned live within a few seconds."},
+		{Key: KeyRateLimitBurst, Group: GroupHTTP, Kind: KindInt, Description: "Per-IP HTTP rate limit burst size (overrides HTTP_RATE_LIMIT_BURST). 0 = disabled. Retuned live within a few seconds."},
 	}
 }
 
