@@ -112,6 +112,9 @@ const (
 	ActionInboundWebhookDelete Action = "inbound_webhook.delete"
 	ActionInboundWebhookRotate Action = "inbound_webhook.rotate"
 	ActionInboundWebhookToggle Action = "inbound_webhook.toggle"
+
+	// Outbound delivery outbox administration.
+	ActionWebhookDeliveryRequeue Action = "webhook_delivery.requeue"
 )
 
 // Event is one auditable occurrence, built fluently and handed to Logger.Log.

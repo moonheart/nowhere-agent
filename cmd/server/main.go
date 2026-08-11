@@ -1161,6 +1161,12 @@ func run() error {
 		handler.WithRunDoneHook(func(_ context.Context, _ string, _ session.Run, status session.RunStatus) {
 			metrics.RecordRun(string(status))
 		})
+		// Persistent delivery outbox (enterprise integration): every run-
+		// completion notification is committed to a row BEFORE the first send,
+		// so a crash or a slow consumer cannot lose it. A background sweeper
+		// retries pending rows with backoff; admins inspect and requeue via
+		// /api/admin/webhook-deliveries.
+		outbox := webhook.NewDeliveryStore(pool)
 		handler.WithRunDoneHook(func(ctx context.Context, sessionID string, run session.Run, status session.RunStatus) {
 			// The run context may be cancelled (a cancelled run); notifications
 			// still want to fire, so delivery runs on an uncancelled view.
@@ -1185,10 +1191,58 @@ func run() error {
 				EndedAt:   time.Now().UTC(),
 				Summary:   runSummary(deliverCtx, sessionID),
 			}
+			// Commit to the outbox first (best-effort — a DB hiccup must not
+			// break the run path); a persisted row survives this process.
+			d, err := outbox.Enqueue(deliverCtx, run.ID, sessionID, target, payload)
+			if err != nil {
+				log.Warn("webhook outbox enqueue failed; falling back to fire-and-forget", "run", run.ID, "err", err)
+				if derr := notifier.Deliver(deliverCtx, target, payload); derr != nil {
+					log.Warn("webhook delivery failed", "run", run.ID, "session", sessionID, "target", target, "err", derr)
+				}
+				return
+			}
+			// First attempt now; on failure the row stays pending and the
+			// sweeper retries with backoff.
 			if err := notifier.Deliver(deliverCtx, target, payload); err != nil {
-				log.Warn("webhook delivery failed", "run", run.ID, "session", sessionID, "target", target, "err", err)
+				log.Warn("webhook delivery failed; queued for retry", "run", run.ID, "delivery", d.ID, "err", err)
+				return
+			}
+			if err := outbox.MarkDelivered(deliverCtx, d.ID, time.Now().UTC()); err != nil {
+				log.Warn("webhook outbox mark delivered failed", "delivery", d.ID, "err", err)
 			}
 		})
+		// Outbox sweeper: retries pending deliveries with backoff
+		// (1m → 5m → 15m → 1h → 4h → 12h → 24h, then dead-letter). Claims are
+		// atomic, so extra instances only speed the sweep, never double-send.
+		webhookBackoffs := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour, 4 * time.Hour, 12 * time.Hour, 24 * time.Hour}
+		outboxSweep := func(ctx context.Context) error {
+			for {
+				d, err := outbox.ClaimNext(ctx, time.Now().UTC())
+				if errors.Is(err, webhook.ErrNoPending) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				var payload webhook.RunCompletedPayload
+				if err := json.Unmarshal(d.Payload, &payload); err != nil {
+					// Unreadable payload: dead-letter immediately.
+					_ = outbox.MarkFailed(ctx, d.ID, time.Now().Add(-time.Minute), "unreadable payload: "+err.Error())
+					continue
+				}
+				if err := notifier.Deliver(ctx, d.TargetURL, payload); err != nil {
+					next := time.Now().UTC().Add(webhookBackoffs[min(d.Attempts-1, len(webhookBackoffs)-1)])
+					_ = outbox.MarkFailed(ctx, d.ID, next, err.Error())
+					log.Warn("webhook outbox retry failed", "delivery", d.ID, "attempt", d.Attempts, "next", next, "err", err)
+					continue
+				}
+				if err := outbox.MarkDelivered(ctx, d.ID, time.Now().UTC()); err != nil {
+					log.Warn("webhook outbox mark delivered failed", "delivery", d.ID, "err", err)
+				}
+			}
+		}
+		go scheduler.New(log, scheduler.Job{Name: "webhook-outbox", Interval: 30 * time.Second, Run: outboxSweep}).Start(ctx)
+		log.Info("webhook outbox sweeper enabled (interval 30s, backoff to dead-letter)")
 		if sandboxMgr != nil {
 			log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
 		}
@@ -1283,7 +1337,8 @@ func run() error {
 		WithUploads(uploadSvc).
 		WithDreaming(dreamRunner).
 		WithAudit(auditLogger).
-		WithExporter(export.New(pool, messageStore, memPort, uploadSvc, schedule.NewPGStore(pool)))
+		WithExporter(export.New(pool, messageStore, memPort, uploadSvc, schedule.NewPGStore(pool))).
+		WithWebhookDeliveries(webhook.NewDeliveryStore(pool))
 	adminHandler.RegisterAuthed(protected)
 	log.Info("admin console endpoints enabled (auth required)")
 

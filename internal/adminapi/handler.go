@@ -11,6 +11,7 @@
 package adminapi
 
 import (
+	"context"
 	"net/http"
 
 	"nowhere-agent/internal/audit"
@@ -23,6 +24,7 @@ import (
 	"nowhere-agent/internal/quota"
 	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/usage"
+	"nowhere-agent/internal/webhook"
 )
 
 // Handler serves the console's endpoints.
@@ -43,6 +45,17 @@ type Handler struct {
 	// exporter assembles a user's data footprint for /api/me/export. Nil
 	// disables the route with a 503 (see WithExporter).
 	exporter *export.Service
+	// deliveries exposes the persistent webhook outbox (delivery history +
+	// manual requeue) to platform admins. Nil disables the routes (503).
+	deliveries DeliveryStore
+}
+
+// DeliveryStore is the outbox surface the admin routes need. *webhook.
+// DeliveryStore satisfies it; an interface keeps the console free of a
+// webhook dependency.
+type DeliveryStore interface {
+	List(ctx context.Context, status string, limit, offset int) ([]webhook.Delivery, int, error)
+	Requeue(ctx context.Context, id string) error
 }
 
 // NewHandler builds the console handler. usage and memories may be nil; the
@@ -64,6 +77,13 @@ func (h *Handler) WithQuotas(q *quota.Store) *Handler {
 // Recording is best-effort and never changes a response (see record).
 func (h *Handler) WithAudit(l *audit.Logger) *Handler {
 	h.audit = l
+	return h
+}
+
+// WithWebhookDeliveries wires the persistent webhook outbox admin routes
+// (delivery history + manual requeue). Left nil, the routes answer 503.
+func (h *Handler) WithWebhookDeliveries(s DeliveryStore) *Handler {
+	h.deliveries = s
 	return h
 }
 
@@ -179,6 +199,9 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	route(g, "GET /api/admin/service-keys", h.requireAdmin(h.listServiceKeys))
 	route(g, "POST /api/admin/service-keys", h.requireAdmin(h.createServiceKey))
 	route(g, "DELETE /api/admin/service-keys/{id}", h.requireAdmin(h.revokeServiceKey))
+
+	route(g, "GET /api/admin/webhook-deliveries", h.requireAdmin(h.listDeliveries))
+	route(g, "POST /api/admin/webhook-deliveries/{id}/retry", h.requireAdmin(h.requeueDelivery))
 
 	// Provider registry, platform tier (change provider-registry): system
 	// providers and their models are platform-managed; one of them is the
