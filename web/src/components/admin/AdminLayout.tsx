@@ -16,6 +16,7 @@ import {
   KeyRound,
   Loader2,
   ScrollText,
+  Settings,
   ShieldCheck,
   Sparkles,
   UserRound,
@@ -201,6 +202,9 @@ export function AdminLayout() {
                 </NavItem>
                 <NavItem to="/admin/platform/audit" icon={<ScrollText />}>
                   {t("admin.auditTrail")}
+                </NavItem>
+                <NavItem to="/admin/platform/settings" icon={<Settings />}>
+                  {t("admin.settings")}
                 </NavItem>
               </>
             )}

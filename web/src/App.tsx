@@ -23,6 +23,7 @@ import {
   PlatformAgentDefsPage,
 } from "@/components/admin/AgentDefsPages";
 import { PlatformAuditPage } from "@/components/admin/AuditPage";
+import { PlatformSettingsPage } from "@/components/admin/SettingsPage";
 import { PlatformProvidersPage } from "@/components/admin/PlatformProvidersPage";
 import { PlatformQuotasPage } from "@/components/admin/QuotasPage";
 import { ScheduledTasksPage } from "@/components/admin/ScheduledTasksPage";
@@ -451,6 +452,7 @@ export default function App() {
         <Route path="platform/skills" element={<PlatformSkillsPage />} />
         <Route path="platform/agents" element={<PlatformAgentDefsPage />} />
         <Route path="platform/audit" element={<PlatformAuditPage />} />
+        <Route path="platform/settings" element={<PlatformSettingsPage />} />
       </Route>
       {/* Anything else falls back to the chat view rather than a blank page. */}
       <Route path="*" element={<ChatApp onSignedOut={() => setToken(null)} />} />

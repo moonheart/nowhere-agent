@@ -60,6 +60,7 @@ export type I18nKey =
   | "admin.skills"
   | "admin.agents"
   | "admin.auditTrail"
+  | "admin.settings"
   | "admin.backToChat";
 
 const zh: Record<I18nKey, string> = {
@@ -114,6 +115,7 @@ const zh: Record<I18nKey, string> = {
   "admin.skills": "技能",
   "admin.agents": "代理定义",
   "admin.auditTrail": "审计日志",
+  "admin.settings": "运行设置",
   "admin.backToChat": "返回聊天",
 };
 
@@ -169,6 +171,7 @@ const en: Record<I18nKey, string> = {
   "admin.skills": "Skills",
   "admin.agents": "Agents",
   "admin.auditTrail": "Audit trail",
+  "admin.settings": "Settings",
   "admin.backToChat": "Back to chat",
 };
 
