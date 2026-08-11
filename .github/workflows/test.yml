@@ -28,3 +28,29 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+
+  # Frontend gate: the SPA is part of the shipped artifact (WEB_DIR serves
+  # web/dist), so its type-check and lint live in the same merge gate as the
+  # backend suite — a frontend break must not land just because only Go was
+  # tested. Linux-only: the checks are host-independent.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Lint (oxlint)
+        run: pnpm lint
+      - name: Type-check (tsc)
+        run: npx tsc --noEmit -p tsconfig.app.json
