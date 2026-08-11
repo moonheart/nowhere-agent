@@ -91,6 +91,86 @@ func TestManagerAggregatesClients(t *testing.T) {
 	}
 }
 
+// TestManagerApplyReconciles proves the runtime reconfigure contract: added
+// servers are returned for a reconnect loop, removed ones are named for
+// cancellation, and unchanged servers keep their exact client instance (live
+// session survives an unrelated edit).
+func TestManagerApplyReconciles(t *testing.T) {
+	m, err := NewManagerFromJSON(`[{"name":"a","url":"https://a.example.com/mcp"},{"name":"b","url":"https://b.example.com/mcp"}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origA := m.Clients()[0]
+	origB := m.Clients()[1]
+
+	// Retune: keep a as-is, change b's endpoint, add c, drop nothing else.
+	added, removed, err := m.Apply(`[
+		{"name":"a","url":"https://a.example.com/mcp"},
+		{"name":"b","url":"https://b.example.com/mcp/v2"},
+		{"name":"c","url":"https://c.example.com/mcp"}
+	]`)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v, want none", removed)
+	}
+	if len(added) != 2 || added[0].Server() != "b" || added[1].Server() != "c" {
+		t.Fatalf("added = %v, want [b c]", serverNames(added))
+	}
+	clients := m.Clients()
+	if len(clients) != 3 {
+		t.Fatalf("clients = %d, want 3", len(clients))
+	}
+	if clients[0] != origA {
+		t.Error("unchanged server a did not keep its client instance")
+	}
+	_ = origB // b was rebuilt; origB is dropped
+
+	// Drop a and c; a's client instance is removed and named.
+	added, removed, err = m.Apply(`[{"name":"b","url":"https://b.example.com/mcp/v2"}]`)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(added) != 0 {
+		t.Errorf("added after drop = %v, want none", serverNames(added))
+	}
+	if len(removed) != 2 || removed[0] != "a" || removed[1] != "c" {
+		t.Fatalf("removed = %v, want [a c]", removed)
+	}
+	if got := m.ServerNames(); len(got) != 1 || got[0] != "b" {
+		t.Fatalf("servers after drop = %v, want [b]", got)
+	}
+
+	// Empty config disables MCP entirely.
+	added, removed, err = m.Apply("")
+	if err != nil {
+		t.Fatalf("apply empty: %v", err)
+	}
+	if len(added) != 0 || len(removed) != 1 || removed[0] != "b" {
+		t.Fatalf("apply empty: added=%v removed=%v, want none added and [b] removed", serverNames(added), removed)
+	}
+	if got := m.ServerNames(); len(got) != 0 {
+		t.Fatalf("servers after empty = %v, want none", got)
+	}
+
+	// A malformed list is an error and leaves the set untouched.
+	if _, _, err := m.Apply(`[{"name":"x","url":"nope"}]`); err == nil {
+		t.Error("malformed apply should error")
+	}
+	if got := m.ServerNames(); len(got) != 0 {
+		t.Fatalf("malformed apply mutated clients: %v", got)
+	}
+}
+
+func serverNames(clients []*Client) []string {
+	var out []string
+	for _, c := range clients {
+		out = append(out, c.Server())
+	}
+	return out
+}
+
 func TestHeaderTransportInjectsHeaders(t *testing.T) {
 	var got http.Header
 	base := roundTripFunc(func(r *http.Request) (*http.Response, error) {

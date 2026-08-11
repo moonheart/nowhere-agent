@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
@@ -66,6 +67,27 @@ func NewSearxng(endpoint string, timeout time.Duration) *Client {
 
 // Server returns the server name used to prefix tool names.
 func (c *Client) Server() string { return c.server }
+
+// sameConfig reports whether this client's wiring (endpoint, timeout,
+// headers) matches a desired config — the Manager keeps a client whose
+// config is unchanged across a runtime reconfigure, so its live session and
+// tools survive an unrelated edit elsewhere in the server list. The timeout
+// comparison normalizes the empty value to the construction default, exactly
+// as NewWithHeaders does.
+func (c *Client) sameConfig(want ServerConfig) bool {
+	wantTimeout := want.timeoutFor()
+	if wantTimeout <= 0 {
+		wantTimeout = defaultTimeout
+	}
+	if c.server != want.Name || c.endpoint != want.URL || c.timeout != wantTimeout {
+		return false
+	}
+	t, ok := c.hc.Transport.(headerTransport)
+	if !ok {
+		return len(want.Headers) == 0
+	}
+	return reflect.DeepEqual(t.headers, want.Headers)
+}
 
 // headerTransport injects fixed per-request headers (bearer tokens, api keys)
 // into every request a Client makes. It is used when the server config carries
