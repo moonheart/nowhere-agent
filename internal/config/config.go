@@ -41,8 +41,6 @@ type Config struct {
 	// Schedule configures the scheduled-task trigger (scheduled-tasks
 	// capability): recurring agent runs fired through the chat run path.
 	Schedule Schedule
-	// Skills configures the skill runtime (capability-gap K3a).
-	Skills Skills
 	// Identity configures the account layer, notably platform-admin bootstrap
 	// (admin-console).
 	Identity Identity
@@ -223,16 +221,6 @@ func (d Dreaming) Validate() error {
 		return fmt.Errorf("DREAMING_PURGE_AFTER must be positive, got %s", d.PurgeAfter)
 	}
 	return nil
-}
-
-// Skills configures the skill runtime (capability-gap K3a). Dir points at a
-// directory of skills (one subdirectory each, holding a SKILL.md); when set,
-// the server seeds the skill store from it at startup at system scope, which
-// lights up the L0 skill index in the system prompt and the read-only load_skill
-// tool. Empty leaves the runtime dormant (no skills). Skill script execution is
-// NOT enabled by this loader — that is K3b, gated on the C17 exec-safety fix.
-type Skills struct {
-	Dir string `envconfig:"SKILLS_DIR" default:""`
 }
 
 // Subagent configures the spawn_agent tool. It is only wired when a sandbox
