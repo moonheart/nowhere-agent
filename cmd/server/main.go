@@ -1214,9 +1214,11 @@ func run() error {
 			// First attempt now; on failure the row stays pending and the
 			// sweeper retries with backoff.
 			if err := notifier.Deliver(deliverCtx, target, payload); err != nil {
+				metrics.RecordWebhookDelivery("failed")
 				log.Warn("webhook delivery failed; queued for retry", "run", run.ID, "delivery", d.ID, "err", err)
 				return
 			}
+			metrics.RecordWebhookDelivery("delivered")
 			if err := outbox.MarkDelivered(deliverCtx, d.ID, time.Now().UTC()); err != nil {
 				log.Warn("webhook outbox mark delivered failed", "delivery", d.ID, "err", err)
 			}
@@ -1254,14 +1256,17 @@ func run() error {
 					// sweep.
 					if webhook.IsRejected(err) || d.Attempts > len(webhookBackoffs) {
 						_ = outbox.MarkFailed(ctx, d.ID, time.Now().Add(-time.Minute), err.Error())
+						metrics.RecordWebhookDelivery("dead_lettered")
 						log.Warn("webhook outbox delivery dead-lettered", "delivery", d.ID, "attempts", d.Attempts, "err", err)
 						continue
 					}
 					next := time.Now().UTC().Add(webhookBackoffs[d.Attempts-1])
 					_ = outbox.MarkFailed(ctx, d.ID, next, err.Error())
+					metrics.RecordWebhookDelivery("failed")
 					log.Warn("webhook outbox retry failed", "delivery", d.ID, "attempt", d.Attempts, "next", next, "err", err)
 					continue
 				}
+				metrics.RecordWebhookDelivery("delivered")
 				if err := outbox.MarkDelivered(ctx, d.ID, time.Now().UTC()); err != nil {
 					log.Warn("webhook outbox mark delivered failed", "delivery", d.ID, "err", err)
 				}

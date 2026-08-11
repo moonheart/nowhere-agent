@@ -45,6 +45,7 @@ type Metrics struct {
 	inflight  prometheus.Gauge
 	runsTotal *prometheus.CounterVec
 	tokens    *prometheus.CounterVec
+	webhooks  *prometheus.CounterVec
 }
 
 // NewMetrics builds a Metrics with its own registry (not the global default),
@@ -80,6 +81,10 @@ func NewMetrics() *Metrics {
 			Name: "nowhere_llm_tokens_total",
 			Help: "LLM tokens consumed, by provider, model, and direction.",
 		}, []string{"provider", "model", "direction"}),
+		webhooks: f.NewCounterVec(prometheus.CounterOpts{
+			Name: "nowhere_webhook_deliveries_total",
+			Help: "Outbound run-completion deliveries by outcome (delivered, failed, dead_lettered).",
+		}, []string{"outcome"}),
 	}
 }
 
@@ -112,6 +117,14 @@ func (m *Metrics) RecordTokens(provider, model, direction string, n int) {
 		return
 	}
 	m.tokens.WithLabelValues(provider, model, direction).Add(float64(n))
+}
+
+// RecordWebhookDelivery counts an outbound run-completion delivery outcome:
+// "delivered" | "failed" | "dead_lettered" (or "rejected" for permanent 4xx).
+// The server wires it to the outbox hook and sweeper, so SRE dashboards can
+// monitor the integration link's success rate.
+func (m *Metrics) RecordWebhookDelivery(outcome string) {
+	m.webhooks.WithLabelValues(outcome).Inc()
 }
 // Middleware instruments the wrapped handler. In the StandardStack it sits
 // INSIDE the rate limiter — rejected floods never reach it, so a throttle
