@@ -20,9 +20,9 @@
 > | §2.10 韧性/机密 | "webhook 无 SSRF 防护" | ✅ 统一 SSRF guard(`internal/webhook/ssrf.go`):投递前逐次解析 + 重定向逐跳校验 + `WEBHOOK_SSRF_ALLOWLIST` 逃生口,覆盖调度/入站/全局三条投递路径 |
 > | 技术债 §4 | "A1 recover / A2 重试 / C17 沙箱转义" | ✅ panic recover 中间件、provider 重试(双适配器)、`SANDBOX_LOCAL_EXEC` 默认 false 均已解决/缓解 |
 >
-> **新增能力(原稿未覆盖)**:`query_db` 只读 SQL 工具(`QUERY_DB_DSNS`,语句守卫 + READ ONLY 事务 + 行/列/字节上限,支持 postgres/mysql 即 OceanBase/TiDB 兼容库);`LLM_SYSTEM_LANG=zh` 中文系统提示词;前端按浏览器语言中文化(登录/会话/输入区);`WEBHOOK_SSRF_ALLOWLIST`。
+> **新增能力(原稿未覆盖)**:`query_db` 只读 SQL 工具(`QUERY_DB_DSNS`,语句守卫 + READ ONLY 事务 + 行/列/字节上限,支持 postgres/mysql 即 OceanBase/TiDB 兼容库);`LLM_SYSTEM_LANG=zh` 中文系统提示词;前端按浏览器语言中文化(登录/会话/输入区);`WEBHOOK_SSRF_ALLOWLIST`;手机号 + SMS-OTP 登录(`PHONE_SMS_URL`,含防轰炸节流);**TOTP 二因素认证**(RFC 6238,登录挑战流,SSO 路径对等强制);持久化 webhook outbox(租约/退避/死信/保留期/删号级联);钉钉/企微/飞书群机器人出站通知(含钉钉加签);自助删号(`DELETE /api/me`)与数据导出 UI。
 >
-> **仍缺(与后续批次相关)**:MFA、RLS、备份/恢复工具、tracing/pprof、k8s/Helm 交付、多架构镜像(amd64 单平台)。
+> **仍缺(与后续批次相关)**:RLS、备份/恢复工具、tracing/pprof、k8s/Helm 交付、IM 入站对话与审批卡片、通讯录同步。MFA(TOTP)已于 2026-08-11 落地。
 >
 > ---
 
