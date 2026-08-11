@@ -16,6 +16,7 @@ import { DataUI, GenerativeUIFromMetadata } from "@/components/generative-ui";
 import { UsageFooter } from "@/components/usage-footer";
 import { PlanPanel } from "@/components/plan-panel";
 import { PendingNotice } from "@/components/pending-notice";
+import { t } from "@/lib/i18n";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Button } from "@/components/ui/button";
 import {
@@ -91,11 +92,11 @@ const ScrollToBottom: FC = () => (
     <Button
       variant="outline"
       size="icon-sm"
-      title="Scroll to bottom"
+      title={t("chat.scrollBottom")}
       className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full shadow-xs transition-[translate,scale,opacity] duration-200 disabled:pointer-events-none disabled:translate-y-full disabled:scale-95 disabled:opacity-0"
     >
       <ArrowDown />
-      <span className="sr-only">Scroll to bottom</span>
+      <span className="sr-only">{t("chat.scrollBottom")}</span>
     </Button>
   </ThreadPrimitive.ScrollToBottom>
 );
@@ -106,7 +107,7 @@ const EmptyState: FC = () => (
       <EmptyMedia className="mb-2 size-12 rounded-2xl bg-primary text-lg font-bold text-primary-foreground">
         n
       </EmptyMedia>
-      <EmptyTitle className="text-base">How can I help?</EmptyTitle>
+      <EmptyTitle className="text-base">{t("chat.help")}</EmptyTitle>
       <EmptyDescription>
         Ask anything, or have me work with files in your workspace.
       </EmptyDescription>
@@ -294,7 +295,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
                 </AttachmentContent>
                 <AttachmentActions>
                   <AttachmentAction
-                    title="Remove image"
+                    title={t("chat.removeImage")}
                     onClick={() => removeStaged(p.path)}
                   >
                     <X />
@@ -317,7 +318,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
               where flex-1 stretches the box vertically and items-center shrinks
               it to the placeholder's width. */}
           <ComposerPrimitive.Input
-            placeholder="Message nowhere-agent…"
+            placeholder={t("chat.placeholder")}
             maxRows={8}
             onPaste={onPaste}
             data-slot="input-group-control"
@@ -333,7 +334,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
                 type="button"
                 variant="ghost"
                 size="icon-sm"
-                title="Attach image"
+                title={t("chat.attachImage")}
                 disabled={uploading}
                 onClick={() => fileRef.current?.click()}
               >
@@ -355,7 +356,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
             <PermissionSelect sessionId={sessionId} />
             <ThreadPrimitive.If running={false}>
               <ComposerPrimitive.Send asChild>
-                <Button size="icon-sm" title="Send" className="ml-auto">
+                <Button size="icon-sm" title={t("chat.send")} className="ml-auto">
                   <ArrowUp />
                 </Button>
               </ComposerPrimitive.Send>

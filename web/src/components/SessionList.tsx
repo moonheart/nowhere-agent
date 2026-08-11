@@ -27,6 +27,7 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -116,7 +117,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
       <div className="space-y-2 border-b border-border p-3">
         <Button size="lg" className="w-full" onClick={onNew}>
           <Plus />
-          New chat
+          {t("chat.new")}
         </Button>
         {sessions.length > 0 && (
           <InputGroup className="bg-background">

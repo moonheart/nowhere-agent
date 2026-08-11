@@ -1,6 +1,7 @@
 import { useEffect, useState, type FC, type FormEvent } from "react";
 import { AlertCircle, KeyRound } from "lucide-react";
 import { login, signup } from "@/lib/auth";
+import { t } from "@/lib/i18n";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -66,12 +67,10 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>
-            {mode === "login" ? "Sign in" : "Create account"}
+            {mode === "login" ? t("login.title") : t("login.titleSignup")}
           </CardTitle>
           <CardDescription>
-            {mode === "login"
-              ? "Continue to nowhere-agent."
-              : "Set up a new nowhere-agent account."}
+            {mode === "login" ? t("login.subtitle") : t("login.subtitleSignup")}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -93,11 +92,11 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
                 }}
               >
                 <KeyRound />
-                Sign in with SSO
+                {t("login.sso")}
               </Button>
               <div className="my-4 flex items-center gap-3 text-xs text-muted-foreground">
                 <span className="h-px flex-1 bg-border" />
-                or with email
+                {t("login.orEmail")}
                 <span className="h-px flex-1 bg-border" />
               </div>
             </div>
@@ -105,7 +104,7 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
           <form onSubmit={submit}>
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="login-email">Email</FieldLabel>
+                <FieldLabel htmlFor="login-email">{t("login.email")}</FieldLabel>
                 <Input
                   id="login-email"
                   type="email"
@@ -117,7 +116,7 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
                 />
               </Field>
               <Field>
-                <FieldLabel htmlFor="login-password">Password</FieldLabel>
+                <FieldLabel htmlFor="login-password">{t("login.password")}</FieldLabel>
                 <Input
                   id="login-password"
                   type="password"
@@ -139,7 +138,11 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
               )}
 
               <Button type="submit" size="lg" disabled={busy}>
-                {busy ? "Working…" : mode === "login" ? "Sign in" : "Sign up"}
+                {busy
+                  ? t("login.busy")
+                  : mode === "login"
+                    ? t("login.submit")
+                    : t("login.submitSignup")}
               </Button>
               <Button
                 type="button"
@@ -148,8 +151,8 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
                 onClick={() => setMode(mode === "login" ? "signup" : "login")}
               >
                 {mode === "login"
-                  ? "No account? Sign up"
-                  : "Have an account? Sign in"}
+                  ? t("login.toggleToSignup")
+                  : t("login.toggleToLogin")}
               </Button>
             </FieldGroup>
           </form>
