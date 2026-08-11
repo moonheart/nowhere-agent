@@ -56,11 +56,21 @@ func (s *Service) SetUserDisabled(ctx context.Context, actorID, userID string, d
 }
 
 // DeleteAccount removes an account and everything cascading from it. An
-// administrator may not delete themselves.
+// administrator may not delete themselves (that would strand the platform
+// without an admin; an admin leaves via the self-service DeleteSelf path,
+// which does not require anyone to remain).
 func (s *Service) DeleteAccount(ctx context.Context, actorID, userID string) error {
 	if actorID == userID {
 		return ErrSelfTarget
 	}
+	return s.store.DeleteUser(ctx, userID)
+}
+
+// DeleteSelf removes the CALLER's own account and everything cascading from
+// it (PIPL §47 erasure right). Unlike DeleteAccount it is not admin-restricted
+// — self-service deletion is the account owner's right, exercised from
+// DELETE /api/me after an explicit confirm. The account's tokens die with it.
+func (s *Service) DeleteSelf(ctx context.Context, userID string) error {
 	return s.store.DeleteUser(ctx, userID)
 }
 
