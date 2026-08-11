@@ -10,13 +10,34 @@ import (
 )
 
 func TestTOTPCodeRFC6238Vector(t *testing.T) {
-	// RFC 6238 test vector: secret "12345678901234567890" (base32 GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ),
-	// T=59 → 94287082 (8 digits); our 6-digit variant uses the same counter.
+	// RFC 6238 Appendix B test vectors (SHA-1, 8-digit reference values; our
+	// 6-digit variant uses the same counter + dynamic truncation, so the
+	// vectors below assert the EXACT codes, pinning the algorithm against
+	// regression — a broken truncation would change every value).
 	secret := "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-	code, err := totpCode(secret, time.Unix(59, 0))
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		unix int64
+		code string
+	}{
+		// RFC 8-digit references truncated to 6: 94287082→287082, 07081804→081804,
+		// 14050471→050471, 89005924→005924, 69279037→279037, 65353130→353130.
+		{59, "287082"},
+		{1111111109, "081804"},
+		{1111111111, "050471"},
+		{1234567890, "005924"},
+		{2000000000, "279037"},
+		{20000000000, "353130"},
+	} {
+		got, err := totpCode(secret, time.Unix(tc.unix, 0))
+		if err != nil {
+			t.Fatalf("T=%d: %v", tc.unix, err)
+		}
+		if got != tc.code {
+			t.Errorf("T=%d: code = %q, want %q", tc.unix, got, tc.code)
+		}
 	}
+	// Sanity: 6 digits exactly.
+	code, _ := totpCode(secret, time.Unix(59, 0))
 	if len(code) != totpDigits {
 		t.Fatalf("code = %q, want %d digits", code, totpDigits)
 	}

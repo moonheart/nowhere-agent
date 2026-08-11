@@ -160,7 +160,22 @@ func run() error {
 		oidcHandler := oidc.NewHandler(oidcProvider, identityStore,
 			func(ctx context.Context, u identity.User) (string, error) {
 				return identitySvc.IssueToken(ctx, u)
-			}).WithAudit(auditLogger)
+			}).
+			// MFA parity: SSO logins respect the account's TOTP second factor
+			// exactly like password logins — a TOTP-enabled account gets a
+			// challenge instead of a token, so the IdP cannot bypass it.
+			WithTotpChallenge(func(ctx context.Context, u identity.User) (string, error) {
+				enabled, err := identitySvc.TOTPEnabled(ctx, u.ID)
+				if err != nil || !enabled {
+					return "", err
+				}
+				ch, err := identitySvc.BeginTOTPChallenge(ctx, u)
+				if err != nil {
+					return "", err
+				}
+				return ch.Token, nil
+			}).
+			WithAudit(auditLogger)
 		oidcHandler.Register(mux)
 		mux.Handle("GET /auth/oidc/enabled", oidc.EnabledProbe())
 		log.Info("oidc sso enabled", "issuer", cfg.OIDC.Issuer, "redirect", cfg.OIDC.RedirectURL)

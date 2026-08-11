@@ -33,10 +33,11 @@ async function ssoAvailable(): Promise<boolean> {
   }
 }
 
-export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> = ({
-  onSuccess,
-  ssoError = null,
-}) => {
+export const LoginForm: FC<{
+  onSuccess: () => void;
+  ssoError?: string | null;
+  initialTotpToken?: string | null;
+}> = ({ onSuccess, ssoError = null, initialTotpToken = null }) => {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -49,9 +50,12 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
   const [phoneEnabled, setPhoneEnabled] = useState(false);
   const [codeSent, setCodeSent] = useState(false);
   const [cooldown, setCooldown] = useState(0);
-  // Second-factor challenge state (MFA): the password half succeeded, the
-  // account demands an authenticator code before any token is issued.
-  const [totpChallenge, setTotpChallenge] = useState<string | null>(null);
+  // Second-factor challenge state (MFA): the password half succeeded (or the
+  // IdP authenticated the account), the account demands an authenticator code
+  // before any token is issued.
+  const [totpChallenge, setTotpChallenge] = useState<string | null>(
+    initialTotpToken,
+  );
   const [totpCode, setTotpCode] = useState("");
 
   useEffect(() => {

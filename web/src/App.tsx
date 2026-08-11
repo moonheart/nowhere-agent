@@ -405,10 +405,14 @@ export default function App() {
   // (or /#sso_error=...). Consume it once on mount — before the gate below — so
   // an IdP sign-in lands signed-in and an SSO failure reaches the login form.
   const [ssoError, setSsoError] = useState<string | null>(null);
+  const [ssoTotp, setSsoTotp] = useState<string | null>(null);
   useEffect(() => {
-    const { token: ssoToken, error } = consumeSSORedirect();
+    const { token: ssoToken, error, totpRequired } = consumeSSORedirect();
     if (ssoToken) setToken(ssoToken);
     if (error) setSsoError(error);
+    // The IdP authenticated the account but its second factor is on: hand the
+    // challenge to the login form so the user completes MFA in the browser.
+    if (totpRequired) setSsoTotp(totpRequired);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -419,6 +423,7 @@ export default function App() {
           <LoginForm
             onSuccess={() => setToken(getToken())}
             ssoError={ssoError}
+            initialTotpToken={ssoTotp}
           />
         </div>
       </div>

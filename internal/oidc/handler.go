@@ -29,6 +29,14 @@ type AccountProvisioner interface {
 // issueToken is wrapped by the server.
 type TokenIssuer func(ctx context.Context, u identity.User) (string, error)
 
+// TotpChallenger begins a second-factor challenge for an account that has one
+// enabled. It returns the one-shot challenge token, or "" when the account
+// has no second factor (the callback then proceeds to issue the token
+// directly). The server implements it over identity's TOTP flow, so SSO
+// logins respect the same MFA policy password logins do — a TOTP-enabled
+// account cannot bypass its second factor via the IdP.
+type TotpChallenger func(ctx context.Context, u identity.User) (string, error)
+
 // Handler serves the browser-facing SSO endpoints: GET /auth/oidc/login
 // (redirect to the IdP) and GET /auth/oidc/callback (code exchange + account
 // provisioning + platform-token hand-off).
@@ -36,14 +44,24 @@ type Handler struct {
 	provider   *Provider
 	accounts   AccountProvisioner
 	issueToken TokenIssuer
-	audit      *audit.Logger
-	now        func() time.Time
+	// totpChallenge, when set, defers accounts with a second factor to the
+	// MFA challenge step instead of issuing a token.
+	totpChallenge TotpChallenger
+	audit         *audit.Logger
+	now           func() time.Time
 }
 
 // NewHandler wires an OIDC handler. issueToken turns a provisioned account into
 // the platform bearer token the SPA then uses exactly as after a password login.
 func NewHandler(p *Provider, accounts AccountProvisioner, issueToken TokenIssuer) *Handler {
 	return &Handler{provider: p, accounts: accounts, issueToken: issueToken, now: time.Now}
+}
+
+// WithTotpChallenge wires the second-factor deferral (MFA parity with the
+// password path). Nil skips the check (legacy behavior).
+func (h *Handler) WithTotpChallenge(c TotpChallenger) *Handler {
+	h.totpChallenge = c
+	return h
 }
 
 // WithAudit wires the audit trail so SSO sign-ins are recorded (best-effort,
@@ -141,6 +159,26 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).Detail(map[string]any{"method": "oidc", "reason": "account_disabled"}))
 		h.redirectError(w, r, "account is disabled")
 		return
+	}
+
+	// MFA parity: an account with a second factor is deferred to the TOTP
+	// challenge step (fragment #totp_required=<challenge>) instead of getting
+	// a platform token — the IdP cannot bypass the platform's own policy.
+	if h.totpChallenge != nil {
+		if ch, cerr := h.totpChallenge(r.Context(), u); cerr != nil {
+			h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).Detail(map[string]any{"method": "oidc", "reason": "totp_challenge"}))
+			h.redirectError(w, r, "sso second-factor setup failed")
+			return
+		} else if ch != "" {
+			h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).
+				Detail(map[string]any{"method": "oidc+totp", "reason": "awaiting_second_factor"}))
+			redirect := r.URL.Query().Get("redirect_uri")
+			if redirect == "" {
+				redirect = "/"
+			}
+			http.Redirect(w, r, redirect+"#totp_required="+url.QueryEscape(ch), http.StatusFound)
+			return
+		}
 	}
 
 	token, err := h.issueToken(r.Context(), u)

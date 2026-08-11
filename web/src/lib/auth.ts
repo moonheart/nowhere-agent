@@ -16,23 +16,31 @@ export function clearToken(): void {
 }
 
 // consumeSSORedirect reads the OIDC callback's URL-fragment hand-off
-// (/#token=... on success, /#sso_error=... on failure), stores a token if one
-// arrived, and strips the fragment from the address bar so the credential does
-// not linger in history or get copied into a shared link. The server delivers
+// (/#token=... on success, /#totp_required=<challenge> when the account has a
+// second factor, /#sso_error=... on failure), stores a token if one arrived,
+// and strips the fragment from the address bar so the credential does not
+// linger in history or get copied into a shared link. The server delivers
 // the token in a fragment precisely so it never reaches a server log; we honor
 // that by removing it here. Returns the outcome so the caller can render an
 // SSO error or proceed signed-in.
-export function consumeSSORedirect(): { token: string | null; error: string | null } {
+export function consumeSSORedirect(): {
+  token: string | null;
+  error: string | null;
+  totpRequired: string | null;
+} {
   const hash = window.location.hash;
-  if (!hash) return { token: null, error: null };
+  if (!hash) return { token: null, error: null, totpRequired: null };
   const params = new URLSearchParams(hash.replace(/^#/, ""));
   const token = params.get("token");
   const error = params.get("sso_error");
-  if (!token && !error) return { token: null, error: null };
+  const totpRequired = params.get("totp_required");
+  if (!token && !error && !totpRequired)
+    return { token: null, error: null, totpRequired: null };
   if (token) setToken(token);
-  // Strip the fragment (token or error) without adding a history entry.
+  // Strip the fragment (token, challenge, or error) without adding a history
+  // entry.
   window.history.replaceState(null, "", window.location.pathname + window.location.search);
-  return { token, error };
+  return { token, error, totpRequired };
 }
 
 
