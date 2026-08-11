@@ -32,7 +32,13 @@ export type I18nKey =
   | "chat.stop"
   | "chat.loading"
   | "chat.error"
-  | "profile.exportData";
+  | "profile.exportData"
+  | "login.phone"
+  | "login.phoneSubtitle"
+  | "login.sendCode"
+  | "login.resendIn"
+  | "login.code"
+  | "login.backToEmail";
 
 const zh: Record<I18nKey, string> = {
   "login.title": "登录",
@@ -59,6 +65,12 @@ const zh: Record<I18nKey, string> = {
   "chat.loading": "加载中…",
   "chat.error": "出错了",
   "profile.exportData": "导出我的数据",
+  "login.phone": "手机号",
+  "login.phoneSubtitle": "使用手机号 + 验证码登录或注册。",
+  "login.sendCode": "发送验证码",
+  "login.resendIn": "重新发送",
+  "login.code": "验证码",
+  "login.backToEmail": "返回邮箱登录",
 };
 
 const en: Record<I18nKey, string> = {
@@ -86,6 +98,12 @@ const en: Record<I18nKey, string> = {
   "chat.loading": "Loading…",
   "chat.error": "Something went wrong",
   "profile.exportData": "Export my data",
+  "login.phone": "Phone",
+  "login.phoneSubtitle": "Sign in or register with a mobile number and one-time code.",
+  "login.sendCode": "Send code",
+  "login.resendIn": "Resend in",
+  "login.code": "Verification code",
+  "login.backToEmail": "Back to email sign-in",
 };
 
 // lang resolves the UI language from the browser locale once (zh-* → zh).

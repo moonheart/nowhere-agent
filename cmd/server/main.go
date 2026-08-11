@@ -166,6 +166,31 @@ func run() error {
 		log.Info("oidc sso enabled", "issuer", cfg.OIDC.Issuer, "redirect", cfg.OIDC.RedirectURL)
 	}
 
+	// Phone + SMS-OTP authentication (domestic enterprise account convention):
+	// when PHONE_SMS_URL is set, users register/sign in with a mobile number +
+	// one-time code. The SMS gateway is deployment-owned (the platform POSTs
+	// {phone, code} to the URL); "log://" prints codes to the server log for
+	// dev/self-host. Verification provisions/resolves the account and issues
+	// the platform's own bearer token — downstream (RequireAuth/teams/quotas)
+	// is unchanged. A misconfigured gateway URL fails the boot.
+	if cfg.Phone.Enabled() {
+		var sms identity.SMSProvider
+		switch {
+		case cfg.Phone.SMSURL == "log://":
+			sms = identity.NewLogSMSProvider(log)
+			log.Warn("phone OTP enabled with the LOG provider — codes are printed to the server log; set PHONE_SMS_URL to a real gateway for production")
+		default:
+			if !strings.HasPrefix(cfg.Phone.SMSURL, "http://") && !strings.HasPrefix(cfg.Phone.SMSURL, "https://") {
+				return fmt.Errorf("phone sms: PHONE_SMS_URL must be an http(s) URL or log://, got %q", cfg.Phone.SMSURL)
+			}
+			sms = identity.NewHTTPSMSProvider(cfg.Phone.SMSURL, cfg.Phone.Timeout, log)
+		}
+		phoneHandler := identity.NewPhoneHandler(identitySvc, sms).WithAudit(auditLogger)
+		phoneHandler.SetLogger(log)
+		phoneHandler.Register(mux)
+		log.Info("phone OTP auth enabled (POST /api/auth/phone/*)")
+	}
+
 	// Platform-admin bootstrap (admin-console): the first account to sign up on
 	// an empty database is made an admin automatically, which does nothing for a
 	// deployment whose accounts predate the role. BOOTSTRAP_ADMIN_EMAIL names

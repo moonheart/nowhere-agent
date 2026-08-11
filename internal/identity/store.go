@@ -18,7 +18,7 @@ func NewStore(db *sql.DB) *Store { return &Store{db: db} }
 
 // userColumns is the projection every user query shares, in the order scanUser
 // expects. Kept in one place so adding a column touches one line.
-const userColumns = `id, email, display_name, password_hash, platform_role, disabled_at, created_at, updated_at`
+const userColumns = `id, email, display_name, password_hash, platform_role, disabled_at, created_at, updated_at, phone`
 
 // bootstrapAdminLockKey serializes the "is this the first account?" check in
 // CreateUser. There is no row to lock on an empty table, so two concurrent
@@ -108,11 +108,13 @@ func scanUserRow(row rowScanner) (User, error) {
 		u        User
 		role     string
 		disabled sql.NullTime
+		phone    sql.NullString
 	)
-	if err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &role, &disabled, &u.CreatedAt, &u.UpdatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &role, &disabled, &u.CreatedAt, &u.UpdatedAt, &phone); err != nil {
 		return User{}, err
 	}
 	u.PlatformRole = PlatformRole(role)
+	u.Phone = phone.String
 	if disabled.Valid {
 		t := disabled.Time
 		u.DisabledAt = &t

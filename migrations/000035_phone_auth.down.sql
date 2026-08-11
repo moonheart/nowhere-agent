@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS phone_otps;
+ALTER TABLE users DROP COLUMN IF EXISTS phone;

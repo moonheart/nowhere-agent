@@ -46,6 +46,9 @@ type User struct {
 	Email        string
 	DisplayName  string
 	PasswordHash string
+	// Phone is the normalized mobile number for phone/OTP accounts; "" for
+	// email and SSO accounts.
+	Phone string
 	// PlatformRole is the account's platform-wide authority.
 	PlatformRole PlatformRole
 	// DisabledAt is set when the account is disabled: it keeps its data but

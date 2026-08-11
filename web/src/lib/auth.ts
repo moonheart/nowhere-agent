@@ -77,6 +77,40 @@ export function signup(email: string, password: string): Promise<void> {
   return auth("/api/auth/signup", { email, password, display_name: email });
 }
 
+// requestPhoneCode asks the server to deliver a verification code to phone
+// (the deployment's SMS gateway does the actual sending).
+export async function requestPhoneCode(phone: string): Promise<void> {
+  const res = await post("/api/auth/phone/request-code", { phone });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `request failed (${res.status})`);
+  }
+}
+
+// verifyPhoneCode checks the code; on success the server provisions/resolves
+// the account and returns the platform token, stored like any other login.
+export async function verifyPhoneCode(phone: string, code: string): Promise<void> {
+  const res = await post("/api/auth/phone/verify", { phone, code });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `request failed (${res.status})`);
+  }
+  const data = (await res.json()) as { token?: string };
+  if (!data.token) throw new Error("no token returned");
+  localStorage.setItem(KEY, data.token);
+}
+
+// phoneAuthAvailable probes the server for the phone/OTP routes (404 when not
+// configured), mirroring the OIDC probe.
+export async function phoneAuthAvailable(): Promise<boolean> {
+  try {
+    const res = await fetch("/api/auth/phone/enabled");
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function logout(): Promise<void> {
   const token = getToken();
   if (token) {

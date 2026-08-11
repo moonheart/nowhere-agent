@@ -49,6 +49,9 @@ type Config struct {
 	// OIDC configures single-sign-on against an external identity provider
 	// (enterprise-readiness P1-2). Disabled unless OIDC_ISSUER is set.
 	OIDC OIDC
+	// Phone configures phone + SMS-OTP authentication (domestic enterprise
+	// account convention). Disabled unless PHONE_SMS_URL is set.
+	Phone Phone
 	// Secrets configures encryption-at-rest for stored credentials
 	// (enterprise-readiness P0-2).
 	Secrets Secrets
@@ -395,6 +398,23 @@ type OIDC struct {
 // and keys are discovered from it, and a public (no-secret) client is valid
 // for some IdPs.
 func (o OIDC) Enabled() bool { return o.Issuer != "" && o.ClientID != "" }
+
+// Phone configures phone + SMS-OTP authentication. Enabled only when SMSURL
+// is set — empty keeps email/password (and SSO) as the only sign-in paths.
+type Phone struct {
+	// SMSURL is where verification codes are delivered: a deployment-owned
+	// HTTP endpoint that receives {"phone","code"} and performs the actual
+	// SMS send (an internal adapter to 阿里云/腾讯云 SMS, an enterprise
+	// messaging gateway, …). 2xx = delivered. The special value "log://"
+	// prints codes to the server log (dev/self-host convenience — never a
+	// production delivery channel). Empty disables phone login entirely.
+	SMSURL string `envconfig:"PHONE_SMS_URL" default:""`
+	// Timeout bounds one delivery call to the SMS gateway.
+	Timeout time.Duration `envconfig:"PHONE_SMS_TIMEOUT" default:"10s"`
+}
+
+// Enabled reports whether phone/OTP authentication is configured.
+func (p Phone) Enabled() bool { return p.SMSURL != "" }
 
 // Workspace configures the per-session workspace storage that backs image
 // payloads referenced by conversation messages (persist-raw-messages).
