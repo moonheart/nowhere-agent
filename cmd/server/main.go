@@ -821,7 +821,15 @@ func run() error {
 				}
 				dsns[name] = dsn
 			}
-			queryDBTool = builtin.NewQueryDB(dsns, builtin.QueryDBOptions{Timeout: cfg.QueryDB.Timeout})
+			queryDBTool = builtin.NewQueryDB(dsns, builtin.QueryDBOptions{
+				Timeout: cfg.QueryDB.Timeout,
+				// Every statement the agent runs against a business database
+				// is server-logged — the audit trail DBA/合规 reviewers
+				// expect for agent access to production data.
+				Logf: func(format string, args ...any) {
+					log.Info("query_db: " + fmt.Sprintf(format, args...))
+				},
+			})
 			if queryDBTool == nil {
 				return fmt.Errorf("query_db: no DSN could be opened; fix QUERY_DB_DSNS or remove it")
 			}

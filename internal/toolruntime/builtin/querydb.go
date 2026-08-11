@@ -146,6 +146,13 @@ func (t *queryDBTool) Call(ctx context.Context, args map[string]any) (toolruntim
 	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 	rows, err := t.queryReadOnly(callCtx, pool, stmt)
+	if t.logf != nil {
+		if err != nil {
+			t.logf("db=%s sql=%q error=%v", dbName, stmt, err)
+		} else {
+			t.logf("db=%s sql=%q rows=%d", dbName, stmt, len(rows))
+		}
+	}
 	if err != nil {
 		return toolruntime.Result{Content: fmt.Sprintf("query_db: %v", err), IsError: true}, nil
 	}
@@ -157,19 +164,23 @@ func (t *queryDBTool) Call(ctx context.Context, args map[string]any) (toolruntim
 }
 
 // queryReadOnly runs stmt inside a READ ONLY transaction — a second, engine-
-// enforced wall behind the statement guard, so even a parser-evading DML
-// (a quoted keyword, a leading comment trick) cannot write.
+// enforced wall behind the statement guard, so even a parser-evading write
+// cannot land. The read-only mode is requested twice: at the driver level
+// (TxOptions.ReadOnly → BEGIN READ ONLY, honored by both pgx and the MySQL
+// driver) and with an explicit SET TRANSACTION READ ONLY inside the
+// transaction (Postgres honors it; the MySQL variant is a documented no-op
+// for the current tx, which is why the driver-level flag is the primary
+// wall). A failure to enter read-only mode REFUSES the call — the text guard
+// is heuristic, so the engine wall must never be silently missing.
 func (t *queryDBTool) queryReadOnly(ctx context.Context, pool *sql.DB, stmt string) ([]map[string]any, error) {
-	tx, err := pool.BeginTx(ctx, nil)
+	tx, err := pool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck // read-only: rollback is always safe
 
 	if _, err := tx.ExecContext(ctx, "SET TRANSACTION READ ONLY"); err != nil {
-		// Some engines reject the statement in autocommit-less contexts;
-		// proceed — the statement guard already blocks writes.
-		_ = err
+		return nil, fmt.Errorf("engine refused read-only mode: %w", err)
 	}
 	q, err := tx.QueryContext(ctx, stmt)
 	if err != nil {
@@ -248,9 +259,11 @@ func normalizeCell(v any) any {
 
 // isReadOnlyStatement reports whether stmt begins with a read-only keyword,
 // skipping leading whitespace, comments, and parentheses. Anything else —
-// INSERT/UPDATE/DELETE/DDL — is refused at the text level. A leading WITH is
-// also scanned: a CTE can legally wrap a write ("WITH x AS (...) DELETE …"),
-// so any write keyword later in the statement refuses it.
+// INSERT/UPDATE/DELETE/DDL — is refused at the text level. Every approved
+// branch is then scanned for write keywords: a CTE can legally wrap a write
+// ("WITH x AS (...) DELETE …"), EXPLAIN ANALYZE actually EXECUTES the
+// statement it analyzes on Postgres, and SELECT … INTO / … INTO OUTFILE /
+// DUMPFILE are write verbs despite their SELECT prefix.
 func isReadOnlyStatement(stmt string) bool {
 	rest := strings.TrimSpace(stmt)
 	for strings.HasPrefix(rest, "--") || strings.HasPrefix(rest, "/*") {
@@ -260,18 +273,19 @@ func isReadOnlyStatement(stmt string) bool {
 	rest = strings.TrimSpace(rest)
 	first := firstWord(rest)
 	switch strings.ToUpper(first) {
-	case "SELECT", "EXPLAIN", "SHOW", "VALUES", "TABLE":
-		return true
-	case "WITH":
+	case "SELECT", "WITH", "EXPLAIN", "SHOW", "VALUES", "TABLE":
 		return !containsWriteKeyword(rest)
 	}
 	return false
 }
 
-// writeKeywords are the DDL/DML verbs a read-only statement must never carry.
+// writeKeywords are the DDL/DML/file-verb keywords a read-only statement must
+// never carry. The list errs on the side of rejection: a false positive only
+// makes the model rephrase, while a miss could write.
 var writeKeywords = []string{
 	"INSERT", "UPDATE", "DELETE", "MERGE", "TRUNCATE",
 	"DROP", "ALTER", "CREATE", "GRANT", "REVOKE", "COPY",
+	"INTO", "OUTFILE", "DUMPFILE", "LOAD_FILE", "CALL", "EXECUTE",
 }
 
 // containsWriteKeyword reports whether s contains any write keyword as a

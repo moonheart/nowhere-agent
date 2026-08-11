@@ -40,7 +40,15 @@ func TestQueryDBStatementGuard(t *testing.T) {
 		"TRUNCATE users",
 		"  -- comment\nDELETE FROM users",   // comment-then-write must still be refused
 		"/* c */ DROP TABLE users",          // block-comment-then-write refused
-		"WITH x AS (SELECT 1) DELETE FROM t", // WITH leading to DML refused? WITH is read-only-approved... see below
+		"WITH x AS (SELECT 1) DELETE FROM t", // CTE wrapping a write
+		"EXPLAIN ANALYZE DELETE FROM users",  // EXPLAIN ANALYZE executes on PG
+		"EXPLAIN UPDATE users SET email='x'",
+		"SELECT * INTO newtable FROM users",  // PG SELECT INTO creates a table
+		"SELECT * INTO OUTFILE '/tmp/x' FROM users", // MySQL file write
+		"SELECT * INTO DUMPFILE '/tmp/x' FROM users",
+		"SELECT LOAD_FILE('/etc/passwd')",
+		"CALL some_proc()",
+		"COPY users TO '/tmp/x'",
 	} {
 		if isReadOnlyStatement(stmt) {
 			t.Errorf("isReadOnlyStatement(%q) = true, want false", stmt)
