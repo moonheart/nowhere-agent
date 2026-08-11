@@ -61,6 +61,10 @@ func (s *Service) Signup(ctx context.Context, email, password, displayName strin
 // A disabled account fails as if the credentials were wrong: telling a
 // disabled account apart from a wrong password hands an attacker a valid-email
 // oracle, and the account holder learns nothing actionable either way.
+//
+// When the account has a TOTP second factor, no bearer token is issued —
+// Login returns ErrTOTPRequired and the caller begins the second-factor
+// challenge instead.
 func (s *Service) Login(ctx context.Context, email, password string) (token string, u User, err error) {
 	u, err = s.store.UserByEmail(ctx, email)
 	if err != nil {
@@ -72,6 +76,10 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 	if u.Disabled() {
 		return "", User{}, ErrUserDisabled
 	}
+	// Second factor: verify the one-time code before any token is issued.
+	if totpEnabled, err := s.TOTPEnabled(ctx, u.ID); err == nil && totpEnabled {
+		return "", User{}, ErrTOTPRequired
+	}
 	raw, err := generateToken()
 	if err != nil {
 		return "", User{}, err
@@ -80,6 +88,18 @@ func (s *Service) Login(ctx context.Context, email, password string) (token stri
 		return "", User{}, err
 	}
 	return raw, u, nil
+}
+
+// TOTPEnabled reports whether the account has an active second factor.
+func (s *Service) TOTPEnabled(ctx context.Context, userID string) (bool, error) {
+	_, enabled, err := s.store.TOTPState(ctx, userID)
+	return enabled, err
+}
+
+// LookupByEmail fetches a user by email (no credential check) — the login
+// challenge path needs the account after the password already verified.
+func (s *Service) LookupByEmail(ctx context.Context, email string) (User, error) {
+	return s.store.UserByEmail(ctx, email)
 }
 
 // IssueToken issues a fresh bearer token for an already-authenticated account.

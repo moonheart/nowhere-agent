@@ -1,7 +1,7 @@
 // Self-service settings: display name, password, teams, and active sessions.
 
 import { useState } from "react";
-import { Download, LogOut, ShieldCheck } from "lucide-react";
+import { Download, LogOut, ShieldCheck, Smartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -19,7 +19,10 @@ import { api } from "@/lib/api";
 import { t } from "@/lib/i18n";
 import {
   changePassword,
+  confirmTotp,
   deleteMeAccount,
+  disableTotp,
+  enableTotp,
   myTokens,
   revokeOtherTokens,
   revokeToken,
@@ -53,6 +56,7 @@ export function ProfilePage() {
         onSaved={reload}
       />
       <PasswordCard />
+      <TotpCard />
       <DataCard />
       <TeamsCard teams={me.teams} />
       <SessionsCard />
@@ -110,6 +114,146 @@ function DangerCard() {
           <Button variant="outline" onClick={() => setConfirming(true)}>
             Delete my account…
           </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// TotpCard is the second-factor (MFA) self-service: enroll (secret shown
+// once, typically scanned into an authenticator app), confirm, disable.
+function TotpCard() {
+  const [phase, setPhase] = useState<"idle" | "enrolled" | "enabled">("idle");
+  const [secret, setSecret] = useState("");
+  const [uri, setUri] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await enableTotp();
+      setSecret(res.secret);
+      setUri(res.uri);
+      setPhase("enrolled");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirm = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await confirmTotp(code);
+      setPhase("enabled");
+      setDone(true);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disable = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await disableTotp(code);
+      setPhase("idle");
+      setCode("");
+      setSecret("");
+      setUri("");
+      setDone(true);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Smartphone className="size-4 text-primary" />
+          Two-step verification
+        </CardTitle>
+        <CardDescription>
+          An authenticator app code is required in addition to your password —
+          recommended for administrators.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {error && <ErrorNotice message={error} />}
+        {done && <p className="text-sm text-muted-foreground">Saved.</p>}
+
+        {phase === "idle" && (
+          <Button variant="outline" disabled={busy} onClick={start}>
+            Set up two-step verification…
+          </Button>
+        )}
+
+        {phase === "enrolled" && (
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Scan this into your authenticator app (or enter the secret
+              manually), then confirm with a code:
+            </p>
+            <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 font-mono text-xs break-all">
+              {uri || secret}
+            </div>
+            <div className="flex items-end gap-3">
+              <div className="flex-1 space-y-1.5">
+                <Label htmlFor="totp-confirm">Code</Label>
+                <Input
+                  id="totp-confirm"
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder="123456"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                />
+              </div>
+              <Button disabled={busy || code.length !== 6} onClick={confirm}>
+                Confirm
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {phase === "enabled" && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+              <ShieldCheck className="size-4 text-primary" />
+              Two-step verification is on.
+            </div>
+            <div className="flex items-end gap-3">
+              <div className="flex-1 space-y-1.5">
+                <Label htmlFor="totp-disable">Current code</Label>
+                <Input
+                  id="totp-disable"
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder="123456"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                />
+              </div>
+              <Button
+                variant="outline"
+                disabled={busy || code.length !== 6}
+                onClick={disable}
+              >
+                Disable
+              </Button>
+            </div>
+          </div>
         )}
       </CardContent>
     </Card>

@@ -158,6 +158,21 @@ export const changePassword = (current_password: string, new_password: string) =
 export const deleteMeAccount = () =>
   api<void>("/api/me", { method: "DELETE" });
 
+// ---- second factor (TOTP/MFA) ----
+
+// enableTotp starts enrollment: the secret and otpauth URI are returned once
+// and the factor only activates after confirmTotp validates a code.
+export const enableTotp = () =>
+  api<{ secret: string; uri: string }>("/api/me/totp/enable", {
+    method: "POST",
+  });
+
+export const confirmTotp = (code: string) =>
+  api<void>("/api/me/totp/confirm", { method: "POST", body: { code } });
+
+export const disableTotp = (code: string) =>
+  api<void>("/api/me/totp/disable", { method: "POST", body: { code } });
+
 export const myUsage = (range: DateRange = {}) =>
   api<UsageReport>(`/api/me/usage${qs(range)}`);
 

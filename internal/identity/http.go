@@ -61,6 +61,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/signup", h.signup)
 	mux.HandleFunc("POST /api/auth/login", h.login)
 	mux.HandleFunc("POST /api/auth/logout", h.logout)
+	mux.HandleFunc("POST /api/auth/totp/verify", h.totpVerify)
 	mux.HandleFunc("GET /api/me", h.requireAuth(h.me))
 }
 
@@ -188,6 +189,27 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "account is disabled")
 		return
 	}
+	if errors.Is(err, ErrTOTPRequired) {
+		// The password was right; the account demands its second factor. Issue
+		// a one-shot challenge token and let the caller complete the login —
+		// this is a 200 with a challenge, not an error: the credential half
+		// succeeded and the flow continues.
+		u, _ = h.svc.LookupByEmail(r.Context(), req.Email)
+		challenge, cerr := h.svc.BeginTOTPChallenge(r.Context(), u)
+		if cerr != nil {
+			h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"email": req.Email, "reason": "totp_challenge_failed"}))
+			writeError(w, http.StatusInternalServerError, "login failed")
+			return
+		}
+		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).
+			Detail(map[string]any{"method": "password+totp", "reason": "awaiting_second_factor"}))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"totp_required": true,
+			"totp_token":    challenge.Token,
+			"user":          toDTO(u),
+		})
+		return
+	}
 	if err != nil {
 		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"email": req.Email, "reason": "internal"}))
 		writeError(w, http.StatusInternalServerError, "login failed")
@@ -217,6 +239,39 @@ func (h *Handler) record(e audit.Event) {
 	if h.audit != nil {
 		h.audit.LogAndReport(context.Background(), e)
 	}
+}
+
+// totpVerify completes a password+TOTP login: it redeems the one-shot
+// challenge token from /api/auth/login with the authenticator code and
+// returns the platform bearer token.
+func (h *Handler) totpVerify(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TotpToken string `json:"totp_token"`
+		Code      string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	token, u, err := h.svc.CompleteTOTPChallenge(r.Context(), req.TotpToken, req.Code)
+	if err != nil {
+		if errors.Is(err, ErrInvalidTOTP) {
+			h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"method": "totp", "reason": "invalid_code"}))
+			writeError(w, http.StatusUnauthorized, "invalid verification code")
+			return
+		}
+		if errors.Is(err, ErrUserDisabled) {
+			h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"method": "totp", "reason": "account_disabled"}))
+			writeError(w, http.StatusForbidden, "account is disabled")
+			return
+		}
+		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"method": "totp", "reason": "internal"}))
+		writeError(w, http.StatusInternalServerError, "verification failed")
+		return
+	}
+	h.record(audit.Success(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).
+		Target("user", u.ID).Detail(map[string]any{"method": "password+totp"}))
+	writeJSON(w, http.StatusOK, authResponse{Token: token, User: toDTO(u)})
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {

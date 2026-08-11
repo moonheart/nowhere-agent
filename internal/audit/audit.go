@@ -60,6 +60,10 @@ const (
 	ActionMeExport Action = "me.export"
 	// Self-service account deletion (PIPL §47 erasure right).
 	ActionMeDelete Action = "me.delete"
+	// Self-service second-factor (TOTP/MFA) management.
+	ActionMeTOTPEnroll  Action = "me.totp.enroll"
+	ActionMeTOTPConfirm Action = "me.totp.confirm"
+	ActionMeTOTPDisable Action = "me.totp.disable"
 
 	// Platform administration of accounts.
 	ActionAdminUserCreate        Action = "admin.user.create"

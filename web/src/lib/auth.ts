@@ -44,6 +44,12 @@ async function post(path: string, body: unknown): Promise<Response> {
   });
 }
 
+// loginResult carries the two possible login outcomes: a bearer token, or a
+// second-factor challenge (totp_required) the caller must complete.
+export type LoginResult =
+  | { token: string; totp_required?: false }
+  | { totp_required: true; totp_token: string };
+
 async function auth(
   path: string,
   body: { email: string; password: string; display_name?: string },
@@ -69,8 +75,49 @@ async function auth(
   localStorage.setItem(KEY, lj.token);
 }
 
-export function login(email: string, password: string): Promise<void> {
-  return auth("/api/auth/login", { email, password });
+// login verifies credentials. On success it stores the bearer token; when the
+// account has a second factor it returns the challenge instead of a token.
+export async function login(
+  email: string,
+  password: string,
+): Promise<LoginResult> {
+  const res = await post("/api/auth/login", { email, password });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `request failed (${res.status})`);
+  }
+  const data = (await res.json()) as {
+    token?: string;
+    totp_required?: boolean;
+    totp_token?: string;
+  };
+  if (data.token) {
+    localStorage.setItem(KEY, data.token);
+    return { token: data.token };
+  }
+  if (data.totp_required && data.totp_token) {
+    return { totp_required: true, totp_token: data.totp_token };
+  }
+  throw new Error("login failed: no token returned");
+}
+
+// completeTotpLogin redeems the challenge token with the authenticator code
+// and stores the resulting bearer token.
+export async function completeTotpLogin(
+  totpToken: string,
+  code: string,
+): Promise<void> {
+  const res = await post("/api/auth/totp/verify", {
+    totp_token: totpToken,
+    code,
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `request failed (${res.status})`);
+  }
+  const data = (await res.json()) as { token?: string };
+  if (!data.token) throw new Error("verification failed: no token returned");
+  localStorage.setItem(KEY, data.token);
 }
 
 export function signup(email: string, password: string): Promise<void> {

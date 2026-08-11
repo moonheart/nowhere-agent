@@ -1,6 +1,7 @@
 import { useEffect, useState, type FC, type FormEvent } from "react";
-import { AlertCircle, KeyRound, Smartphone } from "lucide-react";
+import { AlertCircle, KeyRound, ShieldCheck, Smartphone } from "lucide-react";
 import {
+  completeTotpLogin,
   login,
   phoneAuthAvailable,
   requestPhoneCode,
@@ -48,6 +49,10 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
   const [phoneEnabled, setPhoneEnabled] = useState(false);
   const [codeSent, setCodeSent] = useState(false);
   const [cooldown, setCooldown] = useState(0);
+  // Second-factor challenge state (MFA): the password half succeeded, the
+  // account demands an authenticator code before any token is issued.
+  const [totpChallenge, setTotpChallenge] = useState<string | null>(null);
+  const [totpCode, setTotpCode] = useState("");
 
   useEffect(() => {
     let live = true;
@@ -74,8 +79,29 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
     setError(null);
     setBusy(true);
     try {
-      if (mode === "login") await login(email, password);
-      else await signup(email, password);
+      if (mode === "login") {
+        const result = await login(email, password);
+        if (result.totp_required) {
+          setTotpChallenge(result.totp_token);
+          return;
+        }
+      } else {
+        await signup(email, password);
+      }
+      onSuccess();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitTotp = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      if (totpChallenge) await completeTotpLogin(totpChallenge, totpCode);
       onSuccess();
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed");
@@ -184,7 +210,47 @@ export const LoginForm: FC<{ onSuccess: () => void; ssoError?: string | null }> 
             </div>
           )}
 
-          {phoneMode ? (
+          {totpChallenge ? (
+            <form onSubmit={submitTotp} className="space-y-4">
+              <FieldGroup>
+                <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+                  <ShieldCheck className="size-4 text-primary" />
+                  {t("login.totpHint")}
+                </div>
+                <Field>
+                  <FieldLabel htmlFor="login-totp">{t("login.totpCode")}</FieldLabel>
+                  <Input
+                    id="login-totp"
+                    type="text"
+                    required
+                    inputMode="numeric"
+                    autoFocus
+                    maxLength={6}
+                    placeholder="6 位验证码"
+                    value={totpCode}
+                    onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ""))}
+                  />
+                </Field>
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertCircle />
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                )}
+                <Button type="submit" size="lg" disabled={busy || totpCode.length !== 6}>
+                  {busy ? t("login.busy") : t("login.submit")}
+                </Button>
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  onClick={() => setTotpChallenge(null)}
+                >
+                  {t("login.backToEmail")}
+                </Button>
+              </FieldGroup>
+            </form>
+          ) : phoneMode ? (
             <form onSubmit={verify} className="space-y-4">
               <FieldGroup>
                 <Field>

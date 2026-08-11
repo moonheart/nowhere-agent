@@ -39,6 +39,8 @@ export type I18nKey =
   | "login.resendIn"
   | "login.code"
   | "login.backToEmail"
+  | "login.totpHint"
+  | "login.totpCode"
   | "admin.sectionAccount"
   | "admin.sectionTeams"
   | "admin.sectionPlatform"
@@ -91,6 +93,8 @@ const zh: Record<I18nKey, string> = {
   "login.resendIn": "重新发送",
   "login.code": "验证码",
   "login.backToEmail": "返回邮箱登录",
+  "login.totpHint": "此账号已开启两步验证,请输入身份验证器 App 中的动态验证码。",
+  "login.totpCode": "动态验证码",
   "admin.sectionAccount": "我的账户",
   "admin.sectionTeams": "团队",
   "admin.sectionPlatform": "平台",
@@ -144,6 +148,8 @@ const en: Record<I18nKey, string> = {
   "login.resendIn": "Resend in",
   "login.code": "Verification code",
   "login.backToEmail": "Back to email sign-in",
+  "login.totpHint": "This account has two-step verification enabled. Enter the code from your authenticator app.",
+  "login.totpCode": "Authenticator code",
   "admin.sectionAccount": "Account",
   "admin.sectionTeams": "Teams",
   "admin.sectionPlatform": "Platform",
