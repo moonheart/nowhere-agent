@@ -90,6 +90,24 @@ func (s *DeliveryStore) ClaimNext(ctx context.Context, now time.Time) (Delivery,
 	return d, err
 }
 
+// ClaimByID claims ONE specific delivery by id (or ErrNoPending when it is
+// not pending/due). It exists for the deterministic paths — the run-done hook
+// claims the row it just enqueued, and tests — where the global oldest-first
+// ordering of ClaimNext would otherwise race against unrelated rows (a
+// long-running server's own deliveries, other tests' rows).
+func (s *DeliveryStore) ClaimByID(ctx context.Context, id string, now time.Time) (Delivery, error) {
+	d, err := scanDelivery(s.db.QueryRowContext(ctx, `
+		UPDATE webhook_deliveries
+		SET attempts = attempts + 1, next_attempt_at = $2
+		WHERE id = $1 AND status = 'pending' AND next_attempt_at <= $3
+		RETURNING id, run_id, session_id, user_id, target_url, payload, status, attempts,
+		          next_attempt_at, last_error, created_at, delivered_at`, id, now.Add(claimLease), now))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Delivery{}, ErrNoPending
+	}
+	return d, err
+}
+
 // MarkDelivered settles a claim.
 func (s *DeliveryStore) MarkDelivered(ctx context.Context, id string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx, `

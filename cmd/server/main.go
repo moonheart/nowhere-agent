@@ -1203,10 +1203,11 @@ func run() error {
 				}
 				return
 			}
-			// Claim the row we just enqueued (it is the only due one): the
-			// claim holds the lease, so the background sweeper cannot race us
-			// and double-send the same delivery.
-			if _, err := outbox.ClaimNext(deliverCtx, time.Now().UTC()); err != nil {
+			// Claim the row we just enqueued BY ID (it is the only one we own):
+			// the claim holds the lease, so the background sweeper cannot race
+			// us and double-send — and we never steal a backlogged older row
+			// the way a global oldest-first claim would.
+			if _, err := outbox.ClaimByID(deliverCtx, d.ID, time.Now().UTC()); err != nil {
 				log.Warn("webhook outbox claim failed; queued for retry", "delivery", d.ID, "err", err)
 				return
 			}

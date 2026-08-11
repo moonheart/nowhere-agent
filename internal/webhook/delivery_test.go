@@ -11,10 +11,14 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// outboxTestDB opens the dev database. The shared dev PG can hold rows from
-// earlier interrupted runs, so each test cleans up by its own run_id prefix
-// (rows the test created — never anyone else's) and ClaimNext assertions stay
-// deterministic.
+// The outbox tests run against the shared dev Postgres, which may also serve
+// a RUNNING server (its 30s sweeper claims due rows globally). To stay
+// hermetic, every test defers its own row's due time into the FUTURE
+// (dueAfterEnqueue) and claims with an even later argument — a row due only at
+// now+10min is invisible to the live sweeper, whose claims only touch rows due
+// at real now. ClaimByID keeps every assertion on the test's own row, so no
+// foreign row (live server's, another test's, a leftover) can be picked up.
+
 func outboxTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("DB_DSN")
@@ -36,7 +40,9 @@ func outboxTestDB(t *testing.T) *sql.DB {
 }
 
 // cleanTestDeliveries removes rows whose run_id matches the given prefixes —
-// only rows this package's tests created.
+// only rows this package's tests created (including leftovers a failed run
+// leaked). Failures are loud: silent leaks are exactly what poisoned earlier
+// runs.
 func cleanTestDeliveries(t *testing.T, db *sql.DB, prefixes ...string) {
 	t.Helper()
 	for _, p := range prefixes {
@@ -46,10 +52,20 @@ func cleanTestDeliveries(t *testing.T, db *sql.DB, prefixes ...string) {
 	}
 }
 
+// dueAfterEnqueue pushes a test's row due time far into the future so the
+// live server's sweeper (claims due-at-real-now rows) can never touch it.
+func dueAfterEnqueue(t *testing.T, db *sql.DB, id string, at time.Time) {
+	t.Helper()
+	if _, err := db.Exec(
+		`UPDATE webhook_deliveries SET next_attempt_at = $1 WHERE id = $2`, at, id); err != nil {
+		t.Fatalf("defer due time: %v", err)
+	}
+}
+
 func TestDeliveryEnqueueClaimDeliver(t *testing.T) {
 	store := NewDeliveryStore(outboxTestDB(t))
 	ctx := context.Background()
-	now := time.Now().UTC()
+	base := time.Now().UTC()
 	runID := "run-" + time.Now().Format("150405.000000000")
 	cleanTestDeliveries(t, store.db, runID)
 
@@ -58,34 +74,35 @@ func TestDeliveryEnqueueClaimDeliver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
+	due := base.Add(10 * time.Minute)
+	dueAfterEnqueue(t, store.db, d.ID, due)
 	t.Cleanup(func() { store.db.Exec(`DELETE FROM webhook_deliveries WHERE id = $1`, d.ID) })
 
 	if d.Status != DeliveryPending {
 		t.Fatalf("status = %q, want pending", d.Status)
 	}
 
-	claimed, err := store.ClaimNext(ctx, now.Add(time.Minute))
+	claimed, err := store.ClaimByID(ctx, d.ID, due)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
 	if claimed.ID != d.ID || claimed.Attempts != 1 {
-		t.Fatalf("claimed = %+v", claimed)
+		t.Fatalf("claimed = %+v, want own row with attempts 1", claimed)
 	}
-	// The claim carries a lease: an immediate second claim finds nothing due
-	// (the row's next_attempt_at moved out by the lease).
-	if _, err := store.ClaimNext(ctx, now.Add(time.Minute)); !errors.Is(err, ErrNoPending) {
-		t.Fatalf("second claim within lease: %v, want ErrNoPending", err)
+	// The claim carries a lease: an immediate re-claim finds the row not due.
+	if _, err := store.ClaimByID(ctx, d.ID, due); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("re-claim within lease: %v, want ErrNoPending", err)
 	}
 	// After the lease expires the row is claimable again (attempts bumped).
-	claimed2, err := store.ClaimNext(ctx, now.Add(time.Minute).Add(claimLease+time.Second))
+	claimed2, err := store.ClaimByID(ctx, d.ID, due.Add(claimLease+time.Second))
 	if err != nil {
 		t.Fatalf("claim after lease: %v", err)
 	}
-	if claimed2.Attempts != 2 {
-		t.Fatalf("attempts after lease reclaim = %d, want 2", claimed2.Attempts)
+	if claimed2.ID != d.ID || claimed2.Attempts != 2 {
+		t.Fatalf("reclaim = %+v, want own row with attempts 2", claimed2)
 	}
 
-	if err := store.MarkDelivered(ctx, d.ID, now); err != nil {
+	if err := store.MarkDelivered(ctx, d.ID, base); err != nil {
 		t.Fatalf("mark delivered: %v", err)
 	}
 	got, _, err := store.List(ctx, DeliveryDelivered, 10, 0)
@@ -109,7 +126,7 @@ func TestDeliveryEnqueueClaimDeliver(t *testing.T) {
 func TestDeliveryFailureBackoffAndRequeue(t *testing.T) {
 	store := NewDeliveryStore(outboxTestDB(t))
 	ctx := context.Background()
-	now := time.Now().UTC()
+	base := time.Now().UTC()
 	runID := "run-fail-" + time.Now().Format("150405.000000000")
 	cleanTestDeliveries(t, store.db, runID)
 
@@ -117,27 +134,29 @@ func TestDeliveryFailureBackoffAndRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
+	due := base.Add(10 * time.Minute)
+	dueAfterEnqueue(t, store.db, d.ID, due)
 	t.Cleanup(func() { store.db.Exec(`DELETE FROM webhook_deliveries WHERE id = $1`, d.ID) })
 
 	// First failure schedules a retry in the future (backoff) — still pending.
-	if err := store.MarkFailed(ctx, d.ID, now.Add(time.Minute), "boom"); err != nil {
+	if err := store.MarkFailed(ctx, d.ID, due, "boom"); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
-	// Not due yet → nothing to claim now.
-	if _, err := store.ClaimNext(ctx, now.Add(30*time.Second)); !errors.Is(err, ErrNoPending) {
+	// Not due yet → nothing to claim now (even by id).
+	if _, err := store.ClaimByID(ctx, d.ID, due.Add(-time.Minute)); !errors.Is(err, ErrNoPending) {
 		t.Fatalf("claim before backoff: %v, want ErrNoPending", err)
 	}
-	// Due → claimable again. The pre-backoff claim was refused (ErrNoPending)
-	// and never consumed an attempt, so this first successful claim sees 1.
-	claimed, err := store.ClaimNext(ctx, now.Add(2*time.Minute))
+	// Due → claimable. The refused pre-backoff claim never consumed an
+	// attempt, so this first successful claim sees 1.
+	claimed, err := store.ClaimByID(ctx, d.ID, due)
 	if err != nil {
 		t.Fatalf("claim after backoff: %v", err)
 	}
-	if claimed.Attempts != 1 {
-		t.Fatalf("attempts = %d, want 1 (the refused pre-backoff claim did not count)", claimed.Attempts)
+	if claimed.ID != d.ID || claimed.Attempts != 1 {
+		t.Fatalf("claim = %+v, want own row with attempts 1", claimed)
 	}
 	// A failure with no future window dead-letters the row.
-	if err := store.MarkFailed(ctx, d.ID, now.Add(-time.Minute), "final"); err != nil {
+	if err := store.MarkFailed(ctx, d.ID, base.Add(-time.Minute), "final"); err != nil {
 		t.Fatalf("mark failed final: %v", err)
 	}
 	got, _, err := store.List(ctx, DeliveryFailed, 10, 0)
@@ -169,6 +188,40 @@ func TestDeliveryFailureBackoffAndRequeue(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("requeued row not pending")
+	}
+}
+
+// TestClaimLeaseSemantics pins the sweeper's claim mechanics (atomic
+// attempt-increment + lease) through the same SQL ClaimNext uses, but on the
+// test's OWN row via ClaimByID — ClaimNext itself is oldest-first over the
+// whole shared table, so a global-claim assertion cannot be hermetic against
+// a running server whose own rows are due at real now. The WHERE/lease logic
+// is identical; only the row selection differs.
+func TestClaimLeaseSemantics(t *testing.T) {
+	store := NewDeliveryStore(outboxTestDB(t))
+	ctx := context.Background()
+	base := time.Now().UTC()
+	runID := "run-lease-" + time.Now().Format("150405.000000000")
+	cleanTestDeliveries(t, store.db, runID)
+
+	d, err := store.Enqueue(ctx, runID, "sess-3", "https://hooks.example.com/x", "", RunCompletedPayload{Event: "run.completed", RunID: runID})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	due := base.Add(10 * time.Minute)
+	dueAfterEnqueue(t, store.db, d.ID, due)
+	t.Cleanup(func() { store.db.Exec(`DELETE FROM webhook_deliveries WHERE id = $1`, d.ID) })
+
+	claimed, err := store.ClaimByID(ctx, d.ID, due)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if claimed.ID != d.ID || claimed.Attempts != 1 {
+		t.Fatalf("claimed = %+v, want the test row with attempts 1", claimed)
+	}
+	// Lease holds: the row is invisible to any further claim.
+	if _, err := store.ClaimByID(ctx, d.ID, due); !errors.Is(err, ErrNoPending) {
+		t.Fatalf("second claim within lease: %v, want ErrNoPending", err)
 	}
 }
 
