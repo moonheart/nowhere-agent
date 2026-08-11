@@ -95,6 +95,20 @@ type AfterRunHook interface {
 	AfterRun(ctx context.Context, s *RunState) error
 }
 
+// UsageHookFunc adapts a function into an AfterRunHook-style middleware. It
+// is the convenience seam for one-shot observers that only need the run's
+// final state (metrics reporting, external counters) without building a full
+// middleware type.
+type UsageHookFunc func(ctx context.Context, s *RunState) error
+
+// MiddlewareName identifies the hook in the middleware chain.
+func (f UsageHookFunc) MiddlewareName() string { return "usage-hook" }
+
+// AfterRun forwards the callback.
+func (f UsageHookFunc) AfterRun(ctx context.Context, s *RunState) error {
+	return f(ctx, s)
+}
+
 // ---- gate hook (tool authorization) ------------------------------------------
 // A GateFunc authorizes one tool: (deny, reason). deny=true blocks the call.
 // It receives the run's context so a policy may resolve request/run-scoped

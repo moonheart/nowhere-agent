@@ -711,7 +711,13 @@ func run() error {
 				Temperature:     temperature,
 				ThinkingBudget:  cfg.LLM.ThinkingBudget,
 			})
+			// Token metrics (nowhere_llm_tokens_total): report the run's
+			// aggregate usage once at run end. Only root loops carry the hook —
+			// the subagent factory builds children separately, and their usage
+			// folds into the root run's UsageScope, so nothing is counted
+			// twice. The provider/model labels come from the resolved target.
 			applyStandardMiddleware(loop, adapter, m, windowFor(t), breaker)
+			loop.Use(usageObserver(t.Vendor, m, metrics))
 			return loop, nil
 		}
 
@@ -1078,6 +1084,13 @@ func run() error {
 		} else {
 			log.Info("run-completion webhooks: no global WEBHOOK_URL; task-level webhook_url still applies")
 		}
+		// Run metrics (nowhere_runs_total): every terminal run — chat,
+		// scheduled, inbound-triggered — is counted once at settlement, keyed
+		// by outcome. The webhook hook and this hook both live on the same
+		// registry; the registry fires them independently.
+		handler.WithRunDoneHook(func(_ context.Context, _ string, _ session.Run, status session.RunStatus) {
+			metrics.RecordRun(string(status))
+		})
 		handler.WithRunDoneHook(func(ctx context.Context, sessionID string, run session.Run, status session.RunStatus) {
 			// The run context may be cancelled (a cancelled run); notifications
 			// still want to fire, so delivery runs on an uncancelled view.
@@ -1310,6 +1323,23 @@ func reconnectMCP(ctx context.Context, c *mcp.Client, log *slog.Logger) {
 		log.Info("mcp connected", "server", c.Server(), "tools", len(c.Tools()))
 		return
 	}
+}
+
+// usageObserver returns an AfterRun hook that reports a root run's aggregate
+// token usage into the platform metrics (nowhere_llm_tokens_total), labelled
+// with the resolved provider vendor and model. It is attached ONLY to loops
+// built by buildLoop (chat / scheduled / inbound); the subagent factory builds
+// children separately and their usage folds into the root run's UsageScope,
+// so nothing is counted twice. The hook fires once per run on every exit path
+// (done, error, cancel).
+func usageObserver(vendor, model string, metrics *observability.Metrics) agent.Middleware {
+	return agent.UsageHookFunc(func(_ context.Context, s *agent.RunState) error {
+		metrics.RecordTokens(vendor, model, "input", s.Usage.InputTokens)
+		metrics.RecordTokens(vendor, model, "output", s.Usage.OutputTokens)
+		metrics.RecordTokens(vendor, model, "cache_read", s.Usage.CacheReadTokens)
+		metrics.RecordTokens(vendor, model, "cache_write", s.Usage.CacheWriteTokens)
+		return nil
+	})
 }
 
 // noProviderAdapter fails every generation with the resolver's ErrNoProvider.

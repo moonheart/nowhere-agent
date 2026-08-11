@@ -96,6 +96,23 @@ func (m *Metrics) Register(c prometheus.Collector) error {
 	return m.reg.Register(c)
 }
 
+// RecordRun increments the run counter for a terminal outcome. The server
+// wires it to the shared RunRegistry's run-done hook, so every run — chat,
+// scheduled, inbound-triggered — is counted exactly once at settlement.
+func (m *Metrics) RecordRun(outcome string) {
+	m.runsTotal.WithLabelValues(outcome).Inc()
+}
+
+// RecordTokens increments the LLM token counter for a provider/model/direction
+// triple. The server wires it to the loop's per-run usage observer (the same
+// aggregate the runs row records), so token spend is visible in Prometheus
+// the moment a run finishes.
+func (m *Metrics) RecordTokens(provider, model, direction string, n int) {
+	if n <= 0 {
+		return
+	}
+	m.tokens.WithLabelValues(provider, model, direction).Add(float64(n))
+}
 // Middleware instruments the wrapped handler. In the StandardStack it sits
 // INSIDE the rate limiter — rejected floods never reach it, so a throttle
 // cannot churn metric series — and outside Recovery, so the 500 a recovered

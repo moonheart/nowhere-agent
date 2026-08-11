@@ -284,6 +284,36 @@ func (f afterRunHookFunc) AfterRun(ctx context.Context, s *RunState) error {
 	return f(ctx, s)
 }
 
+// TestUsageHookFuncAdaptsClosure pins the func-to-middleware adapter: a
+// one-shot observer (metrics reporting) registers through Use and fires once
+// with the run's final state at termination.
+func TestUsageHookFuncAdaptsClosure(t *testing.T) {
+	p := &scriptProvider{script: [][]provider.Event{usageTextResponse("hi", 10, 3)}}
+	loop := New(p, toolruntime.NewRegistry(), Config{Model: "m", MaxTokens: 100})
+
+	var fired int
+	var gotUsage provider.Usage
+	loop.Use(UsageHookFunc(func(_ context.Context, s *RunState) error {
+		fired++
+		gotUsage = s.Usage
+		return nil
+	}))
+
+	emit := &memEmitter{}
+	if _, err := loop.Run(context.Background(), nil, emit); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if fired != 1 {
+		t.Fatalf("hook fired %d times, want exactly once", fired)
+	}
+	if gotUsage.InputTokens != 10 || gotUsage.OutputTokens != 3 {
+		t.Fatalf("hook saw usage %+v, want the run's aggregate", gotUsage)
+	}
+	if emit.count(KindDone) != 1 {
+		t.Fatalf("KindDone frames = %d, want 1", emit.count(KindDone))
+	}
+}
+
 // TestBeforeModelAbortRun pins the ErrAbortRun sentinel: a BeforeModel hook
 // returning it (wrapped) aborts the run before the provider is called, with a
 // terminal KindError frame.
