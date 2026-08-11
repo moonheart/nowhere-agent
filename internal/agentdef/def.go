@@ -45,20 +45,44 @@ const GeneralPurpose = "general-purpose"
 
 // Builtins returns the definitions that ship in code, available before any
 // user/team/system document is authored. They live at system scope and are
-// overridable by a same-named scoped definition.
+// overridable by a same-named scoped definition. The prompts are English;
+// BuiltinsForLang("zh") returns the Chinese-phrased defaults instead.
 func Builtins() []AgentDef {
+	return BuiltinsForLang("en")
+}
+
+// BuiltinsForLang returns the shipped default definitions with prompts in the
+// requested language ("en" | "zh"; any other value falls back to English).
+// The server picks the language from config so Chinese-first deployments get
+// Chinese-phrased subagent instructions out of the box.
+func BuiltinsForLang(lang string) []AgentDef {
+	general := subagentPromptEn
+	whenToUse := "General-purpose agent for researching complex questions, searching code, and executing multi-step tasks. Use when a task is self-contained and its intermediate work is not worth keeping in the main context."
+	if lang == "zh" {
+		general = subagentPromptZh
+		whenToUse = "通用子代理:用于研究复杂问题、检索代码、执行多步任务。当任务自包含、其中间过程不值得保留在主上下文时使用。"
+	}
 	return []AgentDef{
 		{
 			Name:      GeneralPurpose,
-			WhenToUse: "General-purpose agent for researching complex questions, searching code, and executing multi-step tasks. Use when a task is self-contained and its intermediate work is not worth keeping in the main context.",
+			WhenToUse: whenToUse,
 			// Wildcard tools (inherit the parent pool), inherit the parent model.
-			System: "You are a subagent of nowhere-agent, launched to handle one self-contained task. " +
-				"You do not see the parent conversation — work only from the task prompt you were given. " +
-				"Use your tools to investigate and act, then finish with a single concise message that reports " +
-				"your result or findings. That final message is the only thing returned to the agent that launched you, " +
-				"so make it self-contained: state the answer, the files or evidence involved, and anything the caller must know. " +
-				"Do not ask questions — you cannot receive a reply.",
-			Scope: identity.SystemScope(),
+			System: general,
+			Scope:  identity.SystemScope(),
 		},
 	}
 }
+
+const (
+	subagentPromptEn = "You are a subagent of nowhere-agent, launched to handle one self-contained task. " +
+		"You do not see the parent conversation — work only from the task prompt you were given. " +
+		"Use your tools to investigate and act, then finish with a single concise message that reports " +
+		"your result or findings. That final message is the only thing returned to the agent that launched you, " +
+		"so make it self-contained: state the answer, the files or evidence involved, and anything the caller must know. " +
+		"Do not ask questions — you cannot receive a reply."
+	subagentPromptZh = "你是 nowhere-agent 的子代理,负责完成一件自包含的任务。" +
+		"你看不到父对话——只能依据交给你的任务提示工作。" +
+		"使用你的工具进行调查与行动,最后用一条简洁的消息汇报结果或发现。" +
+		"这条最终消息是返回给启动你的父代理的唯一内容,所以必须自包含:写明答案、涉及的文件或证据、以及调用方需要知道的一切。" +
+		"不要提问——你无法收到回复。"
+)

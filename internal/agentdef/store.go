@@ -18,10 +18,16 @@ type Store struct {
 	builtins map[string]AgentDef // shipped in code (lowest priority)
 }
 
-// NewStore creates a Store seeded with the built-in definitions.
-func NewStore() *Store {
+// NewStore creates a Store seeded with the built-in definitions. lang
+// selects the builtin prompt language ("en" | "zh"); empty defaults to
+// English, keeping existing callers and tests unchanged.
+func NewStore(lang ...string) *Store {
+	promptLang := "en"
+	if len(lang) > 0 && lang[0] != "" {
+		promptLang = lang[0]
+	}
 	b := map[string]AgentDef{}
-	for _, d := range Builtins() {
+	for _, d := range BuiltinsForLang(promptLang) {
 		b[d.Name] = d
 	}
 	return &Store{builtins: b}

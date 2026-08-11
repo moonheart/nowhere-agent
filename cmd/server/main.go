@@ -340,7 +340,14 @@ func run() error {
 		log.Info("skills seeded from disk", "dir", cfg.Skills.Dir, "count", n)
 	}
 	skillEngine := skill.NewEngine(skillStore)
+	// System prompt language (LLM_SYSTEM_LANG): Chinese-first deployments set
+	// "zh" so the chat base prompt and the built-in subagent definition are
+	// phrased for Chinese users. Custom prompts (skills, agent definitions,
+	// system_prompt overrides) always win over these defaults.
 	baseSystem := "You are nowhere-agent, a helpful AI assistant."
+	if cfg.LLM.SystemLang == "zh" {
+		baseSystem = "你是 nowhere-agent,一名乐于助人的 AI 助手。请用中文思考并回复,除非用户明确要求其他语言。"
+	}
 	ctxBuilder := chatapi.NewContextBuilder(baseSystem, identitySvc, memPort, skillEngine)
 
 	// The consolidation runner is declared out here because the console's manual
@@ -663,7 +670,7 @@ func run() error {
 		// durable PG-backed authored definitions overlaid on the code built-ins,
 		// so user/team/system definitions take effect without a restart and a
 		// store outage degrades to built-ins rather than failing spawns.
-		subResolver := agentdef.NewResolver(agentdef.NewStore(), agentDefPG)
+		subResolver := agentdef.NewResolver(agentdef.NewStore(cfg.LLM.SystemLang), agentDefPG)
 		// resolveTarget picks the provider+model for a run: the caller's team
 		// assignment (or the task's team, when teamID is set) falling back to the
 		// platform default. modelOverride names an explicit model on the resolved

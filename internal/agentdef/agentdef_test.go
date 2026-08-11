@@ -79,6 +79,48 @@ func TestResolveBuiltinDefault(t *testing.T) {
 	}
 }
 
+func TestBuiltinsForLang(t *testing.T) {
+	en := BuiltinsForLang("en")
+	zh := BuiltinsForLang("zh")
+	unknown := BuiltinsForLang("fr") // any other value falls back to English
+
+	if en[0].System != unknown[0].System {
+		t.Fatal("unknown lang must fall back to English")
+	}
+	if zh[0].System == en[0].System {
+		t.Fatal("zh and en builtin prompts must differ")
+	}
+	// The zh builtin actually reads as Chinese.
+	if !strings.Contains(zh[0].System, "子代理") {
+		t.Fatalf("zh prompt not Chinese: %q", zh[0].System)
+	}
+	if strings.Contains(en[0].System, "子代理") {
+		t.Fatalf("en prompt contains Chinese: %q", en[0].System)
+	}
+	// Builtins() stays the English default for existing callers.
+	if got := Builtins(); got[0].System != en[0].System {
+		t.Fatal("Builtins() must keep the English prompt")
+	}
+}
+
+func TestStoreLangSelectsBuiltinLanguage(t *testing.T) {
+	zh := NewStore("zh")
+	sys := []identity.ScopeRef{identity.SystemScope()}
+	d, err := zh.Resolve(GeneralPurpose, sys)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !strings.Contains(d.System, "子代理") {
+		t.Fatalf("zh store resolved an English builtin: %q", d.System)
+	}
+	// NewStore() with no argument stays English.
+	en := NewStore()
+	d2, _ := en.Resolve(GeneralPurpose, sys)
+	if strings.Contains(d2.System, "子代理") {
+		t.Fatalf("default store resolved a Chinese builtin: %q", d2.System)
+	}
+}
+
 func TestResolveScopeOverride(t *testing.T) {
 	s := NewStore()
 	// A user-scoped override of general-purpose should win over the builtin.

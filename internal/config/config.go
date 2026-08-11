@@ -316,6 +316,12 @@ type LLM struct {
 	// no SSE bytes arrive for this long, the stream fails fast with a stall
 	// error instead of hanging until the run is cancelled. <=0 disables.
 	StreamIdleTimeout time.Duration `envconfig:"LLM_STREAM_IDLE_TIMEOUT" default:"120s"`
+	// SystemLang is the language of the built-in system prompts (the chat
+	// base prompt and the default subagent definition): "en" (default) or
+	// "zh" for Chinese-first deployments — prompts and default behaviors are
+	// phrased for Chinese users. Custom prompts (skills, agent definitions,
+	// system_prompt overrides) always win over this default.
+	SystemLang string `envconfig:"LLM_SYSTEM_LANG" default:"en"`
 }
 
 // Web configures serving the built frontend.
