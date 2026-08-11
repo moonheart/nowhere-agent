@@ -38,7 +38,27 @@ export type I18nKey =
   | "login.sendCode"
   | "login.resendIn"
   | "login.code"
-  | "login.backToEmail";
+  | "login.backToEmail"
+  | "admin.sectionAccount"
+  | "admin.sectionTeams"
+  | "admin.sectionPlatform"
+  | "admin.profile"
+  | "admin.myUsage"
+  | "admin.myMemories"
+  | "admin.mySkills"
+  | "admin.myAgents"
+  | "admin.scheduledTasks"
+  | "admin.allMyTeams"
+  | "admin.users"
+  | "admin.teams"
+  | "admin.usage"
+  | "admin.quotas"
+  | "admin.providers"
+  | "admin.memories"
+  | "admin.skills"
+  | "admin.agents"
+  | "admin.auditTrail"
+  | "admin.backToChat";
 
 const zh: Record<I18nKey, string> = {
   "login.title": "登录",
@@ -71,6 +91,26 @@ const zh: Record<I18nKey, string> = {
   "login.resendIn": "重新发送",
   "login.code": "验证码",
   "login.backToEmail": "返回邮箱登录",
+  "admin.sectionAccount": "我的账户",
+  "admin.sectionTeams": "团队",
+  "admin.sectionPlatform": "平台",
+  "admin.profile": "个人资料",
+  "admin.myUsage": "我的用量",
+  "admin.myMemories": "我的记忆",
+  "admin.mySkills": "我的技能",
+  "admin.myAgents": "我的代理",
+  "admin.scheduledTasks": "定时任务",
+  "admin.allMyTeams": "我的全部团队",
+  "admin.users": "用户",
+  "admin.teams": "团队",
+  "admin.usage": "用量",
+  "admin.quotas": "配额",
+  "admin.providers": "模型服务商",
+  "admin.memories": "记忆",
+  "admin.skills": "技能",
+  "admin.agents": "代理定义",
+  "admin.auditTrail": "审计日志",
+  "admin.backToChat": "返回聊天",
 };
 
 const en: Record<I18nKey, string> = {
@@ -104,6 +144,26 @@ const en: Record<I18nKey, string> = {
   "login.resendIn": "Resend in",
   "login.code": "Verification code",
   "login.backToEmail": "Back to email sign-in",
+  "admin.sectionAccount": "Account",
+  "admin.sectionTeams": "Teams",
+  "admin.sectionPlatform": "Platform",
+  "admin.profile": "Profile",
+  "admin.myUsage": "My usage",
+  "admin.myMemories": "My memories",
+  "admin.mySkills": "My skills",
+  "admin.myAgents": "My agents",
+  "admin.scheduledTasks": "Scheduled tasks",
+  "admin.allMyTeams": "All my teams",
+  "admin.users": "Users",
+  "admin.teams": "Teams",
+  "admin.usage": "Usage",
+  "admin.quotas": "Quotas",
+  "admin.providers": "Providers",
+  "admin.memories": "Memories",
+  "admin.skills": "Skills",
+  "admin.agents": "Agents",
+  "admin.auditTrail": "Audit trail",
+  "admin.backToChat": "Back to chat",
 };
 
 // lang resolves the UI language from the browser locale once (zh-* → zh).

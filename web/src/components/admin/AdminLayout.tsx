@@ -24,6 +24,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { isAdmin, useMe } from "@/lib/me";
+import { t } from "@/lib/i18n";
 import { ErrorNotice } from "@/components/admin/common";
 import { cn } from "@/lib/utils";
 import type { Me } from "@/lib/admin";
@@ -127,29 +128,29 @@ export function AdminLayout() {
           <Separator />
 
           <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
-            <SectionLabel>Account</SectionLabel>
+            <SectionLabel>{t("admin.sectionAccount")}</SectionLabel>
             <NavItem to="/admin" end icon={<UserRound />}>
-              Profile
+              {t("admin.profile")}
             </NavItem>
             <NavItem to="/admin/usage" icon={<ChartNoAxesColumn />}>
-              My usage
+              {t("admin.myUsage")}
             </NavItem>
             <NavItem to="/admin/memories" icon={<Brain />}>
-              My memories
+              {t("admin.myMemories")}
             </NavItem>
             <NavItem to="/admin/skills" icon={<Sparkles />}>
-              My skills
+              {t("admin.mySkills")}
             </NavItem>
             <NavItem to="/admin/agents" icon={<Bot />}>
-              My agents
+              {t("admin.myAgents")}
             </NavItem>
             <NavItem to="/admin/scheduled-tasks" icon={<CalendarClock />}>
-              Scheduled tasks
+              {t("admin.scheduledTasks")}
             </NavItem>
 
-            <SectionLabel>Teams</SectionLabel>
+            <SectionLabel>{t("admin.sectionTeams")}</SectionLabel>
             <NavItem to="/admin/teams" end icon={<Building2 />}>
-              All my teams
+              {t("admin.allMyTeams")}
             </NavItem>
             {me.teams.map((t) => (
               <NavLink
@@ -173,33 +174,33 @@ export function AdminLayout() {
 
             {admin && (
               <>
-                <SectionLabel>Platform</SectionLabel>
+                <SectionLabel>{t("admin.sectionPlatform")}</SectionLabel>
                 <NavItem to="/admin/platform/users" icon={<Users />}>
-                  Users
+                  {t("admin.users")}
                 </NavItem>
                 <NavItem to="/admin/platform/teams" icon={<Building2 />}>
-                  Teams
+                  {t("admin.teams")}
                 </NavItem>
                 <NavItem to="/admin/platform/usage" icon={<ChartNoAxesColumn />}>
-                  Usage
+                  {t("admin.usage")}
                 </NavItem>
                 <NavItem to="/admin/platform/quotas" icon={<Gauge />}>
-                  Quotas
+                  {t("admin.quotas")}
                 </NavItem>
                 <NavItem to="/admin/platform/providers" icon={<KeyRound />}>
-                  Providers
+                  {t("admin.providers")}
                 </NavItem>
                 <NavItem to="/admin/platform/memories" icon={<Brain />}>
-                  Memories
+                  {t("admin.memories")}
                 </NavItem>
                 <NavItem to="/admin/platform/skills" icon={<Sparkles />}>
-                  Skills
+                  {t("admin.skills")}
                 </NavItem>
                 <NavItem to="/admin/platform/agents" icon={<Bot />}>
-                  Agents
+                  {t("admin.agents")}
                 </NavItem>
                 <NavItem to="/admin/platform/audit" icon={<ScrollText />}>
-                  Audit trail
+                  {t("admin.auditTrail")}
                 </NavItem>
               </>
             )}
@@ -218,7 +219,7 @@ export function AdminLayout() {
               className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground"
             >
               <ArrowLeft className="size-4" />
-              Back to chat
+              {t("admin.backToChat")}
             </Link>
           </div>
         </aside>
