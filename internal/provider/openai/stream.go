@@ -16,6 +16,11 @@ type chunk struct {
 			// ReasoningContent carries chain-of-thought for reasoning models
 			// (e.g. DeepSeek); it streams separately from content.
 			ReasoningContent string `json:"reasoning_content"`
+			// Reasoning is the same chain-of-thought under its other common
+			// gateway field name; some OpenAI-compatible gateways send
+			// "reasoning" instead of "reasoning_content". Either name is
+			// accepted.
+			Reasoning string `json:"reasoning"`
 			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
@@ -132,7 +137,13 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 
 		// Reasoning (chain-of-thought) → thinking block. Reasoning always
 		// precedes answer text; when text begins, the thinking block closes.
-		if ch.Delta.ReasoningContent != "" {
+		// Gateways name the field "reasoning_content" or "reasoning"; either
+		// is decoded.
+		reasoning := ch.Delta.ReasoningContent
+		if reasoning == "" {
+			reasoning = ch.Delta.Reasoning
+		}
+		if reasoning != "" {
 			if !d.thinkingOpen {
 				events = append(events, provider.Event{
 					Type:  provider.EventBlockStart,
@@ -144,7 +155,7 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 			events = append(events, provider.Event{
 				Type:  provider.EventBlockDelta,
 				Index: thinkingIndex,
-				Delta: ch.Delta.ReasoningContent,
+				Delta: reasoning,
 			})
 		}
 

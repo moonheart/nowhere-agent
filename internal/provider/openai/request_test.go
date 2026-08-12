@@ -74,6 +74,35 @@ func TestBuildRequestToolUseAndResult(t *testing.T) {
 	}
 }
 
+// TestBuildRequestNilToolInput pins the historical-call defense: a tool_use
+// whose arguments were never parsed (ArgsError) or streamed as JSON null
+// persists with a nil ToolInput; the OpenAI API rejects "null" arguments, so
+// the request must carry an empty object instead of a 400.
+func TestBuildRequestNilToolInput(t *testing.T) {
+	msgs := []provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.Block{
+			{Type: provider.BlockToolUse, ToolUseID: "c1", ToolName: "read"},
+		}},
+		{Role: provider.RoleUser, Content: []provider.Block{
+			{Type: provider.BlockToolResult, ToolResultID: "c1", ToolContent: "synthetic error", IsError: true},
+		}},
+	}
+	req, err := buildRequest(provider.Request{Model: "m", Messages: msgs})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	for i := range req.Messages {
+		m := &req.Messages[i]
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			if m.ToolCalls[0].Function.Arguments == "" || m.ToolCalls[0].Function.Arguments == "null" {
+				t.Errorf("nil ToolInput serialized as %q, want an empty JSON object", m.ToolCalls[0].Function.Arguments)
+			}
+			return
+		}
+	}
+	t.Fatalf("assistant tool_call missing: %+v", req.Messages)
+}
+
 func TestBuildRequestDropsThinking(t *testing.T) {
 	req, err := buildRequest(provider.Request{
 		Model: "m",

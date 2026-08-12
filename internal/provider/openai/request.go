@@ -164,7 +164,15 @@ func convertMessage(m provider.Message, imageInput bool) ([]apiMessage, error) {
 		case provider.BlockText:
 			text += b.Text
 		case provider.BlockToolUse:
-			args, err := json.Marshal(b.ToolInput)
+			// A tool call whose arguments were never parsed (ArgsError) or
+			// streamed as JSON null persists with a nil ToolInput; the OpenAI
+			// API rejects any non-object arguments value ("null" included), so
+			// an unparseable historical call is re-sent with an empty object.
+			toolInput := b.ToolInput
+			if toolInput == nil {
+				toolInput = map[string]any{}
+			}
+			args, err := json.Marshal(toolInput)
 			if err != nil {
 				return nil, fmt.Errorf("marshal tool input: %w", err)
 			}
