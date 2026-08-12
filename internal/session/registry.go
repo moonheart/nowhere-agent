@@ -245,8 +245,12 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 		if p := recover(); p != nil {
 			log.Error("run worker panicked", "panic", p, "stack", string(debug.Stack()))
 			bg := context.Background()
+			errText := fmt.Sprintf("internal error: %v", p)
 			rg.voidPendingInteractions(bg, run.ID)
-			_ = rg.appendEvent(bg, sessionID, run.ID, agent.KindError, fmt.Sprintf("internal error: %v", p))
+			_ = rg.appendEvent(bg, sessionID, run.ID, agent.KindError, errText)
+			// The panic bypasses the emitter, so the error text is passed
+			// straight to the message-metadata attach.
+			rg.attachRunError(bg, sessionID, run.ID, errText)
 			_ = rg.rt.CompleteRun(bg, sessionID, RunFailed)
 		}
 	}()
@@ -334,6 +338,19 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 			_ = rg.appendEvent(bg, sessionID, run.ID, agent.KindCancelled, nil)
 		}
 	}
+	// Failed-run visibility (change failed-run-retry): the terminal error is
+	// currently only in run_events, which history rebuild never reads — a
+	// reloaded client would see the failed run "just stop". Attach the exact
+	// error text the live client saw to the run's last assistant message as
+	// metadata, so /history can echo it and the UI can offer a retry. The loop
+	// emitted its assistant KindMessage before KindError, so the message is
+	// durable by the time we get here. Best-effort: a persistence hiccup must
+	// not fail the run path.
+	if status == RunFailed {
+		if errText := emit.terminalErrorText(); errText != "" {
+			rg.attachRunError(bg, sessionID, run.ID, errText)
+		}
+	}
 	_ = rg.rt.CompleteRun(bg, sessionID, status)
 
 	// Run-completion hooks (webhook notifications and friends): fire each on
@@ -387,6 +404,42 @@ func (rg *RunRegistry) voidPendingInteractions(ctx context.Context, runID string
 	if len(pending) > 0 {
 		slog.Info("voided leftover pending interactions of an abnormally-ended run", "run", runID, "count", len(pending))
 	}
+}
+
+// attachRunError attaches a failed run's terminal error text to its last
+// assistant message as metadata {"error": text}, so history rebuild can surface
+// the failure to a reloaded client and the UI can offer a retry. It is the
+// message-side counterpart to the durable KindError event (which run_events
+// carries but history rebuild never reads). Best-effort and failure-tolerant: a
+// missing message store, a store error, or a run with no assistant message
+// (failed before any output) only logs — the error stays in run_events as
+// before. The metadata is never fed back to the model on a later run
+// (StoredMessagesToProvider drops it), so it cannot poison conversation
+// history.
+func (rg *RunRegistry) attachRunError(ctx context.Context, sessionID, runID, errText string) {
+	if rg.msgStore == nil {
+		return
+	}
+	stored, err := rg.msgStore.MessagesFor(ctx, sessionID)
+	if err != nil {
+		slog.Warn("attach run error to message", "session", sessionID, "run", runID, "err", err)
+		return
+	}
+	for i := len(stored) - 1; i >= 0; i-- {
+		m := stored[i]
+		if m.Role != provider.RoleAssistant || m.RunID != runID {
+			continue
+		}
+		meta, merr := json.Marshal(map[string]string{"error": errText})
+		if merr != nil {
+			return
+		}
+		if uerr := rg.msgStore.SetMessageMetadata(ctx, m.ID, meta); uerr != nil {
+			slog.Warn("attach run error to message", "session", sessionID, "run", runID, "message", m.ID, "err", uerr)
+		}
+		return
+	}
+	slog.Warn("failed run has no assistant message to carry its error", "session", sessionID, "run", runID)
 }
 
 // RecordDecision applies the client's verdict to ONE pending interaction and
@@ -788,6 +841,12 @@ type registryEmitter struct {
 	// paths that never emitted it) stays single-written rather than
 	// duplicating the frame in the durable log.
 	cancelledPersisted atomic.Bool
+	// terminalErr latches the run's terminal KindError text (the exact string
+	// the live client saw), so the run worker can attach it to the run's last
+	// assistant message after the loop returns — run_events is not consulted
+	// by history rebuild, so without this a failed run's error would vanish on
+	// client reload. atomic.Value because Emit may be reached concurrently.
+	terminalErr atomic.Value // string
 }
 
 // Emit persists the event (and fans it out). It honours ctx cancellation so a
@@ -839,8 +898,25 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 		}
 		return nil
 	}
+	if kind == agent.KindError {
+		if s, ok := payload.(string); ok && s != "" {
+			e.terminalErr.Store(s)
+		}
+	}
 	e.rg.append(ctx, e.sessionID, e.runID, kind, payload)
 	return nil
+}
+
+// terminalErrorText returns the run's terminal error text the loop emitted (the
+// exact string attached clients saw), or "" for a run that did not end on an
+// error.
+func (e *registryEmitter) terminalErrorText() string {
+	if v := e.terminalErr.Load(); v != nil {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // persistInteraction writes the durable Interaction row for a KindInterrupt

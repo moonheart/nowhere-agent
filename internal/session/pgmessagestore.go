@@ -38,6 +38,11 @@ func (s *PGMessageStore) AppendMessage(ctx context.Context, msg StoredMessage) (
 		ucr = sql.NullInt64{Int64: int64(msg.Usage.CacheReadTokens), Valid: true}
 		ucw = sql.NullInt64{Int64: int64(msg.Usage.CacheWriteTokens), Valid: true}
 	}
+	// Metadata stays NULL for messages with none.
+	var meta sql.NullString
+	if len(msg.Metadata) > 0 {
+		meta = sql.NullString{String: string(msg.Metadata), Valid: true}
+	}
 
 	// A positive msg.ID is a pre-provisioned id (a run_steps intent reserved it
 	// via nextval); the INSERT then uses it explicitly so the intent's binding
@@ -45,12 +50,12 @@ func (s *PGMessageStore) AppendMessage(ctx context.Context, msg StoredMessage) (
 	if msg.ID > 0 {
 		err = s.db.QueryRowContext(ctx, `
 			INSERT INTO messages (id, session_id, run_id, seq, role, content,
-				usage_input, usage_output, usage_cache_read, usage_cache_write)
+				usage_input, usage_output, usage_cache_read, usage_cache_write, metadata)
 			VALUES ($1, $2, $3,
 				(SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = $2),
-				$4, $5, $6, $7, $8, $9)
+				$4, $5, $6, $7, $8, $9, $10)
 			RETURNING id, seq, created_at`,
-			msg.ID, msg.SessionID, msg.RunID, string(msg.Role), content, ui, uo, ucr, ucw,
+			msg.ID, msg.SessionID, msg.RunID, string(msg.Role), content, ui, uo, ucr, ucw, meta,
 		).Scan(&msg.ID, &msg.Seq, &msg.CreatedAt)
 		if err != nil {
 			return StoredMessage{}, fmt.Errorf("append message: %w", err)
@@ -60,12 +65,12 @@ func (s *PGMessageStore) AppendMessage(ctx context.Context, msg StoredMessage) (
 
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO messages (session_id, run_id, seq, role, content,
-			usage_input, usage_output, usage_cache_read, usage_cache_write)
+			usage_input, usage_output, usage_cache_read, usage_cache_write, metadata)
 		VALUES ($1, $2,
 			(SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = $1),
-			$3, $4, $5, $6, $7, $8)
+			$3, $4, $5, $6, $7, $8, $9)
 		RETURNING id, seq, created_at`,
-		msg.SessionID, msg.RunID, string(msg.Role), content, ui, uo, ucr, ucw,
+		msg.SessionID, msg.RunID, string(msg.Role), content, ui, uo, ucr, ucw, meta,
 	).Scan(&msg.ID, &msg.Seq, &msg.CreatedAt)
 	if err != nil {
 		return StoredMessage{}, fmt.Errorf("append message: %w", err)
@@ -77,7 +82,7 @@ func (s *PGMessageStore) AppendMessage(ctx context.Context, msg StoredMessage) (
 func (s *PGMessageStore) MessagesFor(ctx context.Context, sessionID string) ([]StoredMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, run_id, seq, role, content, created_at,
-			usage_input, usage_output, usage_cache_read, usage_cache_write
+			usage_input, usage_output, usage_cache_read, usage_cache_write, metadata
 		FROM messages
 		WHERE session_id = $1
 		ORDER BY seq`, sessionID)
@@ -92,7 +97,7 @@ func (s *PGMessageStore) MessagesFor(ctx context.Context, sessionID string) ([]S
 func (s *PGMessageStore) MessagesAfter(ctx context.Context, sessionID string, afterID int64) ([]StoredMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, run_id, seq, role, content, created_at,
-			usage_input, usage_output, usage_cache_read, usage_cache_write
+			usage_input, usage_output, usage_cache_read, usage_cache_write, metadata
 		FROM messages
 		WHERE session_id = $1 AND id > $2
 		ORDER BY seq`, sessionID, afterID)
@@ -103,9 +108,24 @@ func (s *PGMessageStore) MessagesAfter(ctx context.Context, sessionID string, af
 	return scanMessages(rows)
 }
 
+// SetMessageMetadata replaces one message's metadata JSON. The row is keyed by
+// id; a missing row is not an error (the update raced a delete), matching the
+// best-effort contract.
+func (s *PGMessageStore) SetMessageMetadata(ctx context.Context, id int64, metadata json.RawMessage) error {
+	var meta sql.NullString
+	if len(metadata) > 0 {
+		meta = sql.NullString{String: string(metadata), Valid: true}
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE messages SET metadata = $2 WHERE id = $1`, id, meta); err != nil {
+		return fmt.Errorf("set message metadata: %w", err)
+	}
+	return nil
+}
+
 // scanMessages reads message rows (id, session_id, run_id, seq, role, content,
-// created_at, usage cols) into StoredMessages. Usage is rebuilt when the row
-// recorded it (usage_input non-NULL); otherwise it stays nil.
+// created_at, usage cols, metadata) into StoredMessages. Usage is rebuilt when
+// the row recorded it (usage_input non-NULL); otherwise it stays nil.
 func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 	var out []StoredMessage
 	for rows.Next() {
@@ -113,12 +133,16 @@ func scanMessages(rows *sql.Rows) ([]StoredMessage, error) {
 		var role string
 		var content []byte
 		var ui, uo, ucr, ucw sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.RunID, &m.Seq, &role, &content, &m.CreatedAt, &ui, &uo, &ucr, &ucw); err != nil {
+		var metadata []byte
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.RunID, &m.Seq, &role, &content, &m.CreatedAt, &ui, &uo, &ucr, &ucw, &metadata); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		m.Role = provider.Role(role)
 		if err := json.Unmarshal(content, &m.Content); err != nil {
 			return nil, fmt.Errorf("unmarshal content: %w", err)
+		}
+		if len(metadata) > 0 {
+			m.Metadata = json.RawMessage(metadata)
 		}
 		if ui.Valid {
 			m.Usage = &provider.Usage{

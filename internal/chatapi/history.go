@@ -24,6 +24,10 @@ type historyMessage struct {
 // historyMetadata is the subset of ThreadMessageLike.metadata we populate.
 type historyMetadata struct {
 	UnstableData []historyUsageData `json:"unstable_data,omitempty"`
+	// Error carries the turn's run terminal error text when that run failed
+	// (change failed-run-retry): the client renders the failure notice and a
+	// retry affordance from it. Empty on successful turns.
+	Error string `json:"error,omitempty"`
 }
 
 // historyUsageData is one unstable_data entry: {name:"usage", data:{...}}.
@@ -239,32 +243,51 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 	var cur *historyMessage // the open assistant turn being accumulated
 	var curUsage provider.Usage
 	var curHasUsage bool
+	// curError is the failed-run error carried by the turn's last assistant
+	// message's metadata; echoed on the merged turn so a reloaded client can
+	// show why the run stopped (change failed-run-retry).
+	var curError string
 	flush := func() {
 		if cur != nil && len(cur.Content) > 0 {
 			// Attach the turn's accumulated LLM usage as an unstable_data entry
-			// so the client renders it like the live data-usage frame.
-			if curHasUsage {
-				cur.Metadata = &historyMetadata{UnstableData: []historyUsageData{{
-					Name: "usage",
-					Data: map[string]int{
-						"inputTokens":      curUsage.InputTokens,
-						"outputTokens":     curUsage.OutputTokens,
-						"cacheReadTokens":  curUsage.CacheReadTokens,
-						"cacheWriteTokens": curUsage.CacheWriteTokens,
-					},
-				}}}
+			// so the client renders it like the live data-usage frame, and the
+			// failed-run error (if any) so the client can offer a retry.
+			if curHasUsage || curError != "" {
+				md := &historyMetadata{}
+				if curHasUsage {
+					md.UnstableData = []historyUsageData{{
+						Name: "usage",
+						Data: map[string]int{
+							"inputTokens":      curUsage.InputTokens,
+							"outputTokens":     curUsage.OutputTokens,
+							"cacheReadTokens":  curUsage.CacheReadTokens,
+							"cacheWriteTokens": curUsage.CacheWriteTokens,
+						},
+					}}
+				}
+				if curError != "" {
+					md.Error = curError
+				}
+				cur.Metadata = md
 			}
 			msgs = append(msgs, *cur)
 		}
 		cur = nil
 		curUsage = provider.Usage{}
 		curHasUsage = false
+		curError = ""
 	}
 	for i, m := range stored {
 		switch {
 		case m.Role == provider.RoleAssistant:
 			if cur == nil {
 				cur = &historyMessage{ID: fmt.Sprintf("msg-%d", m.ID), Role: "assistant"}
+			}
+			// A failed run's last assistant message carries its terminal error
+			// as metadata; the turn it belongs to echoes it (later messages of
+			// the same merged turn win — only the last can be the failed one).
+			if err := storedMessageError(m, &curError); err != nil {
+				return nil, fmt.Errorf("read message metadata: %w", err)
 			}
 			// Accumulate each assistant round's LLM-call usage into the turn total.
 			if m.Usage != nil {
@@ -388,4 +411,28 @@ func appendPartText(m *historyMessage, partType, text string) {
 		return
 	}
 	m.Content = append(m.Content, historyPart{Type: partType, Text: text})
+}
+
+// messageErrorMeta is the metadata shape a failed run attaches to its last
+// assistant message (registry.attachRunError).
+type messageErrorMeta struct {
+	Error string `json:"error"`
+}
+
+// storedMessageError reads a stored message's metadata and, when it carries the
+// failed-run error key, writes the text into *out. Malformed metadata JSON is a
+// hard error (it would silently swallow a failure marker); the error key being
+// absent is not.
+func storedMessageError(m session.StoredMessage, out *string) error {
+	if len(m.Metadata) == 0 {
+		return nil
+	}
+	var meta messageErrorMeta
+	if err := json.Unmarshal(m.Metadata, &meta); err != nil {
+		return fmt.Errorf("message %d metadata: %w", m.ID, err)
+	}
+	if meta.Error != "" {
+		*out = meta.Error
+	}
+	return nil
 }

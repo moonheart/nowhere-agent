@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"nowhere-agent/internal/provider"
@@ -25,6 +26,11 @@ type StoredMessage struct {
 	// message (one assistant message == one LLM call). Nil on user/tool_result
 	// rows, which are not LLM responses. Persisted as the messages.usage_* cols.
 	Usage *provider.Usage
+	// Metadata carries per-message extras beyond the block content (migration
+	// 000042): a failed run's terminal error text is attached as {"error":
+	// "..."} so a reloaded client can surface the failure and offer a retry.
+	// Nil on rows without extras. Never fed back to the model on resume.
+	Metadata json.RawMessage
 }
 
 // MessageStore persists conversation messages in original block form and reads
@@ -45,6 +51,13 @@ type MessageStore interface {
 	// seq — the tail beyond a watermark. The dreaming worker uses it to read only
 	// the messages it has not yet consolidated (incremental model).
 	MessagesAfter(ctx context.Context, sessionID string, afterID int64) ([]StoredMessage, error)
+
+	// SetMessageMetadata replaces one message's metadata JSON (used to attach a
+	// failed run's terminal error to its last assistant message after the run
+	// settles — the message row is append-only, so the update is the seam).
+	// Best-effort by design: the block content is unaffected and a failure is
+	// only logged by the caller.
+	SetMessageMetadata(ctx context.Context, id int64, metadata json.RawMessage) error
 }
 
 // StoredMessagesToProvider converts durable StoredMessages back into canonical

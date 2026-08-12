@@ -33,6 +33,16 @@ func (m *memMessageStore) MessagesAfter(ctx context.Context, sessionID string, a
 	}
 	return out, nil
 }
+func (m *memMessageStore) SetMessageMetadata(ctx context.Context, id int64, metadata json.RawMessage) error {
+	for _, msgs := range m.sessions {
+		for i := range msgs {
+			if msgs[i].ID == id {
+				msgs[i].Metadata = metadata
+			}
+		}
+	}
+	return nil
+}
 
 func TestWriteProducesCompleteJSON(t *testing.T) {
 	msgs := &memMessageStore{sessions: map[string][]session.StoredMessage{

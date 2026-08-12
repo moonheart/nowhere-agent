@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -58,6 +59,24 @@ func (m *MemMessageStore) MessagesAfter(_ context.Context, sessionID string, aft
 		}
 	}
 	return out, nil
+}
+
+// SetMessageMetadata replaces one message's metadata JSON, located by id. A
+// missing id is not an error (best-effort contract); the slice is copied so
+// the stored row is updated in place.
+func (m *MemMessageStore) SetMessageMetadata(_ context.Context, id int64, metadata json.RawMessage) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for sess, msgs := range m.bySess {
+		for i := range msgs {
+			if msgs[i].ID == id {
+				msgs[i].Metadata = append(json.RawMessage(nil), metadata...)
+				m.bySess[sess] = msgs
+				return nil
+			}
+		}
+	}
+	return nil
 }
 
 var _ MessageStore = (*MemMessageStore)(nil)
