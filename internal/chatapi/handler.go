@@ -816,7 +816,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			return
 		case <-settlePoll.C:
 			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
-				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				maxOffset = h.drainContent(r, emitter, broker, sessionID, contentCh, run.ID, maxOffset)
 				h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
 				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
@@ -833,7 +833,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			// the stream on the next tick (giving any trailing content a chance).
 		case e, open := <-contentCh:
 			if !open {
-				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				maxOffset = h.drainContent(r, emitter, broker, sessionID, contentCh, run.ID, maxOffset)
 				h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
 				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
@@ -841,17 +841,53 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			if e.RunID != run.ID || e.Offset <= maxOffset {
 				continue
 			}
+			// A slow consumer's live frames get dropped by the broker (mem
+			// broker and Redis poller alike) — recoverable via Read. Detect the
+			// hole on the next delivered frame and fill it BEFORE emitting, so
+			// the stream the client renders has no silent gaps. The gap frames
+			// are emitted in offset order (Read is oldest-first) and bounded
+			// strictly below `e`; anything at or above it is delivered live
+			// next or caught by a later hole check.
+			if e.Offset > maxOffset+1 {
+				maxOffset = h.fillGap(r, emitter, broker, sessionID, run.ID, maxOffset, e.Offset)
+			}
 			maxOffset = e.Offset
 			emitStreamEvent(r, emitter, e)
 			// The run may have settled without a further frame we can observe.
 			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
-				maxOffset = h.drainContent(r, emitter, contentCh, run.ID, maxOffset)
+				maxOffset = h.drainContent(r, emitter, broker, sessionID, contentCh, run.ID, maxOffset)
 				h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
 				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
 			}
 		}
 	}
+}
+
+// fillGap recovers live frames dropped for this consumer between maxOffset and
+// next (the offset of the live frame just received): the broker retained them
+// in its ring (Read returns everything after maxOffset), so re-read and emit
+// them in offset order. Frames at or above `next` are left to the live channel
+// — they arrive in publish order after `e`, or a later hole check catches them
+// if they too are dropped. It returns the new max offset, which the caller
+// advances past `next` next. The broker Read is non-blocking (mem ring under a
+// mutex; Redis XREAD with no block) and runs on the attach's own goroutine, so
+// it cannot deadlock the publish path or interleave with the select loop.
+func (h *Handler) fillGap(r *http.Request, emitter *sseEmitter, broker session.StreamBroker, sessionID, runID string, maxOffset, next int64) int64 {
+	gap, err := broker.Read(r.Context(), sessionID, maxOffset)
+	if err != nil {
+		// A read failure leaves the hole unfilled (the run's content is still
+		// durable in the message store; a reload repairs the view).
+		return maxOffset
+	}
+	for _, ge := range gap {
+		if ge.RunID != runID || ge.Offset <= maxOffset || ge.Offset >= next {
+			continue
+		}
+		maxOffset = ge.Offset
+		emitStreamEvent(r, emitter, ge)
+	}
+	return maxOffset
 }
 
 // settleFinish terminates an attached stream with the correct terminal finish
@@ -916,11 +952,16 @@ func (h *Handler) drainLifecycle(r *http.Request, emitter *sseEmitter, lifecycle
 // drainContent flushes any content frames still buffered on the subscription
 // before the stream is settled. It closes the race where the run completes and
 // its terminal lifecycle fires before the client has drained the broker backlog
-// (the run finishing clears the retained frames via Settle, so a Read can't
-// recover them): without this drain, fast runs — notably the step frames of a
-// multi-iteration tool run — would be dropped between the last frame the client
-// saw and the finish. Non-blocking: only frames already queued are taken.
-func (h *Handler) drainContent(r *http.Request, emitter *sseEmitter, contentCh <-chan session.StreamEvent, runID string, maxOffset int64) int64 {
+// (the run finishing schedules the retained frames for cleanup via Settle, so
+// Read alone can't be relied on once it runs): without this drain, fast runs —
+// notably the step frames of a multi-iteration tool run — would be dropped
+// between the last frame the client saw and the finish. Non-blocking: only
+// frames already queued are taken. After the channel drain, a final broker Read
+// recovers frames dropped for this slow consumer that are still retained in the
+// ring — the run-map removal (which settle detection observes) precedes
+// broker.Settle's ring clear, so there is a window where the ring still holds
+// them.
+func (h *Handler) drainContent(r *http.Request, emitter *sseEmitter, broker session.StreamBroker, sessionID string, contentCh <-chan session.StreamEvent, runID string, maxOffset int64) int64 {
 	for {
 		select {
 		case e, open := <-contentCh:
@@ -933,6 +974,19 @@ func (h *Handler) drainContent(r *http.Request, emitter *sseEmitter, contentCh <
 			maxOffset = e.Offset
 			emitStreamEvent(r, emitter, e)
 		default:
+			// Channel drained. Recover frames the broker dropped for this slow
+			// consumer while they are still retained: the run-map removal the
+			// settle detection observed precedes broker.Settle's ring clear, so
+			// Read can still see them in this window.
+			if retained, err := broker.Read(r.Context(), sessionID, maxOffset); err == nil {
+				for _, ge := range retained {
+					if ge.RunID != runID || ge.Offset <= maxOffset {
+						continue
+					}
+					maxOffset = ge.Offset
+					emitStreamEvent(r, emitter, ge)
+				}
+			}
 			return maxOffset
 		}
 	}

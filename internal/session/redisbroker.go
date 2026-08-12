@@ -116,6 +116,13 @@ func (b *redisBroker) Subscribe(sessionID string, buffer int) (<-chan StreamEven
 // starts from the stream's current tail (equivalent to "$", but resolved
 // eagerly so an entry published during startup isn't missed), then blocks on
 // XREAD for subsequent entries. Catch-up of pre-existing entries is Read's job.
+//
+// A slow consumer's full channel drops entries, and the read position (`last`)
+// is advanced ONLY on a successful delivery: the dropped entry is then re-read
+// by the next XREAD cycle (XREAD returns entries strictly after `last`, so
+// already-delivered ones are never duplicated) and forwarded once the channel
+// drains. This is what keeps a dropped live frame recoverable — both via the
+// retry here and via Read, which serves the same retained stream.
 func (b *redisBroker) pollLoop(ctx context.Context, sessionID string, ch chan<- StreamEvent) {
 	last := b.tailID(ctx, sessionID)
 	for {
@@ -135,11 +142,15 @@ func (b *redisBroker) pollLoop(ctx context.Context, sessionID string, ch chan<- 
 		}
 		for _, stream := range res {
 			for _, m := range stream.Messages {
-				last = m.ID
 				ev := messageToStreamEvent(m)
 				select {
 				case ch <- ev:
-				default: // drop for slow consumers; they recover via Read
+					// The entry is delivered: advance the read position past it.
+					// XREAD is strictly-greater, so a later cycle starting from
+					// this ID re-reads only entries published after it.
+					last = m.ID
+				default: // drop for slow consumers; they recover via Read and
+					// the next cycle's re-read (last is not advanced)
 				}
 			}
 		}

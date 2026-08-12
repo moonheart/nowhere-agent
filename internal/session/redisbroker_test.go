@@ -99,6 +99,42 @@ func TestRedisBrokerSubscribeReceivesLiveFrames(t *testing.T) {
 	}
 }
 
+// TestRedisBrokerSlowConsumerRecoversDroppedFrames pins the pollLoop fix: a
+// full channel must not advance the poller's read position, so frames dropped
+// for a slow consumer are re-read once it drains — live-follow recovers without
+// a reload, and every frame arrives exactly once, in order.
+func TestRedisBrokerSlowConsumerRecoversDroppedFrames(t *testing.T) {
+	b, _ := newTestRedisBroker(t)
+	ctx := context.Background()
+	// Buffer 1: publishes outrun the consumer, forcing drops.
+	ch, unsub := b.Subscribe("s1", 1)
+	defer unsub()
+
+	// Let the poller resolve the stream tail and enter its blocking read.
+	time.Sleep(50 * time.Millisecond)
+	for i := 0; i < 5; i++ {
+		if _, err := b.Publish(ctx, "s1", StreamEvent{RunID: "r1", Kind: "text", Payload: []byte{byte('0' + i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Drain continuously: every frame must arrive — a dropped frame stalls the
+	// poller's position until the channel drains, then is re-read (XREAD is
+	// strictly greater than the last delivered ID, so nothing duplicates).
+	got := ""
+	deadline := time.Now().Add(3 * time.Second)
+	for len(got) < 5 && time.Now().Before(deadline) {
+		select {
+		case ev := <-ch:
+			got += string(ev.Payload)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if got != "01234" {
+		t.Fatalf("frames received = %q, want all five in order (no drops, no dups)", got)
+	}
+}
+
 func TestRedisBrokerSettleAppliesTTL(t *testing.T) {
 	b, mr := newTestRedisBroker(t)
 	ctx := context.Background()
