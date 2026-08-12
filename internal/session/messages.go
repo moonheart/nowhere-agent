@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"nowhere-agent/internal/provider"
@@ -52,6 +53,14 @@ type MessageStore interface {
 	// the messages it has not yet consolidated (incremental model).
 	MessagesAfter(ctx context.Context, sessionID string, afterID int64) ([]StoredMessage, error)
 
+	// LastAssistantText returns the trimmed text of the most recent assistant
+	// message whose content carries text, scanning back at most limit assistant
+	// messages (newest first). It is the cheap bounded form of MessagesFor for
+	// one-shot summaries (webhook payloads): a conversation may hold thousands
+	// of rows, but the last answer lives near the tail, so a full load would be
+	// wasted work. Empty string when no such message exists within the bound.
+	LastAssistantText(ctx context.Context, sessionID string, limit int) (string, error)
+
 	// SetMessageMetadata replaces one message's metadata JSON (used to attach a
 	// failed run's terminal error to its last assistant message after the run
 	// settles — the message row is append-only, so the update is the seam).
@@ -71,4 +80,18 @@ func StoredMessagesToProvider(stored []StoredMessage) []provider.Message {
 		out = append(out, provider.Message{Role: m.Role, Content: m.Content})
 	}
 	return out
+}
+
+// assistantText concatenates a message's text blocks in content order,
+// trimmed. Empty when the message carries no text content (e.g. a tool-only
+// round). Shared by the LastAssistantText implementations of both stores so
+// the notion of "the message's text" cannot drift between them.
+func assistantText(blocks []provider.Block) string {
+	var b strings.Builder
+	for _, blk := range blocks {
+		if blk.Type == provider.BlockText {
+			b.WriteString(blk.Text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }

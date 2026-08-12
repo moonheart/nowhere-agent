@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"sync"
 	"time"
+
+	"nowhere-agent/internal/provider"
 )
 
 // MemMessageStore is an in-memory MessageStore for tests and dev. It assigns
@@ -77,6 +79,27 @@ func (m *MemMessageStore) SetMessageMetadata(_ context.Context, id int64, metada
 		}
 	}
 	return nil
+}
+
+// LastAssistantText returns the most recent assistant text (see
+// MessageStore.LastAssistantText), scanning the session's tail backwards.
+func (m *MemMessageStore) LastAssistantText(_ context.Context, sessionID string, limit int) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		return "", nil
+	}
+	src := m.bySess[sessionID]
+	for i := len(src) - 1; i >= 0 && limit > 0; i-- {
+		if src[i].Role != provider.RoleAssistant {
+			continue
+		}
+		limit--
+		if s := assistantText(src[i].Content); s != "" {
+			return s, nil
+		}
+	}
+	return "", nil
 }
 
 var _ MessageStore = (*MemMessageStore)(nil)

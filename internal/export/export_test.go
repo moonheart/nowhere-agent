@@ -43,6 +43,28 @@ func (m *memMessageStore) SetMessageMetadata(ctx context.Context, id int64, meta
 	}
 	return nil
 }
+func (m *memMessageStore) LastAssistantText(ctx context.Context, sessionID string, limit int) (string, error) {
+	msgs := m.sessions[sessionID]
+	if limit <= 0 {
+		return "", nil
+	}
+	for i := len(msgs) - 1; i >= 0 && limit > 0; i-- {
+		if msgs[i].Role != "assistant" {
+			continue
+		}
+		limit--
+		var b strings.Builder
+		for _, blk := range msgs[i].Content {
+			if blk.Type == "text" {
+				b.WriteString(blk.Text)
+			}
+		}
+		if s := strings.TrimSpace(b.String()); s != "" {
+			return s, nil
+		}
+	}
+	return "", nil
+}
 
 func TestWriteProducesCompleteJSON(t *testing.T) {
 	msgs := &memMessageStore{sessions: map[string][]session.StoredMessage{

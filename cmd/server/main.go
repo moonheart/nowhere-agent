@@ -1367,30 +1367,18 @@ func run() error {
 		// runSummary returns the last assistant text of the session, truncated,
 		// for the notification payload. Read from the durable message store so
 		// the payload works even for a run whose live content already aged out.
+		// LastAssistantText is the bounded tail read (newest assistant messages
+		// only), so a long conversation does not load every row for a summary.
 		runSummary := func(ctx context.Context, sessionID string) string {
-			msgs, err := messageStore.MessagesFor(ctx, sessionID)
+			s, err := messageStore.LastAssistantText(ctx, sessionID, 50)
 			if err != nil {
 				return ""
 			}
-			for i := len(msgs) - 1; i >= 0; i-- {
-				if msgs[i].Role != provider.RoleAssistant {
-					continue
-				}
-				var b strings.Builder
-				for _, blk := range msgs[i].Content {
-					if blk.Type == provider.BlockText {
-						b.WriteString(blk.Text)
-					}
-				}
-				if s := strings.TrimSpace(b.String()); s != "" {
-					r := []rune(s)
-					if len(r) > 2000 {
-						return string(r[:2000]) + "…"
-					}
-					return s
-				}
+			r := []rune(s)
+			if len(r) > 2000 {
+				return string(r[:2000]) + "…"
 			}
-			return ""
+			return s
 		}
 		if cfg.Webhook.URL != "" {
 			log.Info("run-completion webhooks enabled", "global_url", cfg.Webhook.URL, "timeout", cfg.Webhook.Timeout, "retries", cfg.Webhook.Retries)

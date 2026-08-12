@@ -123,6 +123,42 @@ func (s *PGMessageStore) SetMessageMetadata(ctx context.Context, id int64, metad
 	return nil
 }
 
+// LastAssistantText returns the most recent assistant text (see
+// MessageStore.LastAssistantText). The query is bounded to the assistant rows
+// only and ordered newest-first, so the cost is proportional to `limit`, not
+// to the conversation length.
+func (s *PGMessageStore) LastAssistantText(ctx context.Context, sessionID string, limit int) (string, error) {
+	if limit <= 0 {
+		return "", nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT content FROM messages
+		WHERE session_id = $1 AND role = 'assistant'
+		ORDER BY seq DESC
+		LIMIT $2`, sessionID, limit)
+	if err != nil {
+		return "", fmt.Errorf("last assistant text: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return "", fmt.Errorf("last assistant text: %w", err)
+		}
+		var blocks []provider.Block
+		if err := json.Unmarshal(raw, &blocks); err != nil {
+			return "", fmt.Errorf("last assistant text: %w", err)
+		}
+		if s := assistantText(blocks); s != "" {
+			return s, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("last assistant text: %w", err)
+	}
+	return "", nil
+}
+
 // scanMessages reads message rows (id, session_id, run_id, seq, role, content,
 // created_at, usage cols, metadata) into StoredMessages. Usage is rebuilt when
 // the row recorded it (usage_input non-NULL); otherwise it stays nil.

@@ -254,3 +254,72 @@ func TestMemMessageStoreSeqAndOrder(t *testing.T) {
 		t.Errorf("unexpected messages: %+v", msgs)
 	}
 }
+
+// TestMemMessageStoreLastAssistantText pins the bounded tail read both stores
+// share: the most recent assistant message with text wins, tool-only rounds
+// are skipped, non-assistant rows never count toward the limit, and a limit
+// that cuts off before the text-bearing message yields "".
+func TestMemMessageStoreLastAssistantText(t *testing.T) {
+	ms := NewMemMessageStore()
+	ctx := context.Background()
+	appendMsg := func(role provider.Role, blocks ...provider.Block) {
+		t.Helper()
+		if _, err := ms.AppendMessage(ctx, StoredMessage{SessionID: "s1", RunID: "r1", Role: role, Content: blocks}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	appendMsg(provider.RoleUser, provider.Block{Type: provider.BlockText, Text: "first user turn"})
+	appendMsg(provider.RoleAssistant, provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "read"})
+	appendMsg(provider.RoleAssistant, provider.Block{Type: provider.BlockText, Text: "  the answer  "})
+	appendMsg(provider.RoleAssistant, provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu2", ToolName: "plan_write"})
+
+	// The tail is a tool-only round: skip it and land on the previous text.
+	if got, err := ms.LastAssistantText(ctx, "s1", 10); err != nil || got != "the answer" {
+		t.Fatalf("LastAssistantText = %q, %v; want the previous text", got, err)
+	}
+	// A limit of 1 (only the tool-only round) has no text to return.
+	if got, err := ms.LastAssistantText(ctx, "s1", 1); err != nil || got != "" {
+		t.Fatalf("LastAssistantText(limit=1) = %q, %v; want empty", got, err)
+	}
+	// Non-positive limit is a no-op.
+	if got, err := ms.LastAssistantText(ctx, "s1", 0); err != nil || got != "" {
+		t.Fatalf("LastAssistantText(limit=0) = %q, %v; want empty", got, err)
+	}
+	// Unknown session.
+	if got, err := ms.LastAssistantText(ctx, "nope", 10); err != nil || got != "" {
+		t.Fatalf("unknown session = %q, %v; want empty", got, err)
+	}
+}
+
+// TestPGMessageStoreLastAssistantText verifies the SQL bounded tail read
+// against the real schema: the query returns the newest assistant text, and a
+// limit of 1 skips tool-only tails exactly like the mem store.
+func TestPGMessageStoreLastAssistantText(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ms := NewPGMessageStore(db)
+	ctx := context.Background()
+	sessID, runID := setupMessageSession(t, ctx, db, store)
+
+	appendMsg := func(role provider.Role, blocks ...provider.Block) {
+		t.Helper()
+		if _, err := ms.AppendMessage(ctx, StoredMessage{SessionID: sessID, RunID: runID, Role: role, Content: blocks}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	appendMsg(provider.RoleUser, provider.Block{Type: provider.BlockText, Text: "user turn"})
+	appendMsg(provider.RoleAssistant, provider.Block{Type: provider.BlockText, Text: "  tail answer  "})
+	appendMsg(provider.RoleAssistant, provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "read"})
+
+	if got, err := ms.LastAssistantText(ctx, sessID, 10); err != nil || got != "tail answer" {
+		t.Fatalf("LastAssistantText = %q, %v; want the tail text", got, err)
+	}
+	// The most recent assistant row is tool-only: limit=1 has nothing.
+	if got, err := ms.LastAssistantText(ctx, sessID, 1); err != nil || got != "" {
+		t.Fatalf("LastAssistantText(limit=1) = %q, %v; want empty", got, err)
+	}
+	// Unknown session.
+	if got, err := ms.LastAssistantText(ctx, "00000000-0000-0000-0000-000000000000", 10); err != nil || got != "" {
+		t.Fatalf("unknown session = %q, %v; want empty", got, err)
+	}
+}
