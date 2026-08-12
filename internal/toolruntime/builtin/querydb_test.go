@@ -120,6 +120,13 @@ func TestQueryDBReadsRealRows(t *testing.T) {
 	// Seed a row through a direct connection, then read it back via the tool.
 	ctx := context.Background()
 	pool := tool.pools["testdb"]
+	if _, err := pool.ExecContext(ctx, `SELECT 1`); err != nil {
+		// The tool lazily accepts DSNs and connects on first use, so the
+		// nil-tool skip above does not cover an unreachable backend; the CI
+		// matrix runs without a Postgres service (workflow contract: PG-backed
+		// tests skip when the backend is absent).
+		t.Skipf("no postgres reachable: %v", err)
+	}
 	if _, err := pool.ExecContext(ctx,
 		`INSERT INTO users (email, password_hash) VALUES ($1, 'x')`, "qdb-"+randHexBuiltin()+"@test.dev"); err != nil {
 		t.Fatalf("seed: %v", err)

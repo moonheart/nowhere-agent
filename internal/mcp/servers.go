@@ -139,10 +139,16 @@ func (m *Manager) Apply(raw string) (added []*Client, removed []string, err erro
 		kept[name] = nc
 		added = append(added, nc)
 	}
+	// Deterministic output order: added/removed drive reconnect and cancel
+	// loops, and clients feed an index — map iteration order would make the
+	// same Apply produce different orders per run (and per platform).
+	sort.Slice(added, func(i, j int) bool { return added[i].Server() < added[j].Server() })
+	sort.Strings(drop)
 	m.clients = m.clients[:0]
 	for _, c := range kept {
 		m.clients = append(m.clients, c)
 	}
+	sort.Slice(m.clients, func(i, j int) bool { return m.clients[i].Server() < m.clients[j].Server() })
 	return added, drop, nil
 }
 

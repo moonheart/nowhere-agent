@@ -53,4 +53,11 @@ jobs:
       - name: Lint (oxlint)
         run: pnpm lint
       - name: Type-check (tsc)
-        run: npx tsc --noEmit -p tsconfig.app.json
+        # Rebuild the referenced composite project (shadcn ui declarations into
+        # node_modules/.tmp/ui-types) first: its .d.ts outputs are not part of
+        # the pnpm cache, so a restored cache can leave the tsbuildinfo present
+        # without the declarations, and tsc --noEmit then fails with TS6305
+        # ("output file has not been built from source file").
+        run: |
+          npx tsc -b tsconfig.ui.json
+          npx tsc --noEmit -p tsconfig.app.json
