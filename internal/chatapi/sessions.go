@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/session"
 )
@@ -89,7 +90,7 @@ func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 
 	page, err := h.runtime.ListSessionsByUser(r.Context(), user.ID, limit, cursor)
 	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -127,7 +128,7 @@ func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 
 	deleted, err := h.runtime.DeleteSessionForUser(r.Context(), id, user.ID)
 	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !deleted {

@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"nowhere-agent/internal/agent"
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/session"
 )
 
@@ -31,7 +32,7 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	// Pick the run to resume: the in-flight one if any, else the latest.
 	run, ok, err := h.runtime.ActiveRun(r.Context(), threadID)
 	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !ok {

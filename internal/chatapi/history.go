@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
 )
@@ -138,7 +139,7 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 
 	msgs, err := h.buildHistory(r, threadID)
 	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 

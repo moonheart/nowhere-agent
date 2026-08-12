@@ -3,6 +3,8 @@ package chatapi
 import (
 	"encoding/json"
 	"net/http"
+
+	"nowhere-agent/internal/httpx"
 )
 
 // serveSetSessionState handles POST /api/chat/sessions/{id}/state: it writes ONE
@@ -46,7 +48,7 @@ func (h *Handler) serveSetSessionState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.runtime.SetSessionStateKV(r.Context(), sessionID, body.Key, body.Value); err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

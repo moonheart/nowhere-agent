@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -99,6 +100,31 @@ func TestErrorFromWritesShapeOnly(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != "{\"error\":\"Internal Server Error\"}\n" {
 		t.Errorf("body = %q, want the status text shape", got)
+	}
+}
+
+// TestErrorEscapesJSONBody pins the guarantee the error surface must never
+// break: an error message containing quotes or backslashes still produces
+// VALID JSON — the body is a single JSON string, not spliced-in fragments.
+// This is the regression guard for the old `{"error":"`+err.Error()+`"}`
+// hand-concatenation, which produced invalid JSON (and let messages break out
+// of the string) for any text containing " or \.
+func TestErrorEscapesJSONBody(t *testing.T) {
+	msg := `agent said: "hello" C:\tmp\run_id=1`
+	rec := httptest.NewRecorder()
+	Error(rec, http.StatusBadRequest, msg)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", ct)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body is not valid JSON: %v\nraw: %s", err, rec.Body.String())
+	}
+	if body["error"] != msg {
+		t.Fatalf("decoded error = %q, want the message round-tripped unchanged: %q", body["error"], msg)
 	}
 }
 

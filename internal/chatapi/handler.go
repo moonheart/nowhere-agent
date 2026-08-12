@@ -365,7 +365,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		if err := h.budgetGate(r.Context(), s.UserID, teamID); err != nil {
 			if errors.Is(err, quota.ErrBudgetExceeded) {
 				w.Header().Set("Retry-After", "3600")
-				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusTooManyRequests)
+				httpx.Error(w, http.StatusTooManyRequests, err.Error())
 				return
 			}
 			writeSSEError(w, err.Error())
@@ -469,7 +469,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 			http.Error(w, `{"error":"approval not found"}`, http.StatusNotFound)
 			return
 		}
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, ap.SessionID); !ok {
@@ -516,7 +516,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 		ap2 = ap
 		folded, pending, serr := h.registry.BatchFoldState(r.Context(), ap.RunID)
 		if serr != nil {
-			http.Error(w, `{"error":"`+serr.Error()+`"}`, http.StatusInternalServerError)
+			httpx.Error(w, http.StatusInternalServerError, serr.Error())
 			return
 		}
 		if folded {
@@ -527,7 +527,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 		err = nil
 	}
 	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
