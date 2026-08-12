@@ -169,7 +169,7 @@ func run() error {
 		settings.KeyDreamingMaxFacts:     mustJSON(cfg.Dreaming.MaxFacts),
 		settings.KeyDreamingMaxInsights:  mustJSON(cfg.Dreaming.MaxInsights),
 		settings.KeyDreamingMaxSummaries: mustJSON(cfg.Dreaming.MaxSummaries),
-		settings.KeyDreamingPurgeAfter:   mustJSON(int(cfg.Dreaming.PurgeAfter.Hours())),
+		settings.KeyDreamingPurgeAfter:   mustJSON(int(cfg.Dreaming.PurgeAfter.Hours() / 24)),
 		settings.KeyScheduleEnabled:      mustJSON(cfg.Schedule.Enabled),
 		settings.KeyScheduleScanInterval: mustJSON(int(cfg.Schedule.ScanInterval.Seconds())),
 		// HTTP layer.
