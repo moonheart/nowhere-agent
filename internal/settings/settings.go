@@ -120,6 +120,34 @@ func (rt *Runtime) Load(ctx context.Context) error {
 	return nil
 }
 
+// StartRefreshLoop re-loads the snapshot from the store on a fixed interval
+// until ctx is cancelled. It is the multi-instance convergence path (P2-6):
+// rows written by another gateway process — or directly in the database —
+// reach this process's snapshot within one interval, without a restart or a
+// local console write. Load errors are logged and skipped, so a DB hiccup
+// degrades to a stale snapshot instead of killing the loop. interval <= 0
+// falls back to the default 30s. Returns immediately; the goroutine stops on
+// ctx.Done.
+func (rt *Runtime) StartRefreshLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := rt.Load(ctx); err != nil {
+					rt.log.Warn("platform settings refresh failed; keeping the previous snapshot", "err", err)
+				}
+			}
+		}
+	}()
+}
+
 // raw returns the effective value for key: the persisted row, else the
 // default. Second return is false when neither exists.
 func (rt *Runtime) raw(key string) (json.RawMessage, bool) {

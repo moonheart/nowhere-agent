@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
+	"time"
 )
 
 func testDB(t *testing.T) *sql.DB {
@@ -145,6 +148,121 @@ func TestRuntimeBoolFloatDuration(t *testing.T) {
 	if got := rt2.Float64("llm_temperature"); got != -1.0 {
 		t.Fatalf("loaded float = %v, want -1", got)
 	}
+}
+
+// TestRuntimeRefreshLoopPicksUpExternalWrites is the multi-instance
+// convergence case (P2-6): a row written DIRECTLY to the store (bypassing the
+// runtime's snapshot — the "another gateway process" scenario) is picked up by
+// StartRefreshLoop within one interval, without a local Set.
+func TestRuntimeRefreshLoopPicksUpExternalWrites(t *testing.T) {
+	store := NewStore(testDB(t))
+	ctx := context.Background()
+	key := fmt.Sprintf("test_refresh_loop_%d", time.Now().UnixNano())
+	t.Cleanup(func() { store.db.Exec(`DELETE FROM platform_settings WHERE key = $1`, key) })
+
+	rt := NewRuntime(store, map[string]json.RawMessage{key: raw(t, "default")}, slog.Default())
+	if err := rt.Load(ctx); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	// External write straight to the store: the runtime snapshot is stale.
+	changed, _ := json.Marshal("changed")
+	if err := store.Set(ctx, key, changed); err != nil {
+		t.Fatalf("external set: %v", err)
+	}
+	if got := rt.String(key); got != "default" {
+		t.Fatalf("snapshot should be stale until the refresh loop runs, got %q", got)
+	}
+
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	rt.StartRefreshLoop(loopCtx, 30*time.Millisecond)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for rt.String(key) != "changed" {
+		if time.Now().After(deadline) {
+			t.Fatal("refresh loop did not pick up the external write within 5s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// The loop must exit (no goroutine leak) when the ctx is cancelled.
+	cancel()
+	select {
+	case <-loopCtx.Done():
+	default:
+		t.Fatal("loop ctx not cancelled")
+	}
+}
+
+// TestRuntimeConcurrentLoadSetRead exercises the RWMutex snapshot under
+// concurrent Load + Set + reads. Run with -race (as the project test commands
+// do) it pins that readers never observe a torn value map while the snapshot
+// is swapped. Only Errorf is used inside goroutines (Fatalf is illegal off
+// the test goroutine).
+func TestRuntimeConcurrentLoadSetRead(t *testing.T) {
+	store := NewStore(testDB(t))
+	ctx := context.Background()
+	key := fmt.Sprintf("test_concurrent_%d", time.Now().UnixNano())
+	t.Cleanup(func() { store.db.Exec(`DELETE FROM platform_settings WHERE key = $1`, key) })
+
+	rt := NewRuntime(store, map[string]json.RawMessage{key: raw(t, "default")}, slog.Default())
+	if err := rt.Load(ctx); err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	const readers = 8
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				v := rt.String(key)
+				if v != "default" && v != "changed" {
+					t.Errorf("reader observed an illegal value %q", v)
+					return
+				}
+			}
+		}()
+	}
+	// The writer alternates an external-style write (store only) with a local
+	// Set and a Load, so the snapshot both refreshes and mutates concurrently.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		changed, _ := json.Marshal("changed")
+		null := json.RawMessage("null")
+		for i := 0; i < 60; i++ {
+			switch i % 3 {
+			case 0:
+				if err := rt.Set(ctx, key, changed); err != nil {
+					t.Errorf("set: %v", err)
+					return
+				}
+			case 1:
+				if err := store.Set(ctx, key, null); err != nil {
+					t.Errorf("external clear: %v", err)
+					return
+				}
+			case 2:
+				if err := rt.Load(ctx); err != nil {
+					t.Errorf("load: %v", err)
+					return
+				}
+			}
+		}
+	}()
+
+	time.Sleep(300 * time.Millisecond)
+	close(stop)
+	wg.Wait()
 }
 
 func TestCatalogCoversAllGroupsAndKinds(t *testing.T) {

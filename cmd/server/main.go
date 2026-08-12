@@ -187,6 +187,11 @@ func run() error {
 	} else {
 		log.Info("platform settings loaded", "keys", len(settings.Keys()))
 	}
+	// Multi-instance convergence (P2-6): reload the snapshot on an interval so
+	// rows written by another gateway process (or the console on it) reach this
+	// process without a restart or a local write. The loop stops when the root
+	// ctx is cancelled.
+	settingsRuntime.StartRefreshLoop(ctx, 30*time.Second)
 	identityHandler := identity.NewHandler(identitySvc).WithThrottle(identity.NewLoginThrottler())
 	identityHandler.Register(mux)
 
