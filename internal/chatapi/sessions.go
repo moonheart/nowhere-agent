@@ -136,3 +136,40 @@ func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// serveSessionActive handles GET /api/chat/sessions/{id}/active: it reports
+// whether a run is currently in flight for the session as {active: bool}. It is
+// the lightweight replacement for the idle poll's /history call — the poll runs
+// every few seconds per idle tab, and /history rebuilds the whole conversation
+// (messages + pending approvals + session state) each time, which is wasted DB
+// work for a yes/no flag. The check is memory-first: the run registry's worker
+// map is the authoritative in-process view (the poll's purpose is detecting a
+// run started by another tab of the same gateway), so the common case never
+// touches Postgres; the durable ActiveRun query is the fallback for a registry
+// without the worker (tests/dev) and agrees with the /history active flag.
+func (h *Handler) serveSessionActive(w http.ResponseWriter, r *http.Request) {
+	if h.runtime == nil {
+		http.Error(w, `{"error":"sessions unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+	sessionID := r.PathValue("id")
+	if sessionID == "" {
+		http.Error(w, `{"error":"session id required"}`, http.StatusBadRequest)
+		return
+	}
+	if _, ok := h.authorizeSession(w, r, sessionID); !ok {
+		return
+	}
+
+	active := false
+	if h.registry != nil {
+		active = h.registry.ActiveWorker(sessionID)
+	}
+	if !active {
+		if _, a, err := h.runtime.ActiveRun(r.Context(), sessionID); err == nil {
+			active = a
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"active": active})
+}

@@ -236,14 +236,16 @@ export async function* followBody(
 
 // hasActiveRun reports whether the session's run is still in flight. Used by
 // the idle-poll that lets a second client notice a run started elsewhere. It
-// reads only the `active` flag, skipping loadHistory()'s message rebuild and
-// offset scan so the frequent poll stays cheap.
+// hits the lightweight /active endpoint ({active: bool}, memory-first on the
+// server) instead of /history, which rebuilds the whole conversation (messages
+// + pending approvals + session state) on every poll — the poll runs every few
+// seconds per idle tab, so the full rebuild would be constant DB pressure.
 export async function hasActiveRun(): Promise<boolean> {
   const threadId = getSessionId();
   if (!threadId) return false;
   try {
     const res = await fetch(
-      `/api/chat/history?threadId=${encodeURIComponent(threadId)}`,
+      `/api/chat/sessions/${encodeURIComponent(threadId)}/active`,
       { headers: authHeaders() },
     );
     if (!res.ok) return false;

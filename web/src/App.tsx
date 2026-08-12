@@ -167,21 +167,55 @@ function Chat({
   // a poll attach racing the load+resume follow just re-follows (aborting the
   // stale stream) rather than duplicating — the resume stream replaces the
   // same new message's content each time.
+  //
+  // The poll cadence backs off as the session stays idle (2s → 5s → 30s) and
+  // snaps back to the fast tier on any activity (a run detected, or a local run
+  // finishing): an idle tab must not hammer the backend every 2 seconds
+  // forever, but must notice a new remote run promptly.
   useEffect(() => {
     let cancelled = false;
     let attaching = false;
+    let idleStreak = 0;
+    let timer: number | undefined;
+    const intervalFor = (streak: number) =>
+      streak < 2 ? 2000 : streak < 6 ? 5000 : 30000;
+    const schedule = () => {
+      timer = window.setTimeout(tick, intervalFor(idleStreak));
+    };
     const tick = async () => {
-      if (cancelled || attaching) return;
+      if (cancelled) return;
+      if (attaching || runtime.thread.getState().isRunning) {
+        // A run is active locally (or an attach is in flight): no point polling
+        // — but keep the fast cadence, and reset the idle streak, so the
+        // moment the session goes idle again a remote run is noticed promptly.
+        idleStreak = 0;
+        timer = window.setTimeout(tick, 2000);
+        return;
+      }
       const threadId = getSessionId();
-      if (!threadId) return;
-      if (runtime.thread.getState().isRunning) return;
+      if (!threadId) {
+        idleStreak = Math.max(2, idleStreak + 1);
+        schedule();
+        return;
+      }
       let active = false;
       try {
         active = await hasActiveRun();
       } catch {
-        return; // transient failure; try again next tick
+        schedule(); // transient failure; retry at the current cadence
+        return;
       }
-      if (cancelled || !active || runtime.thread.getState().isRunning) return;
+      if (cancelled) return;
+      if (!active) {
+        idleStreak++;
+        schedule();
+        return;
+      }
+      idleStreak = 0;
+      if (runtime.thread.getState().isRunning) {
+        schedule();
+        return;
+      }
       attaching = true;
       try {
         // Attach the re-streamed run as a child of the current head, NOT at the
@@ -199,12 +233,13 @@ function Chat({
         // Attach is best-effort; a failed follow is retried next tick.
       } finally {
         attaching = false;
+        if (!cancelled) schedule();
       }
     };
-    const id = setInterval(tick, 2000);
+    schedule();
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer !== undefined) clearTimeout(timer);
     };
   }, [runtime]);
 
