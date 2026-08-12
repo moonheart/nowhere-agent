@@ -20,12 +20,17 @@ func NewMemMessageStore() *MemMessageStore {
 	return &MemMessageStore{bySess: map[string][]StoredMessage{}}
 }
 
-// AppendMessage assigns the next per-session seq and appends.
+// AppendMessage assigns the next per-session seq and appends. A non-zero
+// msg.ID is a pre-provisioned id (a run_steps intent reserved it; mem uses
+// negative ids so they can never collide with the positive auto-assigned
+// ones) and is honored verbatim.
 func (m *MemMessageStore) AppendMessage(_ context.Context, msg StoredMessage) (StoredMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.next++
-	msg.ID = m.next
+	if msg.ID == 0 {
+		m.next++
+		msg.ID = m.next
+	}
 	msg.Seq = len(m.bySess[msg.SessionID])
 	msg.CreatedAt = time.Now()
 	m.bySess[msg.SessionID] = append(m.bySess[msg.SessionID], msg)

@@ -1,0 +1,310 @@
+package session
+
+import (
+	"context"
+	"testing"
+
+	"nowhere-agent/internal/agent"
+	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/toolruntime"
+)
+
+// usageToolScriptProvider is toolScriptProvider with per-call usage reported
+// on every stop, so the ledger path has something to record.
+type usageToolScriptProvider struct{ calls int }
+
+func (p *usageToolScriptProvider) Name() string { return "usagescript" }
+
+func (p *usageToolScriptProvider) Stream(_ context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 8)
+	p.calls++
+	if p.calls == 1 {
+		ch <- provider.Event{Type: provider.EventMessageStart}
+		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "echo", ToolInput: map[string]any{}}}
+		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: `{"x":1}`}
+		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopToolUse,
+			Usage: &provider.Usage{InputTokens: 10, OutputTokens: 3}}
+	} else {
+		ch <- provider.Event{Type: provider.EventMessageStart}
+		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "done"}
+		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn,
+			Usage: &provider.Usage{InputTokens: 7, OutputTokens: 2}}
+	}
+	close(ch)
+	return ch, nil
+}
+
+// TestRunStepIntentsWrittenBeforeEffects verifies the intent-before-effect
+// discipline end to end (change durable-run-accounting): every assistant step
+// and every executed tool call writes a durable intent carrying a provisioned
+// result id, and the persisted messages land with exactly those ids — assistant
+// intents one per message, a parallel batch's tool intents sharing the batch's
+// id (their results land in one tool-result message).
+func TestRunStepIntentsWrittenBeforeEffects(t *testing.T) {
+	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
+	ms := NewMemMessageStore()
+	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	sess, err := rt.CreateSession(context.Background(), "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reg := toolruntime.NewRegistry()
+	reg.Register(regEchoTool{})
+	loop := agent.New(&toolScriptProvider{}, reg, agent.Config{Model: "m", MaxTokens: 100})
+
+	userMsg := provider.TextMessage(provider.RoleUser, "hi")
+	run, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop, UserMessage: &userMsg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Fatalf("status = %v want done", got)
+	}
+
+	steps, err := rt.store.LatestRunSteps(context.Background(), run.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) < 3 {
+		t.Fatalf("got %d step intents, want >= 3 (assistant, tool, assistant)", len(steps))
+	}
+
+	msgs, err := ms.MessagesFor(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// user + assistant(tool_use) + user(tool_result) + assistant(text)
+	if len(msgs) != 4 {
+		t.Fatalf("got %d messages, want 4", len(msgs))
+	}
+
+	var assistantSteps, toolSteps []RunStep
+	for _, s := range steps {
+		switch s.StepKind {
+		case StepAssistant:
+			assistantSteps = append(assistantSteps, s)
+		case StepTool:
+			toolSteps = append(toolSteps, s)
+		}
+	}
+	if len(assistantSteps) != 2 {
+		t.Fatalf("assistant intents = %d, want 2", len(assistantSteps))
+	}
+	if len(toolSteps) != 1 {
+		t.Fatalf("tool intents = %d, want 1", len(toolSteps))
+	}
+
+	// Durable attempt counts: 1-based, per (run, step_kind). LatestRunSteps
+	// returns newest first, so the first assistant step listed is the second
+	// call.
+	if assistantSteps[0].Attempt != 2 || assistantSteps[1].Attempt != 1 {
+		t.Errorf("assistant attempts (newest first) = %d, %d; want 2, 1", assistantSteps[0].Attempt, assistantSteps[1].Attempt)
+	}
+	if toolSteps[0].Attempt != 1 {
+		t.Errorf("tool attempt = %d, want 1", toolSteps[0].Attempt)
+	}
+
+	// Provisioned-id binding: assistant message rows carry the intent ids.
+	if assistantSteps[0].ResultMessageID == nil || assistantSteps[1].ResultMessageID == nil {
+		t.Fatal("assistant intents carry no provisioned result id")
+	}
+	var assistantIDs = map[int64]bool{
+		*assistantSteps[0].ResultMessageID: false,
+		*assistantSteps[1].ResultMessageID: false,
+	}
+	got := 0
+	for _, m := range msgs {
+		if m.Role == provider.RoleAssistant {
+			if seen, ok := assistantIDs[m.ID]; ok && !seen {
+				assistantIDs[m.ID] = true
+				got++
+			}
+		}
+	}
+	if got != 2 {
+		t.Errorf("assistant messages bound to intent ids = %d, want 2 (messages %+v)", got, msgs)
+	}
+
+	// The tool batch's result message carries the shared tool intent id.
+	if toolSteps[0].ResultMessageID == nil {
+		t.Fatal("tool intent carries no provisioned result id")
+	}
+	foundTool := false
+	for _, m := range msgs {
+		if m.Role == provider.RoleUser && m.ID == *toolSteps[0].ResultMessageID {
+			foundTool = true
+		}
+	}
+	if !foundTool {
+		t.Errorf("no tool-result message carries the tool intent id %d", *toolSteps[0].ResultMessageID)
+	}
+}
+
+// TestUsageLedgerMatchesMessagesAndRun verifies the ledger semantics (change
+// durable-run-accounting): one assistant-caused record per assistant message,
+// bound to the message's id, and the run's aggregate recomputed from the ledger
+// equals the sum of the messages' usage.
+func TestUsageLedgerMatchesMessagesAndRun(t *testing.T) {
+	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
+	ms := NewMemMessageStore()
+	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	sess, err := rt.CreateSession(context.Background(), "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reg := toolruntime.NewRegistry()
+	reg.Register(regEchoTool{})
+	loop := agent.New(&usageToolScriptProvider{}, reg, agent.Config{Model: "m", MaxTokens: 100})
+
+	userMsg := provider.TextMessage(provider.RoleUser, "hi")
+	run, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop, UserMessage: &userMsg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Fatalf("status = %v want done", got)
+	}
+
+	// Every assistant message has exactly one ledger record bound to its id;
+	// user/tool-result messages have none.
+	msgs, err := ms.MessagesFor(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantInput, wantOutput := 0, 0
+	assistantCount := 0
+	for _, m := range msgs {
+		if m.Role == provider.RoleAssistant {
+			assistantCount++
+			if m.Usage != nil {
+				wantInput += m.Usage.InputTokens
+				wantOutput += m.Usage.OutputTokens
+			}
+		}
+	}
+	if assistantCount != 2 {
+		t.Fatalf("assistant messages = %d, want 2", assistantCount)
+	}
+
+	store := rt.store.(*MemStore)
+	records := store.usageRecords[run.ID]
+	if len(records) != assistantCount {
+		t.Fatalf("usage records = %d, want %d", len(records), assistantCount)
+	}
+	for _, r := range records {
+		if r.Cause != UsageAssistant {
+			t.Errorf("record cause = %q, want assistant", r.Cause)
+		}
+		if r.ResultMessageID == nil {
+			t.Error("record not bound to a message id")
+			continue
+		}
+		found := false
+		for _, m := range msgs {
+			if m.ID == *r.ResultMessageID && m.Role == provider.RoleAssistant {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("record bound to %d, which is not an assistant message", *r.ResultMessageID)
+		}
+	}
+
+	// Run aggregate recomputed from the ledger equals the message-sum.
+	sum, err := store.SumUsage(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.InputTokens != wantInput || sum.OutputTokens != wantOutput {
+		t.Errorf("ledger sum = %+v, want input=%d output=%d", sum, wantInput, wantOutput)
+	}
+}
+
+// TestAdjustmentDoesNotMutateMessageUsage verifies adjustments live in the
+// ledger and never touch the messages' immutable usage snapshots.
+func TestAdjustmentDoesNotMutateMessageUsage(t *testing.T) {
+	store := NewMemStore()
+	ctx := context.Background()
+	runID := "run-a"
+
+	if err := store.AppendUsageRecord(ctx, UsageRecord{
+		RunID: runID, Cause: UsageAssistant,
+		Usage: provider.Usage{InputTokens: 10, OutputTokens: 5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendUsageRecord(ctx, UsageRecord{
+		RunID: runID, Cause: UsageAdjustment,
+		Usage: provider.Usage{InputTokens: -2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	sum, err := store.SumUsage(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.InputTokens != 8 {
+		t.Errorf("ledger sum input = %d, want 8 (adjustment included)", sum.InputTokens)
+	}
+	if sum.OutputTokens != 5 {
+		t.Errorf("ledger sum output = %d, want 5", sum.OutputTokens)
+	}
+}
+
+// TestAppendRunStepAttemptCounters verifies durable per-(run, kind) attempt
+// counters: they increment within one run and kind, and restart across runs.
+func TestAppendRunStepAttemptCounters(t *testing.T) {
+	store := NewMemStore()
+	ctx := context.Background()
+
+	for i := 1; i <= 3; i++ {
+		st, err := store.AppendRunStep(ctx, "run-1", StepAssistant, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Attempt != i {
+			t.Fatalf("attempt = %d, want %d", st.Attempt, i)
+		}
+		if st.Seq != i {
+			t.Fatalf("seq = %d, want %d", st.Seq, i)
+		}
+		if st.ResultMessageID == nil {
+			t.Fatal("assistant intent without provisioned id")
+		}
+	}
+	st, err := store.AppendRunStep(ctx, "run-1", StepTool, "tu-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Attempt != 1 {
+		t.Errorf("tool attempt = %d, want 1 (independent of assistant counter)", st.Attempt)
+	}
+
+	// A fresh run restarts the counters (the durable state, not process
+	// memory, is the source of truth across restarts).
+	st, err = store.AppendRunStep(ctx, "run-2", StepAssistant, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Attempt != 1 || st.Seq != 1 {
+		t.Errorf("fresh run attempt/seq = %d/%d, want 1/1", st.Attempt, st.Seq)
+	}
+
+	// A parallel tool batch shares one provisioned id.
+	shared := st.ResultMessageID
+	for _, tc := range []string{"tu-2", "tu-3"} {
+		ts, err := store.AppendRunStep(ctx, "run-2", StepTool, tc, shared)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ts.ResultMessageID == nil || *ts.ResultMessageID != *shared {
+			t.Errorf("shared batch id broken: %v vs %v", ts.ResultMessageID, shared)
+		}
+	}
+}

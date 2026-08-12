@@ -424,6 +424,165 @@ func (s *PGStore) FailStrandedRuns(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
+// StrandedRuns returns every non-terminal run (queued/running/
+// waiting_approval), newest first — startup recovery inspects each run's step
+// intents before settling it (change durable-run-accounting).
+func (s *PGStore) StrandedRuns(ctx context.Context) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, seq, status, created_at,
+			usage_input, usage_output, usage_cache_read, usage_cache_write
+		FROM runs
+		WHERE status IN ('queued','running','waiting_approval')
+		ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("stranded runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// AppendRunStep writes one step intent BEFORE the effect it accounts for. seq
+// is the run's next step ordinal; attempt is the durable per-(run, step_kind)
+// counter (1-based), so a crash-restart loop can never reset it. For step kinds
+// that produce a message (assistant, tool), a fresh messages.id is provisioned
+// from the messages sequence and returned on the step; the effect's result
+// message must be inserted with exactly that id. overflow_compact rows carry no
+// provisioned id. Callers MUST serialize appends for one run (the run worker
+// owns the run, so a registry-level mutex suffices).
+func (s *PGStore) AppendRunStep(ctx context.Context, runID string, kind StepKind, toolCallID string, resultMessageID *int64) (RunStep, error) {
+	var st RunStep
+	var provision *int64
+	var scannedToolCallID sql.NullString
+	if kind == StepAssistant || kind == StepTool {
+		if resultMessageID != nil {
+			// A parallel tool batch reuses the first call's provisioned id: the
+			// batch's results land in one tool-result message.
+			provision = resultMessageID
+		} else {
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT nextval('messages_id_seq')`).Scan(&provision); err != nil {
+				return RunStep{}, fmt.Errorf("provision message id: %w", err)
+			}
+		}
+	}
+	tcID := sql.NullString{String: toolCallID, Valid: toolCallID != ""}
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO run_steps (run_id, seq, step_kind, attempt, result_message_id, tool_call_id)
+		VALUES ($1,
+			(SELECT COALESCE(MAX(seq), 0) + 1 FROM run_steps WHERE run_id = $1),
+			$2,
+			(SELECT COALESCE(MAX(attempt), 0) + 1 FROM run_steps WHERE run_id = $1 AND step_kind = $2),
+			$3, NULLIF($4, ''))
+		RETURNING id, run_id, seq, step_kind, attempt, result_message_id, tool_call_id, created_at`,
+		runID, string(kind), provision, tcID,
+	).Scan(&st.ID, &st.RunID, &st.Seq, (*stepKindString)(&st.StepKind), &st.Attempt, &st.ResultMessageID, &scannedToolCallID, &st.CreatedAt)
+	if scannedToolCallID.Valid {
+		st.ToolCallID = scannedToolCallID.String
+	}
+	if err != nil {
+		return RunStep{}, fmt.Errorf("append run step: %w", err)
+	}
+	return st, nil
+}
+
+// stepKindString adapts a *StepKind for database/sql scanning.
+type stepKindString StepKind
+
+func (k *stepKindString) Scan(value any) error {
+	s, ok := value.(string)
+	if !ok {
+		return fmt.Errorf("scan step_kind: unexpected type %T", value)
+	}
+	*k = stepKindString(StepKind(s))
+	return nil
+}
+
+// AppendUsageRecord writes one per-request usage row at settle time, before any
+// classification, retry, or discard decision. resultMessageID binds the record
+// to the pre-provisioned id of the message the request was expected to produce;
+// the message may never exist (failed/discarded requests), the binding holds.
+func (s *PGStore) AppendUsageRecord(ctx context.Context, rec UsageRecord) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO usage_records (run_id, cause, result_message_id, attempt,
+			input, output, cache_read, cache_write)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		rec.RunID, string(rec.Cause), rec.ResultMessageID, rec.Attempt,
+		rec.Usage.InputTokens, rec.Usage.OutputTokens, rec.Usage.CacheReadTokens, rec.Usage.CacheWriteTokens)
+	if err != nil {
+		return fmt.Errorf("append usage record: %w", err)
+	}
+	return nil
+}
+
+// SumUsage returns a run's aggregate usage as the sum of its ledger rows. A run
+// with no rows returns a zero usage (never nil), so callers can aggregate
+// unconditionally.
+func (s *PGStore) SumUsage(ctx context.Context, runID string) (*provider.Usage, error) {
+	var in, out, cr, cw sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(input), 0), COALESCE(SUM(output), 0),
+			COALESCE(SUM(cache_read), 0), COALESCE(SUM(cache_write), 0)
+		FROM usage_records WHERE run_id = $1`, runID).
+		Scan(&in, &out, &cr, &cw)
+	if err != nil {
+		return nil, fmt.Errorf("sum usage: %w", err)
+	}
+	return &provider.Usage{
+		InputTokens:      int(in.Int64),
+		OutputTokens:     int(out.Int64),
+		CacheReadTokens:  int(cr.Int64),
+		CacheWriteTokens: int(cw.Int64),
+	}, nil
+}
+
+// LatestRunSteps returns a run's newest intent rows (newest first), with
+// ResultExists populated by a left join against messages — recovery reads the
+// step's provisioned id and learns at once whether the result message landed.
+// overflow_compact rows are excluded: they are completed recovery records, not
+// pending effects, so they can never be the "newest unfinished step".
+func (s *PGStore) LatestRunSteps(ctx context.Context, runID string, limit int) ([]RunStep, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT rs.id, rs.run_id, rs.seq, rs.step_kind, rs.attempt, rs.result_message_id,
+			rs.tool_call_id, rs.created_at,
+			(rs.result_message_id IS NOT NULL AND m.id IS NOT NULL) AS result_exists
+		FROM run_steps rs
+		LEFT JOIN messages m ON m.id = rs.result_message_id
+		WHERE rs.run_id = $1 AND rs.step_kind IN ('assistant','tool')
+		ORDER BY rs.seq DESC
+		LIMIT $2`, runID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("latest run steps: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RunStep
+	for rows.Next() {
+		var st RunStep
+		var scannedToolCallID sql.NullString
+		if err := rows.Scan(&st.ID, &st.RunID, &st.Seq, (*stepKindString)(&st.StepKind), &st.Attempt,
+			&st.ResultMessageID, &scannedToolCallID, &st.CreatedAt, &st.ResultExists); err != nil {
+			return nil, fmt.Errorf("scan run step: %w", err)
+		}
+		if scannedToolCallID.Valid {
+			st.ToolCallID = scannedToolCallID.String
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
 // NextRunSeq returns the next sequence number for a session's run.
 func (s *PGStore) NextRunSeq(ctx context.Context, sessionID string) (int, error) {
 	var next int

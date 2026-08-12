@@ -39,6 +39,25 @@ func (s *PGMessageStore) AppendMessage(ctx context.Context, msg StoredMessage) (
 		ucw = sql.NullInt64{Int64: int64(msg.Usage.CacheWriteTokens), Valid: true}
 	}
 
+	// A positive msg.ID is a pre-provisioned id (a run_steps intent reserved it
+	// via nextval); the INSERT then uses it explicitly so the intent's binding
+	// and the message row agree. Zero lets the default BIGSERIAL assign.
+	if msg.ID > 0 {
+		err = s.db.QueryRowContext(ctx, `
+			INSERT INTO messages (id, session_id, run_id, seq, role, content,
+				usage_input, usage_output, usage_cache_read, usage_cache_write)
+			VALUES ($1, $2, $3,
+				(SELECT COALESCE(MAX(seq), -1) + 1 FROM messages WHERE session_id = $2),
+				$4, $5, $6, $7, $8, $9)
+			RETURNING id, seq, created_at`,
+			msg.ID, msg.SessionID, msg.RunID, string(msg.Role), content, ui, uo, ucr, ucw,
+		).Scan(&msg.ID, &msg.Seq, &msg.CreatedAt)
+		if err != nil {
+			return StoredMessage{}, fmt.Errorf("append message: %w", err)
+		}
+		return msg, nil
+	}
+
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO messages (session_id, run_id, seq, role, content,
 			usage_input, usage_output, usage_cache_read, usage_cache_write)

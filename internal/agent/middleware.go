@@ -55,6 +55,11 @@ type RunState struct {
 	// loop's view rebuild skips them, or every iteration would re-overflow on
 	// the same prefix and burn the retry budget again.
 	viewDropped int
+	// overflowRecovered records that a recoverable truncation already discarded
+	// a response and retried once (change durable-run-accounting): the
+	// once-per-conversational-input recovery guard. The durable
+	// overflow_compact step intent mirrors it for recovery/audit.
+	overflowRecovered bool
 }
 
 // ErrAbortRun is the sentinel a node-style hook (BeforeModel/AfterModel)

@@ -138,6 +138,12 @@ const (
 	// it (the durable copy lives in the tool-result message's generative_ui
 	// block; this event is the live render frame for the current run).
 	KindGenerativeUI EventKind = "generative_ui"
+	// KindOverflowRecovery marks an overflow recovery: a recoverable response
+	// (length below the intended output cap, or an overflow-form error) was
+	// discarded, the context compacted, and the request retried. It is a
+	// persistence signal, not a render frame: the session runtime records it as
+	// an overflow_compact step intent — the once-per-input recovery guard.
+	KindOverflowRecovery EventKind = "overflow_recovery"
 )
 
 // Emitter receives loop events (the session runtime persists + fans them out).
@@ -429,6 +435,31 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			_ = emit.Emit(ctx, KindError, emptyErr.Error())
 			return state.Produced, emptyErr
 		}
+		// Recoverable-truncation guard (change durable-run-accounting): a
+		// max_tokens stop with no tool calls whose output is below the intended
+		// cap is context pressure, not an output-limit stop. The response is
+		// DISCARDED here — before it enters Produced or reaches the KindMessage
+		// persist path — the oldest round is dropped to relieve the pressure,
+		// and the request is retried once per conversational input. The emitted
+		// overflow_recovery signal persists the guard as an overflow_compact
+		// step intent.
+		if len(res.Calls) == 0 && res.Stop == provider.StopMaxTokens &&
+			IsRecoverableLength(res.Usage, l.config.MaxTokens) {
+			if state.overflowRecovered || !l.dropOldestRoundForOverflow(state) {
+				// Guard already used, or nothing safe left to drop: without
+				// compaction the request cannot fit. Fail with neutral wording;
+				// the response stays discarded (never persisted).
+				truncErr := fmt.Errorf("response was truncated before completion")
+				l.emitStepFinish(ctx, emit, res, "error", false)
+				l.runAfterRun(ctx, state)
+				_ = emit.Emit(ctx, KindError, truncErr.Error())
+				return state.Produced, truncErr
+			}
+			state.overflowRecovered = true
+			_ = emit.Emit(ctx, KindOverflowRecovery, nil)
+			l.emitStepFinish(ctx, emit, res, "length", true)
+			continue
+		}
 		state.Produced = append(state.Produced, res.Assistant)
 		// Expose the assembled assistant message for full-block persistence
 		// (persist-raw-messages), paired with the usage of the LLM call that
@@ -463,17 +494,26 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			}
 		}
 
-		// No tool calls → the turn is final ONLY on a natural end_turn. Every
-		// other stop reason is a failure shape: a max_tokens truncation, an
-		// unreported stop reason (a cut-off answer or an unverifiable one), or
-		// any other early end — stop_sequence, content_filter, pause_turn,
-		// refusal, provider passthroughs — whose output likewise ended before
-		// the model chose to stop. Surface all of them as errors instead of a
-		// silent done (capability-gap L1): without this the loop treats
-		// truncation as success.
+		// No tool calls → the turn is final ONLY on a natural end_turn (or a
+		// genuine output-limit stop). Every other stop reason is a failure
+		// shape: an unclassifiable max_tokens truncation, an unreported stop
+		// reason (a cut-off answer or an unverifiable one), or any other early
+		// end — stop_sequence, content_filter, pause_turn, refusal, provider
+		// passthroughs — whose output likewise ended before the model chose to
+		// stop. Surface all of them as errors instead of a silent done
+		// (capability-gap L1): without this the loop treats truncation as
+		// success.
+		//
+		// A max_tokens stop that fully used the intended cap (genuineLength) is
+		// the one sanctioned completion here: the answer is as complete as
+		// configured and compaction cannot help.
+		genuineLength := len(res.Calls) == 0 && res.Stop == provider.StopMaxTokens &&
+			l.config.MaxTokens > 0 && res.Usage != nil && res.Usage.OutputTokens >= l.config.MaxTokens
 		if len(res.Calls) == 0 {
-			if res.Stop == provider.StopMaxTokens {
-				truncErr := fmt.Errorf("response truncated: hit %s", maxTokensLimitText(l.config.MaxTokens))
+			if res.Stop == provider.StopMaxTokens && !genuineLength {
+				// Unclassifiable truncation (no cap, or no reported usage):
+				// surface it as an error rather than a silent done.
+				truncErr := fmt.Errorf("response was truncated before completion")
 				l.emitStepFinish(ctx, emit, res, "length", false)
 				l.runAfterRun(ctx, state)
 				_ = emit.Emit(ctx, KindError, truncErr.Error())
@@ -492,13 +532,14 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				_ = emit.Emit(ctx, KindError, stopErr.Error())
 				return state.Produced, stopErr
 			}
-			if res.Stop != provider.StopEndTurn {
+			if res.Stop != provider.StopEndTurn && !genuineLength {
 				// Any other reported reason means the output ended early
 				// (stop_sequence truncates at the stop token; content_filter
 				// cuts the answer; pause_turn/refusal are not completions).
 				// Treating it as done would pass a cut-off answer off as
 				// complete — the same silent-truncation class the two guards
-				// above exist to catch.
+				// above exist to catch. A genuine output-limit stop is the
+				// sanctioned exception: it completes normally below.
 				stopErr := fmt.Errorf("response ended early (stop reason: %s); the output may be incomplete", res.Stop)
 				l.emitStepFinish(ctx, emit, res, "error", false)
 				l.runAfterRun(ctx, state)
@@ -700,6 +741,36 @@ func (l *Loop) runAfterRun(ctx context.Context, state *RunState) {
 // run must not abort on a broker hiccup.
 func (l *Loop) emitStepFinish(ctx context.Context, emit Emitter, res ModelResult, reason string, continued bool) {
 	_ = emit.Emit(ctx, KindStepFinish, StepEvent{FinishReason: reason, Usage: res.Usage, IsContinued: continued})
+}
+
+// dropOldestRoundForOverflow relieves context pressure after a recoverable
+// truncation by dropping the oldest round from the run's working view, mirroring
+// the OverflowMW fallback (middleware.go): the leading summary is preserved
+// first, the drop is recorded in viewDropped so the view rebuild skips it, and
+// the compression cache is advanced or invalidated to stay aligned with what is
+// actually sent. Returns false when nothing safe is left to drop.
+func (l *Loop) dropOldestRoundForOverflow(state *RunState) bool {
+	shrunk, ok := contextmgmt.DropOldestRoundPreservingSummary(state.View)
+	if !ok {
+		shrunk, ok = contextmgmt.DropOldestRound(state.View)
+	}
+	if !ok {
+		return false
+	}
+	if state.compressCache != nil && state.compressCache.Covered > 0 &&
+		len(state.View) > 0 && contextmgmt.IsSummary(state.View[0]) {
+		cache := state.compressCache
+		if len(shrunk) > 0 && contextmgmt.IsSummary(shrunk[0]) {
+			if n := len(state.View) - len(shrunk); n > 0 {
+				cache.Advance(state.View[1 : 1+n])
+			}
+		} else {
+			cache.Invalidate()
+		}
+	} else if state.compressCache == nil {
+		state.viewDropped += len(state.View) - len(shrunk)
+	}
+	return true
 }
 
 // attempt runs one provider call through the wrap chain and returns the

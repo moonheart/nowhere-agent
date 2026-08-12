@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -83,10 +85,30 @@ type Store interface {
 	NextRunSeq(ctx context.Context, sessionID string) (int, error)
 	// RunsForSession returns all runs in a session, for history replay.
 	RunsForSession(ctx context.Context, sessionID string) ([]Run, error)
+	// StrandedRuns returns every non-terminal run (queued/running/
+	// waiting_approval), newest first. Startup recovery inspects each run's
+	// step intents before settling it (change durable-run-accounting).
+	StrandedRuns(ctx context.Context) ([]Run, error)
 	// FailStrandedRuns marks every non-terminal run failed. Called at startup to
 	// reconcile runs left running by a process that died mid-run, so they no
 	// longer read as active. Returns the number of runs updated.
 	FailStrandedRuns(ctx context.Context) (int, error)
+
+	// Durable run accounting (change durable-run-accounting, migration 000041).
+	// AppendRunStep writes one step intent before the effect it accounts for.
+	// seq and attempt are assigned per (run, step_kind) in the store; a fresh
+	// messages.id is provisioned via nextval and returned on the step unless
+	// resultMessageID is non-nil, in which case that id is reused (a parallel
+	// tool batch's intents share one id: their results land in one message).
+	AppendRunStep(ctx context.Context, runID string, kind StepKind, toolCallID string, resultMessageID *int64) (RunStep, error)
+	// AppendUsageRecord writes one per-request usage row at settle time.
+	AppendUsageRecord(ctx context.Context, rec UsageRecord) error
+	// SumUsage returns the run's aggregate usage as the sum of its ledger rows
+	// (nil-safe: a run with no rows returns a zero usage).
+	SumUsage(ctx context.Context, runID string) (*provider.Usage, error)
+	// LatestRunSteps returns a run's newest intent rows (per-run seq order,
+	// newest first), with ResultExists populated from the messages table.
+	LatestRunSteps(ctx context.Context, runID string, limit int) ([]RunStep, error)
 
 	AppendEvent(ctx context.Context, e Event) error
 	// EventsAfter returns events for a run with offset > after, ordered.
@@ -416,13 +438,56 @@ func (rt *Runtime) RunsForSession(ctx context.Context, sessionID string) ([]Run,
 	return rt.store.RunsForSession(ctx, sessionID)
 }
 
-// RecoverStrandedRuns marks runs left non-terminal by a previous process as
-// failed (startup reconciliation). Single-instance assumption: at startup no
-// run is genuinely live, so any non-terminal run is orphaned — its in-memory
-// worker died with the process — and would otherwise read as active forever,
-// hanging clients that attach to it. Returns the number of runs reconciled.
+// RecoverStrandedRuns reconciles runs left non-terminal by a previous process
+// (startup reconciliation). Single-instance assumption: at startup no run is
+// genuinely live, so any non-terminal run is orphaned — its in-memory worker
+// died with the process — and would otherwise read as active forever, hanging
+// clients that attach to it.
+//
+// Before settling them, each stranded run's newest step intent is inspected
+// (change durable-run-accounting): an intent whose provisioned result message
+// exists is a completed step; one without it is an interrupted step whose
+// durable attempt count is surfaced. Runs without intents keep the pre-change
+// behavior. Every stranded run is still marked failed (resume is out of scope);
+// the inspection only raises the fidelity of what recovery records. Returns the
+// number of runs reconciled.
 func (rt *Runtime) RecoverStrandedRuns(ctx context.Context) (int, error) {
+	runs, err := rt.store.StrandedRuns(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, r := range runs {
+		steps, err := rt.store.LatestRunSteps(ctx, r.ID, 1)
+		if err != nil {
+			slog.Warn("recover stranded run: step inspection failed", "run", r.ID, "session", r.SessionID, "err", err)
+			continue
+		}
+		if len(steps) == 0 {
+			slog.Info("run stranded without step intents", "run", r.ID, "session", r.SessionID)
+			continue
+		}
+		st := steps[0]
+		if st.ResultExists {
+			slog.Info("run stranded after a completed step",
+				"run", r.ID, "session", r.SessionID,
+				"step_kind", st.StepKind, "attempt", st.Attempt,
+				"result_message_id", derefInt64(st.ResultMessageID))
+		} else {
+			slog.Warn("run stranded with an interrupted step",
+				"run", r.ID, "session", r.SessionID,
+				"step_kind", st.StepKind, "attempt", st.Attempt,
+				"tool_call_id", st.ToolCallID)
+		}
+	}
 	return rt.store.FailStrandedRuns(ctx)
+}
+
+// derefInt64 renders a *int64 for logging ("" when nil).
+func derefInt64(v *int64) string {
+	if v == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", *v)
 }
 
 // ListSessionsByUser returns a page of a user's sessions for the conversation

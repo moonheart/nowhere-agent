@@ -251,7 +251,18 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 		}
 	}()
 
-	emit := &registryEmitter{rg: rg, sessionID: sessionID, runID: run.ID}
+	pending := &stepIntentQueue{}
+	toolMW := &toolIntentMW{rg: rg, sessionID: sessionID, runID: run.ID, pending: pending}
+	emit := &registryEmitter{rg: rg, sessionID: sessionID, runID: run.ID, pending: pending, toolMW: toolMW}
+
+	// Install the durable step-intent middlewares: before each provider request
+	// and each tool execution, an intent row records the effect with its
+	// pre-provisioned result id and durable attempt count (change
+	// durable-run-accounting). The loop is per-run, so Use is safe.
+	work.Loop.Use(
+		&stepIntentMW{rg: rg, sessionID: sessionID, runID: run.ID, pending: pending},
+		toolMW,
+	)
 
 	// Persist the user turn that started this run as its first message, so the
 	// conversation record (the compression/history source) includes the user side.
@@ -743,6 +754,21 @@ func (rg *RunRegistry) append(ctx context.Context, sessionID, runID string, kind
 	})
 }
 
+// stepMu serializes run_steps appends per process. The store assigns seq and
+// attempt with MAX+1 subqueries, which two concurrent appends for one run (a
+// parallel tool batch) would race; the run worker is the only writer per run,
+// and the process is the only writer per session (single-instance assumption),
+// so one registry-level mutex is the whole story.
+var stepMu sync.Mutex
+
+// appendStep writes one step intent, serializing concurrent appends (parallel
+// tool batches) through the per-process mutex.
+func (rg *RunRegistry) appendStep(ctx context.Context, runID string, kind StepKind, toolCallID string, sharedID *int64) (RunStep, error) {
+	stepMu.Lock()
+	defer stepMu.Unlock()
+	return rg.rt.store.AppendRunStep(ctx, runID, kind, toolCallID, sharedID)
+}
+
 // registryEmitter adapts agent.Emitter to the registry's persist+publish write
 // path. The loop emits through it; each event is persisted to the durable log and
 // fanned out to attached clients by the Runtime's AppendEvent.
@@ -750,6 +776,13 @@ type registryEmitter struct {
 	rg        *RunRegistry
 	sessionID string
 	runID     string
+	// pending carries the pre-provisioned message ids the step-intent
+	// middlewares wrote before their effects; the KindMessage persist path
+	// consumes them so messages land with exactly the provisioned ids.
+	pending *stepIntentQueue
+	// toolMW is the tool-intent middleware of this run, so the tool-result
+	// persist path can reset its shared batch id after the batch's message.
+	toolMW *toolIntentMW
 	// cancelledPersisted records that this emitter landed the terminal
 	// KindCancelled frame, so the run worker's compensation (which covers the
 	// paths that never emitted it) stays single-written rather than
@@ -771,6 +804,16 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 		e.persistMessage(ctx, payload)
 		return nil
 	}
+	// The overflow-recovery signal records the once-per-input guard: an
+	// overflow_compact step intent. Best-effort: the in-memory guard already
+	// bounds the loop; the row is the durable audit trail and future resume
+	// input. A failure is logged, not fatal — the run continues.
+	if kind == agent.KindOverflowRecovery {
+		if _, err := e.rg.appendStep(context.Background(), e.runID, StepOverflowCompact, "", nil); err != nil {
+			slog.Warn("record overflow recovery", "run", e.runID, "err", err)
+		}
+		return nil
+	}
 	// The interrupt frame carries the interaction id the client POSTs its verdict
 	// with. Persist the durable Interaction row BEFORE publishing the frame, so a
 	// fast client (an instant client-tool auto-run) can never learn an id it can't
@@ -782,8 +825,8 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 			return err
 		}
 	}
-	// The run's aggregate usage is recorded on the runs row (SetRunUsage is
-	// nil-safe and best-effort); the event still flows to the durable log below.
+	// The run's aggregate usage is recorded on the runs row, recomputed from
+	// the usage ledger (SumUsage); the event still flows to the durable log.
 	if kind == agent.KindUsage {
 		e.persistRunUsage(payload)
 	}
@@ -856,17 +899,14 @@ func (e *registryEmitter) persistInteraction(payload any) error {
 	return nil
 }
 
-// persistRunUsage extracts the run's aggregate usage from a KindUsage payload
-// and records it on the runs row. Best-effort: failures are logged, not fatal.
-func (e *registryEmitter) persistRunUsage(payload any) {
-	var u *provider.Usage
-	switch v := payload.(type) {
-	case provider.Usage:
-		u = &v
-	case *provider.Usage:
-		u = v
-	}
-	if u == nil {
+// persistRunUsage recomputes the run's aggregate usage from the usage ledger
+// (SumUsage) and records it on the runs row — the per-request ledger rows were
+// written at settle time, so this recomputation never loses spend. Best-effort:
+// failures are logged, not fatal.
+func (e *registryEmitter) persistRunUsage(_ any) {
+	u, err := e.rg.rt.store.SumUsage(context.Background(), e.runID)
+	if err != nil {
+		slog.Warn("sum run usage", "run", e.runID, "err", err)
 		return
 	}
 	if err := e.rg.rt.store.SetRunUsage(context.Background(), e.runID, u); err != nil {
@@ -877,7 +917,10 @@ func (e *registryEmitter) persistRunUsage(payload any) {
 // persistMessage stores one assembled message in the MessageStore. The payload
 // is either an agent.MessageWithUsage (an assistant message paired with the
 // usage of the LLM call that produced it) or a bare provider.Message (a tool
-// result, which is not an LLM call and has no usage). Persistence is
+// result, which is not an LLM call and has no usage). For assistant messages
+// the usage ledger row is written FIRST (bound to the step intent's
+// pre-provisioned message id), then the message row with exactly that id — the
+// ledger's cost durability never depends on the message's. Persistence is
 // best-effort: a failure is logged but does not abort the run (the run's render
 // stream is unaffected).
 func (e *registryEmitter) persistMessage(ctx context.Context, payload any) {
@@ -904,11 +947,50 @@ func (e *registryEmitter) persistMessage(ctx context.Context, payload any) {
 	// Use a background context: by the time the final assistant message is
 	// emitted the run ctx may already be cancelled, and we still want the
 	// message persisted (mirrors the terminal-event re-publish on a live ctx).
-	_, _ = e.rg.msgStore.AppendMessage(context.Background(), StoredMessage{
+	bg := context.Background()
+
+	// Assistant messages: consume the step intent's provisioned id (if any),
+	// write the usage ledger row bound to it, then insert the message with
+	// exactly that id.
+	if msg.Role == provider.RoleAssistant {
+		in := e.pending.popAssistant()
+		if usage != nil {
+			rec := UsageRecord{RunID: e.runID, Cause: UsageAssistant, Attempt: in.attempt, Usage: *usage}
+			if in.messageID != nil {
+				rec.ResultMessageID = in.messageID
+			}
+			if err := e.rg.rt.store.AppendUsageRecord(bg, rec); err != nil {
+				slog.Warn("record usage ledger", "run", e.runID, "err", err)
+			}
+		}
+		stored := StoredMessage{
+			SessionID: e.sessionID,
+			RunID:     e.runID,
+			Role:      msg.Role,
+			Content:   contextmgmt.TruncateBlocksForPersistence(msg.Content),
+			Usage:     usage,
+		}
+		if in.messageID != nil {
+			stored.ID = *in.messageID
+		}
+		_, _ = e.rg.msgStore.AppendMessage(bg, stored)
+		return
+	}
+
+	// Tool-result messages: the batch's tool intents shared one provisioned id;
+	// insert with it. The batch's shared id resets for the next batch.
+	toolID := e.pending.popTools()
+	if e.toolMW != nil {
+		e.toolMW.resetBatch()
+	}
+	stored := StoredMessage{
 		SessionID: e.sessionID,
 		RunID:     e.runID,
 		Role:      msg.Role,
 		Content:   contextmgmt.TruncateBlocksForPersistence(msg.Content),
-		Usage:     usage,
-	})
+	}
+	if toolID != nil {
+		stored.ID = *toolID
+	}
+	_, _ = e.rg.msgStore.AppendMessage(bg, stored)
 }

@@ -36,6 +36,12 @@ type MemStore struct {
 	// batches is the in-memory analogue of the suspended_batches table
 	// (migration 000019): runID -> suspended-batch snapshot.
 	batches map[string]*SuspendedBatch
+	// steps is the in-memory analogue of the run_steps table (migration
+	// 000041): runID -> intent rows in per-run seq order.
+	steps map[string][]RunStep
+	// usageRecords is the in-memory analogue of the usage_records table
+	// (migration 000041): runID -> ledger rows in insertion order.
+	usageRecords map[string][]UsageRecord
 }
 
 // NewMemStore creates an empty in-memory Store.
@@ -49,6 +55,8 @@ func NewMemStore() *MemStore {
 		memoryInjectedAt: map[string]time.Time{},
 		approvals:        map[string]*Approval{},
 		batches:          map[string]*SuspendedBatch{},
+		steps:            map[string][]RunStep{},
+		usageRecords:     map[string][]UsageRecord{},
 	}
 }
 
@@ -320,6 +328,99 @@ func (m *MemStore) FailStrandedRuns(_ context.Context) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// StrandedRuns returns every non-terminal run, newest first.
+func (m *MemStore) StrandedRuns(_ context.Context) ([]Run, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Run
+	for _, r := range m.runs {
+		if r.Status == RunQueued || r.Status == RunRunning {
+			out = append(out, *r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+// AppendRunStep writes one step intent (the in-memory analogue of PGStore's
+// nextval provisioning: ids are negative and decrementing so they can never
+// collide with PG-assigned positive ids).
+func (m *MemStore) AppendRunStep(_ context.Context, runID string, kind StepKind, toolCallID string, resultMessageID *int64) (RunStep, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	steps := m.steps[runID]
+	attempt := 1
+	for _, s := range steps {
+		if s.StepKind == kind {
+			attempt++
+		}
+	}
+	st := RunStep{
+		ID:          int64(len(steps) + 1),
+		RunID:       runID,
+		Seq:         len(steps) + 1,
+		StepKind:    kind,
+		Attempt:     attempt,
+		ToolCallID:  toolCallID,
+		CreatedAt:   time.Now(),
+	}
+	if kind == StepAssistant || kind == StepTool {
+		if resultMessageID != nil {
+			st.ResultMessageID = resultMessageID
+		} else {
+			id := int64(-(len(m.usageRecords) + len(steps) + 1))
+			st.ResultMessageID = &id
+		}
+	}
+	m.steps[runID] = append(steps, st)
+	return st, nil
+}
+
+// AppendUsageRecord appends one ledger row.
+func (m *MemStore) AppendUsageRecord(_ context.Context, rec UsageRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec.ID = int64(len(m.usageRecords[rec.RunID]) + 1)
+	rec.CreatedAt = time.Now()
+	m.usageRecords[rec.RunID] = append(m.usageRecords[rec.RunID], rec)
+	return nil
+}
+
+// SumUsage returns the run's aggregate usage as the sum of its ledger rows.
+func (m *MemStore) SumUsage(_ context.Context, runID string) (*provider.Usage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u := &provider.Usage{}
+	for _, r := range m.usageRecords[runID] {
+		u.InputTokens += r.Usage.InputTokens
+		u.OutputTokens += r.Usage.OutputTokens
+		u.CacheReadTokens += r.Usage.CacheReadTokens
+		u.CacheWriteTokens += r.Usage.CacheWriteTokens
+	}
+	return u, nil
+}
+
+// LatestRunSteps returns the run's newest intent rows (newest first),
+// excluding overflow_compact records (completed recovery records, never
+// pending effects). ResultExists is always false in memory: the mem message
+// store keeps no id correlation, and recovery tests drive PGStore for the join.
+func (m *MemStore) LatestRunSteps(_ context.Context, runID string, limit int) ([]RunStep, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		limit = 1
+	}
+	steps := m.steps[runID]
+	out := make([]RunStep, 0, limit)
+	for i := len(steps) - 1; i >= 0 && len(out) < limit; i-- {
+		if steps[i].StepKind == StepOverflowCompact {
+			continue
+		}
+		out = append(out, steps[i])
+	}
+	return out, nil
 }
 
 func (m *MemStore) RunsForSession(_ context.Context, sessionID string) ([]Run, error) {
