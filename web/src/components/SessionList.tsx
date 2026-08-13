@@ -56,6 +56,11 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   // raced a newer search is dropped instead of overwriting its results.
   const [debounced, setDebounced] = useState("");
   const queryRef = useRef("");
+  // seqRef counts refreshes: every refresh (new search, session created or
+  // deleted) bumps it, so a loadMore page that was in flight during the
+  // refresh — its cursor belongs to the OLD list — is dropped instead of
+  // appending deleted sessions or duplicates onto the new first page.
+  const seqRef = useRef(0);
   // Sentinel at the bottom of the list; becoming visible triggers the next page.
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
@@ -75,9 +80,11 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
 
   // refresh reloads from the first page (bumped by refreshToken, e.g. after a
   // new session is created, or by the search box). Any previously loaded pages
-  // are dropped so the list reflects the new activity order / search.
+  // are dropped so the list reflects the new activity order / search; bumping
+  // the generation also voids any loadMore page still in flight.
   const refresh = useCallback(
     async (q: string) => {
+      seqRef.current += 1;
       setLoading(true);
       const page = await fetchPage(q, "");
       if (page) {
@@ -91,10 +98,15 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore) return;
+    const seq = seqRef.current;
     setLoadingMore(true);
     const page = await fetchPage(debounced, nextCursor);
     setLoadingMore(false);
     if (!page) return;
+    // A refresh bumped the generation while this page was in flight: its
+    // cursor pages the pre-refresh list, so appending would resurrect deleted
+    // sessions (or duplicate the refreshed first page). Drop it.
+    if (seqRef.current !== seq) return;
     if (page.sessions.length === 0) {
       setNextCursor("");
       return;
