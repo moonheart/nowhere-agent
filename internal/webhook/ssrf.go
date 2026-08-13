@@ -234,9 +234,6 @@ func public6(ip net.IP) bool {
 }
 
 // hostnameOnly strips the port from a URL host ("host:port" → "host") and the
-// brackets from an IPv6 literal ("[::1]" → "[::1]") so ParseIP can vet it.
-
-// hostnameOnly strips the port from a URL host ("host:port" → "host") and the
 // brackets from an IPv6 literal ("[::1]" → "::1") so ParseIP can vet it.
 func hostnameOnly(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
