@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,31 @@ func TestSPAHandlerServesIndexAtRoot(t *testing.T) {
 	rec := serve(t, spaHandler(dir), "/")
 	if rec.Code != http.StatusOK || rec.Body.String() != "shell" {
 		t.Errorf("/ = %d %q, want 200 with the shell", rec.Code, rec.Body.String())
+	}
+}
+
+// A real directory under the web root must never be served as a FileServer
+// listing: it falls back to the app shell like any client route.
+func TestSPAHandlerDoesNotListDirectories(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "index.html"), "shell")
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "assets", "app.js"), "console.log(1)")
+
+	for _, p := range []string{"/assets", "/assets/"} {
+		rec := serve(t, spaHandler(dir), p)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s = %d, want 200", p, rec.Code)
+		}
+		body := rec.Body.String()
+		if body == "console.log(1)" || strings.Contains(body, "app.js") || strings.Contains(body, "Index of") {
+			t.Errorf("%s served a directory listing: %q", p, body)
+		}
+		if body != "shell" {
+			t.Errorf("%s = %q, want the app shell", p, body)
+		}
 	}
 }
 

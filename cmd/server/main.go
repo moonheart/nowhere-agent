@@ -1921,9 +1921,11 @@ func (noProviderAdapter) Stream(context.Context, provider.Request) (<-chan provi
 }
 
 // spaHandler serves static files from dir, falling back to index.html for
-// paths that do not name a file. That fallback is what makes client-side routes
-// (/admin/users and friends) survive a reload or a shared link — a plain
-// FileServer answers 404 for them.
+// paths that do not name a FILE — including real directories: an existing
+// subdirectory must never be served as a FileServer directory listing, it
+// falls back to the app shell like any client route. That fallback is what
+// makes client-side routes (/admin/users and friends) survive a reload or a
+// shared link — a plain FileServer answers 404 for them.
 //
 // The fallback deliberately does NOT apply to /api/: those routes are
 // registered with more specific patterns, which Go 1.22+ ServeMux matches in
@@ -1942,7 +1944,7 @@ func spaHandler(dir string) http.Handler {
 		// rooted path cannot escape, and http.ServeFile would reject it anyway,
 		// but checking here keeps the stat below honest.
 		clean := path.Clean("/" + r.URL.Path)
-		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(clean))); err == nil && clean != "/" {
+		if info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(clean))); err == nil && clean != "/" && !info.IsDir() {
 			files.ServeHTTP(w, r)
 			return
 		}
