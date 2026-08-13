@@ -24,8 +24,10 @@ import { asAsyncIterableStream } from "assistant-stream/utils";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
+import { ApiError } from "@/lib/api";
 import { imageFileUrl } from "@/lib/image-attachment";
 import { reportInteraction, type Interaction } from "@/lib/approval";
+import { reportNotice } from "@/lib/notice";
 import { reportPlan, type Plan } from "@/lib/plan";
 import { reportPermissionMode, permissionModeFromSessionState } from "@/lib/permission";
 
@@ -132,7 +134,21 @@ async function loadHistory(): Promise<{
     `/api/chat/history?threadId=${encodeURIComponent(threadId)}`,
     { headers: authHeaders() },
   );
-  if (!res.ok) return { messages: [], active: false };
+  if (!res.ok) {
+    // Follow the api<T>() convention: a non-2xx history response is a real
+    // error with the server's `error` message, not an empty conversation.
+    // (No history = a successful response with an empty message list.)
+    const text = await res.text();
+    let msg: string;
+    try {
+      msg =
+        (JSON.parse(text) as { error?: string }).error ??
+        `history load failed (${res.status})`;
+    } catch {
+      msg = text.slice(0, 200) || `history load failed (${res.status})`;
+    }
+    throw new ApiError(msg, res.status);
+  }
   const data = (await res.json()) as {
     messages?: HistoryMessage[];
     active?: boolean;
@@ -249,7 +265,22 @@ export async function hasActiveRun(): Promise<boolean> {
 
 export const threadHistory: ThreadHistoryAdapter = {
   async load() {
-    const { messages, active, pendingApproval, pendingInteractions, sessionState } = await loadHistory();
+    let loaded: Awaited<ReturnType<typeof loadHistory>>;
+    try {
+      loaded = await loadHistory();
+    } catch (err) {
+      // A failed history fetch (401, 500, network) must not read as "this
+      // session has no history" — surface it and leave the thread empty
+      // rather than pretending the conversation is blank.
+      console.error("history load failed", err);
+      reportNotice(
+        err instanceof ApiError
+          ? `Could not load this conversation: ${err.message}`
+          : "Could not load this conversation.",
+      );
+      return ExportedMessageRepository.fromArray([]);
+    }
+    const { messages, active, pendingApproval, pendingInteractions, sessionState } = loaded;
     // Re-show every parked interaction of a gated batch (the transient frames
     // dropped on refresh); the durable rows are the source of truth, echoed by
     // /history as pendingInteractions (queue order). Fall back to the singular
