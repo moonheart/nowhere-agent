@@ -42,7 +42,10 @@ type Store interface {
 	Get(ctx context.Context, id string) (Upload, error)
 	// Delete removes the record by id.
 	Delete(ctx context.Context, id string) error
-	// ReferencedByMessage reports whether any stored message references the
-	// upload id (its content JSON embeds "uploads/<id>.webp").
-	ReferencedByMessage(ctx context.Context, id string) (bool, error)
+	// ReferencedByMessage reports whether any message BY THE SAME USER
+	// references the upload id (its content JSON embeds "uploads/<id>.webp").
+	// The owner scope matters: a message only ever resolves "uploads/…" paths
+	// under its author's own upload scope, so another user's content cannot
+	// hold a reference to this upload.
+	ReferencedByMessage(ctx context.Context, userID, id string) (bool, error)
 }

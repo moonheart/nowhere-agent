@@ -218,6 +218,38 @@ func TestDeleteReferencedIsConflict(t *testing.T) {
 	}
 }
 
+// TestDeleteReferenceCheckScopedToOwner: the reference scan must only look at
+// the upload owner's own messages. Another user's content can never resolve an
+// "uploads/<id>.webp" path under this user's scope (the read route resolves
+// under the author's scope), so a cross-user LIKE hit must neither block the
+// delete nor leak into the result.
+func TestDeleteReferenceCheckScopedToOwner(t *testing.T) {
+	s, db, _ := svc(t)
+	a, b := createUser(t, db), createUser(t, db)
+	ctx := context.Background()
+
+	u, err := s.Upload(ctx, a, "a.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// B's session holds a message that embeds A's exact upload reference.
+	// It must not count against A.
+	addMessage(t, db, b, u.ID)
+
+	if err := s.Delete(ctx, a, u.ID); err != nil {
+		t.Fatalf("delete blocked by another user's message: %v (want nil)", err)
+	}
+	// A's own message embedding the same reference must block.
+	u2, err := s.Upload(ctx, a, "a2.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	addMessage(t, db, a, u2.ID)
+	if err := s.Delete(ctx, a, u2.ID); !errors.Is(err, ErrReferenced) {
+		t.Errorf("delete with own reference err = %v, want ErrReferenced", err)
+	}
+}
+
 func TestDeleteMissingIsNotFound(t *testing.T) {
 	s, db, _ := svc(t)
 	userID := createUser(t, db)

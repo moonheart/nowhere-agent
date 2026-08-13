@@ -139,7 +139,7 @@ func (s *Service) Delete(ctx context.Context, userID, id string) error {
 	if u.UserID != userID {
 		return ErrNotFound
 	}
-	ref, err := s.store.ReferencedByMessage(ctx, id)
+	ref, err := s.store.ReferencedByMessage(ctx, userID, id)
 	if err != nil {
 		return err
 	}

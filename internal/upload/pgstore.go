@@ -71,14 +71,27 @@ func (s *PGStore) Delete(ctx context.Context, id string) error {
 }
 
 // ReferencedByMessage scans message content for the upload reference. Message
-// content is a JSON document, not a normalized relation, so the check is a text
-// scan — a deletion-time cost, not a hot path (see design: reference protection).
-func (s *PGStore) ReferencedByMessage(ctx context.Context, id string) (bool, error) {
+// content is a JSON document, not a normalized relation, so the check is a
+// text scan — a deletion-time cost, not a hot path (see design: reference
+// protection).
+//
+// The scan is scoped to the upload OWNER's sessions via the sessions join.
+// Messages reference "uploads/<id>.webp" and the read route resolves that
+// path under the author's own upload scope, so a row of another user can never
+// reference this upload — scanning them would be pure waste across the whole
+// messages table (no index can help a LIKE '%…%' anyway; the join shrinks the
+// candidate set to the user's messages first). Cross-tenant isolation is a
+// correctness property here too: another user's content must not block (or
+// reveal) this user's delete.
+func (s *PGStore) ReferencedByMessage(ctx context.Context, userID, id string) (bool, error) {
 	pattern := "%uploads/" + id + ".webp%"
 	var ref bool
 	err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM messages WHERE content::text LIKE $1
-		)`, pattern).Scan(&ref)
+			SELECT 1
+			FROM messages m
+			JOIN sessions s ON s.id = m.session_id
+			WHERE s.user_id = $1 AND m.content::text LIKE $2
+		)`, userID, pattern).Scan(&ref)
 	return ref, err
 }
