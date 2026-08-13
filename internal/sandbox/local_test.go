@@ -187,6 +187,29 @@ func TestLocalPortRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestLocalPortRejectsSymlinkedParentEscape(t *testing.T) {
+	p, h := newLocalSandbox(t)
+	ctx := context.Background()
+
+	// A symlinked parent directory inside the workspace pointing outside it:
+	// writes into not-yet-existing children must be refused.
+	outside := t.TempDir()
+	ws := filepath.Join(p.root, h.SessionID)
+	link := filepath.Join(ws, "sub")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("cannot create symlink (Windows perms): %v", err)
+	}
+	if err := p.WriteFile(ctx, h, "sub/evil.txt", strings.NewReader("x")); err == nil {
+		t.Error("expected error writing through symlinked parent")
+	}
+	if err := p.Mkdir(ctx, h, "sub/deep"); err == nil {
+		t.Error("expected error mkdir through symlinked parent")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "evil.txt")); !os.IsNotExist(err) {
+		t.Errorf("escape file exists outside workspace via symlinked parent: %v", err)
+	}
+}
+
 func TestLocalPortDestroy(t *testing.T) {
 	p, h := newLocalSandbox(t)
 	ctx := context.Background()

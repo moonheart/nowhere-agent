@@ -153,15 +153,17 @@ func (p *LocalPort) resolve(h Handle, path string) (string, error) {
 		return "", fmt.Errorf("path %q escapes the workspace", path)
 	}
 
-	// Symlink-aware containment: if the target exists, resolve symlinks on both
+	// Symlink-aware containment. If the target exists, resolve symlinks on both
 	// the root and the file and require the resolved file to stay under the
-	// resolved root. A non-existent path (a write to a new file) can't be a
-	// symlink yet, so the cleaned-path check above suffices.
+	// resolved root. A non-existent target can't itself be a symlink yet, but
+	// its parent chain can — a write to "link-outside/new.txt" must not land
+	// outside the workspace — so resolve the nearest existing ancestor of the
+	// parent and confine that instead.
+	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace: %w", err)
+	}
 	if _, statErr := os.Lstat(full); statErr == nil {
-		resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
-		if err != nil {
-			return "", fmt.Errorf("resolve workspace: %w", err)
-		}
 		resolvedFull, err := filepath.EvalSymlinks(fullAbs)
 		if err != nil {
 			return "", fmt.Errorf("resolve %q: %w", path, err)
@@ -169,8 +171,34 @@ func (p *LocalPort) resolve(h Handle, path string) (string, error) {
 		if !within(resolvedRoot, resolvedFull) {
 			return "", fmt.Errorf("path %q escapes the workspace via symlink", path)
 		}
+	} else {
+		resolvedParent, err := resolveNearestExisting(filepath.Dir(fullAbs))
+		if err != nil {
+			return "", fmt.Errorf("resolve parent of %q: %w", path, err)
+		}
+		if !within(resolvedRoot, resolvedParent) {
+			return "", fmt.Errorf("path %q escapes the workspace via symlinked parent", path)
+		}
 	}
 	return full, nil
+}
+
+// resolveNearestExisting evaluates symlinks on the deepest existing ancestor
+// of path, climbing up until EvalSymlinks succeeds. It is used to confine
+// writes into not-yet-created paths whose parent chain may contain a symlink
+// pointing outside the workspace.
+func resolveNearestExisting(path string) (string, error) {
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			return resolved, nil
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return "", err
+		}
+		path = parent
+	}
 }
 
 // within reports whether child is root itself or under it.
