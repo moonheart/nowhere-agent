@@ -555,6 +555,7 @@ func (m *UsageMW) AfterRun(ctx context.Context, s *RunState) error {
 		c := sc.Total()
 		total.InputTokens += c.InputTokens
 		total.OutputTokens += c.OutputTokens
+		total.ReasoningTokens += c.ReasoningTokens
 		total.CacheReadTokens += c.CacheReadTokens
 		total.CacheWriteTokens += c.CacheWriteTokens
 	}

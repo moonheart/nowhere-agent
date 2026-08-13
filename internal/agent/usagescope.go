@@ -44,6 +44,7 @@ func (s *UsageScope) Add(u provider.Usage) {
 	defer s.mu.Unlock()
 	s.child.InputTokens += u.InputTokens
 	s.child.OutputTokens += u.OutputTokens
+	s.child.ReasoningTokens += u.ReasoningTokens
 	s.child.CacheReadTokens += u.CacheReadTokens
 	s.child.CacheWriteTokens += u.CacheWriteTokens
 }
