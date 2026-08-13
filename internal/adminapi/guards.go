@@ -1,7 +1,6 @@
 package adminapi
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -101,24 +100,12 @@ func caller(r *http.Request) identity.User {
 // bound scheduleapi/agentdefapi use); larger bodies get 413 before decoding.
 const maxBodyBytes = 1 << 20
 
-// decode reads a JSON body into v, answering 400 and reporting false on
-// malformed input. An oversized body answers 413 instead of decoding a
-// truncated blob.
+// decode reads a JSON body into v via the shared httpx implementation, so
+// error wording cannot drift from every other handler: 400 "read body" for an
+// unreadable request, 413 "payload too large" for an oversized one, 400
+// "invalid json" for malformed input. Reports false when a response was written.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	body, err := httpx.ReadBodyMax(r, maxBodyBytes)
-	if err != nil {
-		if errors.Is(err, httpx.ErrBodyTooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
-			return false
-		}
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return false
-	}
-	if err := json.Unmarshal(body, v); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return false
-	}
-	return true
+	return httpx.DecodeBody(w, r, maxBodyBytes, v)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

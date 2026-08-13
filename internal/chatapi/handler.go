@@ -309,14 +309,14 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	body, err := httpx.ReadBodyMax(r, maxChatBodyBytes)
 	if err != nil {
 		if errors.Is(err, httpx.ErrBodyTooLarge) {
-			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "payload too large")
 			return
 		}
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 

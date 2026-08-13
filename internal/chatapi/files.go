@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/workspace"
@@ -34,13 +35,13 @@ func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 		return // 404/403 already written
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxImageUploadBytes+1))
+	body, err := httpx.ReadBodyMax(r, maxImageUploadBytes)
 	if err != nil {
-		http.Error(w, `{"error":"read body failed"}`, http.StatusBadRequest)
-		return
-	}
-	if len(body) > maxImageUploadBytes {
-		http.Error(w, `{"error":"image too large"}`, http.StatusRequestEntityTooLarge)
+		if errors.Is(err, httpx.ErrBodyTooLarge) {
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "image too large")
+			return
+		}
+		httpx.Error(w, http.StatusBadRequest, "read body failed")
 		return
 	}
 
@@ -80,13 +81,13 @@ func (h *Handler) serveUserImageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxImageUploadBytes+1))
+	body, err := httpx.ReadBodyMax(r, maxImageUploadBytes)
 	if err != nil {
-		http.Error(w, `{"error":"read body failed"}`, http.StatusBadRequest)
-		return
-	}
-	if len(body) > maxImageUploadBytes {
-		http.Error(w, `{"error":"image too large"}`, http.StatusRequestEntityTooLarge)
+		if errors.Is(err, httpx.ErrBodyTooLarge) {
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "image too large")
+			return
+		}
+		httpx.Error(w, http.StatusBadRequest, "read body failed")
 		return
 	}
 
