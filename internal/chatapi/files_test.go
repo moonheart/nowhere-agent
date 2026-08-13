@@ -275,6 +275,43 @@ func TestServeImageUploadQuotaExemptWhenUnlimited(t *testing.T) {
 	}
 }
 
+// TestServeImageUploadUniqueNamesPerUpload: consecutive uploads to the SAME
+// session must land under distinct uuid names — the fixed "upload.webp" name
+// used to overwrite the previous file, silently re-pointing old message
+// references at the newest image.
+func TestServeImageUploadUniqueNamesPerUpload(t *testing.T) {
+	_, rt, is, mux := setupFileHandler(t)
+	sess, _ := rt.CreateSession(context.Background(), "owner1", "t")
+
+	var paths []string
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, uploadReq(t, sess.ID, testPNG(t), "owner1"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("upload %d status = %d body=%s", i, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode %d: %v", i, err)
+		}
+		paths = append(paths, resp.Path)
+	}
+	if paths[0] == paths[1] {
+		t.Fatalf("both uploads returned the same path %q — old reference would be re-pointed", paths[0])
+	}
+	// Both files must still exist independently (no overwrite).
+	for _, p := range paths {
+		rc, err := is.Open(sess.ID, p)
+		if err != nil {
+			t.Errorf("stored image %q unreadable: %v", p, err)
+			continue
+		}
+		rc.Close()
+	}
+}
+
 // ---- user-level uploads (change user-image-uploads) ----
 
 // fakeUploader implements upload.Uploader over the workspace ImageStore, so the

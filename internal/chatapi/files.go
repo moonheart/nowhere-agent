@@ -10,6 +10,8 @@ import (
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/workspace"
+
+	"github.com/google/uuid"
 )
 
 // maxImageUploadBytes caps the raw upload payload size (image-input capability):
@@ -71,11 +73,12 @@ func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The store decodes the payload (PNG/JPEG/GIF/WebP), rejects unsupported or
-	// malformed bytes, and re-encodes to WebP under the session dir.
-	name := "upload.webp"
-	if fn := r.URL.Query().Get("name"); fn != "" {
-		name = fn
-	}
+	// malformed bytes, and re-encodes to WebP under the session dir. The file
+	// name is ALWAYS a fresh uuid: the frontend sends no name, and a client-
+	// supplied fixed name would let consecutive uploads overwrite each other,
+	// silently re-pointing old message references at the newest image (the
+	// same convention as user-level uploads).
+	name := uuid.NewString()
 	rel, err := h.images.Save(sessID, name, body)
 	if err != nil {
 		if errors.Is(err, workspace.ErrUnsupportedImage) {

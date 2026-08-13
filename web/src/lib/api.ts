@@ -117,25 +117,6 @@ export function qs(params: Record<string, string | number | undefined>): string 
   return parts.length > 0 ? `?${parts.join("&")}` : "";
 }
 
-// uploadSessionImage uploads an image to the session's workspace (POST
-// .../sessions/{id}/images) and returns the session-relative path the chat
-// request then references as an image part. The endpoint reads the RAW payload
-// (ImageStore re-encodes to WebP), so the file bytes go straight in the body
-// with the file's own content type.
-export async function uploadSessionImage(
-  sessionId: string,
-  file: File,
-): Promise<{ path: string }> {
-  return api<{ path: string }>(
-    `/api/chat/sessions/${encodeURIComponent(sessionId)}/images`,
-    {
-      method: "POST",
-      body: await file.arrayBuffer(),
-      contentType: file.type || "application/octet-stream",
-    },
-  );
-}
-
 // uploadUserImage stores an image as a user-level upload (change
 // user-image-uploads), independent of any session — so a brand-new
 // conversation's first message can carry an image. The returned path has the
