@@ -73,7 +73,9 @@ type Notifier struct {
 
 // Options tunes delivery. Zero values pick safe defaults.
 type Options struct {
-	// Timeout bounds one HTTP attempt; 0 defaults to 10s.
+	// Timeout is the WHOLE delivery budget: one context covers every attempt
+	// and the backoff waits between them, so a slow consumer cannot stretch
+	// one notification across N attempts × timeout. 0 defaults to 10s.
 	Timeout time.Duration
 	// Retries is the number of attempts after the first; 0 defaults to 3.
 	Retries int
@@ -133,9 +135,10 @@ func httpClientFor(g *Guard, _ time.Duration) *http.Client {
 }
 
 // SetPolicy retunes the delivery policy live (admin console): timeout bounds
-// one attempt, retries bounds the attempts after the first, and signingSecret
-// (may be empty to stop signing) signs every payload. Zero timeout/retries
-// fall back to the 10s/3 defaults. The next delivery uses the new policy.
+// the whole delivery (one context across all attempts and backoff waits),
+// retries bounds the attempts after the first, and signingSecret (may be
+// empty to stop signing) signs every payload. Zero timeout/retries fall back
+// to the 10s/3 defaults. The next delivery uses the new policy.
 func (n *Notifier) SetPolicy(timeout time.Duration, retries int, signingSecret string) {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
