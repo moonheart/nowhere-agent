@@ -68,6 +68,29 @@ func TestNewManagerFromJSON(t *testing.T) {
 	}
 }
 
+// TestEmptyManagerAppliesRuntimeConfig proves the cold-start contract: a
+// manager built without boot servers can still reconcile a runtime
+// mcp_servers value (the admin console enables MCP without a restart).
+func TestEmptyManagerAppliesRuntimeConfig(t *testing.T) {
+	m := NewEmptyManager()
+	if got := m.ServerNames(); len(got) != 0 {
+		t.Fatalf("empty manager servers = %v, want none", got)
+	}
+	if got := len(m.Tools()); got != 0 {
+		t.Errorf("empty manager tools = %d, want 0", got)
+	}
+	added, removed, err := m.Apply(`[{"name":"searxng","url":"https://searxng.example.com/mcp"}]`)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(removed) != 0 || len(added) != 1 || added[0].Server() != "searxng" {
+		t.Fatalf("added=%v removed=%v, want [searxng] added", serverNames(added), removed)
+	}
+	if got := m.ServerNames(); len(got) != 1 || got[0] != "searxng" {
+		t.Errorf("servers after apply = %v, want [searxng]", got)
+	}
+}
+
 func TestManagerToolsBeforeConnectEmpty(t *testing.T) {
 	m, err := NewManagerFromJSON(`[{"name":"a","url":"https://a.example.com/mcp"}]`)
 	if err != nil {

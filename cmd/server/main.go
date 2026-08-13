@@ -822,14 +822,19 @@ func run() error {
 		// Tools stay unregistered until the handshake lands; a config mistake
 		// surfaces as a clear startup warning and keeps retrying rather than
 		// exiting.
-		var mcpManager *mcp.Manager
-		mcpRaw := initialMCPServers(cfg)
-		if mcpRaw != "" {
-			var err error
-			mcpManager, err = mcp.NewManagerFromJSON(mcpRaw)
-			if err != nil {
-				return fmt.Errorf("mcp config: %w", err)
-			}
+		//
+		// The manager is ALWAYS built — an empty boot config yields an empty
+		// manager, not nil — so the runtime mcp_servers setting can enable MCP
+		// from the admin console without a restart: applyMCP below would
+		// otherwise short-circuit on a nil manager and a console-added server
+		// would never take effect on a cold start without MCP_SERVERS.
+		mcpManager, mcpErr := mcp.NewManagerFromJSON(initialMCPServers(cfg))
+		if mcpErr != nil {
+			return fmt.Errorf("mcp config: %w", mcpErr)
+		}
+		if mcpManager == nil {
+			mcpManager = mcp.NewEmptyManager()
+		} else {
 			log.Info("mcp servers configured", "servers", mcpManager.ServerNames())
 			for _, c := range mcpManager.Clients() {
 				go reconnectMCP(ctx, c, log)
@@ -843,9 +848,6 @@ func run() error {
 		// should one ever reach here, keeps the previous set with a loud log.
 		mcpCancels := map[string]context.CancelFunc{}
 		applyMCP := func() {
-			if mcpManager == nil {
-				return
-			}
 			added, removed, err := mcpManager.Apply(settingsRuntime.String(settings.KeyMCPServers))
 			if err != nil {
 				log.Warn("mcp servers config invalid; keeping previous set", "err", err)
@@ -1345,11 +1347,11 @@ func run() error {
 				}
 			}
 			// MCP tools (network): registered into the same run registry so
-			// children scoped from it inherit them.
-			if mcpManager != nil {
-				for _, t := range mcpManager.Tools() {
-					reg.Register(t)
-				}
+			// children scoped from it inherit them. The manager is always
+			// non-nil (an empty boot config builds an empty one); Tools()
+			// returns nothing until a server connects.
+			for _, t := range mcpManager.Tools() {
+				reg.Register(t)
 			}
 			// view_image (image-input): a dedicated vision model backs a main model
 			// without native image input. The tool resolves the image bytes through

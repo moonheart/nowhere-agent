@@ -104,6 +104,13 @@ func NewManagerFromJSON(raw string) (*Manager, error) {
 	return NewManager(cfgs)
 }
 
+// NewEmptyManager builds a Manager with no configured servers. Unlike
+// NewManager/NewManagerFromJSON — which return a nil manager for an empty
+// config (MCP disabled) — it is the runtime-reconfigure handle for a boot
+// without MCP_SERVERS: Apply can still reconcile the mcp_servers setting, so
+// the admin console can enable MCP live without a restart.
+func NewEmptyManager() *Manager { return &Manager{} }
+
 // Apply reconciles the managed clients against a new MCP_SERVERS JSON
 // (runtime-settable). Servers whose config is unchanged keep their live
 // session (no reconnect storm); changed servers are rebuilt; removed servers
