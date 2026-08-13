@@ -229,11 +229,15 @@ func Allowlist(patterns []string) (AllowlistFunc, error) {
 			// Translation schemes (NAT64/6to4/ISATAP/4-in-6) reach an
 			// embedded IPv4 on the caller's behalf: match the CIDR rules
 			// against that too, or a [64:ff9b::10.0.0.1] target misses a
-			// 10.0.0.0/8 rule in an IPv6-only (NAT64) setup.
-			if v4 := netutil.EmbeddedIPv4(ip); v4 != nil {
-				for _, r := range rules {
-					if r.ipNet != nil && r.ipNet.Contains(v4) {
-						return true
+			// 10.0.0.0/8 rule in an IPv6-only (NAT64) setup. Every reading
+			// of an ambiguous NAT64 address is tried (see
+			// netutil.EmbeddedIPv4s).
+			if v4s := netutil.EmbeddedIPv4s(ip); len(v4s) > 0 {
+				for _, v4 := range v4s {
+					for _, r := range rules {
+						if r.ipNet != nil && r.ipNet.Contains(v4) {
+							return true
+						}
 					}
 				}
 			}

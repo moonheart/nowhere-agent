@@ -31,6 +31,7 @@ func TestAllowlistMatches(t *testing.T) {
 		{"https://11.0.0.1/x", false},
 		{"https://[64:ff9b::a00:1]/x", true},       // NAT64 embedding 10.0.0.1, inside 10.0.0.0/8
 		{"https://[64:ff9b:1:a00:101::]/x", true},  // NAT64 /48, u≠0, embedding 10.0.1.0, inside 10.0.0.0/8
+		{"https://[64:ff9b:1:0:a:0:100::]/x", true}, // NAT64 PL=64: 10.0.0.1 at bytes 9-12, inside 10.0.0.0/8
 		{"https://[2001:db8::5efe:a00:1]/x", true}, // ISATAP embedding 10.0.0.1, inside 10.0.0.0/8
 		{"https://[64:ff9b::c0a8:101]/x", false},   // NAT64 embedding 192.168.1.1, outside 10.0.0.0/8
 		{"file://api.example.com/x", false},

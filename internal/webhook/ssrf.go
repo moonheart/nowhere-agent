@@ -165,11 +165,14 @@ func (g *Guard) allowedIP(ip net.IP, host string) bool {
 	// an allowlist keyed on that address must match too — otherwise a
 	// private target smuggled as [64:ff9b::10.0.0.1], [2002:a00:1::],
 	// [2001:db8::5efe:10.0.0.1] or [::a00:1] evades a 10.0.0.0/8 allowlist
-	// that only sees the raw IPv6.
-	if v4 := netutil.EmbeddedIPv4(ip); v4 != nil {
-		for _, n := range g.allowNets {
-			if n.Contains(v4) {
-				return true
+	// that only sees the raw IPv6. Every possible reading of an ambiguous
+	// NAT64 address is checked (see netutil.EmbeddedIPv4s).
+	if v4s := netutil.EmbeddedIPv4s(ip); len(v4s) > 0 {
+		for _, v4 := range v4s {
+			for _, n := range g.allowNets {
+				if n.Contains(v4) {
+					return true
+				}
 			}
 		}
 	}
@@ -215,9 +218,17 @@ func public6(ip net.IP) bool {
 	// caller's behalf: vet THAT address, or a private target smuggled as
 	// [64:ff9b::10.0.0.1], [2002:a00:1::], [2001:db8::5efe:10.0.0.1] or
 	// [::a00:1] would slip past the IPv6 checks (IsPrivate etc. do not
-	// cover these encodings).
-	if v4 := netutil.EmbeddedIPv4(ip); v4 != nil {
-		return public4(v4)
+	// cover these encodings). A NAT64 local-use address has several
+	// possible readings (netutil.EmbeddedIPv4s): it is refused when ANY
+	// reading is private, since the actual translator parameter is not
+	// observable from the address alone.
+	if v4s := netutil.EmbeddedIPv4s(ip); len(v4s) > 0 {
+		for _, v4 := range v4s {
+			if !public4(v4) {
+				return false
+			}
+		}
+		return true
 	}
 	return true
 }

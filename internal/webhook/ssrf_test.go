@@ -43,6 +43,7 @@ func TestValidateURL(t *testing.T) {
 		"http://[64:ff9b::a00:1]/hook",        // NAT64 (RFC 6052) embedding 10.0.0.1 refused
 		"http://[64:ff9b:1:a00:0:100::]/hook", // NAT64 local-use /48 embedding 10.0.0.1
 		"http://[64:ff9b:1:a00:101::]/hook",   // NAT64 local-use /48, u octet ≠ 0, embedding 10.0.1.0
+		"http://[64:ff9b:1:0:a:0:100::]/hook",  // NAT64 PL=64: 10.0.0.1 at bytes 9-12 (the /48 reading sees public 0.0.10.0)
 		"http://[2002:a00:1::]/hook",          // 6to4 (RFC 3056) embedding 10.0.0.1 refused
 		"http://[2001:db8::5efe:a00:1]/hook",  // ISATAP (RFC 5214) embedding 10.0.0.1 refused
 		"http://[::a00:1]/hook",               // 4-in-6 embedding 10.0.0.1 refused
@@ -75,6 +76,7 @@ func TestCheckURLPrivateTargets(t *testing.T) {
 		"http://[64:ff9b::a00:1]/x",        // NAT64 well-known prefix embedding 10.0.0.1
 		"http://[64:ff9b:1:a00:0:100::]/x", // NAT64 local-use /48 embedding 10.0.0.1
 		"http://[64:ff9b:1:a00:101::]/x",   // NAT64 local-use /48, u octet ≠ 0, embedding 10.0.1.0
+		"http://[64:ff9b:1:0:a:0:100::]/x", // NAT64 PL=64: 10.0.0.1 at bytes 9-12, /48 reading public 0.0.10.0 — fail closed
 		"http://[2002:a00:1::]/x",          // 6to4 embedding 10.0.0.1
 		"http://[2001:db8::5efe:a00:1]/x",  // ISATAP embedding 10.0.0.1
 		"http://[::a00:1]/x",               // 4-in-6 embedding 10.0.0.1
@@ -94,6 +96,7 @@ func TestCheckURLPublicTargets(t *testing.T) {
 		"https://[2606:4700:4700::1111]/x",  // Cloudflare DNS
 		"http://[64:ff9b::808:808]/x",       // NAT64 embedding public 8.8.8.8
 		"http://[64:ff9b:1:808:8:800::]/x",  // NAT64 local-use /48 embedding public 8.8.8.8
+		"http://[64:ff9b:1:0:8:808:800::]/x", // NAT64 PL=64: public 8.8.8.8 at bytes 9-12
 		"http://[2002:808:808::]/x",         // 6to4 embedding public 8.8.8.8
 		"http://[2001:db8::5efe:808:808]/x", // ISATAP embedding public 8.8.8.8
 		"http://[::808:808]/x",              // 4-in-6 embedding public 8.8.8.8
@@ -153,6 +156,7 @@ func TestAllowlistOpensPrivateTargets(t *testing.T) {
 		{"http://[64:ff9b::a00:1]/h", true},           // NAT64 well-known prefix embedding allowlisted 10.0.0.1
 		{"http://[64:ff9b:1:a00:0:100::]/h", true},    // NAT64 local-use /48 embedding allowlisted 10.0.0.1
 		{"http://[64:ff9b:1:a00:101::]/h", true},      // NAT64 local-use /48, u octet ≠ 0, embedding allowlisted 10.0.1.0
+		{"http://[64:ff9b:1:0:a:0:100::]/h", true},     // NAT64 PL=64: 10.0.0.1 at bytes 9-12 matches the allowlisted CIDR
 		{"http://[2002:a00:1::]/h", true},             // 6to4 embedding allowlisted 10.0.0.1
 		{"http://[2001:db8::5efe:a00:1]/h", true},     // ISATAP embedding allowlisted 10.0.0.1
 		{"http://[::a00:1]/h", true},                  // 4-in-6 embedding allowlisted 10.0.0.1
