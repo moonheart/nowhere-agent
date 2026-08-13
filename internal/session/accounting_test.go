@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"nowhere-agent/internal/agent"
@@ -306,5 +308,68 @@ func TestAppendRunStepAttemptCounters(t *testing.T) {
 		if ts.ResultMessageID == nil || *ts.ResultMessageID != *shared {
 			t.Errorf("shared batch id broken: %v vs %v", ts.ResultMessageID, shared)
 		}
+	}
+}
+
+// TestToolIntentMWParallelBatchProvisionsOnce pins the batch-id race: parallel
+// tool dispatch must provision the shared result id exactly ONCE. Two racing
+// first-callers used to each read batchID == nil and provision their own id —
+// the second intent's id never got a message, so recovery misread the batch as
+// an interrupted step. 25 rounds of a 16-way batch: the old race collides
+// essentially every round; the fix never can.
+func TestToolIntentMWParallelBatchProvisionsOnce(t *testing.T) {
+	store := NewMemStore()
+	rg := NewRunRegistry(NewRuntime(store))
+	ctx := context.Background()
+	sess, err := store.CreateSession(ctx, "u1", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(ctx, sess.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := &stepIntentQueue{}
+	mw := &toolIntentMW{rg: rg, sessionID: sess.ID, runID: run.ID, pending: pending}
+
+	for round := 0; round < 25; round++ {
+		const n = 16
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				mw.WrapToolCall(ctx, &agent.ToolCall{
+					Call: toolruntime.Call{ID: fmt.Sprintf("tc-%d", i), Name: "echo"},
+				}, func(context.Context, *agent.ToolCall) toolruntime.Result {
+					return toolruntime.Result{Content: "ok"}
+				})
+			}(i)
+		}
+		wg.Wait()
+
+		pending.mu.Lock()
+		ids := append([]stepIntent{}, pending.ids...)
+		pending.mu.Unlock()
+		if len(ids) != n {
+			t.Fatalf("round %d: intents = %d, want %d", round, len(ids), n)
+		}
+		var first *int64
+		for _, in := range ids {
+			if first == nil {
+				first = in.messageID
+				continue
+			}
+			if in.messageID == nil || *in.messageID != *first {
+				t.Fatalf("round %d: batch provisioned more than one id (%d vs %d)", round, *first, *in.messageID)
+			}
+		}
+		if first == nil {
+			t.Fatalf("round %d: no intent written", round)
+		}
+		// Fresh batch: the next round provisions a fresh id. Drain the queue
+		// the way the emitter's tool-result persist path does.
+		mw.resetBatch()
+		_ = pending.popTools()
 	}
 }

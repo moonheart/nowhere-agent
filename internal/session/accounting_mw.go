@@ -61,10 +61,29 @@ var _ agent.ToolCallMiddleware = (*toolIntentMW)(nil)
 // MiddlewareName identifies the middleware in the chain.
 func (m *toolIntentMW) MiddlewareName() string { return "tool-intent" }
 
-// WrapToolCall writes the intent and then executes.
+// WrapToolCall writes the intent and then executes. The batch's shared id is
+// decided atomically: the FIRST caller to see batchID == nil provisions it
+// (appendStep) and every later caller reuses — racing parallel dispatches must
+// never each provision (two ids would leave a dangling second intent that
+// recovery misreads as an interrupted step). The decision and the provision
+// stay under the same lock acquisition; a failed provision leaves batchID nil
+// so the next caller takes the first-caller role.
 func (m *toolIntentMW) WrapToolCall(ctx context.Context, c *agent.ToolCall, next agent.ToolHandler) toolruntime.Result {
 	m.mu.Lock()
 	shared := m.batchID
+	if shared == nil {
+		st, err := m.rg.appendStep(ctx, m.runID, StepTool, c.Call.ID, nil)
+		if err != nil {
+			m.mu.Unlock()
+			slog.Warn("write tool step intent failed; skipping tool", "run", m.runID, "tool", c.Call.Name, "err", err)
+			return toolruntime.Result{
+				Content: "not executed: the run could not record this tool call's intent (durable accounting failure)",
+				IsError: true,
+			}
+		}
+		m.batchID = st.ResultMessageID
+		shared = st.ResultMessageID
+	}
 	m.mu.Unlock()
 	st, err := m.rg.appendStep(ctx, m.runID, StepTool, c.Call.ID, shared)
 	if err != nil {
@@ -74,11 +93,6 @@ func (m *toolIntentMW) WrapToolCall(ctx context.Context, c *agent.ToolCall, next
 			IsError: true,
 		}
 	}
-	m.mu.Lock()
-	if m.batchID == nil {
-		m.batchID = st.ResultMessageID
-	}
-	m.mu.Unlock()
 	m.pending.push(stepIntent{kind: StepTool, messageID: st.ResultMessageID, attempt: st.Attempt})
 	return next(ctx, c)
 }
