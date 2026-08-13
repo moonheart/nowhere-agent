@@ -138,11 +138,13 @@ func (s *Service) sessionsForUser(ctx context.Context, userID string) ([]session
 	return out, nil
 }
 
-// Write streams the export document for userID to w as JSON. It is written
-// incrementally (sessions stream one at a time), so a large conversation
-// history does not need to be held in memory at once. The identity rows are
-// provided by the caller (the authenticated request context already holds
-// them; the export is a copy, not a re-query).
+// Write writes the export document for userID to w as JSON. The document is
+// ENCODED incrementally (sessions are flushed to w one at a time), but the
+// data itself is not streamed: sessionsForUser first loads every session and
+// every message of the user into memory, so a very large conversation
+// history is held in memory for the duration of the export. The identity
+// rows are provided by the caller (the authenticated request context already
+// holds them; the export is a copy, not a re-query).
 func (s *Service) Write(ctx context.Context, w io.Writer, u identity.User) error {
 	enc := json.NewEncoder(w)
 	// Open the object: header fields first. The user object's own braces come
