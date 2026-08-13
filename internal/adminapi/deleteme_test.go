@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"nowhere-agent/internal/identity"
@@ -80,5 +82,46 @@ func TestDeleteMeServiceGuard(t *testing.T) {
 	}
 	if err := e.svc.DeleteSelf(context.Background(), u.ID); err != nil {
 		t.Fatalf("DeleteSelf(self) = %v, want nil", err)
+	}
+}
+
+// TestDeleteMePurgesImages pins the regression where DELETE /api/me wiped the
+// account but left its workspace images behind: the session's image dir and
+// the user's __uploads__ scope must be removed just like the admin delete
+// path does (the account row and its cascades die, so nothing else will ever
+// clean those dirs).
+func TestDeleteMePurgesImages(t *testing.T) {
+	e := newEnv(t)
+	u := e.user(identity.PlatformRoleUser)
+	sess := e.sessionFor(u)
+
+	// Seed the two workspace locations the delete must reclaim: a session
+	// image dir and the user's upload scope.
+	sessDir := filepath.Join(e.images.Root(), sess.ID)
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("mkdir session dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "pic.webp"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write session image: %v", err)
+	}
+	uploadDir := filepath.Join(e.images.Root(), "__uploads__", u.ID)
+	if err := os.MkdirAll(uploadDir, 0o755); err != nil {
+		t.Fatalf("mkdir upload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(uploadDir, "blob.webp"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write upload blob: %v", err)
+	}
+
+	rec := e.as(u, "DELETE", "/api/me", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete me: %d (%s), want 204", rec.Code, rec.Body)
+	}
+	for path, what := range map[string]string{
+		filepath.Join(sessDir, "pic.webp"):    "session image",
+		filepath.Join(uploadDir, "blob.webp"): "upload blob",
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s survived the delete (stat err=%v)", what, err)
+		}
 	}
 }

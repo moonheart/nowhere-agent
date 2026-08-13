@@ -183,13 +183,25 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 // account owner removes their own account and its data. It uses the dedicated
 // DeleteSelf path (DeleteAccount would refuse a self-target by design) and
 // the caller's tokens die with the account — the client clears its stored
-// token afterwards.
+// token afterwards. Like deleteUser it purges the account's workspace images
+// (session dirs + upload scope): the cascade removes the session rows, and
+// image dirs keyed by session id would otherwise orphan forever.
 func (h *Handler) deleteMe(w http.ResponseWriter, r *http.Request) {
 	u := caller(r)
+	var sessionIDs []string
+	if h.sessions != nil {
+		ids, err := h.sessions.SessionIDsForUser(r.Context(), u.ID)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		sessionIDs = ids
+	}
 	if err := h.identity.DeleteSelf(r.Context(), u.ID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
+	h.purgeUserImages(r, u.ID, sessionIDs)
 	h.record(r, audit.Success(audit.ActionMeDelete).Target("user", u.ID))
 	w.WriteHeader(http.StatusNoContent)
 }
