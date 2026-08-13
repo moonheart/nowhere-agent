@@ -173,6 +173,67 @@ func TestAdminSessionPurgeCancelsActiveRun(t *testing.T) {
 	}
 }
 
+// TestAdminDeleteUserCancelsActiveRuns pins the active-run contract for user
+// deletion: deleting an account with an in-flight run must interrupt the
+// worker BEFORE the cascade removes its rows, or the worker fails its next DB
+// write (FK cascade) while the LLM stream keeps spending. Both the admin
+// delete and the self-service delete must unwind the worker.
+func TestAdminDeleteUserCancelsActiveRuns(t *testing.T) {
+	for _, path := range []string{"/api/admin/users/", "/api/me"} {
+		t.Run(path, func(t *testing.T) {
+			e := newEnv(t)
+			admin := e.user(identity.PlatformRoleAdmin)
+			owner := e.user(identity.PlatformRoleUser)
+			sess := e.sessionFor(owner)
+			// sessionFor leaves a queued run row; settle it so the single-active-run
+			// lock does not reject the new submit.
+			if _, err := e.db.Exec(`UPDATE runs SET status = 'done' WHERE session_id = $1 AND status <> 'done'`, sess.ID); err != nil {
+				t.Fatalf("settle queued run: %v", err)
+			}
+
+			// Submit a run whose provider blocks until the test ends, so a worker
+			// is actively executing for the session.
+			release := make(chan struct{})
+			defer close(release)
+			msg := provider.TextMessage(provider.RoleUser, "hold")
+			if _, err := e.registry.Submit(context.Background(), sess.ID, session.RunWork{
+				Loop:        agent.New(gateProvider{release: release}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}),
+				UserMessage: &msg,
+			}); err != nil {
+				t.Fatalf("submit blocking run: %v", err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for !e.registry.ActiveWorker(sess.ID) {
+				if time.Now().After(deadline) {
+					t.Fatal("run worker never became active")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			actor := admin
+			target := path + sess.UserID
+			if path == "/api/me" {
+				actor = owner
+				target = path
+			}
+			rec := e.as(actor, "DELETE", target, nil)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("delete = %d (%s), want 204", rec.Code, rec.Body.String())
+			}
+
+			// The worker was interrupted and must unwind (no more token burn
+			// against a deleted account).
+			deadline = time.Now().Add(5 * time.Second)
+			for e.registry.ActiveWorker(sess.ID) {
+				if time.Now().After(deadline) {
+					t.Fatal("deleted user's run worker is still active after the delete")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
 // gateProvider blocks each run in Stream until released or cancelled, keeping
 // the run active (a live worker) — the state a purge must cancel before the
 // hard delete.
