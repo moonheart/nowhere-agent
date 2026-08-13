@@ -284,7 +284,7 @@ func Catalog() []KeyInfo {
 		// Tools tab.
 		{Key: KeyHTTPToolAllowlist, Group: GroupTools, Kind: KindString, Description: "Comma-separated http_request host allowlist (same syntax as HTTP_TOOL_ALLOWLIST): api.example.com, *.example.com, 10.0.0.0/8, or *. Empty disables the tool. Applies to the next run."},
 		{Key: KeyHTTPToolTimeout, Group: GroupTools, Kind: KindInt, Description: "http_request per-call timeout in seconds (overrides HTTP_TOOL_TIMEOUT)."},
-		{Key: KeyQueryDBDsns, Group: GroupTools, Kind: KindString, Description: "Comma-separated name=dsn business databases for query_db (same syntax as QUERY_DB_DSNS), e.g. erp=postgres://ro:secret@pg.internal:5432/erp. Empty disables the tool. Applies to the next run."},
+		{Key: KeyQueryDBDsns, Group: GroupTools, Kind: KindString, Secret: true, Description: "Comma-separated name=dsn business databases for query_db (same syntax as QUERY_DB_DSNS), e.g. erp=postgres://ro:secret@pg.internal:5432/erp. Empty disables the tool. DSNs may carry database passwords — the value is never echoed back. Applies to the next run."},
 		{Key: KeyQueryDBTimeout, Group: GroupTools, Kind: KindInt, Description: "query_db per-call timeout in seconds (overrides QUERY_DB_TIMEOUT)."},
 
 		// Webhooks tab.

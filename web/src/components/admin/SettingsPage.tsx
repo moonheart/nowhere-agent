@@ -6,7 +6,8 @@
 // segmented buttons for enums, sliders for bounded numbers, and unit-aware
 // inputs for durations. Saving applies immediately on the next use; saving
 // empty restores the environment default. Secret keys (webhook signing
-// secret, MCP servers) are never echoed back. Changes are audited.
+// secret, query_db DSNs, MCP servers) are never echoed back. Changes are
+// audited.
 
 import { useState } from "react";
 import { Save } from "lucide-react";
@@ -149,15 +150,6 @@ const splitList = (s: string | number | boolean | null): string[] =>
     ? s.split(",").map((x) => x.trim()).filter(Boolean)
     : [];
 
-function parseDsnRows(s: string | number | boolean | null): DsnRow[] {
-  return splitList(typeof s === "string" ? s : "").map((entry) => {
-    const eq = entry.indexOf("=");
-    return eq > 0
-      ? { name: entry.slice(0, eq).trim(), dsn: entry.slice(eq + 1).trim() }
-      : { name: "", dsn: entry };
-  });
-}
-
 function displayValue(s: SettingEntry): string {
   if (s.secret) {
     return s.value === null ? "(not set)" : "(set — hidden)";
@@ -211,11 +203,12 @@ export function PlatformSettingsPage() {
   // save submits one key; empty drafts clear the override (back to default).
   const save = async (s: SettingEntry, d?: Draft) => {
     // Secret rows never echo their value back, so an untouched Save would PUT
-    // null and wipe the configured override. Exactly these two can tell "no
+    // null and wipe the configured override. Exactly these three can tell "no
     // local edit" apart from a deliberate clear: mcpDraft stays null until the
-    // table is touched, and the secret field only enters drafts once typed.
+    // table is touched, and the secret fields only enter drafts once typed.
     if (
       (s.key === "mcp_servers" && mcpDraft === null) ||
+      (s.key === "query_db_dsns" && drafts[s.key] === undefined) ||
       (s.key === "webhook_signing_secret" && drafts[s.key] === undefined)
     ) {
       setSaved(null);
@@ -278,12 +271,31 @@ export function PlatformSettingsPage() {
   const renderEditor = (s: SettingEntry) => {
     const current = s.value;
     if (s.key === "query_db_dsns") {
-      const rows = (drafts[s.key] as DsnRow[] | undefined) ?? parseDsnRows(current);
+      // Secret: the current value is never loaded back. The table starts
+      // empty; an untouched editor saves nothing, "Clear override" empties it
+      // so Save restores the env default.
+      const rows = (drafts[s.key] as DsnRow[] | undefined) ?? [];
       return (
-        <DsnEditor
-          rows={rows}
-          onChange={(v) => setDraft(s.key, v)}
-        />
+        <>
+          <DsnEditor
+            rows={rows}
+            onChange={(v) => setDraft(s.key, v)}
+          />
+          <div className="flex items-start gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setDraft(s.key, [])}
+              title="Empty the table so Save restores the environment default (QUERY_DB_DSNS)"
+            >
+              Clear override
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              DSNs may carry database passwords — the current value is never
+              loaded back (secret). An untouched editor saves nothing.
+            </p>
+          </div>
+        </>
       );
     }
     if (s.key === "mcp_servers") {
