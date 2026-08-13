@@ -41,7 +41,7 @@ import { reportInteraction, resetApprovals, registerDecisionFollower, hasPending
 import { clearNotice, reportNotice } from "@/lib/notice";
 import { clientToolDeclarations } from "@/lib/client-tools";
 import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
-import { takeImages, resetImages } from "@/lib/image-attachment";
+import { takeImages, addImage, resetImages, type PendingImage } from "@/lib/image-attachment";
 import {
   resetPermissionMode,
   reportPermissionMode,
@@ -65,6 +65,11 @@ function Chat({
   // Captured once per mounted conversation. Subagent signals stream from the
   // backend; if a late frame arrives after a reset/switch, the store drops it.
   const chatEpoch = activityEpoch();
+  // Images staged for the CURRENT send: the body closure takes the batch from
+  // the attachment store (clearing the chips), and a FAILED send puts it back
+  // so the chips — and the batch — survive a retry. Success keeps them cleared
+  // (the images rode the accepted turn).
+  let sendImages: PendingImage[] = [];
   const runtime = useDataStreamRuntime({
     api: "/api/chat",
     headers: async (): Promise<Record<string, string>> => {
@@ -79,8 +84,10 @@ function Chat({
       const tools = clientToolDeclarations();
       // Images the composer staged for THIS turn (uploaded first, paths held in
       // the attachment store). Consuming them here clears the chips — the batch
-      // is exactly what this send carries.
+      // is exactly what this send carries. Kept in sendImages so onError can
+      // restore the chips when the send fails.
       const images = takeImages();
+      if (images.length > 0) sendImages = images;
       return {
         ...(threadId ? { threadId } : {}),
         ...(Object.keys(tools).length > 0 ? { tools } : {}),
@@ -124,6 +131,15 @@ function Chat({
     },
     adapters: { history: threadHistory },
     onError: (e) => {
+      // A failed send consumed the staged batch from the body closure (the
+      // chips were cleared when the request body was built); put them back so
+      // retrying the turn still carries the images — a rejected send must not
+      // silently drop the attachments. addImage dedupes by path, so restoring
+      // is safe against a body closure that ran more than once.
+      if (sendImages.length > 0) {
+        for (const img of sendImages) addImage(img);
+        sendImages = [];
+      }
       // A send rejected by the pending-interaction gate (409): point at the
       // parked card instead of a bare console error. The typed error body
       // doesn't reach this callback, so detect the condition client-side — a
