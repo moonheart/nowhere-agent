@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+// mustNew builds a scheduler for tests, failing on an invalid job set.
+func mustNew(t *testing.T, jobs ...Job) *Scheduler {
+	t.Helper()
+	s, err := New(nil, jobs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
 // waitFor polls cond until it holds or a deadline passes.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
@@ -23,7 +33,7 @@ func waitFor(t *testing.T, cond func() bool) {
 
 func TestCatchUpRunsNeverRunJobs(t *testing.T) {
 	var ran atomic.Int32
-	s := New(nil, Job{Name: "j", Interval: time.Hour, Run: func(context.Context) error {
+	s := mustNew(t, Job{Name: "j", Interval: time.Hour, Run: func(context.Context) error {
 		ran.Add(1)
 		return nil
 	}})
@@ -40,7 +50,7 @@ func TestCatchUpRunsNeverRunJobs(t *testing.T) {
 }
 
 func TestCatchUpRecordsLastRun(t *testing.T) {
-	s := New(nil, Job{Name: "j", Interval: time.Hour, Run: func(context.Context) error { return nil }})
+	s := mustNew(t, Job{Name: "j", Interval: time.Hour, Run: func(context.Context) error { return nil }})
 	if _, ok := s.LastRun("j"); ok {
 		t.Error("should not have run yet")
 	}
@@ -53,7 +63,7 @@ func TestCatchUpRecordsLastRun(t *testing.T) {
 
 func TestRunDueOnlyAfterInterval(t *testing.T) {
 	var ran atomic.Int32
-	s := New(nil, Job{Name: "j", Interval: time.Minute, Run: func(context.Context) error {
+	s := mustNew(t, Job{Name: "j", Interval: time.Minute, Run: func(context.Context) error {
 		ran.Add(1)
 		return nil
 	}})
@@ -79,7 +89,7 @@ func TestRunDueOnlyAfterInterval(t *testing.T) {
 
 func TestJobErrorDoesNotCrashScheduler(t *testing.T) {
 	var ran atomic.Int32
-	s := New(nil, Job{Name: "bad", Interval: time.Second, Run: func(context.Context) error {
+	s := mustNew(t, Job{Name: "bad", Interval: time.Second, Run: func(context.Context) error {
 		ran.Add(1)
 		return errors.New("boom")
 	}})
@@ -104,7 +114,7 @@ func TestSlowJobDoesNotBlockSiblings(t *testing.T) {
 		return nil
 	}}
 	var fast atomic.Int32
-	s := New(nil, slow, Job{Name: "fast", Interval: time.Minute, Run: func(context.Context) error {
+	s := mustNew(t, slow, Job{Name: "fast", Interval: time.Minute, Run: func(context.Context) error {
 		fast.Add(1)
 		return nil
 	}})
@@ -130,7 +140,7 @@ func TestJobDoesNotOverlapItself(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var runs atomic.Int32
-	s := New(nil, Job{Name: "j", Interval: time.Millisecond, Run: func(context.Context) error {
+	s := mustNew(t, Job{Name: "j", Interval: time.Millisecond, Run: func(context.Context) error {
 		runs.Add(1)
 		entered <- struct{}{}
 		<-release
@@ -162,7 +172,7 @@ func TestJobDoesNotOverlapItself(t *testing.T) {
 // Start performs catch-up on launch and keeps ticking after the interval.
 func TestStartCatchUpAndTick(t *testing.T) {
 	var runs atomic.Int32
-	s := New(nil, Job{Name: "j", Interval: time.Hour, Run: func(context.Context) error {
+	s := mustNew(t, Job{Name: "j", Interval: time.Hour, Run: func(context.Context) error {
 		runs.Add(1)
 		return nil
 	}})
@@ -176,8 +186,57 @@ func TestStartCatchUpAndTick(t *testing.T) {
 }
 
 func TestUTCNow(t *testing.T) {
-	s := New(nil)
+	s := mustNew(t)
 	if s.now().Location() != time.UTC {
 		t.Errorf("scheduler time not UTC: %v", s.now().Location())
 	}
+}
+
+func TestNewRejectsNonPositiveInterval(t *testing.T) {
+	if _, err := New(nil, Job{Name: "bad", Interval: 0, Run: func(context.Context) error { return nil }}); err == nil {
+		t.Error("zero interval must be refused")
+	}
+	if _, err := New(nil, Job{Name: "bad", Interval: -time.Second, Run: func(context.Context) error { return nil }}); err == nil {
+		t.Error("negative interval must be refused")
+	}
+	if _, err := New(nil, Job{Name: "ok", Interval: time.Second, Run: func(context.Context) error { return nil }}); err != nil {
+		t.Errorf("valid job refused: %v", err)
+	}
+}
+
+// A job that ignores ctx cancellation must not hold shutdown forever: Start
+// returns once the bounded wait elapses.
+func TestStartShutdownTimesOutOnHungJob(t *testing.T) {
+	old := stopTimeout
+	stopTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { stopTimeout = old })
+
+	blocked := make(chan struct{})
+	s := mustNew(t, Job{Name: "hung", Interval: time.Hour, Run: func(context.Context) error {
+		<-blocked // never returns, ignores ctx
+		return nil
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.Start(ctx)
+		close(done)
+	}()
+	// Wait for the job to start, then cancel and expect a prompt return.
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.inflight["hung"]
+	})
+	start := time.Now()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return within the stop timeout")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("shutdown took %v, want bounded by stopTimeout", elapsed)
+	}
+	close(blocked)
 }

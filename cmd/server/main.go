@@ -917,11 +917,14 @@ func run() error {
 					}
 					return dreamRunner.RunScheduled(ctx)
 				}
-				sched := scheduler.New(log, scheduler.Job{
+				sched, err := scheduler.New(log, scheduler.Job{
 					Name:     "dreaming",
 					Interval: cfg.Dreaming.Interval,
 					Run:      runDreaming,
 				})
+				if err != nil {
+					return fmt.Errorf("dreaming scheduler: %w", err)
+				}
 				go sched.Start(ctx)
 				// Retune the cadence live: the scheduler re-reads the job's
 				// interval each tick, and the settings watcher keeps it in
@@ -1554,7 +1557,11 @@ func run() error {
 		// so a slow in-flight attempt is not re-claimed by another instance;
 		// claims are atomic, so concurrent sweepers never double-send.
 		sweeper := webhook.NewSweeper(outbox, notifier, metrics.RecordWebhookDelivery, log)
-		go scheduler.New(log, scheduler.Job{Name: "webhook-outbox", Interval: 30 * time.Second, Run: sweeper.Sweep}).Start(ctx)
+		outboxSched, err := scheduler.New(log, scheduler.Job{Name: "webhook-outbox", Interval: 30 * time.Second, Run: sweeper.Sweep})
+		if err != nil {
+			return fmt.Errorf("webhook sweeper scheduler: %w", err)
+		}
+		go outboxSched.Start(ctx)
 		log.Info("webhook outbox sweeper enabled (interval 30s, backoff to dead-letter)")
 		// Keep the notifier's policy in sync with the runtime settings: the
 		// admin console's webhook_* keys (timeout, retries, signing secret,

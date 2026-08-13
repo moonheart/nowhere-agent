@@ -220,6 +220,9 @@ func (d Dreaming) Validate() error {
 	if !d.Enabled {
 		return nil
 	}
+	if d.Interval <= 0 {
+		return fmt.Errorf("DREAMING_INTERVAL must be positive, got %s (a non-positive interval would run the pass on every scheduler tick)", d.Interval)
+	}
 	for _, c := range []struct {
 		name string
 		v    int

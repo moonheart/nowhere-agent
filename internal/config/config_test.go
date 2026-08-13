@@ -119,6 +119,14 @@ func TestDreamingNonPositivePurgeRejected(t *testing.T) {
 	}
 }
 
+func TestDreamingNonPositiveIntervalRejected(t *testing.T) {
+	t.Setenv("DREAMING_ENABLED", "true")
+	t.Setenv("DREAMING_INTERVAL", "0s")
+	if _, err := Load(); err == nil {
+		t.Error("Load succeeded with DREAMING_INTERVAL=0s; want an error")
+	}
+}
+
 // Validation is scoped to an enabled worker: a deployment that never runs
 // dreaming should not have to hold valid caps for it.
 func TestDreamingCapsUnvalidatedWhenDisabled(t *testing.T) {

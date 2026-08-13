@@ -5,6 +5,7 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -37,8 +38,15 @@ type Scheduler struct {
 	wg       sync.WaitGroup
 }
 
-// New creates a Scheduler. Times are UTC.
-func New(log *slog.Logger, jobs ...Job) *Scheduler {
+// stopTimeout bounds how long Start waits for in-flight runs to wind down
+// after ctx is cancelled, so a job that ignores cancellation cannot hold
+// shutdown forever. Exposed as a var so tests can shorten it.
+var stopTimeout = 5 * time.Second
+
+// New creates a Scheduler. Times are UTC. A job with a non-positive interval
+// is refused: such a job would be due on every tick (a busy loop — for
+// dreaming, an LLM pass every second).
+func New(log *slog.Logger, jobs ...Job) (*Scheduler, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -50,9 +58,15 @@ func New(log *slog.Logger, jobs ...Job) *Scheduler {
 		inflight: map[string]bool{},
 	}
 	for _, j := range jobs {
+		if j.Interval <= 0 {
+			return nil, fmt.Errorf("scheduler: job %q interval must be positive, got %s", j.Name, j.Interval)
+		}
+		if j.Run == nil {
+			return nil, fmt.Errorf("scheduler: job %q has no run func", j.Name)
+		}
 		s.jobs[j.Name] = j
 	}
-	return s
+	return s, nil
 }
 
 // SetInterval retunes a job's cadence live. A non-positive interval is
@@ -86,8 +100,18 @@ func (s *Scheduler) Start(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			// No dispatches can start after the loop exits; wait for the runs
-			// that are already in flight.
-			s.wg.Wait()
+			// that are already in flight. The wait is bounded: a job that
+			// ignores ctx cancellation must not hold shutdown forever.
+			done := make(chan struct{})
+			go func() {
+				s.wg.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(stopTimeout):
+				s.log.Warn("scheduler shutdown timed out waiting for in-flight jobs")
+			}
 			return
 		case now := <-ticker.C:
 			s.runDue(ctx, now)
