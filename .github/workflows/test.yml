@@ -8,7 +8,9 @@ on:
 # Cross-platform CI: the exec-surface tools are meant to run on Windows, Linux,
 # and macOS hosts, so the suite must stay green on all three. Pure-Go tools test
 # identically everywhere; docker/postgres-backed tests skip when their backend is
-# absent, so no services are provisioned here.
+# absent, so the matrix job provisions no services. The dedicated test-postgres
+# job (ubuntu) runs the FULL suite against a real Postgres so the ~15 packages
+# whose tests need a database (they t.Skipf otherwise) actually gate merges.
 jobs:
   test:
     strategy:
@@ -27,6 +29,55 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
+        run: go test ./...
+
+  # Postgres-backed suite: apply migrations on a fresh postgres:16 service,
+  # then point every PG test DSN (and DB_DSN, used by the packages with no
+  # package-specific variable) at it and run the full suite. The PG tests
+  # create only uniquely-named rows and delete them, so a shared instance is
+  # safe. Ubuntu-only: docker services are flaky on the other runners, and the
+  # backend behaviour is host-independent.
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nowhere
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DB_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      ADMINAPI_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      AGENTDEF_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      AGENTDEFAPI_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      AUDIT_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      IDENTITY_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      INBOUND_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      MEMORY_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      PROVIDERREG_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      QUOTA_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      SCHEDULE_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      SESSION_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      SKILL_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      SKILLAPI_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      UPLOAD_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+      USAGE_PG_TEST_DSN: postgres://postgres:postgres@localhost:5432/nowhere?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Apply migrations
+        run: go run ./cmd/migrate
+      - name: Test (full suite incl. Postgres)
         run: go test ./...
 
   # Frontend gate: the SPA is part of the shipped artifact (WEB_DIR serves
