@@ -5,7 +5,6 @@ package chatapi
 
 import (
 	"encoding/json"
-	"fmt"
 )
 
 // ui-message-stream chunk types (subset we emit).
@@ -99,5 +98,3 @@ func (w *streamWriter) done() {
 func (w *streamWriter) String() string {
 	return string(w.buf)
 }
-
-var _ = fmt.Sprintf // keep fmt imported for future use

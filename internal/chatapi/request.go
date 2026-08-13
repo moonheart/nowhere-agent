@@ -2,7 +2,6 @@ package chatapi
 
 import (
 	"encoding/json"
-	"net/http"
 	"strings"
 
 	"nowhere-agent/internal/provider"
@@ -237,5 +236,3 @@ func storedMessagesToProvider(stored []session.StoredMessage) []provider.Message
 	}
 	return out
 }
-
-var _ = http.MethodPost // referenced by handler registration elsewhere
