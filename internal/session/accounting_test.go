@@ -334,6 +334,7 @@ func TestToolIntentMWParallelBatchProvisionsOnce(t *testing.T) {
 
 	for round := 0; round < 25; round++ {
 		const n = 16
+		before, _ := store.LatestRunSteps(context.Background(), run.ID, 1000)
 		var wg sync.WaitGroup
 		for i := 0; i < n; i++ {
 			wg.Add(1)
@@ -366,6 +367,12 @@ func TestToolIntentMWParallelBatchProvisionsOnce(t *testing.T) {
 		}
 		if first == nil {
 			t.Fatalf("round %d: no intent written", round)
+		}
+		// Exactly one durable step row per call: the deciding caller provisions
+		// AND pushes in one go — a second append for the same call would leave
+		// a duplicate step row recovery reads as a phantom tool call.
+		if steps, _ := store.LatestRunSteps(context.Background(), run.ID, 1000); len(steps)-len(before) != n {
+			t.Fatalf("round %d: durable step rows added = %d, want %d (one per call)", round, len(steps)-len(before), n)
 		}
 		// Fresh batch: the next round provisions a fresh id. Drain the queue
 		// the way the emitter's tool-result persist path does.

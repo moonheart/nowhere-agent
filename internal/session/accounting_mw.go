@@ -62,12 +62,13 @@ var _ agent.ToolCallMiddleware = (*toolIntentMW)(nil)
 func (m *toolIntentMW) MiddlewareName() string { return "tool-intent" }
 
 // WrapToolCall writes the intent and then executes. The batch's shared id is
-// decided atomically: the FIRST caller to see batchID == nil provisions it
-// (appendStep) and every later caller reuses — racing parallel dispatches must
-// never each provision (two ids would leave a dangling second intent that
-// recovery misreads as an interrupted step). The decision and the provision
-// stay under the same lock acquisition; a failed provision leaves batchID nil
-// so the next caller takes the first-caller role.
+// decided atomically: exactly ONE caller sees batchID == nil and provisions it
+// (appendStep, holding the lock across the provision); every later caller
+// reuses the decided id. Racing parallel dispatches must never each provision
+// (two ids would leave a dangling second intent that recovery misreads as an
+// interrupted step), and the deciding caller must not append twice (a duplicate
+// step row for one call). A failed provision leaves batchID nil so the next
+// caller takes the first-caller role.
 func (m *toolIntentMW) WrapToolCall(ctx context.Context, c *agent.ToolCall, next agent.ToolHandler) toolruntime.Result {
 	m.mu.Lock()
 	shared := m.batchID
@@ -82,7 +83,9 @@ func (m *toolIntentMW) WrapToolCall(ctx context.Context, c *agent.ToolCall, next
 			}
 		}
 		m.batchID = st.ResultMessageID
-		shared = st.ResultMessageID
+		m.mu.Unlock()
+		m.pending.push(stepIntent{kind: StepTool, messageID: st.ResultMessageID, attempt: st.Attempt})
+		return next(ctx, c)
 	}
 	m.mu.Unlock()
 	st, err := m.rg.appendStep(ctx, m.runID, StepTool, c.Call.ID, shared)
