@@ -89,6 +89,52 @@ func TestBuildRequestTools(t *testing.T) {
 	}
 }
 
+// TestBuildRequestToolCachePoint pins the tools-prefix cache breakpoint: the
+// LAST tool carries cache_control when CacheablePrefix is set (the API caches
+// all definitions up to and including it), and no tool carries it otherwise.
+// The synthetic JSON-response tool is appended last, so the breakpoint lands
+// on it when present.
+func TestBuildRequestToolCachePoint(t *testing.T) {
+	tools := []provider.ToolDefinition{
+		{Name: "read", Description: "read file", InputSchema: map[string]any{"type": "object"}},
+		{Name: "write", Description: "write file", InputSchema: map[string]any{"type": "object"}},
+	}
+	withCache := buildRequest(provider.Request{
+		Model: "m", MaxTokens: 1, CacheablePrefix: true, Tools: tools,
+	})
+	if len(withCache.Tools) != 2 {
+		t.Fatalf("tools = %+v", withCache.Tools)
+	}
+	if withCache.Tools[0].CacheCtl != nil {
+		t.Error("cache_control must only land on the LAST tool")
+	}
+	if withCache.Tools[1].CacheCtl == nil {
+		t.Error("expected cache_control on the last tool when CacheablePrefix set")
+	}
+
+	noCache := buildRequest(provider.Request{Model: "m", MaxTokens: 1, Tools: tools})
+	if noCache.Tools[1].CacheCtl != nil {
+		t.Error("did not expect tool cache_control without CacheablePrefix")
+	}
+
+	// The synthetic response tool is appended last: the breakpoint follows it.
+	withJSON := buildRequest(provider.Request{
+		Model: "m", MaxTokens: 1, CacheablePrefix: true, Tools: tools,
+		JSONResponse: &provider.JSONResponseSpec{
+			Name: "record_facts", Description: "d", Schema: map[string]any{"type": "object"},
+		},
+	})
+	last := withJSON.Tools[len(withJSON.Tools)-1]
+	if last.Name != "record_facts" || last.CacheCtl == nil {
+		t.Errorf("last tool = %+v, want the forced response tool with cache_control", last)
+	}
+	for i := 0; i < len(withJSON.Tools)-1; i++ {
+		if withJSON.Tools[i].CacheCtl != nil {
+			t.Errorf("tool %d must not carry cache_control: %+v", i, withJSON.Tools[i])
+		}
+	}
+}
+
 func TestConvertBlocksRoundTrip(t *testing.T) {
 	blocks := []provider.Block{
 		{Type: provider.BlockText, Text: "hello"},

@@ -91,6 +91,9 @@ type apiTool struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
 	InputSchema map[string]any `json:"input_schema"`
+	// CacheCtl marks the LAST tool as the tools-prefix cache breakpoint (the
+	// API caches all definitions up to and including it as one prefix).
+	CacheCtl *cacheControl `json:"cache_control,omitempty"`
 }
 
 // buildRequest converts a canonical Request into the Anthropic API shape.
@@ -152,6 +155,20 @@ func buildRequest(r provider.Request) apiRequest {
 	if jr := jsonResp; jr != nil {
 		req.Tools = append(req.Tools, apiTool{Name: jr.Name, Description: jr.Description, InputSchema: jr.Schema})
 		req.ToolChoice = &apiToolChoice{Type: "tool", Name: jr.Name}
+	}
+
+	// Cache point on the last tool (same CacheablePrefix gate as the system
+	// block): the API caches every tool definition up to and including it as
+	// one prefix, so per-run repeated calls (multi-round tool loops) read the
+	// definitions from cache. The tool array is fixed for the lifetime of a
+	// run, so the breakpoint is stable within it; a shorter-than-minimum
+	// prefix is silently left uncached (no error), and any change to the tool
+	// definitions invalidates the whole prefix cache — which already covers
+	// the system breakpoint — so a changed last tool costs a re-write, never
+	// a stale read. Marked AFTER the synthetic response tool is appended, so
+	// the breakpoint always sits on the final tool actually sent.
+	if len(req.Tools) > 0 && r.CacheablePrefix {
+		req.Tools[len(req.Tools)-1].CacheCtl = &cacheControl{Type: "ephemeral"}
 	}
 
 	// Messages. Consecutive user messages are merged into one (their content
