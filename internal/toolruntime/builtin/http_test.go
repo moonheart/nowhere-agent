@@ -96,6 +96,49 @@ func TestHTTPRequestRejectsNonAllowlistedHost(t *testing.T) {
 	}
 }
 
+func TestHTTPRequestRedirectToNonAllowlistedTargetRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://10.0.0.1/secret", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	allow, _ := Allowlist([]string{"127.0.0.1"})
+	tool := NewHTTPRequest(allow, 10*time.Second)
+	res, err := tool.Call(context.Background(), map[string]any{"url": srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(res.Content, "redirect target not allowed") {
+		t.Errorf("expected redirect target rejection, got %s", res.Content)
+	}
+}
+
+func TestHTTPRequestRedirectToAllowlistedTargetFollowed(t *testing.T) {
+	var redirected bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		redirected = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	allow, _ := Allowlist([]string{"127.0.0.1"})
+	tool := NewHTTPRequest(allow, 10*time.Second)
+	res, err := tool.Call(context.Background(), map[string]any{"url": srv.URL + "/start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error result: %s", res.Content)
+	}
+	if !redirected {
+		t.Error("redirect to an allowlisted host was not followed")
+	}
+}
+
 func TestHTTPRequestNilAllowlistDisablesTool(t *testing.T) {
 	if got := NewHTTPRequest(nil, 10*time.Second); got != nil {
 		t.Error("nil allowlist should disable the tool")

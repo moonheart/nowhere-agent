@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -65,13 +66,29 @@ func NewHTTPRequest(allow AllowlistFunc, timeout time.Duration) toolruntime.Tool
 	if timeout <= 0 {
 		timeout = httpDefaultTimeout
 	}
-	return &httpRequestTool{
-		allow:  allow,
-		client: &http.Client{},
+	t := &httpRequestTool{
+		allow: allow,
 		// The tool-level timeout bounds one call; the per-request timeout is
 		// capped below by the caller's argument.
 		timeout: timeout,
 	}
+	// The default redirect policy only re-checks nothing: without a custom
+	// CheckRedirect an allowlisted host could 302 the request to a private
+	// target that the allowlist gate never sees. Re-verify every hop.
+	t.client = &http.Client{CheckRedirect: t.checkRedirect}
+	return t
+}
+
+// checkRedirect re-verifies every redirect hop against the allowlist, so an
+// allowlisted host cannot smuggle the request elsewhere via a 302.
+func (t *httpRequestTool) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("too many redirects")
+	}
+	if !t.allow(req.URL.String()) {
+		return errors.New("redirect target not allowed")
+	}
+	return nil
 }
 
 func (t *httpRequestTool) Name() string { return HTTPToolName }
@@ -126,7 +143,7 @@ func (t *httpRequestTool) Call(ctx context.Context, args map[string]any) (toolru
 	}
 	client := t.client
 	if timeout != t.timeout {
-		client = &http.Client{Timeout: timeout}
+		client = &http.Client{Timeout: timeout, CheckRedirect: t.checkRedirect}
 	}
 
 	resp, err := client.Do(req)
