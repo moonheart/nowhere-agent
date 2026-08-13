@@ -28,11 +28,12 @@ type Store interface {
 	GetSession(ctx context.Context, id string) (Session, error)
 	EndSession(ctx context.Context, id string) error
 	// ListSessionsByUser returns a page of a user's active sessions,
-	// most-recently-active first. limit caps the page size (<= 0 falls back to
-	// a default); cursor is the previous page's NextCursor (nil for the first
-	// page). The returned page's NextCursor is nil when no further sessions
-	// exist.
-	ListSessionsByUser(ctx context.Context, userID string, limit int, cursor *SessionCursor) (SessionPage, error)
+	// most-recently-active first. q, when non-empty, narrows the list to
+	// sessions whose title contains it (case-insensitive) — the sidebar
+	// search. limit caps the page size (<= 0 falls back to a default); cursor
+	// is the previous page's NextCursor (nil for the first page). The
+	// returned page's NextCursor is nil when no further sessions exist.
+	ListSessionsByUser(ctx context.Context, userID string, q string, limit int, cursor *SessionCursor) (SessionPage, error)
 	// DeleteSessionForUser soft-deletes (ends) a session owned by userID,
 	// returning false if no such session exists for that user.
 	DeleteSessionForUser(ctx context.Context, id, userID string) (bool, error)
@@ -504,9 +505,10 @@ func derefInt64(v *int64) string {
 }
 
 // ListSessionsByUser returns a page of a user's sessions for the conversation
-// list (most-recently-active first, keyset-paginated by limit/cursor).
-func (rt *Runtime) ListSessionsByUser(ctx context.Context, userID string, limit int, cursor *SessionCursor) (SessionPage, error) {
-	return rt.store.ListSessionsByUser(ctx, userID, limit, cursor)
+// list (most-recently-active first, keyset-paginated by limit/cursor). q
+// narrows to title-contains matches (case-insensitive) when non-empty.
+func (rt *Runtime) ListSessionsByUser(ctx context.Context, userID string, q string, limit int, cursor *SessionCursor) (SessionPage, error) {
+	return rt.store.ListSessionsByUser(ctx, userID, q, limit, cursor)
 }
 
 // DeleteSessionForUser ends a session the user owns; false if not theirs.

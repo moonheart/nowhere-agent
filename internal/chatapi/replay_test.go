@@ -434,7 +434,7 @@ func TestDeleteSession(t *testing.T) {
 	if rec2.Code != http.StatusNoContent {
 		t.Errorf("alice deleting own session = %d want 204", rec2.Code)
 	}
-	remaining, _ := store.ListSessionsByUser(req2.Context(), "alice", 0, nil)
+	remaining, _ := store.ListSessionsByUser(req2.Context(), "alice", "", 0, nil)
 	if len(remaining.Sessions) != 0 {
 		t.Errorf("deleted session still listed: %+v", remaining.Sessions)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"nowhere-agent/internal/agent"
@@ -80,5 +81,56 @@ func TestServeSessionsPagination(t *testing.T) {
 	}
 	if _, _, code := fetch("", "garbage"); code != http.StatusBadRequest {
 		t.Errorf("bad cursor: code=%d want 400", code)
+	}
+}
+
+// TestServeSessionsSearch verifies the q param end to end: the sidebar search
+// runs server-side (so old pages are searchable, not just the loaded ones),
+// matches case-insensitively, and returns no results for a miss.
+func TestServeSessionsSearch(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(func(context.Context, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: "searcher"}
+
+	ctx := context.Background()
+	for _, title := range []string{"Alpha Plan", "beta report", "spring retro"} {
+		if _, err := rt.CreateSession(ctx, user.ID, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	get := func(q string) (titles []string, code int) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/chat/sessions?q="+url.QueryEscape(q), nil)
+		req = req.WithContext(identity.NewContextWithUser(req.Context(), user))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		var resp struct {
+			Sessions []sessionDTO `json:"sessions"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		for _, s := range resp.Sessions {
+			titles = append(titles, s.Title)
+		}
+		return titles, rec.Code
+	}
+
+	if titles, code := get("ALPHA"); code != http.StatusOK || len(titles) != 1 || titles[0] != "Alpha Plan" {
+		t.Errorf("q=ALPHA: code=%d titles=%v, want just [Alpha Plan]", code, titles)
+	}
+	if titles, code := get("retro"); code != http.StatusOK || len(titles) != 1 || titles[0] != "spring retro" {
+		t.Errorf("q=retro: code=%d titles=%v, want just [spring retro]", code, titles)
+	}
+	// A blank q behaves like no filter.
+	if titles, code := get("   "); code != http.StatusOK || len(titles) != 3 {
+		t.Errorf("q blank: code=%d n=%d, want all 3", code, len(titles))
+	}
+	if titles, code := get("nope"); code != http.StatusOK || len(titles) != 0 {
+		t.Errorf("q=nope: code=%d titles=%v, want none", code, titles)
 	}
 }

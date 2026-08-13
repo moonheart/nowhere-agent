@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, MessageSquare, Plus, Search, Trash2 } from "lucide-react";
 import {
   deleteSession,
@@ -51,36 +51,62 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [query, setQuery] = useState("");
+  // debounced is the search term actually sent to the backend (250ms after the
+  // last keystroke). queryRef tracks the latest issued term so a response that
+  // raced a newer search is dropped instead of overwriting its results.
+  const [debounced, setDebounced] = useState("");
+  const queryRef = useRef("");
   // Sentinel at the bottom of the list; becoming visible triggers the next page.
   const sentinelRef = useRef<HTMLDivElement | null>(null);
 
-  // refresh reloads from the first page (bumped by refreshToken, e.g. after a
-  // new session is created). Any previously loaded pages are dropped so the
-  // list reflects the new activity order.
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    const page = await listSessions();
-    setSessions(page.sessions);
-    setNextCursor(page.nextCursor);
-    setLoading(false);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(query.trim()), 250);
+    return () => clearTimeout(id);
+  }, [query]);
+
+  // fetchPage guards against stale responses: the list is replaced wholesale by
+  // a newer search while a page is in flight, so only apply a page whose term
+  // is still the current one.
+  const fetchPage = useCallback(async (q: string, cursor: string) => {
+    const page = await listSessions(cursor, q);
+    if (queryRef.current !== q) return null;
+    return page;
   }, []);
+
+  // refresh reloads from the first page (bumped by refreshToken, e.g. after a
+  // new session is created, or by the search box). Any previously loaded pages
+  // are dropped so the list reflects the new activity order / search.
+  const refresh = useCallback(
+    async (q: string) => {
+      setLoading(true);
+      const page = await fetchPage(q, "");
+      if (page) {
+        setSessions(page.sessions);
+        setNextCursor(page.nextCursor);
+      }
+      setLoading(false);
+    },
+    [fetchPage],
+  );
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || loadingMore) return;
     setLoadingMore(true);
-    const page = await listSessions(nextCursor);
+    const page = await fetchPage(debounced, nextCursor);
     setLoadingMore(false);
+    if (!page) return;
     if (page.sessions.length === 0) {
       setNextCursor("");
       return;
     }
     setSessions((prev) => [...prev, ...page.sessions]);
     setNextCursor(page.nextCursor);
-  }, [nextCursor, loadingMore]);
+  }, [nextCursor, loadingMore, debounced, fetchPage]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh, refreshToken]);
+    queryRef.current = debounced;
+    void refresh(debounced);
+  }, [debounced, refresh, refreshToken]);
 
   // Infinite scroll: when the bottom sentinel scrolls into view (rootMargin
   // preloads a screenful) and more pages exist, fetch the next one.
@@ -102,15 +128,14 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
     if (id === currentId) {
       onDeleteCurrent();
     } else {
-      void refresh();
+      void refresh(debounced);
     }
   };
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return sessions;
-    return sessions.filter((s) => (s.title || "Untitled").toLowerCase().includes(q));
-  }, [sessions, query]);
+  // The list is already the server's answer: the search box re-fetches with q,
+  // so (unlike a client-side filter) old pages are searchable too. The search
+  // box stays visible after a search with no hits, so it can be changed.
+  const showSearch = sessions.length > 0 || query.trim() !== "";
 
   return (
     <aside className="flex h-full w-64 flex-col border-r border-border bg-muted/50">
@@ -119,7 +144,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
           <Plus />
           {t("chat.new")}
         </Button>
-        {sessions.length > 0 && (
+        {showSearch && (
           <InputGroup className="bg-background">
             <InputGroupAddon>
               <Search />
@@ -136,7 +161,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="p-2">
-          {!loading && sessions.length === 0 && (
+          {!loading && sessions.length === 0 && debounced === "" && (
             <Empty className="p-4">
               <EmptyHeader>
                 <EmptyMedia variant="icon">
@@ -149,7 +174,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
               </EmptyHeader>
             </Empty>
           )}
-          {sessions.length > 0 && filtered.length === 0 && (
+          {!loading && sessions.length === 0 && debounced !== "" && (
             <Empty className="p-4">
               <EmptyHeader>
                 <EmptyMedia variant="icon">
@@ -161,7 +186,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
             </Empty>
           )}
           <ul className="flex flex-col gap-0.5">
-            {filtered.map((s) => {
+            {sessions.map((s) => {
               const active = s.id === currentId;
               return (
                 <li key={s.id} className="group relative">

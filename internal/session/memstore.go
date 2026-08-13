@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -214,15 +215,16 @@ func (m *MemStore) SessionState(_ context.Context, id string) (map[string]json.R
 	return out, nil
 }
 
-func (m *MemStore) ListSessionsByUser(_ context.Context, userID string, limit int, cursor *SessionCursor) (SessionPage, error) {
+func (m *MemStore) ListSessionsByUser(_ context.Context, userID, q string, limit int, cursor *SessionCursor) (SessionPage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if limit <= 0 {
 		limit = 25
 	}
+	needle := strings.ToLower(q)
 	var out []Session
 	for _, s := range m.sessions {
-		if s.UserID == userID && s.Status == SessionActive {
+		if s.UserID == userID && s.Status == SessionActive && (needle == "" || strings.Contains(strings.ToLower(s.Title), needle)) {
 			out = append(out, *s)
 		}
 	}

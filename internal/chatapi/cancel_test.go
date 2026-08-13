@@ -83,7 +83,7 @@ func sessionIDs(h *Handler) []string {
 	if h.runtime == nil {
 		return nil
 	}
-	sessions, err := h.runtime.ListSessionsByUser(context.Background(), testUserID, 0, nil)
+	sessions, err := h.runtime.ListSessionsByUser(context.Background(), testUserID, "", 0, nil)
 	if err != nil {
 		return nil
 	}
@@ -320,7 +320,7 @@ func TestDisconnectLeavesRunRunning(t *testing.T) {
 	}
 
 	// But the run must still be active: disconnect detaches, it does not cancel.
-	page, err := rt.ListSessionsByUser(context.Background(), testUserID, 0, nil)
+	page, err := rt.ListSessionsByUser(context.Background(), testUserID, "", 0, nil)
 	if err != nil || len(page.Sessions) == 0 {
 		t.Fatalf("list sessions: %v n=%d", err, len(page.Sessions))
 	}

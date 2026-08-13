@@ -7,11 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
 )
+
+// escapeLike escapes the LIKE/ILIKE wildcards in a user-supplied search term so
+// it matches literally (backslash is the default LIKE escape character, so an
+// escaped % or _ needs no ESCAPE clause).
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
 
 // ErrSessionNotFound reports a hard-delete target that does not exist.
 var ErrSessionNotFound = errors.New("session not found")
@@ -291,11 +302,13 @@ func (s *PGStore) SessionState(ctx context.Context, id string) (map[string]json.
 }
 
 // ListSessionsByUser returns a page of a user's active (non-deleted) sessions,
-// most-recently-active first. Ended sessions are hidden from the sidebar.
+// most-recently-active first. Ended sessions are hidden from the sidebar. q,
+// when non-empty, narrows the list to sessions whose title contains it
+// (case-insensitive, ILIKE; wildcards in the term are matched literally).
 // Pagination is keyset: the query fetches limit+1 rows, the extra one proving
 // that another page exists, and NextCursor pins (updated_at, id) of the page's
 // last row (id breaks ties between sessions updated in the same instant).
-func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string, limit int, cursor *SessionCursor) (SessionPage, error) {
+func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string, q string, limit int, cursor *SessionCursor) (SessionPage, error) {
 	if limit <= 0 {
 		limit = 25
 	}
@@ -304,8 +317,12 @@ func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string, limit i
 		FROM sessions
 		WHERE user_id = $1 AND status = $2`
 	args := []any{userID, string(SessionActive)}
+	if q != "" {
+		query += ` AND title ILIKE '%' || $` + strconv.Itoa(len(args)+1) + ` || '%'`
+		args = append(args, escapeLike(q))
+	}
 	if cursor != nil {
-		query += ` AND (updated_at, id) < ($3::timestamptz, $4::uuid)`
+		query += ` AND (updated_at, id) < ($` + strconv.Itoa(len(args)+1) + `::timestamptz, $` + strconv.Itoa(len(args)+2) + `::uuid)`
 		args = append(args, cursor.UpdatedAt, cursor.ID)
 	}
 	query += `

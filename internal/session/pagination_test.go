@@ -48,7 +48,7 @@ func TestMemStoreListSessionsPagination(t *testing.T) {
 	var cursor *SessionCursor
 	pages := 0
 	for {
-		p, err := m.ListSessionsByUser(ctx, "alice", 10, cursor)
+		p, err := m.ListSessionsByUser(ctx, "alice", "", 10, cursor)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -113,7 +113,7 @@ func TestMemStoreListSessionsKeysetTiebreak(t *testing.T) {
 	var got []string
 	var cursor *SessionCursor
 	for {
-		p, err := m.ListSessionsByUser(ctx, "alice", 1, cursor)
+		p, err := m.ListSessionsByUser(ctx, "alice", "", 1, cursor)
 		if err != nil {
 			t.Fatal(err)
 		}

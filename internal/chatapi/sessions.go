@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"nowhere-agent/internal/httpx"
@@ -57,10 +58,13 @@ func decodeSessionCursor(raw string) (*session.SessionCursor, error) {
 // serveSessions handles GET /api/chat/sessions: it lists the caller's sessions
 // (most-recently-active first) for the sidebar conversation list, one page at a
 // time. limit caps the page size (default 25); cursor is the previous page's
-// nextCursor (omitted for the first page). The response's nextCursor is empty
-// when the list is exhausted. Unlike history/resume (which authorize a specific
-// session), this scopes the query to the authenticated user, so it only ever
-// returns their own conversations.
+// nextCursor (omitted for the first page). q, when non-empty, narrows the list
+// to sessions whose title contains it (case-insensitive) — the sidebar search,
+// served from the backend so old pages are searchable, not just the ones the
+// client has loaded. The response's nextCursor is empty when the list is
+// exhausted. Unlike history/resume (which authorize a specific session), this
+// scopes the query to the authenticated user, so it only ever returns their
+// own conversations.
 func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
 		http.Error(w, `{"error":"sessions unavailable"}`, http.StatusServiceUnavailable)
@@ -87,8 +91,9 @@ func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		cursor = c
 	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
 
-	page, err := h.runtime.ListSessionsByUser(r.Context(), user.ID, limit, cursor)
+	page, err := h.runtime.ListSessionsByUser(r.Context(), user.ID, q, limit, cursor)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return

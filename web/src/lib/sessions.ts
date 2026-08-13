@@ -20,11 +20,16 @@ export type SessionPage = {
   nextCursor: string;
 };
 
-export async function listSessions(cursor = ""): Promise<SessionPage> {
+// listSessions fetches one page of the caller's conversations. q, when
+// non-empty, narrows the list server-side to sessions whose title contains it
+// (case-insensitive): the sidebar search runs on the backend so old
+// conversations are searchable even though the client only loads 25 at a time.
+export async function listSessions(cursor = "", q = ""): Promise<SessionPage> {
   const token = getToken();
   if (!token) return { sessions: [], nextCursor: "" };
   const params = new URLSearchParams({ limit: String(SESSION_PAGE_SIZE) });
   if (cursor) params.set("cursor", cursor);
+  if (q) params.set("q", q);
   const res = await fetch(`/api/chat/sessions?${params}`, {
     headers: { authorization: `Bearer ${token}` },
   });
