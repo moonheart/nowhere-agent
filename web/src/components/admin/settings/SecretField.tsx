@@ -47,6 +47,15 @@ export function SecretField({
       >
         <RefreshCw /> Generate
       </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        disabled={!isSet && value === ""}
+        onClick={() => onChange("")}
+        title="Clear the override (back to the environment default)"
+      >
+        Clear
+      </Button>
       <Button variant="ghost" size="sm" onClick={() => setShow(!show)}>
         {show ? "Hide" : "Show"}
       </Button>

@@ -291,11 +291,21 @@ export function PlatformSettingsPage() {
       return (
         <>
           <McpEditor rows={rows} onChange={setMcpDraft} />
-          <p className="text-xs text-muted-foreground">
-            Current value is never loaded back (secret). A table with no servers
-            clears the setting (back to the env default). Timeout in seconds
-            (empty = client default).
-          </p>
+          <div className="flex items-start gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setMcpDraft([])}
+              title="Empty the table so Save restores the environment default (MCP_SERVERS)"
+            >
+              Clear override
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Current value is never loaded back (secret). An untouched editor
+              saves nothing; "Clear override" empties the table so Save restores
+              the env default. Timeout in seconds (empty = client default).
+            </p>
+          </div>
         </>
       );
     }
