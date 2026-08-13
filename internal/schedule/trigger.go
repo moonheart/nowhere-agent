@@ -234,9 +234,17 @@ func (tr *Trigger) FireNow(ctx context.Context, task Task) error {
 
 // submit builds the run environment for a claimed task and hands it to the
 // registry. It is the construction half of the "unattended chatapi" (design:
-// run construction).
+// run construction). Failure policy splits transient from persistent: a
+// transient skip (pending interaction, budget exceeded) requeues so the next
+// scan retries; a persistent failure (unresolvable prompt source or loop
+// build) leaves the claimed slot advanced and lets the NEXT CRON OCCURRENCE
+// retry — requeueing a misconfigured task would hot-loop the scan
+// (create/delete session churn every interval) until an operator fixes it.
 func (tr *Trigger) submit(ctx context.Context, task Task) error {
 	// Resolve the prompt source into a system prompt, model, and opening turn.
+	// A resolution failure (unknown agent def) is persistent — the claimed slot
+	// stays advanced for the next cron occurrence (see the failure policy
+	// above), never requeued.
 	system, model, kickoff, err := tr.resolvePrompt(ctx, task)
 	if err != nil {
 		return err
@@ -272,15 +280,16 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 
 	// Build the whitelisted loop and submit through the shared registry — from
 	// here on it is byte-identical to a human chat run. A loop build failure
-	// (unresolvable provider/model) fails this firing; the task is requeued so
-	// the next scan retries once the operator fixes the reference.
+	// (unresolvable provider/model) is a PERSISTENT misconfiguration: leave the
+	// claimed slot advanced and let the next cron occurrence retry once the
+	// operator fixes the reference — requeueing would hot-loop the scan (build
+	// fails again 30s later, session churn every interval).
 	loop, err := tr.buildLoop(ctx, task, system, model)
 	if err != nil {
 		if fresh {
 			tr.cleanupFreshSession(ctx, task, sessID)
 		}
 		tr.log.Warn("schedule: loop build failed", "task", task.ID, "err", err)
-		tr.requeue(ctx, task)
 		return err
 	}
 	if tr.bindTools != nil {
@@ -456,13 +465,16 @@ func (tr *Trigger) cleanupFreshSession(ctx context.Context, task Task, sessID st
 }
 
 // requeue pushes a claimed-but-skipped task's next_run_at back to now so the
-// next scan retries it. Claim already advanced the schedule; a pre-submit skip
-// (budget gate, pending interaction, loop build failure) must not burn the slot
+// next scan retries it. Claim already advanced the schedule; a transient
+// pre-submit skip (budget gate, pending interaction) must not burn the slot
 // the claim consumed — a daily task would otherwise wait 24h for its next
-// chance. Best-effort: a requeue failure is logged, never allowed to mask the
-// skip (the sweep already logged its reason).
+// chance. The store re-checks the claimed state (task still enabled,
+// unexpired, and its next_run_at untouched by an operator edit since the
+// claim), so a requeue is a no-op if the schedule changed underneath us.
+// Best-effort: a requeue failure is logged, never allowed to mask the skip
+// (the sweep already logged its reason).
 func (tr *Trigger) requeue(ctx context.Context, task Task) {
-	if err := tr.store.RequeueDue(ctx, task.ID, tr.now()); err != nil {
+	if err := tr.store.RequeueDue(ctx, task, tr.now()); err != nil {
 		tr.log.Warn("schedule: requeue skipped task failed", "task", task.ID, "err", err)
 	}
 }

@@ -61,11 +61,16 @@ type Store interface {
 	Claim(ctx context.Context, id string, now time.Time) (Task, error)
 	// RequeueDue pushes a claimed-but-skipped task's NextRunAt back to `now` so
 	// the next scan retries it. Claim already advanced the schedule; a
-	// pre-submit skip (budget gate, pending interaction, loop build failure)
-	// must not burn the slot the claim consumed — a daily task would otherwise
-	// wait 24h for its next chance. ErrNotFound when the task no longer exists
-	// (deleted between claim and requeue — a fine no-op).
-	RequeueDue(ctx context.Context, id string, now time.Time) error
+	// pre-submit skip (budget gate, pending interaction) must not burn the slot
+	// the claim consumed — a daily task would otherwise wait 24h for its next
+	// chance. It only applies when the task still matches what the claim
+	// returned: t.NextRunAt must still be the stored next_run_at and the task
+	// must still be enabled and unexpired at `now` — an operator edit (cron,
+	// disable, end time) between claim and requeue makes the requeue a no-op
+	// (ErrNotFound) instead of clobbering the fresh schedule or resurrecting a
+	// disabled/expired task. ErrNotFound is also returned when the task no
+	// longer exists (deleted between claim and requeue — a fine no-op).
+	RequeueDue(ctx context.Context, t Task, now time.Time) error
 	// ListSessions returns the ids of active sessions a task produced, newest
 	// first. Ended (cleared) sessions are hidden, matching the sidebar's rule.
 	ListSessions(ctx context.Context, taskID string) ([]string, error)
@@ -243,11 +248,17 @@ func (s *PGStore) Claim(ctx context.Context, id string, now time.Time) (Task, er
 
 // RequeueDue pushes a task's next_run_at back to `now` so the next scan picks
 // it up again — the counterweight to Claim for pre-submit skips (design note:
-// a skip must not burn the slot the claim consumed). A zero-row update means
-// the task vanished between claim and requeue; ErrNotFound is fine there.
-func (s *PGStore) RequeueDue(ctx context.Context, id string, now time.Time) error {
+// a skip must not burn the slot the claim consumed). The WHERE re-checks the
+// claimed state: next_run_at must still be what Claim set (t.NextRunAt), and
+// the task must still be enabled and unexpired — so a requeue can neither
+// clobber a cron an operator edited between claim and requeue nor resurrect a
+// task disabled/expired in that window. A zero-row update means the claim
+// state no longer holds; ErrNotFound is fine there.
+func (s *PGStore) RequeueDue(ctx context.Context, t Task, now time.Time) error {
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE scheduled_task SET next_run_at = $2, updated_at = now() WHERE id = $1`, id, now)
+		`UPDATE scheduled_task SET next_run_at = $2, updated_at = now()
+		 WHERE id = $1 AND enabled AND next_run_at = $3
+		   AND (end_time IS NULL OR end_time > $2)`, t.ID, now, t.NextRunAt)
 	if err != nil {
 		if identity.IsMalformedID(err) {
 			return ErrNotFound
@@ -596,15 +607,21 @@ func (m *MemStore) Claim(ctx context.Context, id string, now time.Time) (Task, e
 }
 
 // RequeueDue pushes the task's NextRunAt back to `now` (MemStore mirror of the
-// PG skip-path counterweight to Claim).
-func (m *MemStore) RequeueDue(ctx context.Context, id string, now time.Time) error {
-	t, ok := m.tasks[id]
-	if !ok {
+// PG skip-path counterweight to Claim). Like the PG store, it guards on the
+// claimed state: the stored NextRunAt must still match t.NextRunAt and the
+// task must still be enabled and unexpired, so an edit between claim and
+// requeue makes it a no-op (ErrNotFound) rather than a clobber.
+func (m *MemStore) RequeueDue(ctx context.Context, t Task, now time.Time) error {
+	cur, ok := m.tasks[t.ID]
+	if !ok || !cur.Enabled || !cur.NextRunAt.Equal(t.NextRunAt) {
 		return ErrNotFound
 	}
-	t.NextRunAt = now
-	t.UpdatedAt = now
-	m.tasks[id] = t
+	if cur.EndTime != nil && !cur.EndTime.After(now) {
+		return ErrNotFound
+	}
+	cur.NextRunAt = now
+	cur.UpdatedAt = now
+	m.tasks[t.ID] = cur
 	return nil
 }
 

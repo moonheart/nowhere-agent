@@ -567,6 +567,63 @@ func TestTriggerBudgetSkipRequeuesForNextScan(t *testing.T) {
 	}
 }
 
+// TestTriggerLoopBuildFailureLeavesClaimed pins the persistent-failure policy:
+// a loop build failure (unresolvable provider/model) must NOT requeue — the
+// claimed slot stays advanced and the task is due again at the NEXT cron
+// occurrence, never every scan. Requeueing a misconfigured task would
+// hot-loop the scan (build fails, session churn every 30s) until an operator
+// fixes it. The budget-skip path above shows the transient contrast: it IS
+// requeued.
+func TestTriggerLoopBuildFailureLeavesClaimed(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), validTask(userID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	now := time.Now()
+	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
+	claimed, err := store.Claim(context.Background(), created.ID, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	build := func(ctx context.Context, task Task, system, model string) (*agent.Loop, error) {
+		return nil, errors.New("provider cannot be resolved")
+	}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, build, db, time.Hour)
+	if err := tr.submit(context.Background(), claimed); err == nil {
+		t.Fatal("a failing loop build must surface as an error")
+	}
+
+	// The claimed slot was NOT pushed back: next_run_at is still the claim's
+	// future occurrence, so a scan right now does not find the task due (no
+	// hot loop) and the next cron slot will retry it.
+	after, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("get after failed fire: %v", err)
+	}
+	if !after.NextRunAt.After(time.Now()) {
+		t.Fatalf("failed fire must leave next_run_at claimed in the future, got %v", after.NextRunAt)
+	}
+	if !after.NextRunAt.Equal(claimed.NextRunAt) {
+		t.Fatalf("failed fire moved next_run_at: claimed %v, now %v", claimed.NextRunAt, after.NextRunAt)
+	}
+	due, err := store.ListDue(context.Background(), time.Now())
+	if err != nil {
+		t.Fatalf("list due: %v", err)
+	}
+	for _, d := range due {
+		if d.ID == created.ID {
+			t.Error("loop-build-failed task leaked back into the due scan set")
+		}
+	}
+}
+
 // dueScopedStore narrows ListDue to a fixed set of task ids, so a sweep test is
 // insulated from overdue tasks other tests left in the shared dev database.
 // Every other method delegates to the wrapped store.
