@@ -425,6 +425,13 @@ type Workspace struct {
 	// Dir is the local root under which per-session image files are stored
 	// (<dir>/<sessionID>/<name>.webp). Empty disables image storage.
 	Dir string `envconfig:"WORKSPACE_DIR" default:""`
+	// RetentionDays is how long an ENDED session's image directory is kept
+	// before the hourly retention sweep deletes it (only the session's image
+	// dir — never the upload scope, never anything else under the root).
+	// <= 0 disables the sweep. Soft-deleted sessions are the trigger: their
+	// images are unreachable once the session is ended, so this closes the
+	// leak without touching active conversations.
+	RetentionDays int `envconfig:"WORKSPACE_RETENTION_DAYS" default:"30"`
 }
 
 // HTTP configures the gateway server.

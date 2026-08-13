@@ -99,6 +99,25 @@ func (m *MemStore) ListIdleSessions(_ context.Context, before time.Time) ([]Sess
 	return out, nil
 }
 
+// ListEndedSessionsEndedBefore returns ids of ended sessions whose end time
+// (UpdatedAt — MemStore stamps no dedicated ended_at) predates before, oldest
+// first, capped at limit.
+func (m *MemStore) ListEndedSessionsEndedBefore(_ context.Context, before time.Time, limit int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for _, s := range m.sessions {
+		if s.Status == SessionEnded && s.UpdatedAt.Before(before) {
+			ids = append(ids, s.ID)
+		}
+	}
+	sort.Strings(ids)
+	if limit > 0 && len(ids) > limit {
+		ids = ids[:limit]
+	}
+	return ids, nil
+}
+
 // ListUndreamedSessions is not supported by MemStore: eligibility needs a join
 // against the message store (messages beyond the watermark), which the session
 // MemStore cannot see. The production store (PGStore) answers it in SQL; tests

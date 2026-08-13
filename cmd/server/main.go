@@ -410,6 +410,36 @@ func run() error {
 				MaxBytes: int64(settingsRuntime.Int(settings.KeyUploadMaxBytesPerUser)),
 			}
 		})
+		// Retention sweep (P2-8): an ended session's images are unreachable, so
+		// an hourly pass deletes image dirs of sessions ended more than
+		// WORKSPACE_RETENTION_DAYS ago (<= 0 disables). Only the session's own
+		// image files are removed — a shared sandbox workspace, the upload
+		// scope, and active sessions are never touched. One bounded scan per
+		// tick, non-blocking, best-effort.
+		if cfg.Workspace.RetentionDays > 0 {
+			imageSweepLog := log
+			go func() {
+				ticker := time.NewTicker(time.Hour)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						cutoff := time.Now().UTC().Add(-time.Duration(cfg.Workspace.RetentionDays) * 24 * time.Hour)
+						removed, err := workspace.SweepEndedSessionImages(ctx, imageSweepLog, imageStore,
+							sessionStore.ListEndedSessionsEndedBefore, cutoff, 200)
+						if err != nil {
+							imageSweepLog.Warn("image retention sweep failed", "err", err)
+							continue
+						}
+						if removed > 0 {
+							imageSweepLog.Info("image retention sweep removed session images", "count", removed)
+						}
+					}
+				}
+			}()
+		}
 	}
 
 	// Sandbox for built-in tools (file-tools): a per-session sandbox Manager

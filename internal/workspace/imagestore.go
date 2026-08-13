@@ -10,9 +10,11 @@ import (
 	_ "image/jpeg" // register JPEG decoding
 	_ "image/png"  // register PNG decoding
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gen2brain/webp"
 	"github.com/google/uuid"
@@ -302,6 +304,81 @@ func (s *ImageStore) DeleteUserUpload(userID, pathOrID string) error {
 		}
 	}
 	return s.blobs.Delete(userID, id)
+}
+
+// DeleteSessionImages removes the session's image files — every *.webp stored
+// directly under <root>/<sessionID> — and, once the dir is empty, the dir
+// itself. The id is validated exactly as saves validate it (no separators, no
+// traversal), so a hostile id can never escape the root. Only IMAGE files are
+// touched: the local sandbox backend may share the same root, so a sibling
+// file or subdirectory in the session dir (a sandbox workspace) must survive.
+// A missing dir is not an error.
+func (s *ImageStore) DeleteSessionImages(sessionID string) error {
+	if sessionID == "" || sessionID == "." || sessionID == ".." || strings.ContainsAny(sessionID, `/\`) {
+		return fmt.Errorf("invalid session id %q", sessionID)
+	}
+	dir := filepath.Join(s.root, sessionID)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // nothing stored for this session
+		}
+		return fmt.Errorf("read session dir: %w", err)
+	}
+	var removed bool
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".webp") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("remove session image: %w", err)
+		}
+		removed = true
+	}
+	if removed {
+		// Reclaim the session dir when the sweep left it empty. If non-image
+		// files (a shared sandbox workspace) remain, this fails and the dir
+		// stays — correct either way, and best-effort by design.
+		_ = os.Remove(dir)
+	}
+	return nil
+}
+
+// SweepEndedSessionImages is the retention sweep (P2-8 no-data-hard-delete):
+// it deletes the image directory of every session the lister reports as ended
+// before cutoff, bounded by limit per pass so one scan cannot grow unbounded.
+// Only each listed session's own image dir is removed — nothing else under the
+// workspace root. Best-effort per session: a failure is logged and the sweep
+// continues with the next id. Returns the number of directories removed.
+func SweepEndedSessionImages(ctx context.Context, log *slog.Logger, images *ImageStore, listEnded func(ctx context.Context, before time.Time, limit int) ([]string, error), cutoff time.Time, limit int) (int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if images == nil {
+		return 0, nil
+	}
+	var removed int
+	for {
+		ids, err := listEnded(ctx, cutoff, limit)
+		if err != nil {
+			return removed, fmt.Errorf("list ended sessions: %w", err)
+		}
+		if len(ids) == 0 {
+			return removed, nil
+		}
+		for _, id := range ids {
+			if err := images.DeleteSessionImages(id); err != nil {
+				if log != nil {
+					log.Warn("sweep: remove session images failed", "session", id, "err", err)
+				}
+				continue
+			}
+			removed++
+		}
+		if len(ids) < limit {
+			return removed, nil
+		}
+	}
 }
 
 // ResolverFor returns a provider.ImageResolver bound to one session and its

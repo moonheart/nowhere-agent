@@ -89,6 +89,34 @@ func (s *PGStore) ListIdleSessions(ctx context.Context, idleSinceEventBefore tim
 	return out, rows.Err()
 }
 
+// ListEndedSessionsEndedBefore returns ids of ended sessions whose ended_at
+// predates before, oldest first, capped at limit — the retention sweep's
+// eligibility scan. A NULL ended_at (a session ended before the column was
+// stamped, or by an old code path) is excluded: unknown age means the sweep
+// never touches it.
+func (s *PGStore) ListEndedSessionsEndedBefore(ctx context.Context, before time.Time, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id::text FROM sessions
+		WHERE status = $1 AND ended_at IS NOT NULL AND ended_at < $2
+		ORDER BY ended_at
+		LIMIT $3`,
+		string(SessionEnded), before, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list ended sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan ended session: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // ListUndreamedSessions returns sessions that have messages beyond their
 // dreamed watermark — the dreaming worker's eligibility scan (incremental
 // model, capability-gap K1). A session qualifies regardless of status (open

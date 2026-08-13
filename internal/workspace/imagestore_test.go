@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // makePNG encodes a small solid-color PNG in memory.
@@ -212,5 +213,122 @@ func TestResolverForDispatchesPrefix(t *testing.T) {
 	resOther := s.ResolverFor("sess1", "user2")
 	if _, err := resOther.ResolveImage(context.Background(), upPath); err == nil {
 		t.Error("another user's resolver resolved the upload")
+	}
+}
+
+// ---- retention sweep (P2-8: no-data hard-delete, workspace image cleanup) ----
+
+func TestSweepEndedSessionImagesRemovesOnlyListedOldSessions(t *testing.T) {
+	root := t.TempDir()
+	s := NewImageStore(root)
+
+	// Two sessions with images, plus a decoy file at the root.
+	for _, id := range []string{"old-sess", "fresh-sess"} {
+		if _, err := s.Save(id, "photo.png", makePNG(t)); err != nil {
+			t.Fatalf("Save(%s): %v", id, err)
+		}
+	}
+	decoy := filepath.Join(root, "decoy.txt")
+	if err := os.WriteFile(decoy, []byte("keep me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A user upload must survive too (it lives under __uploads__).
+	upPath, _, err := s.SaveUserUpload("user1", "u.png", makePNG(t))
+	if err != nil {
+		t.Fatalf("SaveUserUpload: %v", err)
+	}
+
+	var calls int
+	cutoff := time.Now()
+	listEnded := func(ctx context.Context, before time.Time, limit int) ([]string, error) {
+		calls++
+		if calls > 1 {
+			return nil, nil
+		}
+		if !before.Equal(cutoff) || limit != 10 {
+			t.Errorf("lister args = (%v, %d), want (%v, 10)", before, limit, cutoff)
+		}
+		return []string{"old-sess"}, nil
+	}
+
+	removed, err := SweepEndedSessionImages(context.Background(), nil, s, listEnded, cutoff, 10)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+
+	// old-sess is gone; fresh-sess, the decoy, and the user upload survive.
+	if _, err := s.Open("old-sess", "photo.webp"); err == nil {
+		t.Error("old session's image should be gone")
+	}
+	if rc, err := s.Open("fresh-sess", "photo.webp"); err != nil {
+		t.Errorf("fresh session's image must survive: %v", err)
+	} else {
+		rc.Close()
+	}
+	if _, err := os.Stat(decoy); err != nil {
+		t.Errorf("decoy file must survive: %v", err)
+	}
+	if rc, err := s.OpenUserUpload("user1", upPath); err != nil {
+		t.Errorf("user upload must survive: %v", err)
+	} else {
+		rc.Close()
+	}
+}
+
+func TestDeleteSessionImagesKeepsNonImageSiblingFiles(t *testing.T) {
+	root := t.TempDir()
+	s := NewImageStore(root)
+	if _, err := s.Save("sess1", "photo.png", makePNG(t)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// A sibling non-image file mimics a shared sandbox workspace: it must stay.
+	sibling := filepath.Join(root, "sess1", "notes.txt")
+	if err := os.WriteFile(sibling, []byte("sandbox file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteSessionImages("sess1"); err != nil {
+		t.Fatalf("DeleteSessionImages: %v", err)
+	}
+	if _, err := s.Open("sess1", "photo.webp"); err == nil {
+		t.Error("session image should be gone")
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Errorf("non-image sibling must survive: %v", err)
+	}
+}
+
+func TestDeleteSessionImagesRejectsTraversal(t *testing.T) {
+	s := NewImageStore(t.TempDir())
+	for _, id := range []string{"..", "../evil", "a/b", `..\evil`, "", "."} {
+		if err := s.DeleteSessionImages(id); err == nil {
+			t.Errorf("DeleteSessionImages(%q) should be rejected", id)
+		}
+	}
+}
+
+func TestDeleteSessionImagesMissingDirIsNoop(t *testing.T) {
+	s := NewImageStore(t.TempDir())
+	if err := s.DeleteSessionImages("no-such-session"); err != nil {
+		t.Errorf("missing dir should be a no-op, got %v", err)
+	}
+}
+
+func TestSweepStopsWhenListExhausted(t *testing.T) {
+	s := NewImageStore(t.TempDir())
+	var calls int
+	listEnded := func(context.Context, time.Time, int) ([]string, error) {
+		calls++
+		return nil, nil // empty first call: nothing to do
+	}
+	removed, err := SweepEndedSessionImages(context.Background(), nil, s, listEnded, time.Now(), 100)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 0 || calls != 1 {
+		t.Errorf("removed=%d calls=%d, want 0/1 (one scan, then stop)", removed, calls)
 	}
 }

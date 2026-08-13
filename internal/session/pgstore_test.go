@@ -212,3 +212,57 @@ func TestPGStoreListIdleSessions(t *testing.T) {
 		}
 	}
 }
+
+func TestPGStoreListEndedSessionsEndedBefore(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ctx := context.Background()
+	userID := pgNewUser(t, db)
+
+	oldSess, _ := store.CreateSession(ctx, userID, "old")
+	freshSess, _ := store.CreateSession(ctx, userID, "fresh")
+	activeSess, _ := store.CreateSession(ctx, userID, "active")
+
+	if err := store.EndSession(ctx, oldSess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EndSession(ctx, freshSess.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Age the old session's ended_at beyond the cutoff.
+	if _, err := db.Exec(`UPDATE sessions SET ended_at = now() - interval '40 days' WHERE id = $1`, oldSess.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := store.ListEndedSessionsEndedBefore(ctx, time.Now().Add(-30*24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("ListEndedSessionsEndedBefore: %v", err)
+	}
+	gotOld, gotFresh, gotActive := false, false, false
+	for _, id := range ids {
+		switch id {
+		case oldSess.ID:
+			gotOld = true
+		case freshSess.ID:
+			gotFresh = true
+		case activeSess.ID:
+			gotActive = true
+		}
+	}
+	if !gotOld {
+		t.Errorf("old ended session %s must be listed", oldSess.ID)
+	}
+	if gotFresh {
+		t.Errorf("freshly-ended session %s must not be listed", freshSess.ID)
+	}
+	if gotActive {
+		t.Errorf("active session %s must not be listed", activeSess.ID)
+	}
+
+	// The limit must be honored (the old session is the only candidate anyway,
+	// but a limit of 0 must return nothing rather than everything).
+	if ids, err := store.ListEndedSessionsEndedBefore(ctx, time.Now().Add(-30*24*time.Hour), 0); err != nil || len(ids) != 0 {
+		t.Errorf("limit 0: ids=%v err=%v, want none", ids, err)
+	}
+}

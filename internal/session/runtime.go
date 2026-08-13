@@ -39,6 +39,11 @@ type Store interface {
 	// ListIdleSessions returns active sessions with no event activity since
 	// the given time (candidates for idle-end by the scheduler).
 	ListIdleSessions(ctx context.Context, idleSinceEventBefore time.Time) ([]Session, error)
+	// ListEndedSessionsEndedBefore returns the ids of ended sessions whose
+	// ended_at predates before, oldest first, capped at limit — the retention
+	// sweep's eligibility scan for workspace image cleanup. Sessions whose end
+	// time is unknown (ended_at NULL) are never returned.
+	ListEndedSessionsEndedBefore(ctx context.Context, before time.Time, limit int) ([]string, error)
 	// ListUndreamedSessions returns sessions with messages beyond their dreamed
 	// watermark (any status — open conversations are learnable). This is the
 	// dreaming worker's eligibility scan (incremental model, capability-gap K1).
