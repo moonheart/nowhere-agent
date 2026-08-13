@@ -50,6 +50,7 @@ import {
   setPermissionMode,
 } from "@/lib/permission";
 import { cancelSession } from "@/lib/sessions";
+import { t, useLang, setLang } from "@/lib/i18n";
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
 // and re-runs history.load() for the now-current sessionId.
@@ -303,6 +304,22 @@ function PlanMetadataWatcher() {
 
 // ChatApp is the conversation view. Authentication now lives in App, which
 // gates both this and the console, so ChatApp only reports the sign-out.
+// LangToggle flips the UI language between 中文 and English. The label shows
+// the language you switch TO (the current language's name, per convention).
+function LangToggle() {
+  const lang = useLang();
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      title={lang === "zh" ? t("lang.switchToEn") : t("lang.switchToZh")}
+      onClick={() => setLang(lang === "zh" ? "en" : "zh")}
+    >
+      {lang === "zh" ? "EN" : "中文"}
+    </Button>
+  );
+}
+
 function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
   const [conversationKey, setConversationKey] = useState(0);
   // The URL is the shareable source of truth for the active conversation: the
@@ -412,6 +429,10 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
           </span>
         </div>
         <div className="ml-auto flex items-center gap-1">
+          {/* UI language toggle: a user override (nowhere.lang) beats the
+              browser locale; the header re-renders via useLang, other t()
+              consumers pick the new language up on their next render. */}
+          <LangToggle />
           {/* buttonVariants, not <Button render={<Link/>}>: base-ui's Button
               assumes a native <button>, and telling it otherwise costs the
               anchor its link semantics (middle-click, open in new tab). */}

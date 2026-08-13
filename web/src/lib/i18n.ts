@@ -1,12 +1,16 @@
 // Minimal UI localization for the user-facing console surfaces (login, chat,
 // session list). The platform targets Chinese enterprises first, so the
 // language follows the browser locale: zh-* users get Chinese, everyone else
-// keeps English. This is deliberately a small typed dictionary — not a full
-// i18n framework — so the most visible screens can be localized without
+// keeps English. A localStorage override (nowhere.lang, via setLang) wins over
+// the browser locale so a user can switch the UI language without changing the
+// OS/browser settings. This is deliberately a small typed dictionary — not a
+// full i18n framework — so the most visible screens can be localized without
 // churning every component in the admin console.
 //
 // Add keys here as more surfaces are localized; keep the key list typed so a
 // missing translation is a compile error, not a runtime "undefined".
+
+import { useSyncExternalStore } from "react";
 
 export type I18nKey =
   | "login.title"
@@ -74,7 +78,9 @@ export type I18nKey =
   | "admin.agents"
   | "admin.auditTrail"
   | "admin.settings"
-  | "admin.backToChat";
+  | "admin.backToChat"
+  | "lang.switchToZh"
+  | "lang.switchToEn";
 
 const zh: Record<I18nKey, string> = {
   "login.title": "登录",
@@ -143,6 +149,8 @@ const zh: Record<I18nKey, string> = {
   "admin.auditTrail": "审计日志",
   "admin.settings": "运行设置",
   "admin.backToChat": "返回聊天",
+  "lang.switchToZh": "切换为中文",
+  "lang.switchToEn": "Switch to English",
 };
 
 const en: Record<I18nKey, string> = {
@@ -212,12 +220,56 @@ const en: Record<I18nKey, string> = {
   "admin.auditTrail": "Audit trail",
   "admin.settings": "Settings",
   "admin.backToChat": "Back to chat",
+  "lang.switchToZh": "切换到中文",
+  "lang.switchToEn": "Switch to English",
 };
 
-// lang resolves the UI language from the browser locale once (zh-* → zh).
-const lang: "zh" | "en" = navigator.language.toLowerCase().startsWith("zh")
-  ? "zh"
-  : "en";
+// lang resolves the UI language once: a stored choice (nowhere.lang) wins,
+// else the browser locale (zh-* → zh). setLang persists the choice and
+// notifies subscribers; t() reads the mutable value at call time, so text
+// renders in the new language on the next render of its component.
+const LANG_KEY = "nowhere.lang";
+function detectLang(): "zh" | "en" {
+  try {
+    const stored = localStorage.getItem(LANG_KEY);
+    if (stored === "zh" || stored === "en") return stored;
+  } catch {
+    // localStorage unavailable (private mode); fall through to the locale.
+  }
+  return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+let lang: "zh" | "en" = detectLang();
+const langListeners = new Set<() => void>();
+
+// getLang returns the active UI language.
+export function getLang(): "zh" | "en" {
+  return lang;
+}
+
+// setLang switches the UI language and persists the choice; subscribers
+// (useLang) re-render. Components rendering via plain t() pick the new
+// language up on their next render.
+export function setLang(next: "zh" | "en") {
+  if (next === lang) return;
+  lang = next;
+  try {
+    localStorage.setItem(LANG_KEY, next);
+  } catch {
+    // best-effort persistence; the switch still applies for this session
+  }
+  for (const fn of langListeners) fn();
+}
+
+function subscribeLang(fn: () => void) {
+  langListeners.add(fn);
+  return () => langListeners.delete(fn);
+}
+
+// useLang reactively returns the active UI language, re-rendering the caller
+// when setLang switches it.
+export function useLang(): "zh" | "en" {
+  return useSyncExternalStore(subscribeLang, getLang);
+}
 
 // t returns the localized string for key. vars, when given, substitutes
 // {name} placeholders in the translation (e.g. t("chat.noMatchesHint", {term})).
