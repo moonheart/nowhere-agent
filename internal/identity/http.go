@@ -334,14 +334,10 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
 		if token == "" {
-			// An <img> tag cannot set the Authorization header, so the frontend
-			// appends the token as a query param for image reads (imageFileUrl).
-			// The fallback applies only when no header token is present, and the
-			// access log records the request path, never the query, so the token
-			// does not reach the logs.
-			token = r.URL.Query().Get("token")
-		}
-		if token == "" {
+			// No query-param fallback (removed): a ?token= in the URL would
+			// leak into reverse-proxy logs, browser history and Referer headers.
+			// Image reads use the authenticated fetch helper (Bearer header),
+			// so no route needs the query form.
 			writeError(w, http.StatusUnauthorized, "missing token")
 			return
 		}
