@@ -176,7 +176,7 @@ func (h *Handler) serveTrigger(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, quota.ErrBudgetExceeded):
 			status = http.StatusTooManyRequests
 		}
-		http.Error(w, err.Error(), status)
+		httpx.Error(w, status, err.Error())
 		return
 	}
 
@@ -256,7 +256,7 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request) {
 	u := caller(r)
 	whs, err := h.store.ListByUser(r.Context(), u.ID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	out := make([]webhookDTO, 0, len(whs))
@@ -301,7 +301,7 @@ func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
 		Enabled:         true,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	h.record(r, audit.Success(audit.ActionInboundWebhookCreate).Target("inbound_webhook", wh.ID))
@@ -327,7 +327,7 @@ func (h *Handler) serveToggle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	h.record(r, audit.Success(audit.ActionInboundWebhookToggle).Target("inbound_webhook", id).Detail(map[string]any{"enabled": req.Enabled}))
@@ -339,7 +339,7 @@ func (h *Handler) serveDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ok, err := h.store.Delete(r.Context(), id, u.ID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !ok {
@@ -363,7 +363,7 @@ func (h *Handler) serveRotate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	h.record(r, audit.Success(audit.ActionInboundWebhookRotate).Target("inbound_webhook", id))
