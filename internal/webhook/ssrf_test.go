@@ -37,10 +37,10 @@ func TestValidateURL(t *testing.T) {
 	for _, bad := range []string{
 		"", "file:///etc/passwd", "javascript:alert(1)", "ftp://x/y",
 		"https://", "localhost", "/relative", "http://",
-		"http://127.0.0.1:8080/hook", // literal loopback refused even without DNS
-		"http://10.1.2.3/hook",       // literal private refused
-		"http://[::1]/hook",          // IPv6 loopback refused
-		"http://[64:ff9b::a00:1]/hook",   // NAT64 (RFC 6052) embedding 10.0.0.1 refused
+		"http://127.0.0.1:8080/hook",          // literal loopback refused even without DNS
+		"http://10.1.2.3/hook",                // literal private refused
+		"http://[::1]/hook",                   // IPv6 loopback refused
+		"http://[64:ff9b::a00:1]/hook",        // NAT64 (RFC 6052) embedding 10.0.0.1 refused
 		"http://[64:ff9b:1:a00:0:100::]/hook", // NAT64 local-use /48 embedding 10.0.0.1
 	} {
 		if err := g.ValidateURL(bad); err == nil {
@@ -68,9 +68,9 @@ func TestCheckURLPrivateTargets(t *testing.T) {
 		"http://100.64.0.1/x",                     // CGNAT
 		"http://[::1]/x",
 		"http://[fc00::1]/x",
-		"http://[64:ff9b::a00:1]/x",       // NAT64 well-known prefix embedding 10.0.0.1
+		"http://[64:ff9b::a00:1]/x",        // NAT64 well-known prefix embedding 10.0.0.1
 		"http://[64:ff9b:1:a00:0:100::]/x", // NAT64 local-use /48 embedding 10.0.0.1
-		"http://localhost:8080/x", // resolves loopback via real DNS
+		"http://localhost:8080/x",          // resolves loopback via real DNS
 	} {
 		if err := g.CheckURL(ctx, u); err == nil {
 			t.Errorf("CheckURL(%q): accepted, want block", u)
@@ -136,12 +136,15 @@ func TestAllowlistOpensPrivateTargets(t *testing.T) {
 		url  string
 		want bool
 	}{
-		{"http://10.1.2.3/h", true},            // allowlisted CIDR
-		{"http://172.16.0.5/h", true},          // allowlisted CIDR
-		{"http://im.example.internal/h", true}, // allowlisted hostname
-		{"http://192.168.1.1/h", false},        // outside the CIDRs
-		{"http://other.example/h", false},      // private address, host not allowlisted
-		{"http://127.0.0.1/h", false},          // loopback is never allowed by CIDR
+		{"http://10.1.2.3/h", true},                // allowlisted CIDR
+		{"http://172.16.0.5/h", true},              // allowlisted CIDR
+		{"http://im.example.internal/h", true},     // allowlisted hostname
+		{"http://[64:ff9b::a00:1]/h", true},        // NAT64 well-known prefix embedding allowlisted 10.0.0.1
+		{"http://[64:ff9b:1:a00:0:100::]/h", true}, // NAT64 local-use /48 embedding allowlisted 10.0.0.1
+		{"http://192.168.1.1/h", false},            // outside the CIDRs
+		{"http://[64:ff9b::c0a8:101]/h", false},    // NAT64 embedding 192.168.1.1, outside the CIDRs
+		{"http://other.example/h", false},          // private address, host not allowlisted
+		{"http://127.0.0.1/h", false},              // loopback is never allowed by CIDR
 	} {
 		err := g.CheckURL(ctx, tc.url)
 		if tc.want && err != nil {

@@ -159,6 +159,17 @@ func (g *Guard) allowedIP(ip net.IP, host string) bool {
 			return true
 		}
 	}
+	// Translation schemes reach an embedded IPv4 on the caller's behalf, so
+	// an allowlist keyed on that address must match too — otherwise a
+	// private target smuggled as [64:ff9b::10.0.0.1] evades a 10.0.0.0/8
+	// allowlist that only sees the raw IPv6.
+	if v4 := nat64IPv4(ip); v4 != nil {
+		for _, n := range g.allowNets {
+			if n.Contains(v4) {
+				return true
+			}
+		}
+	}
 	_, hostAllowed := g.allowHosts[strings.ToLower(host)]
 	return hostAllowed
 }
