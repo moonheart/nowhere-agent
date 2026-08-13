@@ -310,6 +310,7 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
       setSelectedId(null);
       setCurrent(null);
       setDraft(null);
+      setDirty(false);
       await refreshList();
     } catch (e) {
       setError((e as Error).message);
