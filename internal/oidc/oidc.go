@@ -161,6 +161,10 @@ func (p *Provider) AuthURL(state string) string {
 // the id_token's signature, issuer, audience, and expiry are all validated
 // before any claim is trusted.
 func (p *Provider) Exchange(ctx context.Context, code string) (Claims, error) {
+	// The oauth2 package would otherwise use http.DefaultClient with no
+	// timeout; route the token-endpoint call through the same bounded client
+	// as discovery/JWKS so a hung IdP cannot block the login handler forever.
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, p.httpClient)
 	tok, err := p.oauth2.Exchange(ctx, code)
 	if err != nil {
 		return Claims{}, fmt.Errorf("oidc: exchange code: %w", err)
