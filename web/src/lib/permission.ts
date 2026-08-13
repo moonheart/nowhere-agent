@@ -14,6 +14,7 @@
 
 import { useSyncExternalStore } from "react";
 import { getToken } from "@/lib/auth";
+import { handleUnauthorized } from "@/lib/api";
 
 export type PermissionMode = "auto" | "allow_all";
 
@@ -78,6 +79,7 @@ export async function setPermissionMode(sessionId: string, mode: PermissionMode)
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ key: "permission_mode", value: mode }),
   }).catch(() => null);
+  if (res) handleUnauthorized(res);
   if (res === null || !res.ok) return false;
   reportPermissionMode(mode);
   return true;

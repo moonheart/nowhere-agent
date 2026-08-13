@@ -4,6 +4,7 @@
 // load the next page; an empty cursor means the list is exhausted.
 
 import { getToken } from "@/lib/auth";
+import { handleUnauthorized } from "@/lib/api";
 
 export type SessionSummary = {
   id: string;
@@ -46,6 +47,7 @@ export async function listSessions(
     // an error state instead of mistaking it for an empty list.
     return null;
   }
+  handleUnauthorized(res);
   if (!res.ok) return null;
   let data: { sessions?: SessionSummary[]; nextCursor?: string };
   try {
@@ -66,6 +68,7 @@ export async function deleteSession(id: string): Promise<boolean> {
       method: "DELETE",
       headers: { authorization: `Bearer ${token}` },
     });
+    handleUnauthorized(res);
     return res.ok;
   } catch {
     return false;
@@ -78,10 +81,11 @@ export async function deleteSession(id: string): Promise<boolean> {
 export async function cancelSession(id: string): Promise<void> {
   const token = getToken();
   if (!token) return;
-  await fetch(`/api/chat/cancel?threadId=${encodeURIComponent(id)}`, {
+  const res = await fetch(`/api/chat/cancel?threadId=${encodeURIComponent(id)}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
-  }).catch(() => {});
+  }).catch(() => null);
+  if (res) handleUnauthorized(res);
 }
 
 // relTime renders a compact relative timestamp for the sidebar.

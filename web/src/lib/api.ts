@@ -3,7 +3,7 @@
 // endpoint uses, and surfaces the server's `error` field as a thrown Error so
 // callers can render one message rather than decoding status codes.
 
-import { getToken } from "@/lib/auth";
+import { clearToken, getToken } from "@/lib/auth";
 
 export class ApiError extends Error {
   // Declared as a field rather than a constructor parameter property: the
@@ -15,6 +15,18 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
   }
+}
+
+// handleUnauthorized signs the session out when the server answers 401 on an
+// AUTHENTICATED request: the stored token is no longer valid (expired,
+// revoked, or replaced), so it is cleared and the app returns to the login
+// screen (App listens for the auth:expired event). Callers whose 401 is an
+// EXPECTED outcome — the login and phone routes, which never attach a token —
+// must not call it; without a stored token this is a no-op.
+export function handleUnauthorized(res: { status: number }): void {
+  if (res.status !== 401 || !getToken()) return;
+  clearToken();
+  window.dispatchEvent(new Event("auth:expired"));
 }
 
 type Options = {
@@ -53,6 +65,10 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
           : JSON.stringify(opts.body),
     signal: opts.signal,
   });
+
+  // An expired/revoked token answers 401 on every protected route: sign out
+  // rather than surfacing each request's generic error to a dead session.
+  handleUnauthorized(res);
 
   if (res.status === 204) return undefined as T;
   if (opts.raw) {

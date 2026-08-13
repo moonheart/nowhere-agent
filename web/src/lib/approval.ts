@@ -9,7 +9,7 @@
 import { useSyncExternalStore } from "react";
 import { getToken } from "@/lib/auth";
 import { getSessionId } from "@/lib/thread";
-import { ApiError } from "@/lib/api";
+import { ApiError, handleUnauthorized } from "@/lib/api";
 import { runClientTool } from "@/lib/client-tools";
 
 export type AskOption = {
@@ -252,6 +252,7 @@ async function postDecision(
   if (res === null) {
     throw new ApiError("the verdict could not reach the server", 0);
   }
+  handleUnauthorized(res);
   if (!res.ok) {
     let msg = `request failed (${res.status})`;
     try {

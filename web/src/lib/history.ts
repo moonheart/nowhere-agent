@@ -24,7 +24,7 @@ import { asAsyncIterableStream } from "assistant-stream/utils";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
 import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
-import { ApiError } from "@/lib/api";
+import { ApiError, handleUnauthorized } from "@/lib/api";
 import { imageFileUrl } from "@/lib/image-attachment";
 import { reportInteraction, type Interaction } from "@/lib/approval";
 import { reportNotice } from "@/lib/notice";
@@ -134,6 +134,7 @@ async function loadHistory(): Promise<{
     `/api/chat/history?threadId=${encodeURIComponent(threadId)}`,
     { headers: authHeaders() },
   );
+  handleUnauthorized(res);
   if (!res.ok) {
     // Follow the api<T>() convention: a non-2xx history response is a real
     // error with the server's `error` message, not an empty conversation.
@@ -179,6 +180,7 @@ async function* resumeStream(
     `/api/chat/resume?threadId=${encodeURIComponent(threadId)}&after=${after}`,
     { method: "POST", headers: authHeaders() },
   );
+  handleUnauthorized(res);
   if (!res.ok || !res.body) return;
 
   const accumulated = res.body
@@ -255,6 +257,7 @@ export async function hasActiveRun(): Promise<boolean> {
       `/api/chat/sessions/${encodeURIComponent(threadId)}/active`,
       { headers: authHeaders() },
     );
+    handleUnauthorized(res);
     if (!res.ok) return false;
     const data = (await res.json()) as { active?: boolean };
     return data.active === true;

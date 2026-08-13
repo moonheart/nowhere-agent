@@ -475,6 +475,16 @@ export default function App() {
     if (totpRequired) setSsoTotp(totpRequired);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Global 401 handling: an expired/revoked token answers 401 on any
+  // authenticated request; the shared fetch helpers clear the token and
+  // broadcast auth:expired, and this listener returns the app to the login
+  // screen — instead of leaving the user staring at a dead session whose
+  // requests all fail with generic errors.
+  useEffect(() => {
+    const onExpired = () => setToken(null);
+    window.addEventListener("auth:expired", onExpired);
+    return () => window.removeEventListener("auth:expired", onExpired);
+  }, []);
 
   if (!token) {
     return (
