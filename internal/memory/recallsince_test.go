@@ -89,3 +89,17 @@ func TestRecallSinceEmptyQueryRecencyOrder(t *testing.T) {
 		t.Fatalf("empty-query recall should be recency-ordered, got %+v", got)
 	}
 }
+
+// TestRecallSinceRequiresMatch pins the PGPort symmetry for the incremental
+// path: with a non-empty query, zero-relevance memories must not surface.
+func TestRecallSinceRequiresMatch(t *testing.T) {
+	p := NewMemPort()
+	ctx := context.Background()
+	scope := identity.UserScope("u1")
+	storeAt(t, p, Memory{Scope: scope, Kind: KindFact, Content: "golang concurrency primitives"}, time.Now())
+
+	got, _ := p.RecallSince(ctx, time.Time{}, "electric unicycles", []identity.ScopeRef{scope}, nil, 10)
+	if len(got) != 0 {
+		t.Errorf("no-match incremental recall = %+v, want empty", got)
+	}
+}

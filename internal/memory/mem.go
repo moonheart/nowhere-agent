@@ -67,6 +67,12 @@ func (p *MemPort) Recall(_ context.Context, query string, scopes []identity.Scop
 			continue
 		}
 		s := relevance(query, *m)
+		// A non-empty query must actually match (PGPort's ts_rank > 0 floor):
+		// without it, a query with no keyword overlap would return an arbitrary
+		// page of unrelated memories as "matches".
+		if strings.TrimSpace(query) != "" && s <= 0 {
+			continue
+		}
 		results = append(results, scored{m: *m, score: s})
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].score > results[j].score })
@@ -104,7 +110,13 @@ func (p *MemPort) RecallSince(_ context.Context, since time.Time, query string, 
 		if len(kinds) > 0 && !kindIn(m.Kind, kinds) {
 			continue
 		}
-		results = append(results, scored{m: *m, score: relevance(query, *m)})
+		s := relevance(query, *m)
+		// Same zero-relevance floor as PGPort: with a query, a memory with no
+		// keyword overlap must not surface as a match.
+		if strings.TrimSpace(query) != "" && s <= 0 {
+			continue
+		}
+		results = append(results, scored{m: *m, score: s})
 	}
 	// With a query: relevance, ties broken by recency. Without: pure recency.
 	sort.Slice(results, func(i, j int) bool {

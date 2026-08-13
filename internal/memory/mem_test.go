@@ -57,6 +57,33 @@ func TestRecallIncludesTeamAndSystemScopes(t *testing.T) {
 	}
 }
 
+// TestRecallRequiresMatch pins the PGPort symmetry: with a non-empty query, a
+// memory with no keyword overlap (score 0) must not surface — before the fix,
+// MemPort returned an arbitrary page of unrelated memories as "matches".
+func TestRecallRequiresMatch(t *testing.T) {
+	p := NewMemPort()
+	ctx := context.Background()
+	scope := identity.UserScope("u1")
+	storeMem(t, p, Memory{Scope: scope, Kind: KindFact, Content: "golang concurrency primitives"})
+
+	got, err := p.Recall(ctx, "electric unicycles", []identity.ScopeRef{scope}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("no-match recall = %+v, want empty", got)
+	}
+
+	// An empty query is not a match query: it must still return the memory.
+	got, err = p.Recall(ctx, "", []identity.ScopeRef{scope}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Errorf("empty-query recall = %d memories, want 1", len(got))
+	}
+}
+
 func TestRecallExcludesDeprecated(t *testing.T) {
 	p := NewMemPort()
 	ctx := context.Background()

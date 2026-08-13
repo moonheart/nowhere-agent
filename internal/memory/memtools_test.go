@@ -27,7 +27,7 @@ func TestWriteMemoryToolStoresUserMemory(t *testing.T) {
 	}
 
 	// The stored memory must be user-scoped to u1 and immediately recallable.
-	got, err := p.Recall(context.Background(), "language", []identity.ScopeRef{identity.UserScope("u1")}, 5)
+	got, err := p.Recall(context.Background(), "prefers", []identity.ScopeRef{identity.UserScope("u1")}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestWriteMemoryToolStoresUserMemory(t *testing.T) {
 		t.Errorf("stored memory = %+v", got)
 	}
 	// And not visible to another user.
-	other, _ := p.Recall(context.Background(), "language", []identity.ScopeRef{identity.UserScope("u2")}, 5)
+	other, _ := p.Recall(context.Background(), "prefers", []identity.ScopeRef{identity.UserScope("u2")}, 5)
 	if len(other) != 0 {
 		t.Errorf("memory leaked across users: %+v", other)
 	}
