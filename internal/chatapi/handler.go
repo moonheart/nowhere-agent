@@ -527,8 +527,11 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	sessID := ap.SessionID
 
 	// Build the fresh run's loop and bind this session's tools BEFORE deciding:
-	// an approved permission call executes through this same registry.
-	loop := h.newLoop(r.Context(), h.system)
+	// an approved permission call executes through this same registry. The
+	// system prompt goes through the ContextBuilder (skill L0 index) exactly
+	// like a fresh submission; a verdict carries no new user text, so the
+	// query is empty.
+	loop := h.newLoop(r.Context(), h.systemPromptForText(r, ""))
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
 	}
@@ -704,6 +707,13 @@ func registerClientTools(loop *agent.Loop, decls map[string]clientToolDecl) {
 // (skills + recalled memory) when wired and the caller is authenticated,
 // otherwise the static base prompt.
 func (h *Handler) systemPromptFor(r *http.Request, req dataStreamRequest) string {
+	return h.systemPromptForText(r, lastUserText(req))
+}
+
+// systemPromptForText is systemPromptFor for a turn without a parsed request
+// body — a verdict resume carries no new user text, so the builder runs on an
+// empty query, exactly as the resume's memory injection does.
+func (h *Handler) systemPromptForText(r *http.Request, text string) string {
 	if h.ctxBuilder == nil {
 		return h.system
 	}
@@ -711,7 +721,7 @@ func (h *Handler) systemPromptFor(r *http.Request, req dataStreamRequest) string
 	if !ok {
 		return h.system
 	}
-	return h.ctxBuilder.SystemPrompt(r.Context(), user, lastUserText(req))
+	return h.ctxBuilder.SystemPrompt(r.Context(), user, text)
 }
 
 // resolveSession maps the request to a session: it resumes the session named
