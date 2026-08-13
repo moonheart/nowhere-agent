@@ -91,49 +91,89 @@ export function imageFileUrl(sessionId: string | null, path: string): string {
   return `/api/chat/sessions/${encodeURIComponent(sessionId ?? "")}/files/${path}`;
 }
 
+// BROKEN_IMAGE_SRC is the placeholder shown when an authenticated image fails
+// to load: an inline SVG broken-image icon, so a failed fetch is visible
+// instead of a permanently blank thumbnail. Data URI needs no object URL, so it
+// never leaks and needs no revoke. Consumers may compare the hook's return
+// value against it to offer a click-to-retry.
+export const BROKEN_IMAGE_SRC =
+  "data:image/svg+xml;utf8," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>`,
+  );
+
+// blobCache shares one object URL across every mount of the same src. Each
+// live mount holds a reference (refs); when the last one unmounts or changes
+// src, the blob is revoked and the entry dropped — so a long session with many
+// mounts of the same images stops re-fetching and re-creating blobs, and the
+// memory footprint tracks the distinct images, not the mounts.
+type BlobEntry = { url: string; refs: number };
+const blobCache = new Map<string, BlobEntry>();
+
 // useAuthenticatedImage fetches a server image URL with the bearer token — an
 // <img> tag cannot set an Authorization header — and returns a blob URL to
 // render. The URL itself stays token-free (see imageFileUrl): the token never
 // rides the query string into proxy access logs or browser history. Returns
-// undefined while the bytes are loading or on failure. Blob URLs are revoked
-// when the src changes or the component unmounts.
-export function useAuthenticatedImage(src: string): string | undefined {
+// undefined while the bytes are loading, BROKEN_IMAGE_SRC on failure. Bumping
+// retry re-fetches a failed src (click-to-retry); a src that already loaded
+// (or is loading) is unaffected — retry only matters for the failure path.
+export function useAuthenticatedImage(src: string, retry = 0): string | undefined {
   const [blob, setBlob] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     let revoked = false;
-    let url: string | undefined;
     setBlob(undefined);
     const token = getToken();
     if (!src || !token) return;
 
+    // Another live mount already fetched this src: share its blob URL instead
+    // of re-fetching and double-creating an object URL.
     const ctrl = new AbortController();
-    (async () => {
-      try {
-        const res = await fetch(src, {
-          headers: { authorization: `Bearer ${token}` },
-          signal: ctrl.signal,
-        });
-        if (!res.ok) return;
-        const bytes = await res.blob();
-        if (revoked) return;
-        url = URL.createObjectURL(bytes);
-        if (revoked) {
-          URL.revokeObjectURL(url);
-          return;
+    const existing = blobCache.get(src);
+    if (existing) {
+      existing.refs++;
+      setBlob(existing.url);
+    } else {
+      (async () => {
+        let url: string | undefined;
+        try {
+          const res = await fetch(src, {
+            headers: { authorization: `Bearer ${token}` },
+            signal: ctrl.signal,
+          });
+          if (!res.ok) throw new Error(`image fetch failed: ${res.status}`);
+          const bytes = await res.blob();
+          if (revoked) return;
+          url = URL.createObjectURL(bytes);
+          // Two mounts of the same src raced the fetch; the winner's entry is
+          // now in the cache. Join it rather than keeping a duplicate blob.
+          const joined = blobCache.get(src);
+          if (joined) {
+            joined.refs++;
+            URL.revokeObjectURL(url);
+            setBlob(joined.url);
+            return;
+          }
+          blobCache.set(src, { url, refs: 1 });
+          setBlob(url);
+        } catch {
+          // Aborted by cleanup or a failed/network-broken response: render the
+          // placeholder so the failure is visible instead of a blank spot.
+          if (!revoked) setBlob(BROKEN_IMAGE_SRC);
         }
-        setBlob(url);
-      } catch {
-        // Aborted by cleanup or network failure: render nothing.
-      }
-    })();
+      })();
+    }
 
     return () => {
       revoked = true;
       ctrl.abort();
-      if (url) URL.revokeObjectURL(url);
+      const cur = blobCache.get(src);
+      if (cur && --cur.refs <= 0) {
+        blobCache.delete(src);
+        URL.revokeObjectURL(cur.url);
+      }
     };
-  }, [src]);
+  }, [src, retry]);
 
   return blob;
 }

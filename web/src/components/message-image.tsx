@@ -2,18 +2,37 @@ import { useEffect, useState, type FC } from "react";
 import { createPortal } from "react-dom";
 import { ZoomIn } from "lucide-react";
 import type { ImageMessagePartComponent } from "@assistant-ui/react";
-import { useAuthenticatedImage } from "@/lib/image-attachment";
+import {
+  BROKEN_IMAGE_SRC,
+  useAuthenticatedImage,
+} from "@/lib/image-attachment";
 
 // AuthenticatedImg is a plain <img> whose src is resolved through the
 // authenticated fetch — for image tags outside message parts (the composer's
-// attachment chip), which have no fetch hook of their own.
+// attachment chip), which have no fetch hook of their own. A failed load shows
+// the broken-image placeholder; clicking it retries the fetch.
 export const AuthenticatedImg: FC<{
   src: string;
   alt?: string;
   className?: string;
-}> = ({ src, alt, className }) => (
-  <img src={useAuthenticatedImage(src)} alt={alt} className={className} />
-);
+}> = ({ src, alt, className }) => {
+  const [retry, setRetry] = useState(0);
+  const url = useAuthenticatedImage(src, retry);
+  if (url === BROKEN_IMAGE_SRC) {
+    return (
+      <button
+        type="button"
+        onClick={() => setRetry((r) => r + 1)}
+        title="Retry image"
+        aria-label="Retry loading image"
+        className={className}
+      >
+        <img src={BROKEN_IMAGE_SRC} alt={alt} className={className} />
+      </button>
+    );
+  }
+  return <img src={url} alt={alt} className={className} />;
+};
 
 // MessageImage renders a message's image part as a small square thumbnail;
 // clicking it opens a full-size lightbox over the chat. The thumbnail keeps
@@ -23,7 +42,8 @@ export const AuthenticatedImg: FC<{
 // so the lightbox has no focus-trap/title ceremony.)
 export const MessageImage: ImageMessagePartComponent = ({ image, filename }) => {
   const [open, setOpen] = useState(false);
-  const src = useAuthenticatedImage(image);
+  const [retry, setRetry] = useState(0);
+  const src = useAuthenticatedImage(image, retry);
 
   useEffect(() => {
     if (!open) return;
@@ -40,14 +60,21 @@ export const MessageImage: ImageMessagePartComponent = ({ image, filename }) => 
   }, [open]);
 
   const alt = filename || "Image";
+  // A failed load is visible (broken placeholder) and clicking it retries the
+  // fetch instead of zooming a blank image.
+  const broken = src === BROKEN_IMAGE_SRC;
+  const onThumbClick = () => {
+    if (broken) setRetry((r) => r + 1);
+    else setOpen(true);
+  };
 
   return (
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
-        title="Click to enlarge"
-        aria-label="Enlarge image"
+        onClick={onThumbClick}
+        title={broken ? "Retry image" : "Click to enlarge"}
+        aria-label={broken ? "Retry loading image" : alt}
         className="group relative mt-1 shrink-0 cursor-zoom-in rounded-lg border border-border p-0.5 transition-shadow hover:ring-2 hover:ring-ring focus-visible:ring-2 focus-visible:ring-ring"
       >
         <img
@@ -55,11 +82,14 @@ export const MessageImage: ImageMessagePartComponent = ({ image, filename }) => 
           alt={alt}
           className="size-16 rounded-md object-cover"
         />
-        <span className="absolute right-1.5 bottom-1.5 rounded-full bg-black/50 p-0.5 text-background opacity-0 transition-opacity group-hover:opacity-100">
-          <ZoomIn className="size-3" />
-        </span>
+        {!broken && (
+          <span className="absolute right-1.5 bottom-1.5 rounded-full bg-black/50 p-0.5 text-background opacity-0 transition-opacity group-hover:opacity-100">
+            <ZoomIn className="size-3" />
+          </span>
+        )}
       </button>
-      {open &&
+      {!broken &&
+        open &&
         createPortal(
           <div
             role="dialog"
