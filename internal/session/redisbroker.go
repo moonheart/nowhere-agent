@@ -81,25 +81,37 @@ func (b *redisBroker) Publish(ctx context.Context, sessionID string, ev StreamEv
 	return streamIDToOffset(id), nil
 }
 
+// Read returns every retained entry published after `after`, in offset order.
+// A single XREAD is capped at Count entries, so it loops until a batch returns
+// fewer than the cap: a catch-up reading more than 1024 frames must not stop
+// mid-stream (the caller would otherwise lose the middle of the retained
+// buffer once the run settles and the stream expires). The position advances
+// between batches, so each entry is read exactly once.
 func (b *redisBroker) Read(ctx context.Context, sessionID string, after int64) ([]StreamEvent, error) {
-	res, err := b.cli.XRead(ctx, &redis.XReadArgs{
-		Streams: []string{b.key(sessionID), offsetToStreamID(after)},
-		Count:   1024,
-	}).Result()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return nil, nil
+	var out []StreamEvent
+	for {
+		res, err := b.cli.XRead(ctx, &redis.XReadArgs{
+			Streams: []string{b.key(sessionID), offsetToStreamID(after)},
+			Count:   1024,
+		}).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				return out, nil
+			}
+			return nil, err
 		}
-		return nil, err
+		if len(res) == 0 {
+			return out, nil
+		}
+		msgs := res[0].Messages
+		for _, m := range msgs {
+			out = append(out, messageToStreamEvent(m))
+			after = streamIDToOffset(m.ID)
+		}
+		if len(msgs) < 1024 {
+			return out, nil
+		}
 	}
-	if len(res) == 0 {
-		return nil, nil
-	}
-	out := make([]StreamEvent, 0, len(res[0].Messages))
-	for _, m := range res[0].Messages {
-		out = append(out, messageToStreamEvent(m))
-	}
-	return out, nil
 }
 
 // Subscribe polls XREAD BLOCK in a loop and forwards entries to a channel. The

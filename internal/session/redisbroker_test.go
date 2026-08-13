@@ -172,6 +172,41 @@ func TestRedisBrokerSlowConsumerNoBusyLoop(t *testing.T) {
 	_ = ch
 }
 
+// TestRedisBrokerReadLoopsPastSingleBatchCap: a catch-up reading more frames
+// than one XREAD batch (Count 1024) returns them ALL, in order — the old
+// single-read would lose the middle of the retained buffer once the run
+// settles and the stream expires.
+func TestRedisBrokerReadLoopsPastSingleBatchCap(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cli := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	defer cli.Close()
+	b := NewRedisBrokerFromClient(cli, 5000, time.Minute)
+	ctx := context.Background()
+
+	// 2500 frames: 3 XREAD batches of 1024/1024/452.
+	for i := 0; i < 2500; i++ {
+		if _, err := b.Publish(ctx, "s1", StreamEvent{RunID: "r1", Kind: "text", Payload: []byte{byte('0' + i%10)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := b.Read(ctx, "s1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2500 {
+		t.Fatalf("Read = %d frames, want all 2500 (past the 1024 single-batch cap)", len(got))
+	}
+	for i, e := range got {
+		if string(e.Payload) != string([]byte{byte('0' + i%10)}) {
+			t.Fatalf("frame %d payload = %q, want %q (order must hold across batches)", i, e.Payload, byte('0'+i%10))
+		}
+		if i > 0 && e.Offset <= got[i-1].Offset {
+			t.Fatalf("offsets not increasing at %d", i)
+		}
+	}
+}
+
 func TestRedisBrokerSettleAppliesTTL(t *testing.T) {
 	b, mr := newTestRedisBroker(t)
 	ctx := context.Background()
