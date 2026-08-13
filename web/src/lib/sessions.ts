@@ -24,7 +24,12 @@ export type SessionPage = {
 // non-empty, narrows the list server-side to sessions whose title contains it
 // (case-insensitive): the sidebar search runs on the backend so old
 // conversations are searchable even though the client only loads 25 at a time.
-export async function listSessions(cursor = "", q = ""): Promise<SessionPage> {
+// Returns null when the request FAILED — the caller must distinguish that from
+// a legitimate empty list (which would otherwise render as "No conversations").
+export async function listSessions(
+  cursor = "",
+  q = "",
+): Promise<SessionPage | null> {
   const token = getToken();
   if (!token) return { sessions: [], nextCursor: "" };
   const params = new URLSearchParams({ limit: String(SESSION_PAGE_SIZE) });
@@ -33,11 +38,13 @@ export async function listSessions(cursor = "", q = ""): Promise<SessionPage> {
   const res = await fetch(`/api/chat/sessions?${params}`, {
     headers: { authorization: `Bearer ${token}` },
   });
-  if (!res.ok) return { sessions: [], nextCursor: "" };
-  const data = (await res.json()) as {
-    sessions?: SessionSummary[];
-    nextCursor?: string;
-  };
+  if (!res.ok) return null;
+  let data: { sessions?: SessionSummary[]; nextCursor?: string };
+  try {
+    data = (await res.json()) as { sessions?: SessionSummary[]; nextCursor?: string };
+  } catch {
+    return null;
+  }
   return { sessions: data.sessions ?? [], nextCursor: data.nextCursor ?? "" };
 }
 

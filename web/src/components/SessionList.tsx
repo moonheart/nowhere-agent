@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/item";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { t } from "@/lib/i18n";
+import { reportNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -51,6 +52,10 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [query, setQuery] = useState("");
+  // loadError is true when the last refresh FAILED (listSessions returned
+  // null) — distinct from an empty list, which is a legitimate "no
+  // conversations yet". Shows an error/retry banner instead of the empty state.
+  const [loadError, setLoadError] = useState(false);
   // debounced is the search term actually sent to the backend (250ms after the
   // last keystroke). queryRef tracks the latest issued term so a response that
   // raced a newer search is dropped instead of overwriting its results.
@@ -97,6 +102,11 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
       if (page) {
         setSessions(page.sessions);
         setNextCursor(page.nextCursor);
+        setLoadError(false);
+      } else {
+        // The request failed: keep the current list but surface the error so a
+        // transient outage is not mistaken for "no conversations yet".
+        setLoadError(true);
       }
     },
     [fetchPage],
@@ -142,7 +152,10 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   }, [loadMore]);
 
   const handleDelete = async (id: string) => {
-    if (!(await deleteSession(id))) return;
+    if (!(await deleteSession(id))) {
+      reportNotice("Could not delete the conversation — try again.");
+      return;
+    }
     if (id === currentId) {
       onDeleteCurrent();
     } else {
@@ -179,6 +192,19 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="p-2">
+          {loadError && (
+            <div className="mb-1 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+              <span>Couldn’t load conversations.</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-auto px-2 py-0.5"
+                onClick={() => void refresh(debounced)}
+              >
+                Retry
+              </Button>
+            </div>
+          )}
           {!loading && sessions.length === 0 && debounced === "" && (
             <Empty className="p-4">
               <EmptyHeader>
