@@ -1188,6 +1188,7 @@ func run() error {
 		}
 		buildToolRegistry := func(ctx context.Context, sessionID string, whitelist []string) *toolruntime.Registry {
 			full := toolruntime.NewRegistry()
+			full.SetMaxConcurrent(cfg.HTTPTool.MaxConcurrent)
 			reg := full
 			// Structured user questions (capability O-ask): the model asks 1–4
 			// questions; the loop suspends the run on this tool and the user's
@@ -1346,6 +1347,7 @@ func run() error {
 					allow[n] = true
 				}
 			filtered := toolruntime.NewRegistry()
+			filtered.SetMaxConcurrent(cfg.HTTPTool.MaxConcurrent)
 			for _, t := range full.All() {
 				if allow[t.Name()] {
 					// D3: a whitelisted spawn_agent must scope children from the

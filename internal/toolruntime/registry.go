@@ -15,15 +15,39 @@ import (
 
 const defaultTimeout = 30 * time.Second
 
+// defaultMaxConcurrent bounds in-flight tool executions per registry when no
+// explicit cap is set (HTTP_TOOL_MAX_CONCURRENT). A model batch of 30 calls
+// would otherwise spawn one goroutine per call with no upper bound.
+const defaultMaxConcurrent = 8
+
 // Registry holds the tools available to a run and dispatches calls to them.
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]Tool
+	// sem, when non-nil, caps concurrent tool executions: Call acquires a
+	// slot before dispatch and releases it when the call returns. A nil sem
+	// (SetMaxConcurrent(0)) means unlimited. The cap is per registry — each
+	// run owns one — so a large batch executes at most maxConcurrent tools at
+	// once instead of a goroutine per call.
+	sem chan struct{}
 }
 
-// NewRegistry creates an empty Registry.
+// NewRegistry creates an empty Registry with the default concurrency cap.
 func NewRegistry() *Registry {
-	return &Registry{tools: map[string]Tool{}}
+	return &Registry{tools: map[string]Tool{}, sem: make(chan struct{}, defaultMaxConcurrent)}
+}
+
+// SetMaxConcurrent caps the number of tool executions this registry runs in
+// parallel (0 or negative = unlimited). Call it before dispatching; a change
+// applies to subsequent calls.
+func (r *Registry) SetMaxConcurrent(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n <= 0 {
+		r.sem = nil
+		return
+	}
+	r.sem = make(chan struct{}, n)
 }
 
 // Register adds a tool, replacing any with the same name.
@@ -56,6 +80,13 @@ func (r *Registry) All() []Tool {
 	return out
 }
 
+// semaphore returns the concurrency-cap channel, or nil when unlimited.
+func (r *Registry) semaphore() chan struct{} {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sem
+}
+
 // Call dispatches one tool call by name, applying the tool's timeout.
 // Unknown tools, errors, and panics are returned as error Results so the model
 // can self-correct rather than crashing the loop (or, since CallAll dispatches
@@ -64,6 +95,17 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 	t, ok := r.Get(name)
 	if !ok {
 		return Result{Content: fmt.Sprintf("unknown tool: %s (available tools: %s)", name, strings.Join(r.Names(), ", ")), IsError: true}
+	}
+
+	// Concurrency cap: acquire a slot before executing. A cancelled ctx while
+	// queued is reported as a failed call rather than starting the tool.
+	if sem := r.semaphore(); sem != nil {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		case <-ctx.Done():
+			return Result{Content: fmt.Sprintf("tool %s failed: %v", name, ctx.Err()), IsError: true}
+		}
 	}
 
 	timeout := t.Timeout()

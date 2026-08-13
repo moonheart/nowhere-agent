@@ -3,6 +3,8 @@ package toolruntime
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -115,5 +117,52 @@ func TestRegistryCallAllConcurrent(t *testing.T) {
 	// Concurrent: 3 x 50ms should take ~50ms, not 150ms.
 	if time.Since(start) > 120*time.Millisecond {
 		t.Errorf("calls did not run concurrently: %v", time.Since(start))
+	}
+}
+
+// TestRegistryCallRespectsConcurrencyCap pins the per-registry semaphore: with
+// a cap of 2, at most two tool executions overlap, and SetMaxConcurrent(0)
+// restores unlimited parallelism.
+func TestRegistryCallRespectsConcurrencyCap(t *testing.T) {
+	var mu sync.Mutex
+	var inFlight, peak int
+	var blocked bool
+	tool := fakeTool{name: "gauge", fn: func(ctx context.Context, _ map[string]any) (Result, error) {
+		mu.Lock()
+		inFlight++
+		if inFlight > peak {
+			peak = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		return Result{Content: "ok"}, nil
+	}}
+
+	capped := NewRegistry()
+	capped.Register(tool)
+	capped.SetMaxConcurrent(2)
+	calls := make([]Call, 8)
+	for i := range calls {
+		calls[i] = Call{ID: fmt.Sprintf("%d", i), Name: "gauge"}
+	}
+	capped.CallAll(context.Background(), calls)
+	mu.Lock()
+	blocked = peak > 2
+	mu.Unlock()
+	if blocked {
+		t.Errorf("peak in-flight = %d, want <= 2 under the cap", peak)
+	}
+
+	// Cap removed: 8 concurrent 20ms calls complete in ~20ms, not ~80ms.
+	uncapped := NewRegistry()
+	uncapped.Register(tool)
+	uncapped.SetMaxConcurrent(0)
+	start := time.Now()
+	uncapped.CallAll(context.Background(), calls)
+	if time.Since(start) > 40*time.Millisecond {
+		t.Errorf("uncapped calls did not run in parallel: %v", time.Since(start))
 	}
 }

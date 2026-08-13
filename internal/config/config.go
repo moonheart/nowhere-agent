@@ -295,6 +295,13 @@ type HTTPTool struct {
 	Allowlist string `envconfig:"HTTP_TOOL_ALLOWLIST" default:""`
 	// Timeout bounds a single tool call; the model may lower it per call.
 	Timeout time.Duration `envconfig:"HTTP_TOOL_TIMEOUT" default:"30s"`
+	// MaxConcurrent caps how many tool executions a single run may have in
+	// flight at once (a per-run registry semaphore; 0 = unlimited). It applies
+	// to the whole tool registry of a run — query_db, spawn_agent, built-ins —
+	// not just http_request; the knob sits here because HTTP_TOOL_TIMEOUT set
+	// the pattern for tool-tuning env vars. Default 8 turns a 30-call model
+	// batch into 8 in-flight tools instead of one goroutine per call.
+	MaxConcurrent int `envconfig:"HTTP_TOOL_MAX_CONCURRENT" default:"8"`
 }
 
 // QueryDB configures the query_db built-in tool (enterprise integration): the
