@@ -220,14 +220,15 @@ func public6(ip net.IP) bool {
 
 // embeddedIPv4 returns the IPv4 reachable through an IPv6 translation
 // scheme — NAT64 (RFC 6052 well-known 64:ff9b::/96 or RFC 8215 local-use
-// 64:ff9b:1::/48), 6to4 (RFC 3056 2002:V4::/16) or the legacy 4-in-6
-// ::a.b.c.d — or nil when ip carries no embedded address.
+// 64:ff9b:1::/48), 6to4 (RFC 3056 2002:V4::/16), ISATAP (RFC 5214) or the
+// legacy 4-in-6 ::a.b.c.d — or nil when ip carries no embedded address.
 // Per RFC 6052 §2.2 the /96 form carries the IPv4 in the low 32 bits; the
 // /48 form splits it across the reserved "u" octet (bytes 6-7 and 9-10, u
 // at byte 8, whose value is ignored: RFC 6052 §2.3 extraction removes the
 // u octet unconditionally and translators do not enforce it being zero).
-// 6to4 puts the IPv4 at bytes 2-5; 4-in-6 in the low 32 bits with the high
-// 96 bits zero.
+// 6to4 puts the IPv4 at bytes 2-5; ISATAP at bytes 12-15 (preceded by the
+// 0x00005efe identifier marker at bytes 8-11); 4-in-6 in the low 32 bits
+// with the high 96 bits zero.
 func embeddedIPv4(ip net.IP) net.IP {
 	v6 := ip.To16()
 	if v6 == nil {
@@ -260,6 +261,16 @@ func embeddedIPv4(ip net.IP) net.IP {
 	if v6[0] == 0 && v6[1] == 0 && v6[2] == 0 && v6[3] == 0 &&
 		v6[4] == 0 && v6[5] == 0 && v6[6] == 0 && v6[7] == 0 &&
 		v6[8] == 0 && v6[9] == 0 && v6[10] == 0 && v6[11] == 0 {
+		return net.IPv4(v6[12], v6[13], v6[14], v6[15])
+	}
+	// ISATAP (RFC 5214): the interface identifier is 0x0000_5EFE followed
+	// by the IPv4 in the low 32 bits — bytes 8-11 are the 0x00005efe
+	// marker and the IPv4 sits in bytes 12-15 (e.g.
+	// 2001:db8::5efe:10.0.0.1). Any address carrying the 5efe marker is
+	// decoded (fail-closed), even if the prefix half of the identifier is
+	// nonzero. Unlike Teredo (RFC 4380) there are no server/obfuscation
+	// bits to strip, so the embedded address is reachable as-is.
+	if v6[10] == 0x5e && v6[11] == 0xfe {
 		return net.IPv4(v6[12], v6[13], v6[14], v6[15])
 	}
 	return nil
