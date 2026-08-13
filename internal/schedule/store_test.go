@@ -476,3 +476,187 @@ func TestPGStoreEndSessions(t *testing.T) {
 		t.Fatalf("expected repeat clear = 0, got %d", again)
 	}
 }
+
+// TestPGStoreRequeueDueGuards pins RequeueDue's three-way guard (f774b17): a
+// requeue must only roll next_run_at back when the claim state still holds —
+// the task still enabled, unexpired, and its next_run_at still what Claim set.
+// An operator edit, a disable, or an expiry in the claim→requeue window must
+// all no-op (ErrNotFound) and leave next_run_at untouched, so a requeue can
+// neither clobber a newer schedule nor resurrect a disabled/expired task.
+func TestPGStoreRequeueDueGuards(t *testing.T) {
+	db := pgTestDB(t)
+	ctx := context.Background()
+	userID := pgNewUser(t, db)
+	store := NewPGStore(db)
+
+	now := time.Now()
+	claim := func(task Task) (Task, time.Time) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), task.ID); err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := store.Claim(ctx, task.ID, now)
+		if err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		return claimed, claimed.NextRunAt
+	}
+	read := func(id string) Task {
+		t.Helper()
+		g, err := store.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	mk := func() Task {
+		t.Helper()
+		created, err := store.Create(ctx, validTask(userID))
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+		return created
+	}
+	// closeEnough tolerates the timestamptz microsecond round-trip.
+	closeEnough := func(got, want time.Time) bool { return got.Sub(want) < time.Second && got.Sub(want) > -time.Second }
+
+	// Positive control: claim state intact → next_run_at rolls back to now.
+	ok := mk()
+	claimed, _ := claim(ok)
+	if err := store.RequeueDue(ctx, claimed, now); err != nil {
+		t.Fatalf("requeue with intact claim state: %v", err)
+	}
+	if g := read(ok.ID); !closeEnough(g.NextRunAt, now) {
+		t.Errorf("requeue did not roll next_run_at back to now: %v", g.NextRunAt)
+	}
+
+	// Guard 1: next_run_at edited between claim and requeue.
+	edited := mk()
+	claimed, _ = claim(edited)
+	editedAt := now.Add(time.Hour)
+	if _, err := db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, editedAt, edited.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RequeueDue(ctx, claimed, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("requeue after next_run_at edit = %v, want ErrNotFound", err)
+	}
+	if g := read(edited.ID); !closeEnough(g.NextRunAt, editedAt) {
+		t.Errorf("requeue clobbered the edited next_run_at: got %v want %v", g.NextRunAt, editedAt)
+	}
+
+	// Guard 2: task disabled between claim and requeue.
+	disabled := mk()
+	claimed, claimedAt := claim(disabled)
+	if err := store.SetEnabled(ctx, disabled.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RequeueDue(ctx, claimed, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("requeue of a disabled task = %v, want ErrNotFound", err)
+	}
+	if g := read(disabled.ID); !g.NextRunAt.Equal(claimedAt) {
+		t.Errorf("requeue rolled back a disabled task's next_run_at: got %v want %v", g.NextRunAt, claimedAt)
+	}
+
+	// Guard 3: task expired between claim and requeue.
+	expired := mk()
+	claimed, claimedAt = claim(expired)
+	if _, err := db.Exec(`UPDATE scheduled_task SET end_time = $1 WHERE id = $2`, now.Add(-time.Hour), expired.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RequeueDue(ctx, claimed, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("requeue of an expired task = %v, want ErrNotFound", err)
+	}
+	if g := read(expired.ID); !g.NextRunAt.Equal(claimedAt) {
+		t.Errorf("requeue rolled back an expired task's next_run_at: got %v want %v", g.NextRunAt, claimedAt)
+	}
+}
+
+// TestMemStoreRequeueDueGuards is the in-memory mirror of the PG guards: the
+// same three no-op cases must leave next_run_at untouched, and the intact
+// claim state must roll it back.
+func TestMemStoreRequeueDueGuards(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemStore()
+	now := time.Now()
+
+	created, err := store.Create(ctx, validTask("u-mem-requeue"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Force due-ness (Create seeds next_run_at in the future).
+	mut := store.tasks[created.ID]
+	mut.NextRunAt = now.Add(-time.Minute)
+	store.tasks[created.ID] = mut
+	claimed, err := store.Claim(ctx, created.ID, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	// Positive control: intact claim state → next_run_at rolls back to now.
+	if err := store.RequeueDue(ctx, claimed, now); err != nil {
+		t.Fatalf("requeue with intact claim state: %v", err)
+	}
+	if g, _ := store.Get(ctx, created.ID); !g.NextRunAt.Equal(now) {
+		t.Errorf("requeue did not roll next_run_at back to now: %v", g.NextRunAt)
+	}
+
+	// Guard 1: next_run_at edited between claim and requeue.
+	cur := store.tasks[created.ID]
+	cur.NextRunAt = now.Add(-time.Minute)
+	store.tasks[created.ID] = cur
+	claimed, err = store.Claim(ctx, created.ID, now)
+	if err != nil {
+		t.Fatalf("re-claim: %v", err)
+	}
+	editedAt := now.Add(time.Hour)
+	cur = store.tasks[created.ID]
+	cur.NextRunAt = editedAt
+	store.tasks[created.ID] = cur
+	if err := store.RequeueDue(ctx, claimed, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("requeue after next_run_at edit = %v, want ErrNotFound", err)
+	}
+	if g, _ := store.Get(ctx, created.ID); !g.NextRunAt.Equal(editedAt) {
+		t.Errorf("requeue clobbered the edited next_run_at: got %v want %v", g.NextRunAt, editedAt)
+	}
+
+	// Guard 2: task disabled between claim and requeue.
+	cur = store.tasks[created.ID]
+	cur.NextRunAt = now.Add(-time.Minute)
+	store.tasks[created.ID] = cur
+	claimed, err = store.Claim(ctx, created.ID, now)
+	if err != nil {
+		t.Fatalf("re-claim: %v", err)
+	}
+	if err := store.SetEnabled(ctx, created.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RequeueDue(ctx, claimed, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("requeue of a disabled task = %v, want ErrNotFound", err)
+	}
+	if g, _ := store.Get(ctx, created.ID); !g.NextRunAt.Equal(claimed.NextRunAt) {
+		t.Errorf("requeue rolled back a disabled task's next_run_at: got %v want %v", g.NextRunAt, claimed.NextRunAt)
+	}
+
+	// Guard 3: task expired between claim and requeue.
+	if err := store.SetEnabled(ctx, created.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	cur = store.tasks[created.ID]
+	cur.NextRunAt = now.Add(-time.Minute)
+	store.tasks[created.ID] = cur
+	claimed, err = store.Claim(ctx, created.ID, now)
+	if err != nil {
+		t.Fatalf("re-claim: %v", err)
+	}
+	past := now.Add(-time.Hour)
+	cur = store.tasks[created.ID]
+	cur.EndTime = &past
+	store.tasks[created.ID] = cur
+	if err := store.RequeueDue(ctx, claimed, now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("requeue of an expired task = %v, want ErrNotFound", err)
+	}
+	if g, _ := store.Get(ctx, created.ID); !g.NextRunAt.Equal(claimed.NextRunAt) {
+		t.Errorf("requeue rolled back an expired task's next_run_at: got %v want %v", g.NextRunAt, claimed.NextRunAt)
+	}
+}
