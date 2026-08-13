@@ -3,7 +3,9 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
@@ -67,6 +69,65 @@ func TestImageStoreSaveRejectsUndecodable(t *testing.T) {
 	s := NewImageStore(t.TempDir())
 	if _, err := s.Save("sess1", "bad.png", []byte("not an image")); err == nil {
 		t.Error("expected decode failure for non-image bytes")
+	}
+}
+
+// hugeDimPNG builds a minimal PNG whose header claims 200000×200000 pixels:
+// tiny on disk (no pixel data follows the IHDR) but a full decode would
+// allocate ~160 GB. Save must reject it from the header alone.
+func hugeDimPNG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	chunk := func(typ string, data []byte) {
+		var l [4]byte
+		binary.BigEndian.PutUint32(l[:], uint32(len(data)))
+		buf.Write(l[:])
+		buf.WriteString(typ)
+		buf.Write(data)
+		crc := crc32.NewIEEE()
+		crc.Write([]byte(typ))
+		crc.Write(data)
+		var c [4]byte
+		binary.BigEndian.PutUint32(c[:], crc.Sum32())
+		buf.Write(c[:])
+	}
+	buf.Write([]byte("\x89PNG\r\n\x1a\n"))
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], 200000)
+	binary.BigEndian.PutUint32(ihdr[4:8], 200000)
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 2 // color type RGB
+	chunk("IHDR", ihdr)
+	return buf.Bytes()
+}
+
+func TestImageStoreSaveRejectsHugePixelCount(t *testing.T) {
+	s := NewImageStore(t.TempDir())
+	_, err := s.Save("sess1", "bomb.png", hugeDimPNG(t))
+	if !errors.Is(err, ErrImagePixelLimit) {
+		t.Fatalf("err = %v, want ErrImagePixelLimit", err)
+	}
+	_, _, err = s.SaveUserUpload("user1", "bomb.png", hugeDimPNG(t))
+	if !errors.Is(err, ErrImagePixelLimit) {
+		t.Errorf("SaveUserUpload err = %v, want ErrImagePixelLimit", err)
+	}
+	// Nothing was stored.
+	if _, err := s.Open("sess1", "bomb.webp"); err == nil {
+		t.Error("rejected image must not be stored")
+	}
+}
+
+func TestImageStoreSaveAcceptsLargeButValidPixels(t *testing.T) {
+	// A dimension product below the cap must still pass, proving the check is
+	// on pixels, not bytes: 4000×4000 = 16 MP with a real encoded grid.
+	img := image.NewRGBA(image.Rect(0, 0, 4000, 4000))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	s := NewImageStore(t.TempDir())
+	if _, err := s.Save("sess1", "big.png", buf.Bytes()); err != nil {
+		t.Fatalf("Save 16 MP image: %v", err)
 	}
 }
 

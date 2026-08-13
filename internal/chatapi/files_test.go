@@ -3,7 +3,9 @@ package chatapi
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
@@ -33,6 +35,36 @@ func testPNG(t *testing.T) []byte {
 	if err := png.Encode(&buf, img); err != nil {
 		t.Fatal(err)
 	}
+	return buf.Bytes()
+}
+
+// hugeDimPNG builds a minimal PNG whose header claims 200000×200000 pixels
+// (40 Gpx): the bytes are tiny on disk — no pixel data follows the IHDR — but
+// a full decode would allocate ~160 GB. The pixel-cap check must reject it
+// from the header alone, before any decode.
+func hugeDimPNG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	chunk := func(typ string, data []byte) {
+		var l [4]byte
+		binary.BigEndian.PutUint32(l[:], uint32(len(data)))
+		buf.Write(l[:])
+		buf.WriteString(typ)
+		buf.Write(data)
+		crc := crc32.NewIEEE()
+		crc.Write([]byte(typ))
+		crc.Write(data)
+		var c [4]byte
+		binary.BigEndian.PutUint32(c[:], crc.Sum32())
+		buf.Write(c[:])
+	}
+	buf.Write([]byte("\x89PNG\r\n\x1a\n"))
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], 200000)
+	binary.BigEndian.PutUint32(ihdr[4:8], 200000)
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 2 // color type RGB
+	chunk("IHDR", ihdr)
 	return buf.Bytes()
 }
 
@@ -202,6 +234,20 @@ func TestServeImageUploadRejectsOversize(t *testing.T) {
 	mux.ServeHTTP(rec, uploadReq(t, sess.ID, big, "owner1"))
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversize status = %d want 413", rec.Code)
+	}
+}
+
+// TestServeImageUploadRejectsHugePixelCount: a tiny payload whose header
+// claims a giant pixel grid (decompression bomb) must be rejected from the
+// header alone — a full decode would OOM the request goroutine.
+func TestServeImageUploadRejectsHugePixelCount(t *testing.T) {
+	_, rt, _, mux := setupFileHandler(t)
+	sess, _ := rt.CreateSession(context.Background(), "owner1", "t")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, uploadReq(t, sess.ID, hugeDimPNG(t), "owner1"))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("huge-dimension status = %d want 413", rec.Code)
 	}
 }
 

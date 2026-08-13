@@ -85,6 +85,10 @@ func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"unsupported or malformed image"}`, http.StatusUnsupportedMediaType)
 			return
 		}
+		if errors.Is(err, workspace.ErrImagePixelLimit) {
+			http.Error(w, `{"error":"image too large"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, `{"error":"image save failed"}`, http.StatusInternalServerError)
 		return
 	}
@@ -127,6 +131,10 @@ func (h *Handler) serveUserImageUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, workspace.ErrUnsupportedImage) {
 			http.Error(w, `{"error":"unsupported or malformed image"}`, http.StatusUnsupportedMediaType)
+			return
+		}
+		if errors.Is(err, workspace.ErrImagePixelLimit) {
+			http.Error(w, `{"error":"image too large"}`, http.StatusRequestEntityTooLarge)
 			return
 		}
 		if errors.Is(err, upload.ErrQuotaExceeded) {

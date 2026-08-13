@@ -133,10 +133,30 @@ func (l *localBlobStore) Delete(userID, id string) error {
 	return nil
 }
 
+// maxImagePixels caps the decoded pixel count (160 MP ≈ 12649²): a tiny
+// payload can carry an enormous pixel grid (decompression bomb) and a full
+// Decode allocates a buffer proportional to width×height inside the request
+// goroutine. The cap is checked from the image header alone, before any
+// full decode.
+const maxImagePixels = 160_000_000
+
+// ErrImagePixelLimit reports an image whose header-declared pixel count
+// exceeds maxImagePixels. The upload endpoints map it to 413.
+var ErrImagePixelLimit = errors.New("image exceeds pixel limit")
+
 // encodeWebP decodes raw image bytes (PNG/JPEG/GIF/WebP) and re-encodes them
 // as WebP. A decode failure rejects the input (fail-closed: we never store an
-// unverifiable blob).
+// unverifiable blob). Images whose header-declared dimensions exceed
+// maxImagePixels are rejected from the header alone, so a decompression bomb
+// never reaches the full decode.
 func encodeWebP(raw []byte) ([]byte, error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnsupportedImage, err)
+	}
+	if int64(cfg.Width)*int64(cfg.Height) > maxImagePixels {
+		return nil, ErrImagePixelLimit
+	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnsupportedImage, err)
