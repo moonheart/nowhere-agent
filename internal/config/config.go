@@ -340,6 +340,10 @@ type LLM struct {
 	// <dir>/<provider>/<timestamp>-<seq>.{req,resp} for offline inspection.
 	// Auth headers are never written. Empty disables recording.
 	RawLogDir string `envconfig:"LLM_RAW_LOG_DIR" default:""`
+	// RawLogRetentionDays deletes raw log files older than this many days on
+	// the hourly sweep (<= 0 disables), so an always-on recorder cannot grow
+	// the log dir without bound. Mirrors WORKSPACE_RETENTION_DAYS.
+	RawLogRetentionDays int `envconfig:"LLM_RAW_LOG_RETENTION_DAYS" default:"7"`
 	// ContextWindow is the model's context window in tokens. The agent loop
 	// compresses its working view when it approaches this window (context-
 	// compression). 0 means "derive from the built-in model capability

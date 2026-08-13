@@ -377,6 +377,34 @@ func run() error {
 	if recorder.Enabled() {
 		log.Info("recording raw LLM request/response", "dir", cfg.LLM.RawLogDir)
 	}
+	// Raw LLM log retention (LLM_RAW_LOG_RETENTION_DAYS): request/response
+	// files otherwise accumulate without bound; an hourly pass deletes files
+	// older than the retention window (<= 0 disables), mirroring the other
+	// sweeps. The root is re-read per pass, so an admin-console retarget still
+	// sweeps the current dir.
+	if cfg.LLM.RawLogRetentionDays > 0 {
+		go func() {
+			rawLogSweepLog := log
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					cutoff := time.Now().UTC().Add(-time.Duration(cfg.LLM.RawLogRetentionDays) * 24 * time.Hour)
+					removed, err := recorder.Sweep(cutoff)
+					if err != nil {
+						rawLogSweepLog.Warn("raw log retention sweep failed", "err", err)
+						continue
+					}
+					if removed > 0 {
+						rawLogSweepLog.Info("raw log retention sweep removed files", "count", removed)
+					}
+				}
+			}
+		}()
+	}
 	if _, err := provResolver.ResolveForTeam(ctx, ""); err != nil {
 		log.Warn("no platform provider configured; chat/schedule fail until a provider is added (see the admin console)")
 	}
