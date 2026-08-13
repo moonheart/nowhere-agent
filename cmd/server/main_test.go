@@ -13,6 +13,8 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"nowhere-agent/internal/permission"
 )
 
 // ---- SPA fallback ----
@@ -141,4 +143,20 @@ func randSuffix() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// TestClampPermissionDecision pins the fail-closed clamp: a known value passes
+// through, and anything else (corrupt setting, manual DB edit) becomes deny so
+// neither execution gate can silently open.
+func TestClampPermissionDecision(t *testing.T) {
+	for _, v := range []string{"allow", "ask", "deny"} {
+		if got := clampPermissionDecision(v, "k"); got != permission.Decision(v) {
+			t.Errorf("clamp(%q) = %q, want pass-through %q", v, got, v)
+		}
+	}
+	for _, v := range []string{"", "ALLOW", "maybe", "1"} {
+		if got := clampPermissionDecision(v, "k"); got != permission.DecisionDeny {
+			t.Errorf("clamp(%q) = %q, want deny (fail-closed)", v, got)
+		}
+	}
 }

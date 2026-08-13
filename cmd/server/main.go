@@ -591,12 +591,19 @@ func run() error {
 		// network and deny external-write; tighten via PERMISSION_* env. The
 		// policy is re-resolved from the runtime settings on EVERY check, so the
 		// admin console retunes it live.
+		// permissionDecision parses a runtime-settings permission value into a
+		// Decision. The admin API validates on write, but the runtime store
+		// could still hold something else (a legacy row, a manual DB edit); an
+		// unknown value must NOT fail open — both gates below pass through any
+		// value that is neither Ask nor Deny — so it is clamped to deny
+		// (fail-closed) and logged.
+		permissionDecision := clampPermissionDecision
 		policyFor := func() permission.Policy {
 			return permission.Policy{
-				ReadOnly:      permission.Decision(settingsRuntime.String(settings.KeyPermissionReadOnly)),
-				SandboxWrite:  permission.Decision(settingsRuntime.String(settings.KeyPermissionSandboxWrite)),
-				Network:       permission.Decision(settingsRuntime.String(settings.KeyPermissionNetwork)),
-				ExternalWrite: permission.Decision(settingsRuntime.String(settings.KeyPermissionExternalWrite)),
+				ReadOnly:      permissionDecision(settingsRuntime.String(settings.KeyPermissionReadOnly), "read_only"),
+				SandboxWrite:  permissionDecision(settingsRuntime.String(settings.KeyPermissionSandboxWrite), "sandbox_write"),
+				Network:       permissionDecision(settingsRuntime.String(settings.KeyPermissionNetwork), "network"),
+				ExternalWrite: permissionDecision(settingsRuntime.String(settings.KeyPermissionExternalWrite), "external_write"),
 			}
 		}
 		// permissionMode reads the session's permission mode from its state store.
@@ -1700,6 +1707,20 @@ func run() error {
 		return srv.Shutdown(shutCtx)
 	case err := <-errCh:
 		return err
+	}
+}
+
+// clampPermissionDecision parses a runtime-settings permission value into a
+// permission.Decision. Any value that is not a known allow/ask/deny is clamped
+// to deny (fail-closed) and logged, so a corrupt or hand-edited setting can
+// never silently open an execution gate.
+func clampPermissionDecision(v, key string) permission.Decision {
+	switch permission.Decision(v) {
+	case permission.DecisionAllow, permission.DecisionAsk, permission.DecisionDeny:
+		return permission.Decision(v)
+	default:
+		slog.Warn("invalid permission setting clamped to deny", "key", key, "value", v)
+		return permission.DecisionDeny
 	}
 }
 
