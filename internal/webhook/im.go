@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"unicode/utf8"
 )
 
 // IM-bot delivery (domestic office-messaging integration): when a run-
@@ -83,17 +84,35 @@ func (n *Notifier) imPayloadFor(raw string, payload RunCompletedPayload) ([]byte
 	}
 }
 
+// imSummaryMaxBytes is the byte budget for an IM summary line. The IM gateways
+// cap content by BYTES (WeCom's text field hard-limits at 2048 bytes); 1800
+// leaves room for the JSON envelope and escaping overhead.
+const imSummaryMaxBytes = 1800
+
 // imSummary renders the human-readable run-completion line for IM channels.
 func imSummary(p RunCompletedPayload) string {
 	line := fmt.Sprintf("Agent 任务完成(任务 %s):%s", p.RunID, p.Status)
 	if p.Summary != "" {
 		line += "\n" + p.Summary
 	}
-	if len(line) > 1800 {
-		r := []rune(line)
-		line = string(r[:1800]) + "…"
+	return truncateIM(line, imSummaryMaxBytes)
+}
+
+// truncateIM keeps line within maxBytes (bytes, not runes), cutting on a rune
+// boundary and reserving room for the ellipsis. A naive rune cut would let a
+// non-ASCII summary pass the byte gate: 600 CJK characters are ~1800 runes but
+// ~5400 bytes — over WeCom's 2048-byte cap — while len() > 1800 never fired.
+func truncateIM(line string, maxBytes int) string {
+	if len(line) <= maxBytes {
+		return line
 	}
-	return line
+	// Reserve the ellipsis so the result stays within the byte cap.
+	cut := line[:maxBytes-len("…")]
+	// Back off to a rune boundary: never split a UTF-8 sequence.
+	for len(cut) > 0 && !utf8.ValidString(cut) {
+		cut = cut[:len(cut)-1]
+	}
+	return cut + "…"
 }
 
 // imSendURL rewrites a bot URL for DingTalk 加签 mode: a #secret fragment

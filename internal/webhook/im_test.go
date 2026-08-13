@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // captureBody records the request body a test server received.
@@ -166,6 +167,28 @@ func TestIMSendURLDingTalkSign(t *testing.T) {
 		if got, err := imSendURL(u, time.Now()); err != nil || got != u {
 			t.Errorf("imSendURL(%q) = %q, %v", u, got, err)
 		}
+	}
+}
+
+// TestIMSummaryTruncatesByBytes pins the byte-based truncation: a CJK summary
+// must end strictly within the byte cap on a rune boundary — the old
+// rune-based cut passed byte-overlong payloads past WeCom's cap.
+func TestIMSummaryTruncatesByBytes(t *testing.T) {
+	cjk := strings.Repeat("工", 700) // 2100 bytes
+	got := imSummary(RunCompletedPayload{RunID: "r", Status: "done", Summary: cjk})
+	if len(got) > imSummaryMaxBytes {
+		t.Errorf("summary = %d bytes, want <= %d (byte cap)", len(got), imSummaryMaxBytes)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("summary %q must end with the ellipsis after truncation", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Error("truncated summary must stay valid UTF-8 (rune boundary)")
+	}
+	// Under the cap: untouched, no ellipsis.
+	short := imSummary(RunCompletedPayload{RunID: "r", Status: "done", Summary: "少量中文"})
+	if short != "Agent 任务完成(任务 r):done\n少量中文" {
+		t.Errorf("short summary altered: %q", short)
 	}
 }
 
