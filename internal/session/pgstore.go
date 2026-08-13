@@ -104,17 +104,21 @@ func (s *PGStore) ListIdleSessions(ctx context.Context, idleSinceEventBefore tim
 }
 
 // ListEndedSessionsEndedBefore returns ids of ended sessions whose ended_at
-// predates before, oldest first, capped at limit — the retention sweep's
-// eligibility scan. A NULL ended_at (a session ended before the column was
-// stamped, or by an old code path) is excluded: unknown age means the sweep
-// never touches it.
-func (s *PGStore) ListEndedSessionsEndedBefore(ctx context.Context, before time.Time, limit int) ([]string, error) {
+// predates before, ordered by (ended_at, id) ascending, capped at limit — the
+// retention sweep's eligibility scan. afterID is the keyset cursor: the last
+// id of the previous page ("" for the first page); the page resumes strictly
+// after (ended_at, id) of that row. A NULL ended_at (a session ended before
+// the column was stamped, or by an old code path) is excluded: unknown age
+// means the sweep never touches it. If the cursor session no longer exists,
+// the scan returns an empty page (the sweep stops) rather than repeating.
+func (s *PGStore) ListEndedSessionsEndedBefore(ctx context.Context, before time.Time, afterID string, limit int) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id::text FROM sessions
 		WHERE status = $1 AND ended_at IS NOT NULL AND ended_at < $2
-		ORDER BY ended_at
+		  AND ($4 = '' OR (ended_at, id::text) > (SELECT ended_at, $4::text FROM sessions WHERE id::text = $4))
+		ORDER BY ended_at, id
 		LIMIT $3`,
-		string(SessionEnded), before, limit)
+		string(SessionEnded), before, limit, afterID)
 	if err != nil {
 		return nil, fmt.Errorf("list ended sessions: %w", err)
 	}

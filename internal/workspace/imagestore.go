@@ -370,7 +370,15 @@ func (s *ImageStore) DeleteUserUploadScope(userID string) error {
 // Only each listed session's own image dir is removed — nothing else under the
 // workspace root. Best-effort per session: a failure is logged and the sweep
 // continues with the next id. Returns the number of directories removed.
-func SweepEndedSessionImages(ctx context.Context, log *slog.Logger, images *ImageStore, listEnded func(ctx context.Context, before time.Time, limit int) ([]string, error), cutoff time.Time, limit int) (int, error) {
+//
+// Pagination is keyset: after each page the last id becomes the next call's
+// afterID cursor, so the scan advances even though deleting image dirs does
+// NOT move the sessions rows (a plain offset/limit lister would return the
+// same full page forever once the candidate count exceeds the page size). As
+// a guard against a lister that ignores the cursor and repeats a page, a page
+// whose last id equals the cursor passed in aborts the pass instead of
+// looping.
+func SweepEndedSessionImages(ctx context.Context, log *slog.Logger, images *ImageStore, listEnded func(ctx context.Context, before time.Time, afterID string, limit int) ([]string, error), cutoff time.Time, limit int) (int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -378,12 +386,19 @@ func SweepEndedSessionImages(ctx context.Context, log *slog.Logger, images *Imag
 		return 0, nil
 	}
 	var removed int
+	var cursor string
 	for {
-		ids, err := listEnded(ctx, cutoff, limit)
+		ids, err := listEnded(ctx, cutoff, cursor, limit)
 		if err != nil {
 			return removed, fmt.Errorf("list ended sessions: %w", err)
 		}
 		if len(ids) == 0 {
+			return removed, nil
+		}
+		if ids[len(ids)-1] == cursor {
+			if log != nil {
+				log.Warn("image sweep: lister did not advance past cursor, aborting pass", "cursor", cursor)
+			}
 			return removed, nil
 		}
 		for _, id := range ids {
@@ -395,6 +410,7 @@ func SweepEndedSessionImages(ctx context.Context, log *slog.Logger, images *Imag
 			}
 			removed++
 		}
+		cursor = ids[len(ids)-1]
 		if len(ids) < limit {
 			return removed, nil
 		}

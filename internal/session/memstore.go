@@ -101,20 +101,43 @@ func (m *MemStore) ListIdleSessions(_ context.Context, before time.Time) ([]Sess
 }
 
 // ListEndedSessionsEndedBefore returns ids of ended sessions whose end time
-// (UpdatedAt — MemStore stamps no dedicated ended_at) predates before, oldest
-// first, capped at limit.
-func (m *MemStore) ListEndedSessionsEndedBefore(_ context.Context, before time.Time, limit int) ([]string, error) {
+// (UpdatedAt — MemStore stamps no dedicated ended_at) predates before, ordered
+// by (ended_at, id) ascending, capped at limit. afterID is the keyset cursor:
+// the last id of the previous page ("" for the first page); the page resumes
+// strictly AFTER that row, mirroring PGStore so a page cursor stays comparable
+// across implementations.
+func (m *MemStore) ListEndedSessionsEndedBefore(_ context.Context, before time.Time, afterID string, limit int) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var ids []string
+	type ended struct {
+		id      string
+		endedAt time.Time
+	}
+	var out []ended
 	for _, s := range m.sessions {
 		if s.Status == SessionEnded && s.UpdatedAt.Before(before) {
-			ids = append(ids, s.ID)
+			out = append(out, ended{id: s.ID, endedAt: s.UpdatedAt})
 		}
 	}
-	sort.Strings(ids)
-	if limit > 0 && len(ids) > limit {
-		ids = ids[:limit]
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].endedAt.Equal(out[j].endedAt) {
+			return out[i].endedAt.Before(out[j].endedAt)
+		}
+		return out[i].id < out[j].id
+	})
+	var ids []string
+	started := afterID == ""
+	for _, e := range out {
+		if !started {
+			if e.id == afterID {
+				started = true
+			}
+			continue
+		}
+		ids = append(ids, e.id)
+		if limit > 0 && len(ids) >= limit {
+			break
+		}
 	}
 	return ids, nil
 }

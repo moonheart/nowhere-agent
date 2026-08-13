@@ -49,10 +49,13 @@ type Store interface {
 	// the given time (candidates for idle-end by the scheduler).
 	ListIdleSessions(ctx context.Context, idleSinceEventBefore time.Time) ([]Session, error)
 	// ListEndedSessionsEndedBefore returns the ids of ended sessions whose
-	// ended_at predates before, oldest first, capped at limit — the retention
-	// sweep's eligibility scan for workspace image cleanup. Sessions whose end
-	// time is unknown (ended_at NULL) are never returned.
-	ListEndedSessionsEndedBefore(ctx context.Context, before time.Time, limit int) ([]string, error)
+	// ended_at predates before, ordered by (ended_at, id) ascending, capped at
+	// limit — the retention sweep's eligibility scan for workspace image
+	// cleanup. afterID is the keyset cursor: the last id of the previous page
+	// ("" for the first page); a page resumes strictly AFTER that row, so a
+	// full page never repeats itself. Sessions whose end time is unknown
+	// (ended_at NULL) are never returned.
+	ListEndedSessionsEndedBefore(ctx context.Context, before time.Time, afterID string, limit int) ([]string, error)
 	// ListUndreamedSessions returns sessions with messages beyond their dreamed
 	// watermark (any status — open conversations are learnable). This is the
 	// dreaming worker's eligibility scan (incremental model, capability-gap K1).

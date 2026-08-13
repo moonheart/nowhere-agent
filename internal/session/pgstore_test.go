@@ -235,7 +235,7 @@ func TestPGStoreListEndedSessionsEndedBefore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ids, err := store.ListEndedSessionsEndedBefore(ctx, time.Now().Add(-30*24*time.Hour), 100)
+	ids, err := store.ListEndedSessionsEndedBefore(ctx, time.Now().Add(-30*24*time.Hour), "", 100)
 	if err != nil {
 		t.Fatalf("ListEndedSessionsEndedBefore: %v", err)
 	}
@@ -262,7 +262,62 @@ func TestPGStoreListEndedSessionsEndedBefore(t *testing.T) {
 
 	// The limit must be honored (the old session is the only candidate anyway,
 	// but a limit of 0 must return nothing rather than everything).
-	if ids, err := store.ListEndedSessionsEndedBefore(ctx, time.Now().Add(-30*24*time.Hour), 0); err != nil || len(ids) != 0 {
+	if ids, err := store.ListEndedSessionsEndedBefore(ctx, time.Now().Add(-30*24*time.Hour), "", 0); err != nil || len(ids) != 0 {
 		t.Errorf("limit 0: ids=%v err=%v, want none", ids, err)
+	}
+}
+
+// TestPGStoreListEndedSessionsPagination pins the keyset cursor: pages resume
+// strictly after the previous page's last id, so a page size smaller than the
+// candidate count scans every session exactly once (the retention sweep
+// depends on this — it deletes image dirs, which never moves sessions rows).
+func TestPGStoreListEndedSessionsPagination(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ctx := context.Background()
+	userID := pgNewUser(t, db)
+
+	var ended []string
+	for i := 0; i < 3; i++ {
+		sess, err := store.CreateSession(ctx, userID, "old")
+		if err != nil {
+			t.Fatalf("create session: %v", err)
+		}
+		if err := store.EndSession(ctx, sess.ID); err != nil {
+			t.Fatalf("end session: %v", err)
+		}
+		// Age past the cutoff so all three are eligible.
+		if _, err := db.Exec(`UPDATE sessions SET ended_at = now() - interval '40 days' WHERE id = $1`, sess.ID); err != nil {
+			t.Fatal(err)
+		}
+		ended = append(ended, sess.ID)
+	}
+
+	cutoff := time.Now().Add(-30 * 24 * time.Hour)
+	page1, err := store.ListEndedSessionsEndedBefore(ctx, cutoff, "", 2)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("page 1 = %v, want 2 ids", page1)
+	}
+	page2, err := store.ListEndedSessionsEndedBefore(ctx, cutoff, page1[len(page1)-1], 2)
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if len(page2) != 1 {
+		t.Fatalf("page 2 = %v, want 1 id", page2)
+	}
+	for _, id := range page1 {
+		if id == page2[0] {
+			t.Errorf("page 2 repeated page 1 id %s", id)
+		}
+	}
+	page3, err := store.ListEndedSessionsEndedBefore(ctx, cutoff, page2[0], 2)
+	if err != nil {
+		t.Fatalf("page 3: %v", err)
+	}
+	if len(page3) != 0 {
+		t.Errorf("page 3 = %v, want none (scan exhausted)", page3)
 	}
 }

@@ -240,7 +240,7 @@ func TestSweepEndedSessionImagesRemovesOnlyListedOldSessions(t *testing.T) {
 
 	var calls int
 	cutoff := time.Now()
-	listEnded := func(ctx context.Context, before time.Time, limit int) ([]string, error) {
+	listEnded := func(ctx context.Context, before time.Time, afterID string, limit int) ([]string, error) {
 		calls++
 		if calls > 1 {
 			return nil, nil
@@ -320,7 +320,7 @@ func TestDeleteSessionImagesMissingDirIsNoop(t *testing.T) {
 func TestSweepStopsWhenListExhausted(t *testing.T) {
 	s := NewImageStore(t.TempDir())
 	var calls int
-	listEnded := func(context.Context, time.Time, int) ([]string, error) {
+	listEnded := func(context.Context, time.Time, string, int) ([]string, error) {
 		calls++
 		return nil, nil // empty first call: nothing to do
 	}
@@ -330,5 +330,48 @@ func TestSweepStopsWhenListExhausted(t *testing.T) {
 	}
 	if removed != 0 || calls != 1 {
 		t.Errorf("removed=%d calls=%d, want 0/1 (one scan, then stop)", removed, calls)
+	}
+}
+
+// TestSweepTerminatesWhenListerRepeatsPage pins the sweep's keyset guard: the
+// real PG lister pages by (ended_at, id), but deleting image dirs does NOT
+// move sessions rows — a lister that ignores the cursor and returns the same
+// full page again would loop forever when the candidate count exceeds the
+// page size. The sweep must detect the stalled page and terminate.
+func TestSweepTerminatesWhenListerRepeatsPage(t *testing.T) {
+	root := t.TempDir()
+	s := NewImageStore(root)
+	for _, id := range []string{"sess-1", "sess-2", "sess-3"} {
+		if _, err := s.Save(id, "photo.png", makePNG(t)); err != nil {
+			t.Fatalf("Save(%s): %v", id, err)
+		}
+	}
+
+	// Page size 2 < 3 expired candidates; the stub ignores the cursor and
+	// keeps returning the same first page (pre-fix this looped forever).
+	var calls int
+	listEnded := func(ctx context.Context, before time.Time, afterID string, limit int) ([]string, error) {
+		calls++
+		return []string{"sess-1", "sess-2"}, nil
+	}
+
+	removed, err := SweepEndedSessionImages(context.Background(), nil, s, listEnded, time.Now(), 2)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2 (one page deleted, then the stalled page aborts)", removed)
+	}
+	if calls != 2 {
+		t.Errorf("lister calls = %d, want 2 (first page + repeated page detection)", calls)
+	}
+	// The first page's dirs are gone; the unlisted session's dir survives.
+	if _, err := s.Open("sess-1", "photo.webp"); err == nil {
+		t.Error("sess-1's image should be gone after the first page")
+	}
+	if rc, err := s.Open("sess-3", "photo.webp"); err != nil {
+		t.Errorf("unlisted sess-3's image must survive: %v", err)
+	} else {
+		rc.Close()
 	}
 }
