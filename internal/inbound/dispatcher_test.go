@@ -180,3 +180,58 @@ func TestDispatchTargetSessionGetsWebhookTag(t *testing.T) {
 		t.Errorf("reused target session webhook_id = %q, want %q", webhookID, wh.ID)
 	}
 }
+
+// TestDispatchOtherWebhookDoesNotOverwriteTag pins the conditional stamp: a
+// second webhook firing into the same target session must not overwrite the
+// tag the first webhook's fire set — last-write-wins would misdeliver the
+// first webhook's run-completion notification to the second's notify_url.
+func TestDispatchOtherWebhookDoesNotOverwriteTag(t *testing.T) {
+	db := pgTestDB(t)
+	uid := seedUser(t, db)
+
+	rt := session.NewRuntime(session.NewPGStore(db))
+	rg := session.NewRunRegistry(rt)
+	d := NewDispatcher(NewStore(db), rt, rg, nil, nil,
+		func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
+			return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}), nil
+		}, func() string { return "base" }, db)
+
+	var sessID string
+	if err := db.QueryRow(`INSERT INTO sessions (user_id, title) VALUES ($1, 'shared target') RETURNING id`, uid).Scan(&sessID); err != nil {
+		t.Fatalf("seed target session: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, sessID) })
+
+	whA := testWebhook(uid)
+	whA.ID = "inb-" + randHex()
+	whA.TargetSessionID = sessID
+	if _, _, err := d.Dispatch(context.Background(), whA, "hello", nil); err != nil {
+		t.Fatalf("dispatch A: %v", err)
+	}
+	// Wait for A's run to settle so B's dispatch can actually start a run.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, active, _ := rt.ActiveRun(context.Background(), sessID); !active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run A did not settle")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	whB := testWebhook(uid)
+	whB.ID = "inb-" + randHex()
+	whB.TargetSessionID = sessID
+	if _, _, err := d.Dispatch(context.Background(), whB, "hello", nil); err != nil {
+		t.Fatalf("dispatch B: %v", err)
+	}
+
+	var webhookID string
+	if err := db.QueryRow(`SELECT COALESCE(metadata->>'webhook_id','') FROM sessions WHERE id = $1`, sessID).Scan(&webhookID); err != nil {
+		t.Fatalf("read session tag: %v", err)
+	}
+	if webhookID != whA.ID {
+		t.Errorf("session webhook_id = %q after B fired, want A's %q", webhookID, whA.ID)
+	}
+}

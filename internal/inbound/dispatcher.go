@@ -195,6 +195,13 @@ func (d *Dispatcher) Dispatch(ctx context.Context, wh Webhook, prompt string, me
 		return "", "", err
 	}
 
+	// Provenance stamp for a REUSED target session — deliberately AFTER the
+	// submit: a fire that never became a run must not retag the session, and
+	// the tag must not overwrite one already held by a different webhook
+	// (last-write-wins would misdeliver A's run-completion notification to
+	// webhook B). See stampReusedSession.
+	d.stampReusedSession(ctx, wh, sessID)
+
 	d.log.Info("inbound: run started", "webhook", wh.ID, "session", sessID, "run", run.ID)
 	return run.ID, sessID, nil
 }
@@ -235,19 +242,11 @@ func (d *Dispatcher) resolveSession(ctx context.Context, wh Webhook, prompt stri
 		if sess.UserID != wh.UserID {
 			return "", false, ErrNotOwner
 		}
-		// Provenance stamp (mirror of the fresh-session branch): a REUSED target
-		// session must still carry the webhook back-reference, or run-completion
-		// notifications cannot resolve this webhook's notify_url (target.go
-		// matches on source = 'inbound' AND metadata->>'webhook_id'). The tag
-		// must not clobber sibling metadata keys, so it goes through jsonb_set.
-		if d.db != nil {
-			if _, err := d.db.ExecContext(ctx, `
-				UPDATE sessions SET source = 'inbound',
-					metadata = jsonb_set(metadata, '{webhook_id}', to_jsonb($1::text), true)
-				WHERE id = $2`, wh.ID, wh.TargetSessionID); err != nil {
-				return "", false, err
-			}
-		}
+		// Provenance tagging for a REUSED target session happens after the
+		// submit succeeds (Dispatch → stampReusedSession): a fire abandoned
+		// before submit (pending interaction, budget, loop build, active run)
+		// must not retag the session, and the tag must never overwrite another
+		// webhook's tag.
 		return wh.TargetSessionID, false, nil
 	}
 	title := truncate(prompt, 60)
@@ -270,6 +269,32 @@ func (d *Dispatcher) resolveSession(ctx context.Context, wh Webhook, prompt stri
 		VALUES ($1, $2, 'inbound', $3) RETURNING id`,
 		wh.UserID, title, raw).Scan(&id)
 	return id, true, err
+}
+
+// stampReusedSession tags a reused target session with the webhook
+// back-reference so run-completion notifications can resolve this webhook's
+// notify_url (target.go matches on source = 'inbound' AND
+// metadata->>'webhook_id'). The tag must not clobber sibling metadata keys,
+// so it goes through jsonb_set. The WHERE makes it conditional: the tag is
+// only written when the session is untagged or already carries THIS webhook's
+// id, so a second webhook firing into the same session cannot overwrite the
+// first's tag and misdeliver its run-completion notification. Best-effort —
+// the run is already submitted, so a failure is logged, never fatal. The
+// residual race (a run completing after another webhook legitimately tagged
+// the session first) is not solved here; it would require run-level
+// provenance rather than a session-level tag.
+func (d *Dispatcher) stampReusedSession(ctx context.Context, wh Webhook, sessID string) {
+	if d.db == nil {
+		return
+	}
+	if _, err := d.db.ExecContext(ctx, `
+		UPDATE sessions SET source = 'inbound',
+			metadata = jsonb_set(metadata, '{webhook_id}', to_jsonb($1::text), true)
+		WHERE id = $2
+		  AND (metadata->>'webhook_id' IS NULL OR metadata->>'webhook_id' = $1)`,
+		wh.ID, sessID); err != nil {
+		d.log.Warn("inbound: stamp reused session failed", "session", sessID, "err", err)
+	}
 }
 
 // cleanupFreshSession removes a just-created session whose trigger was
