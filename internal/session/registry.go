@@ -833,6 +833,43 @@ func (rg *RunRegistry) BatchFoldState(ctx context.Context, runID string) (folded
 	return folded, len(pend), nil
 }
 
+// DecidedButUnfoldedRun returns the newest run of the session whose suspended
+// batch is fully decided but not yet folded — the crash window between
+// RecordDecision and the fold commit. A fresh submission reconciles it (folds
+// it) first, so a decided batch's tool_use never dangles in the history the
+// new run sends; without this only a client re-sending the same verdict
+// repairs the batch. Returns ("", nil) when nothing needs folding. Runs with
+// no snapshot, already folded, or still awaiting verdicts are skipped (a
+// pending batch is the pending gate's job). "Newest" is by run seq, so the
+// scan is independent of the store's row order.
+func (rg *RunRegistry) DecidedButUnfoldedRun(ctx context.Context, sessionID string) (string, error) {
+	runs, err := rg.rt.store.RunsForSession(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	best, bestSeq := "", -1
+	for i := range runs {
+		snap, err := rg.rt.store.SuspendedBatchForRun(ctx, runs[i].ID)
+		if err != nil {
+			continue // no suspended batch on this run
+		}
+		if snap.FoldedSeq != nil {
+			continue // already folded
+		}
+		pend, err := rg.rt.store.PendingApprovalsForRun(ctx, runs[i].ID)
+		if err != nil {
+			return "", err
+		}
+		if len(pend) > 0 {
+			continue // still awaiting verdicts
+		}
+		if runs[i].Seq > bestSeq {
+			best, bestSeq = runs[i].ID, runs[i].Seq
+		}
+	}
+	return best, nil
+}
+
 // append persists an event through the Runtime (which fans it out to subscribers
 // on the bus) so the durable log and live stream stay in one write path.
 func (rg *RunRegistry) append(ctx context.Context, sessionID, runID string, kind agent.EventKind, payload any) {

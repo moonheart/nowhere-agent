@@ -140,6 +140,78 @@ func TestRegistryBatchDecisionFlow(t *testing.T) {
 	}
 }
 
+// TestRegistryDecidedButUnfoldedReconcile pins the background reconciliation
+// target: a batch whose verdicts all committed but whose fold never ran (the
+// crash window between RecordDecision and the fold commit) must be
+// discoverable by the next submission, foldable, and invisible once folded —
+// so a NEW message never buries its decided tool_use.
+func TestRegistryDecidedButUnfoldedReconcile(t *testing.T) {
+	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
+	rg := NewRunRegistry(rt).WithMessageStore(NewMemMessageStore())
+	sess, err := rt.CreateSession(context.Background(), "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loop := agent.New(&twoGatedProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100})
+	loop.RegisterTool(gatedTool{name: "edit_a"})
+	loop.RegisterTool(gatedTool{name: "edit_b"})
+	loop.Use(&agent.PermissionMW{Check: func(context.Context, toolruntime.Tool) (bool, string) {
+		return true, agent.ApprovalReasonPrefix + "ask"
+	}})
+
+	run, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Fatalf("gated run status = %v, want done (parked)", got)
+	}
+	queue, err := rg.PendingApprovalsForSession(context.Background(), sess.ID)
+	if err != nil || len(queue) != 2 {
+		t.Fatalf("pending queue = %+v err %v, want 2", queue, err)
+	}
+
+	// Nothing to reconcile while verdicts are still pending.
+	if id, _ := rg.DecidedButUnfoldedRun(context.Background(), sess.ID); id != "" {
+		t.Fatalf("pending batch reported as reconcilable: %s", id)
+	}
+
+	// Both verdicts commit; the fold "crashes" and never runs.
+	if _, _, err := rg.RecordDecision(context.Background(), queue[0].ID, true, nil); err != nil {
+		t.Fatalf("RecordDecision 1: %v", err)
+	}
+	if _, _, err := rg.RecordDecision(context.Background(), queue[1].ID, false, nil); err != nil {
+		t.Fatalf("RecordDecision 2: %v", err)
+	}
+
+	// The decided-but-unfolded batch is now the reconciliation target.
+	id, err := rg.DecidedButUnfoldedRun(context.Background(), sess.ID)
+	if err != nil || id != run.ID {
+		t.Fatalf("DecidedButUnfoldedRun = %q, %v; want the decided run", id, err)
+	}
+
+	// Folding it clears the target.
+	if _, err := rg.FoldBatch(context.Background(), sess.ID, run.ID, loop.Tools(), nil); err != nil {
+		t.Fatalf("FoldBatch: %v", err)
+	}
+	if id, _ := rg.DecidedButUnfoldedRun(context.Background(), sess.ID); id != "" {
+		t.Fatalf("folded batch still reported: %s", id)
+	}
+
+	// A fresh run without a batch is never flagged.
+	run2, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop})
+	if err != nil {
+		t.Fatalf("submit run2: %v", err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Fatalf("run2 status = %v, want done", got)
+	}
+	if id, _ := rg.DecidedButUnfoldedRun(context.Background(), sess.ID); id != "" {
+		t.Fatalf("batchless run flagged: %s (run2 = %s)", id, run2.ID)
+	}
+}
+
 // failBatchStore wraps MemStore and fails CreateInteractionBatch once it has
 // succeeded failAfter times — a durable write dying mid-way through a gated
 // batch's interrupt frames (earlier rows already persisted).

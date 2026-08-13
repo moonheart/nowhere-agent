@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -412,6 +413,20 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// registers its file tools into the loop's registry.
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
+	}
+
+	// Reconcile a decided-but-unfolded batch (a crash between the verdict
+	// commit and its fold): a new message must not bury the decided batch's
+	// tool_use — fold it now, through this run's registry and gate, so the run
+	// this submission starts sees a complete conversation. Fail-open: a
+	// reconcile error logs and the submission proceeds (the batch stays
+	// retriable via the verdict path).
+	if runID, err := h.registry.DecidedButUnfoldedRun(r.Context(), sessID); err != nil {
+		slog.Warn("reconcile decided batch", "session", sessID, "err", err)
+	} else if runID != "" {
+		if _, err := h.registry.FoldBatch(agent.ContextWithSessionID(r.Context(), sessID), sessID, runID, loop.Tools(), session.ToolGate(loop.Gate())); err != nil {
+			slog.Warn("fold decided batch on new submission", "session", sessID, "run", runID, "err", err)
+		}
 	}
 
 	// Client-declared tools (general interrupt): tools the CLIENT executes,
