@@ -279,6 +279,10 @@ func run() error {
 			func(ctx context.Context, u identity.User) (string, error) {
 				return identitySvc.IssueToken(ctx, u)
 			}).
+			// Secure state cookie regardless of the gateway's own connection
+			// scheme: TLS terminates at the reverse proxy, so r.TLS is never
+			// set and the cookie must not depend on it.
+			WithSecureCookies(cfg.HTTP.CookieSecure).
 			// MFA parity: SSO logins respect the account's TOTP second factor
 			// exactly like password logins — a TOTP-enabled account gets a
 			// challenge instead of a token, so the IdP cannot bypass it.

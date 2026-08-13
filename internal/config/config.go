@@ -459,6 +459,13 @@ type HTTP struct {
 	// gateway sits behind a reverse proxy, or rate-limit/audit keys silently
 	// switch to the proxy's address.
 	TrustedProxyCIDRs []string `envconfig:"HTTP_TRUSTED_PROXY_CIDRS" default:""`
+	// CookieSecure sets the Secure attribute on the auth cookies the gateway
+	// sets (the OIDC state cookie). Default true: under the documented reverse-
+	// proxy TLS termination (see TrustedProxyCIDRs) the gateway's own connection
+	// is plain HTTP, so r.TLS is never set and a TLS-derived flag would ship the
+	// cookie over plaintext forever. Turn it off only for a plain-HTTP local/dev
+	// deployment, where a Secure cookie would never be sent by the browser.
+	CookieSecure bool `envconfig:"HTTP_COOKIE_SECURE" default:"true"`
 }
 
 // DB configures Postgres.

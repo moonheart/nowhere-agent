@@ -45,8 +45,11 @@ type Handler struct {
 	provider   *Provider
 	accounts   AccountProvisioner
 	issueToken TokenIssuer
-	// totpChallenge, when set, defers accounts with a second factor to the
-	// MFA challenge step instead of issuing a token.
+	// secureCookie sets the Secure attribute on the state cookie. It defaults to
+	// true and is derived from config, NOT from r.TLS: under a TLS-terminating
+	// reverse proxy the gateway's own connection is plain HTTP, so r.TLS would
+	// never be set and the cookie would ride plaintext forever.
+	secureCookie  bool
 	totpChallenge TotpChallenger
 	audit         *audit.Logger
 	now           func() time.Time
@@ -55,7 +58,14 @@ type Handler struct {
 // NewHandler wires an OIDC handler. issueToken turns a provisioned account into
 // the platform bearer token the SPA then uses exactly as after a password login.
 func NewHandler(p *Provider, accounts AccountProvisioner, issueToken TokenIssuer) *Handler {
-	return &Handler{provider: p, accounts: accounts, issueToken: issueToken, now: time.Now}
+	return &Handler{provider: p, accounts: accounts, issueToken: issueToken, secureCookie: true, now: time.Now}
+}
+
+// WithSecureCookies sets whether the state cookie carries the Secure attribute.
+// Default true; set false for a plain-HTTP local/dev deployment only.
+func (h *Handler) WithSecureCookies(secure bool) *Handler {
+	h.secureCookie = secure
+	return h
 }
 
 // WithTotpChallenge wires the second-factor deferral (MFA parity with the
@@ -105,7 +115,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		Value:    state,
 		Path:     "/auth/oidc",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   h.secureCookie,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((10 * time.Minute).Seconds()),
 		Expires:  h.now().Add(10 * time.Minute),
