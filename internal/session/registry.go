@@ -707,8 +707,8 @@ func suspendedBatchCalls(stored []StoredMessage, runID string, snap SuspendedBat
 			if b.Type != provider.BlockToolUse || b.ToolUseID == "" {
 				continue
 			}
-		ids = append(ids, b.ToolUseID)
-		calls = append(calls, toolruntime.Call{ID: b.ToolUseID, Name: b.ToolName, Args: b.ToolInput, ArgsError: b.ArgsError})
+			ids = append(ids, b.ToolUseID)
+			calls = append(calls, toolruntime.Call{ID: b.ToolUseID, Name: b.ToolName, Args: b.ToolInput, ArgsError: b.ArgsError})
 		}
 		if len(calls) == 0 {
 			continue
