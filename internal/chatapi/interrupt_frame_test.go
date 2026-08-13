@@ -52,3 +52,67 @@ func TestEmitStreamEventInterruptFrame(t *testing.T) {
 		}
 	}
 }
+
+// TestEmitInterruptFrameDirect pins the direct-path half of the same contract:
+// the loop hands sseEmitter.Emit the agent.Interaction STRUCT (serveChatDirect,
+// the no-runtime path), and the type assertion must not silently drop the
+// frame. Without the struct branch the run "just ends" with no prompt.
+func TestEmitInterruptFrameDirect(t *testing.T) {
+	rec := httptest.NewRecorder()
+	emitter := &sseEmitter{w: rec, flusher: rec, msgID: "m", textID: "text-1", thinkID: "reasoning-1"}
+
+	if err := emitter.Emit(t.Context(), agent.KindInterrupt, agent.Interaction{
+		ID:         "int-2",
+		Kind:       "ask_user",
+		ToolCallID: "tc-2",
+		ToolName:   "ask_user",
+		Input:      map[string]any{"questions": []any{"how?"}},
+	}); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"type":"data-interaction"`,
+		`"interactionId":"int-2"`,
+		`"kind":"ask_user"`,
+		`"toolCallId":"tc-2"`,
+		`"toolName":"ask_user"`,
+		`"transient":true`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("data-interaction frame missing %s\n---\n%s", want, body)
+		}
+	}
+}
+
+// TestEmitInterruptFrameDirectLowercaseKeys pins the map branch's tolerance for
+// a JSON round-trip with lowercase keys, so a payload that was lowercased by
+// storage never silently disables the interaction card.
+func TestEmitInterruptFrameDirectLowercaseKeys(t *testing.T) {
+	rec := httptest.NewRecorder()
+	emitter := &sseEmitter{w: rec, flusher: rec, msgID: "m", textID: "text-1", thinkID: "reasoning-1"}
+
+	if err := emitter.Emit(t.Context(), agent.KindInterrupt, map[string]any{
+		"id":         "int-3",
+		"kind":       "",
+		"toolCallID": "tc-3",
+		"toolName":   "sleep",
+		"input":      map[string]any{"seconds": float64(3)},
+	}); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"type":"data-interaction"`,
+		`"interactionId":"int-3"`,
+		`"kind":"approval"`,
+		`"toolCallId":"tc-3"`,
+		`"toolName":"sleep"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("data-interaction frame missing %s\n---\n%s", want, body)
+		}
+	}
+}

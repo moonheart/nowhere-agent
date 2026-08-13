@@ -1110,26 +1110,24 @@ func (e *sseEmitter) Emit(ctx context.Context, kind agent.EventKind, payload any
 		// The loop generated the interaction's ID when it detected the gate
 		// (LangGraph-style), so the frame carries it — the card POSTs its verdict
 		// with no refresh or lookup. Transient: it drives UI, not the message record.
-		m, ok := payload.(map[string]any)
+		interaction, ok := interactionPayload(payload)
 		if !ok {
 			break
 		}
-		kind, _ := m["Kind"].(string)
+		kind := interaction.Kind
 		if kind == "" {
 			kind = "approval"
 		}
-		toolCallID, _ := m["ToolCallID"].(string)
-		toolName, _ := m["ToolName"].(string)
-		args := m["Input"]
+		args := interaction.Input
 		if args == nil {
 			args = map[string]any{}
 		}
 		e.write(chunk{"type": "data-interaction", "data": map[string]any{
-			"interactionId": m["ID"],
-			"approvalId":    m["ID"], // legacy alias for clients still reading it
+			"interactionId": interaction.ID,
+			"approvalId":    interaction.ID, // legacy alias for clients still reading it
 			"kind":          kind,
-			"toolCallId":    toolCallID,
-			"toolName":      toolName,
+			"toolCallId":    interaction.ToolCallID,
+			"toolName":      interaction.ToolName,
 			"args":          args,
 		}, "transient": true})
 	case agent.KindGenerativeUI:
@@ -1330,6 +1328,47 @@ func stepEvent(payload any) (se agent.StepEvent, ok bool) {
 		return se, reason != ""
 	}
 	return agent.StepEvent{}, false
+}
+
+// interactionPayload extracts an Interaction from a KindInterrupt payload,
+// tolerating an agent.Interaction value (the loop's direct-path emit — the
+// serveChatDirect no-runtime path hands the struct itself) and a decoded JSON
+// object (the broker/replay path, where the payload round-trips through storage
+// with Go's default field-name keys). The lowercase aliases guard against a
+// JSON round-trip that lowercases them. Returns ok=false when the payload
+// carries no interaction data.
+func interactionPayload(payload any) (in agent.Interaction, ok bool) {
+	switch v := payload.(type) {
+	case agent.Interaction:
+		return v, true
+	case *agent.Interaction:
+		if v != nil {
+			return *v, true
+		}
+	case map[string]any:
+		id, _ := v["ID"].(string)
+		if id == "" {
+			id, _ = v["id"].(string)
+		}
+		kind, _ := v["Kind"].(string)
+		if kind == "" {
+			kind, _ = v["kind"].(string)
+		}
+		toolCallID, _ := v["ToolCallID"].(string)
+		if toolCallID == "" {
+			toolCallID, _ = v["toolCallID"].(string)
+		}
+		toolName, _ := v["ToolName"].(string)
+		if toolName == "" {
+			toolName, _ = v["toolName"].(string)
+		}
+		args, _ := v["Input"].(map[string]any)
+		if args == nil {
+			args, _ = v["input"].(map[string]any)
+		}
+		return agent.Interaction{ID: id, Kind: kind, ToolCallID: toolCallID, ToolName: toolName, Input: args}, true
+	}
+	return agent.Interaction{}, false
 }
 
 // intFromAny reads an int from a JSON-decoded numeric value (float64 by default,
