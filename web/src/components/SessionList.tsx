@@ -193,9 +193,20 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
                   <Search />
                 </EmptyMedia>
                 <EmptyTitle>No matches</EmptyTitle>
-                <EmptyDescription>Nothing matches “{query}”.</EmptyDescription>
+                {/* The debounced term is what the backend actually searched:
+                    the live query would lag the real search during the
+                    debounce window. */}
+                <EmptyDescription>
+                  Nothing matches “{debounced}”.
+                </EmptyDescription>
               </EmptyHeader>
             </Empty>
+          )}
+          {loading && sessions.length > 0 && (
+            <div className="flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" />
+              Searching…
+            </div>
           )}
           <ul className="flex flex-col gap-0.5">
             {sessions.map((s) => {
