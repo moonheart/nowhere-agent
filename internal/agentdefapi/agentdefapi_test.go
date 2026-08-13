@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -336,6 +337,24 @@ func TestInvalidDocumentRejected(t *testing.T) {
 	rec := e.as(u, "GET", "/api/me/agentdefs", nil)
 	if n := len(decodeBody(t, rec)["defs"].([]any)); n != 0 {
 		t.Fatalf("nothing must be stored, got %d defs", n)
+	}
+}
+
+// TestCreateOversizedBody pins the 1 MiB request-body bound (the same guard
+// scheduleapi uses): an oversized payload is rejected with 413 before parsing,
+// so a definition document cannot push unbounded bytes through the API.
+func TestCreateOversizedBody(t *testing.T) {
+	e := newEnv(t)
+	u := e.user(identity.PlatformRoleUser)
+
+	big := doc("oversized", strings.Repeat("x", 1<<20)) // exactly over the 1 MiB bound
+	if rec := e.as(u, "POST", "/api/me/agentdefs", big); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body: expected 413, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	// Nothing was stored.
+	rec := e.as(u, "GET", "/api/me/agentdefs", nil)
+	if n := len(decodeBody(t, rec)["defs"].([]any)); n != 0 {
+		t.Fatalf("oversized create stored %d defs, want none", n)
 	}
 }
 
