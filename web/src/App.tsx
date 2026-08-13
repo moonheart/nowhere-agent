@@ -116,7 +116,9 @@ function Chat({
         // dangerous-action approval, an ask_user question set, or a client_tool
         // the browser auto-executes. Show the matching card on the tool call;
         // transient, not the message. ("tool-approval" is the legacy frame name.)
-        reportInteraction(d.data as Interaction);
+        // Tagged with the conversation epoch so a late frame from a session
+        // that was reset meanwhile can't land in the new conversation.
+        reportInteraction(d.data as Interaction, chatEpoch);
       } else if (d.name === "session-state") {
         // Session-level state push (O1): the plan_write tool's plan, pushed
         // live. Feeds the top plan panel. The permission_mode setting rides the

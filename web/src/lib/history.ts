@@ -26,7 +26,7 @@ import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
 import { ApiError, handleUnauthorized } from "@/lib/api";
 import { imageFileUrl } from "@/lib/image-attachment";
-import { reportInteraction, type Interaction } from "@/lib/approval";
+import { reportInteraction, approvalEpoch, type Interaction } from "@/lib/approval";
 import { reportNotice } from "@/lib/notice";
 import { reportPlan, type Plan } from "@/lib/plan";
 import { reportPermissionMode, permissionModeFromSessionState } from "@/lib/permission";
@@ -176,6 +176,10 @@ async function* resumeStream(
 ): AsyncGenerator<ChatModelRunResult, void, unknown> {
   const threadId = getSessionId();
   if (!threadId) return;
+  // The conversation epoch this stream belongs to: if the user switches
+  // session while the stream drains, its interaction frames must not land in
+  // the new conversation's pending map.
+  const streamEpoch = approvalEpoch();
   const res = await fetch(
     `/api/chat/resume?threadId=${encodeURIComponent(threadId)}&after=${after}`,
     { method: "POST", headers: authHeaders() },
@@ -188,7 +192,7 @@ async function* resumeStream(
       new UIMessageStreamDecoder({
         onData: (d) => {
           if (d.name === "interaction" || d.name === "tool-approval") {
-            reportInteraction(d.data as Interaction);
+            reportInteraction(d.data as Interaction, streamEpoch);
           }
         },
       }),
@@ -220,6 +224,9 @@ export function attachStream(): ReturnType<typeof resumeStream> {
 export async function* followBody(
   body: ReadableStream<Uint8Array>,
 ): AsyncGenerator<ChatModelRunResult, void, unknown> {
+  // Tagged with the conversation epoch so a verdict stream still draining
+  // after a session switch can't write its interactions into the new session.
+  const streamEpoch = approvalEpoch();
   const accumulated = body
     .pipeThrough(
       // A verdict run can itself end on a new gate (the model asks a follow-up
@@ -229,7 +236,7 @@ export async function* followBody(
       new UIMessageStreamDecoder({
         onData: (d) => {
           if (d.name === "interaction" || d.name === "tool-approval") {
-            reportInteraction(d.data as Interaction);
+            reportInteraction(d.data as Interaction, streamEpoch);
           }
         },
       }),

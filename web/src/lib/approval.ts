@@ -45,6 +45,14 @@ export type ToolApproval = Interaction;
 let pending = new Map<string, Interaction>();
 const listeners = new Set<() => void>();
 
+// epoch bumps on every resetApprovals (session switch / new chat). A verdict or
+// attach stream for the PREVIOUS session can still be draining — its late
+// interaction frame must not land in the new conversation's pending map (or
+// hasPendingInteractions() misreports and gates the wrong session's sends).
+// Reports captured against an older epoch are dropped, mirroring
+// lib/activity.ts's conversation-generation mechanism.
+let epoch = 0;
+
 // autoRan tracks client_tool interaction ids already auto-executed, so the same
 // frame arriving twice (live stream + a reload's pendingApproval echo) runs the
 // browser capability and POSTs its output only once.
@@ -62,8 +70,11 @@ function emit() {
 // reportInteraction registers a pending interaction from a data-interaction
 // frame. A client_tool interaction is auto-executed (the browser runs the named
 // capability) and its output POSTed — no human click unless the capability
-// itself prompts.
-export function reportInteraction(a: Interaction) {
+// itself prompts. atEpoch is the conversation epoch the frame belongs to; a
+// frame from a session that was reset meanwhile (a draining verdict/attach
+// stream) is dropped.
+export function reportInteraction(a: Interaction, atEpoch: number = epoch) {
+  if (atEpoch !== epoch) return;
   const id = a.interactionId || a.approvalId || "";
   if (!id || !a.toolCallId) return;
   const norm = { ...a, interactionId: id };
@@ -138,13 +149,23 @@ export function hasPendingInteractions(): boolean {
   return pending.size > 0;
 }
 
-// resetApprovals clears all prompts (new conversation / session switch).
+// resetApprovals clears all prompts (new conversation / session switch). The
+// epoch bump also invalidates interaction frames still in flight from the
+// previous conversation's streams.
 export function resetApprovals() {
+  epoch++;
   autoRan.clear();
   if (pending.size === 0 && failed.size === 0) return;
   pending = new Map();
   failed = new Map();
   emit();
+}
+
+// approvalEpoch exposes the current conversation epoch so a streaming reporter
+// (the resume/attach and verdict streams in lib/history.ts) can tag its frames
+// and have them dropped once the conversation resets underneath it.
+export function approvalEpoch(): number {
+  return epoch;
 }
 
 function subscribe(fn: () => void) {
