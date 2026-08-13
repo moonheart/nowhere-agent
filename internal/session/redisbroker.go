@@ -196,17 +196,20 @@ func (b *redisBroker) Settle(ctx context.Context, sessionID string) error {
 
 // streamIDToOffset converts a Redis stream ID ("<ms>-<seq>") to a monotonic
 // int64 offset. We use the millisecond+sequence composite; for our per-session
-// streams the first component dominates ordering.
+// streams the first component dominates ordering. seq is scaled by 1e6 (not
+// 1000): a burst of >= 1000 entries in one millisecond would otherwise
+// collide with the next millisecond's "ms+1-0" offset and Read(after) would
+// skip or replay entries.
 func streamIDToOffset(id string) int64 {
 	ms, seq, _ := splitStreamID(id)
-	return ms*1000 + seq
+	return ms*1_000_000 + seq
 }
 
 func offsetToStreamID(off int64) string {
 	if off <= 0 {
 		return "0"
 	}
-	return strconv.FormatInt(off/1000, 10) + "-" + strconv.FormatInt(off%1000, 10)
+	return strconv.FormatInt(off/1_000_000, 10) + "-" + strconv.FormatInt(off%1_000_000, 10)
 }
 
 func splitStreamID(id string) (ms, seq int64, err error) {

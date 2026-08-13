@@ -249,3 +249,23 @@ func TestStreamIDOffsetMappingMonotonic(t *testing.T) {
 		}
 	}
 }
+
+// TestStreamIDOffsetNoMillisecondCollision pins the seq scaling: a burst of
+// more than 1000 entries within one millisecond (seq >= 1000, which Redis
+// assigns when a stream outpaces the clock) must not collide with the next
+// millisecond's first entry.
+func TestStreamIDOffsetNoMillisecondCollision(t *testing.T) {
+	a := streamIDToOffset("100-999")    // last entry of ms 100 under the old scale
+	b := streamIDToOffset("100-1000")   // 1000+ entries in one millisecond
+	d := streamIDToOffset("100-100000") // extreme burst — still below the 1e6 scale
+	c := streamIDToOffset("101-0")      // first entry of the next millisecond
+	if !(a < b && b < d && d < c) {
+		t.Fatalf("offsets must be strictly increasing, got %d, %d, %d, %d", a, b, d, c)
+	}
+	// Round-trip stays the identity across the boundary.
+	for _, id := range []string{"100-999", "100-1000", "100-100000", "101-0"} {
+		if got := offsetToStreamID(streamIDToOffset(id)); got != id {
+			t.Errorf("round-trip %s -> %s", id, got)
+		}
+	}
+}
