@@ -126,8 +126,9 @@ type Redact struct {
 }
 
 // Permission maps each tool risk class to a decision for the execution-permission
-// gate: allow (run), deny (block), or ask (headless server has no interactive
-// approver, so ask is treated as deny). Defaults permit read-only, sandbox-write,
+// gate: allow (run), deny (block), or ask (suspends the run and presents an
+// approval card in the chat UI; it only behaves like deny when no client
+// consumes the suspension). Defaults permit read-only, sandbox-write,
 // and network (the wired web-search tool); external-write (long-term memory
 // tools, future out-of-workspace writers) asks first — the user approves or
 // rejects each call. Tighten network to deny for stricter multi-tenant

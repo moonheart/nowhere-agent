@@ -685,9 +685,11 @@ func run() error {
 	// cannot be resolved fails closed — there is no boot-time default adapter.
 	{
 		// Execution-permission gate (D10): authorize each tool call by the tool's
-		// risk before dispatch. This server is headless, so an "ask" decision
-		// denies (no interactive approver). Defaults allow read-only/sandbox-write/
-		// network and deny external-write; tighten via PERMISSION_* env. The
+		// risk before dispatch. An "ask" decision suspends the run and presents an
+		// approval card in the chat UI (only a client that consumes none of the
+		// suspension experiences it as a plain deny). Defaults allow
+		// read-only/sandbox-write/network and deny external-write; tighten via
+		// PERMISSION_* env. The
 		// policy is re-resolved from the runtime settings on EVERY check, so the
 		// admin console retunes it live.
 		// permissionDecision parses a runtime-settings permission value into a
