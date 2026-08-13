@@ -431,8 +431,10 @@ func (rt *Runtime) SetSessionStateKV(ctx context.Context, sessionID, key string,
 	}
 	// Tag the frame with the session's active run so attached clients (which
 	// filter content by run ID) accept it. A state write usually happens inside a
-	// run's tool call, so an active run exists; if there is none (an out-of-band
-	// write) the empty RunID still reaches subscribers that don't filter.
+	// run's tool call, so an active run exists; with none (an out-of-band write)
+	// the empty RunID marks the frame as session-scoped — attach passes frames
+	// with an empty RunID to every client of the session, so the live push still
+	// lands for clients attached between or after runs.
 	var runID string
 	if run, active, err := rt.ActiveRun(ctx, sessionID); err == nil && active {
 		runID = run.ID

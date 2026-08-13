@@ -863,7 +863,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 	maxOffset := after
 	if retained, err := broker.Read(r.Context(), sessionID, after); err == nil {
 		for _, e := range retained {
-			if e.RunID != run.ID || e.Offset <= maxOffset {
+			if !runScoped(e.RunID, run.ID) || e.Offset <= maxOffset {
 				continue
 			}
 			maxOffset = e.Offset
@@ -904,7 +904,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 				h.settleFinish(r, emitter, sessionID, run.ID, "")
 				return
 			}
-			if e.RunID != run.ID || e.Offset <= maxOffset {
+			if !runScoped(e.RunID, run.ID) || e.Offset <= maxOffset {
 				continue
 			}
 			// A slow consumer's live frames get dropped by the broker (mem
@@ -947,7 +947,7 @@ func (h *Handler) fillGap(r *http.Request, emitter *sseEmitter, broker session.S
 		return maxOffset
 	}
 	for _, ge := range gap {
-		if ge.RunID != runID || ge.Offset <= maxOffset || ge.Offset >= next {
+		if !runScoped(ge.RunID, runID) || ge.Offset <= maxOffset || ge.Offset >= next {
 			continue
 		}
 		maxOffset = ge.Offset
@@ -1015,6 +1015,15 @@ func (h *Handler) drainLifecycle(r *http.Request, emitter *sseEmitter, lifecycle
 	}
 }
 
+// runScoped reports whether a content frame belongs to the stream of the run
+// being attached. A frame with an EMPTY RunID is session-scoped — an
+// out-of-band session_state write (Runtime.SetSessionStateKV with no active
+// run, e.g. the client state endpoint between runs) — and every attached
+// client of the session accepts it, so the plan panel stays live across runs.
+func runScoped(eRunID, runID string) bool {
+	return eRunID == runID || eRunID == ""
+}
+
 // drainContent flushes any content frames still buffered on the subscription
 // before the stream is settled. It closes the race where the run completes and
 // its terminal lifecycle fires before the client has drained the broker backlog
@@ -1034,7 +1043,7 @@ func (h *Handler) drainContent(r *http.Request, emitter *sseEmitter, broker sess
 			if !open {
 				return maxOffset
 			}
-			if e.RunID != runID || e.Offset <= maxOffset {
+			if !runScoped(e.RunID, runID) || e.Offset <= maxOffset {
 				continue
 			}
 			maxOffset = e.Offset
@@ -1046,7 +1055,7 @@ func (h *Handler) drainContent(r *http.Request, emitter *sseEmitter, broker sess
 			// Read can still see them in this window.
 			if retained, err := broker.Read(r.Context(), sessionID, maxOffset); err == nil {
 				for _, ge := range retained {
-					if ge.RunID != runID || ge.Offset <= maxOffset {
+					if !runScoped(ge.RunID, runID) || ge.Offset <= maxOffset {
 						continue
 					}
 					maxOffset = ge.Offset
