@@ -148,6 +148,45 @@ func TestSolidifyIsAtomicAgainstInterruption(t *testing.T) {
 	}
 }
 
+func TestSolidifyRollsBackVersionDirOnPointerFailure(t *testing.T) {
+	s := newStore(t)
+	src := t.TempDir()
+	writeTree(t, src, map[string]string{"f.txt": "v1"})
+	if _, err := s.Solidify("s", src); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sabotage the pointer commit: a directory squatting on the temp path
+	// makes os.WriteFile fail after the version dir was already promoted.
+	cur := s.currentPath("s")
+	if err := os.MkdirAll(cur+".tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Solidify("s", src); err == nil {
+		t.Fatal("solidify must fail when the pointer cannot be committed")
+	}
+
+	// The promoted version dir must be rolled back so the next solidify
+	// recomputes the same version instead of colliding with an existing dir.
+	if _, err := os.Stat(filepath.Join(s.versionsDir("s"), "2")); !os.IsNotExist(err) {
+		t.Fatalf("version 2 dir must be rolled back on pointer failure (stat err = %v)", err)
+	}
+	// Current still points at the committed version.
+	if cur, ok := s.Current("s"); !ok || cur.Version != 1 {
+		t.Fatalf("current = %+v ok=%v, want version 1", cur, ok)
+	}
+
+	if err := os.RemoveAll(cur + ".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Solidify("s", src); err != nil {
+		t.Fatalf("solidify after rollback: %v", err)
+	}
+	if ref, _ := s.Current("s"); ref.Version != 2 {
+		t.Errorf("current version = %d, want 2", ref.Version)
+	}
+}
+
 func TestSessionsIsolated(t *testing.T) {
 	s := newStore(t)
 	srcA := t.TempDir()

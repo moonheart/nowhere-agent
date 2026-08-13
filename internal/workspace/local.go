@@ -98,17 +98,24 @@ func (s *LocalStore) Solidify(sessionID, dir string) (Ref, error) {
 		return Ref{}, fmt.Errorf("promote staging: %w", err)
 	}
 
-	// 3. Atomically update the current pointer (write temp + rename).
+	// 3. Atomically update the current pointer (write temp + rename). If the
+	// pointer cannot be committed, roll the promoted version dir back: the
+	// version counter derives from the pointer, so without a rollback the next
+	// solidify would rename onto the existing dir (fails on Windows, silently
+	// replaces on Unix).
 	p := pointer{Version: next}
 	b, err := json.Marshal(p)
 	if err != nil {
+		os.RemoveAll(versionDir)
 		return Ref{}, err
 	}
 	tmp := s.currentPath(sessionID) + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		os.RemoveAll(versionDir)
 		return Ref{}, err
 	}
 	if err := os.Rename(tmp, s.currentPath(sessionID)); err != nil {
+		os.RemoveAll(versionDir)
 		return Ref{}, fmt.Errorf("commit pointer: %w", err)
 	}
 
