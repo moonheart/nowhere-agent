@@ -1,7 +1,6 @@
 package adminapi
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -32,8 +31,7 @@ func (h *Handler) confirmTOTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Code string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
+	if !decode(w, r, &req) {
 		return
 	}
 	if err := h.identity.ConfirmTOTP(r.Context(), u.ID, req.Code); err != nil {
@@ -54,8 +52,7 @@ func (h *Handler) disableTOTP(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Code string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
+	if !decode(w, r, &req) {
 		return
 	}
 	if err := h.identity.DisableTOTP(r.Context(), u.ID, req.Code); err != nil {

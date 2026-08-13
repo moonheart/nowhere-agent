@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"nowhere-agent/internal/httpx"
@@ -246,5 +247,16 @@ func TestSettingsListGrouped(t *testing.T) {
 		if !kinds[want] {
 			t.Fatalf("kind %q missing from list", want)
 		}
+	}
+}
+
+func TestSettingsRejectOversizedBody(t *testing.T) {
+	e, _ := settingsEnv(t)
+	admin := e.user(identity.PlatformRoleAdmin)
+
+	rec := e.as(admin, "PUT", "/api/admin/settings/"+settings.KeyWebhookURL,
+		map[string]any{"value": strings.Repeat("x", maxBodyBytes+1)})
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized put: %d, want 413", rec.Code)
 	}
 }

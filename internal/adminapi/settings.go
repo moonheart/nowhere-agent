@@ -93,8 +93,7 @@ func (h *Handler) putSetting(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Value json.RawMessage `json:"value"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
+	if !decode(w, r, &req) {
 		return
 	}
 	if len(req.Value) == 0 {
