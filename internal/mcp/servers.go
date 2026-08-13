@@ -107,9 +107,10 @@ func NewManagerFromJSON(raw string) (*Manager, error) {
 // Apply reconciles the managed clients against a new MCP_SERVERS JSON
 // (runtime-settable). Servers whose config is unchanged keep their live
 // session (no reconnect storm); changed servers are rebuilt; removed servers
-// are dropped. The caller must start reconnect loops for the returned added
-// clients and cancel the loops of the returned removed names. A malformed
-// raw value is an error and leaves the current set untouched.
+// are dropped. The sessions of dropped and rebuilt clients are closed here.
+// The caller must start reconnect loops for the returned added clients and
+// cancel the loops of the returned removed names. A malformed raw value is an
+// error and leaves the current set untouched.
 func (m *Manager) Apply(raw string) (added []*Client, removed []string, err error) {
 	cfgs, err := ParseServers(raw)
 	if err != nil {
@@ -128,11 +129,16 @@ func (m *Manager) Apply(raw string) (added []*Client, removed []string, err erro
 		name := c.Server()
 		if _, ok := desired[name]; !ok {
 			drop = append(drop, name)
+			_ = c.Close() // dropped: release the session, the loop is cancelled by the caller
 			continue
 		}
 		if c.sameConfig(nameIndex(cfgs, name)) {
 			kept[name] = c
 			delete(desired, name)
+		} else {
+			// Config changed: the client is rebuilt below, so release the old
+			// session instead of leaving the dropped client holding the stream.
+			_ = c.Close()
 		}
 	}
 	for name, nc := range desired {

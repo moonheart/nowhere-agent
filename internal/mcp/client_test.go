@@ -134,6 +134,26 @@ func TestCallToolErrorSurfaced(t *testing.T) {
 	}
 }
 
+func TestClientCloseReleasesSession(t *testing.T) {
+	hs := newTestServer(t)
+	c := connectClient(t, hs.URL)
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session != nil {
+		t.Error("session must be nil after Close")
+	}
+	if len(c.tools) != 0 {
+		t.Errorf("tools must be cleared after Close, got %d", len(c.tools))
+	}
+}
+
 func TestReconnectAfterSessionDrop(t *testing.T) {
 	hs := newTestServer(t)
 	c := connectClient(t, hs.URL)

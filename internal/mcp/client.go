@@ -68,6 +68,24 @@ func NewSearxng(endpoint string, timeout time.Duration) *Client {
 // Server returns the server name used to prefix tool names.
 func (c *Client) Server() string { return c.server }
 
+// Close releases the client's MCP session (the SDK closes the transport's HTTP
+// stream with it) and drops the adapted tool set. The request transport wraps
+// the process-wide http.DefaultTransport, so idle HTTP connections are left
+// for the shared pool — there is nothing else to tear down. Close is
+// idempotent and safe to call when never connected; the Manager calls it for
+// dropped and rebuilt servers, never to shut the process down.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	session := c.session
+	c.session = nil
+	c.tools = nil
+	c.mu.Unlock()
+	if session == nil {
+		return nil
+	}
+	return session.Close()
+}
+
 // sameConfig reports whether this client's wiring (endpoint, timeout,
 // headers) matches a desired config — the Manager keeps a client whose
 // config is unchanged across a runtime reconfigure, so its live session and

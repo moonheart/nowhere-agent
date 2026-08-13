@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -169,6 +170,52 @@ func serverNames(clients []*Client) []string {
 		out = append(out, c.Server())
 	}
 	return out
+}
+
+// TestApplyClosesDroppedAndRebuiltClients proves that Apply releases the
+// session of every client it discards (removed or config-changed), while an
+// unchanged client keeps its live session.
+func TestApplyClosesDroppedAndRebuiltClients(t *testing.T) {
+	hs := newTestServer(t)
+	url := hs.URL
+	m, err := NewManagerFromJSON(`[{"name":"a","url":"` + url + `"},{"name":"b","url":"` + url + `"}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	t.Cleanup(cancel)
+	for _, c := range m.Clients() {
+		if err := c.Connect(ctx); err != nil {
+			t.Fatalf("connect %s: %v", c.Server(), err)
+		}
+	}
+	origA := m.Clients()[0]
+	origB := m.Clients()[1]
+
+	// Retune: keep a as-is, change b's endpoint (rebuilt), add c.
+	if _, _, err := m.Apply(`[{"name":"a","url":"` + url + `"},{"name":"b","url":"` + url + `/v2"},{"name":"c","url":"https://c.example.com/mcp"}]`); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	origA.mu.Lock()
+	if origA.session == nil {
+		t.Error("unchanged client a must keep its live session")
+	}
+	origA.mu.Unlock()
+	origB.mu.Lock()
+	if origB.session != nil {
+		t.Error("rebuilt client b must have its session closed")
+	}
+	origB.mu.Unlock()
+
+	// Drop a: its session must be closed too.
+	if _, _, err := m.Apply(`[{"name":"c","url":"https://c.example.com/mcp"}]`); err != nil {
+		t.Fatalf("apply drop: %v", err)
+	}
+	origA.mu.Lock()
+	defer origA.mu.Unlock()
+	if origA.session != nil {
+		t.Error("dropped client a must have its session closed")
+	}
 }
 
 func TestHeaderTransportInjectsHeaders(t *testing.T) {
