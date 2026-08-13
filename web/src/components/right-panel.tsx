@@ -274,7 +274,7 @@ const SkillsTab: FC<{ active: boolean }> = ({ active }) => {
       setSkills(skills.sort((a, b) => a.name.localeCompare(b.name)));
       setError("");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(`Failed to load skills: ${e instanceof Error ? e.message : String(e)}`);
     }
   }, []);
 
@@ -290,8 +290,13 @@ const SkillsTab: FC<{ active: boolean }> = ({ active }) => {
       setSkills((prev) =>
         prev ? prev.map((x) => (x.id === s.id ? { ...x, enabled: !s.enabled } : x)) : prev,
       );
-    } catch {
-      // keep the previous state on failure
+      setError("");
+    } catch (e) {
+      // A failed toggle must not vanish: surface the reason at the tab top and
+      // keep the previous state.
+      setError(
+        `Failed to ${s.enabled ? "disable" : "enable"} ${s.name}: ${e instanceof Error ? e.message : String(e)}`,
+      );
     } finally {
       setBusy(null);
     }
@@ -312,7 +317,7 @@ const SkillsTab: FC<{ active: boolean }> = ({ active }) => {
   return (
     <div className="p-2">
       {error && (
-        <p className="px-1 pb-2 text-[11px] text-destructive">Failed to load skills: {error}</p>
+        <p className="px-1 pb-2 text-[11px] text-destructive">{error}</p>
       )}
       <ul className="space-y-1">
         {skills?.map((s) => (
