@@ -220,10 +220,12 @@ func messageText(m *provider.Message) string {
 // clients always observe done/failed/cancelled — live or via the replay tail —
 // before the run reads as inactive. This removes the settle-before-terminal race.
 //
-// A run that suspends for tool approval (agent.ErrAwaitingApproval) is NOT
-// settled: execute parks it in waiting_approval (releasing the single-active-run
-// lock) and returns, leaving the run Active for Resume to continue. The parked
-// worker is removed from the registry here so a fresh Submit is not blocked.
+// A run that hits a client interaction (a permission approval, an ask_user
+// question set, a client-side tool) is NOT parked: the loop emits KindInterrupt
+// and finishes normally, and this run is settled like any other (run-stateless
+// model). The interaction's result is applied by a FRESH run that Submit
+// installs as a NEW worker — hence the identity-guarded worker removal in the
+// deferred cleanup below, so this worker can never clobber its successor.
 func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run, w *runWorker, work RunWork) {
 	defer close(w.done)
 	// Bind a run-scoped logger into the context: the submitter's request logger
@@ -238,9 +240,10 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 	runCtx = observability.WithLogger(runCtx, log)
 	defer func() {
 		rg.mu.Lock()
-		// Remove the worker only if it is still the registered one — a resumed
-		// run installs a NEW worker for the same session, and the parked worker's
-		// deferred cleanup must not clobber it.
+		// Remove the worker only if it is still the registered one — a new run
+		// (a resume after an interaction, or a newer submission) installs a NEW
+		// worker for the same session, and this worker's deferred cleanup must
+		// not clobber it.
 		if rg.workers[sessionID] == w {
 			delete(rg.workers, sessionID)
 		}

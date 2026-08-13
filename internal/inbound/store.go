@@ -9,8 +9,9 @@
 // and stored AES-256-GCM encrypted at rest (internal/secrets, the same
 // protection team provider keys get). Trigger requests must present
 // X-Nowhere-Timestamp (unix seconds, within a 5-minute window) and
-// X-Nowhere-Signature: sha256=<hex HMAC-SHA256 over "<ts>.<raw body>">, so the
-// secret never rides in a plain header and replays are bounded.
+// X-Nowhere-Signature: sha256=<hex HMAC-SHA256 over "<ts>.<nonce>.<body>">, so
+// the secret never rides in a plain header, replays are bounded, and each
+// signed event can only start one run.
 package inbound
 
 import (
