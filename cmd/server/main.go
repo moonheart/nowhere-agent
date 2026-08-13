@@ -204,6 +204,12 @@ func run() error {
 	// process without a restart or a local write. The loop stops when the root
 	// ctx is cancelled.
 	settingsRuntime.StartRefreshLoop(ctx, 30*time.Second)
+	// Five-second settings sync (P2-7): one Watcher drives every component's
+	// "re-read the runtime settings and apply" callback on a 5s cadence —
+	// MCP servers, dreaming/schedule cadence, webhook policy, rate limiter.
+	// Components register their callback where they are wired; the loop
+	// starts once at the end of run().
+	settingsSync := settings.NewWatcher()
 	identityHandler := identity.NewHandler(identitySvc).WithThrottle(identity.NewLoginThrottler())
 	identityHandler.Register(mux)
 
@@ -702,12 +708,12 @@ func run() error {
 				go reconnectMCP(ctx, c, log)
 			}
 		}
-		// Runtime MCP reconfigure (admin console): a background loop keeps the
-		// manager reconciled with the mcp_servers setting. Unchanged servers
-		// keep their live session and tools; added servers get a reconnect
-		// loop; removed servers' loops are cancelled. A malformed runtime
-		// value is rejected by the PUT validation and, should one ever reach
-		// here, keeps the previous set with a loud log.
+		// Runtime MCP reconfigure (admin console): a settings-watcher callback
+		// keeps the manager reconciled with the mcp_servers setting on every
+		// 5s tick. Unchanged servers keep their live session and tools; added
+		// servers get a reconnect loop; removed servers' loops are cancelled.
+		// A malformed runtime value is rejected by the PUT validation and,
+		// should one ever reach here, keeps the previous set with a loud log.
 		mcpCancels := map[string]context.CancelFunc{}
 		applyMCP := func() {
 			if mcpManager == nil {
@@ -732,18 +738,7 @@ func run() error {
 				log.Info("mcp server added, connecting", "server", c.Server())
 			}
 		}
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					applyMCP()
-				}
-			}
-		}()
+		settingsSync.Add(applyMCP)
 		// Context compression (context-compression): the loop compresses its
 		// working view as it approaches the model's context window, using a
 		// no-tools summarize call (LLMCompressor). The compressor is built
@@ -859,21 +854,12 @@ func run() error {
 					Run:      runDreaming,
 				})
 				go sched.Start(ctx)
-				go func() {
-					// Retune the cadence live: the scheduler re-reads the job's
-					// interval each tick, and this goroutine keeps it in sync
-					// with the admin console within a few seconds.
-					ticker := time.NewTicker(5 * time.Second)
-					defer ticker.Stop()
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-ticker.C:
-							sched.SetInterval("dreaming", settingsRuntime.Duration(settings.KeyDreamingInterval))
-						}
-					}
-				}()
+				// Retune the cadence live: the scheduler re-reads the job's
+				// interval each tick, and the settings watcher keeps it in
+				// sync with the admin console within a few seconds.
+				settingsSync.Add(func() {
+					sched.SetInterval("dreaming", settingsRuntime.Duration(settings.KeyDreamingInterval))
+				})
 				log.Info("dreaming scheduler enabled",
 					"interval", cfg.Dreaming.Interval, "max_tokens", cfg.Dreaming.MaxTokens,
 					"cap_facts", cfg.Dreaming.MaxFacts, "cap_insights", cfg.Dreaming.MaxInsights,
@@ -1503,18 +1489,7 @@ func run() error {
 		// Keep the notifier's policy in sync with the runtime settings: the
 		// admin console's webhook_* keys (timeout, retries, signing secret,
 		// SSRF allowlist) apply to new deliveries within a few seconds.
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					applyWebhookPolicy()
-				}
-			}
-		}()
+		settingsSync.Add(applyWebhookPolicy)
 		if sandboxMgr != nil {
 			log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
 		}
@@ -1566,19 +1541,10 @@ func run() error {
 			})
 			trigger.SetLogger(log)
 			go trigger.Start(ctx)
-			go func() {
-				// Keep the scan cadence in sync with the admin console.
-				ticker := time.NewTicker(5 * time.Second)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						trigger.SetScanInterval(settingsRuntime.Duration(settings.KeyScheduleScanInterval))
-					}
-				}
-			}()
+			// Keep the scan cadence in sync with the admin console.
+			settingsSync.Add(func() {
+				trigger.SetScanInterval(settingsRuntime.Duration(settings.KeyScheduleScanInterval))
+			})
 			schedTrigger = trigger
 			log.Info("scheduled-task trigger enabled (runtime schedule_enabled switch)", "scan_interval", cfg.Schedule.ScanInterval)
 		}
@@ -1699,10 +1665,16 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:         cfg.HTTP.Addr,
-		Handler:      httpHandler(ctx, cfg, log, metrics, settingsRuntime, mux),
+		Handler:      httpHandler(ctx, cfg, log, metrics, settingsRuntime, settingsSync, mux),
 		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: cfg.HTTP.WriteTimeout,
 	}
+
+	// Start the 5-second settings sync: every registered callback (MCP
+	// servers, dreaming/schedule cadence, webhook policy, rate limiter) now
+	// runs on the shared watcher loop. All callbacks are registered by this
+	// point, and the loop stops when the root ctx is cancelled.
+	settingsSync.StartSync(ctx, 5*time.Second)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -1876,7 +1848,7 @@ func spaHandler(dir string) http.Handler {
 //   - metrics then recovery, innermost around the mux: a panic is recovered,
 //     logged with a stack, and answered 500 — and because recovery sits inside
 //     metrics, that 500 is counted like any other status.
-func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metrics *observability.Metrics, settingsRuntime *settings.Runtime, mux *http.ServeMux) http.Handler {
+func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metrics *observability.Metrics, settingsRuntime *settings.Runtime, settingsSync *settings.Watcher, mux *http.ServeMux) http.Handler {
 	proxies := trustedproxy.New(cfg.HTTP.TrustedProxyCIDRs)
 	limiter := quota.NewRateLimiter(cfg.HTTP.RateLimitRPS, cfg.HTTP.RateLimitBurst,
 		func(r *http.Request) string {
@@ -1887,28 +1859,19 @@ func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metri
 			return quota.ClientIPKey(r, proxies)
 		})
 	// Live retune: pick up the runtime settings (0/0 = disabled); existing
-	// buckets converge within the limiter's sweep TTL. A background loop keeps
-	// the rate in sync with the admin console, so retuning rate_limit_rps /
-	// rate_limit_burst needs no restart.
+	// buckets converge within the limiter's sweep TTL. The settings watcher
+	// keeps the rate in sync with the admin console, so retuning
+	// rate_limit_rps / rate_limit_burst needs no restart.
 	limiter.SetRate(
 		float64(settingsRuntime.Int(settings.KeyRateLimitRPS)),
 		settingsRuntime.Int(settings.KeyRateLimitBurst),
 	)
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				limiter.SetRate(
-					float64(settingsRuntime.Int(settings.KeyRateLimitRPS)),
-					settingsRuntime.Int(settings.KeyRateLimitBurst),
-				)
-			}
-		}
-	}()
+	settingsSync.Add(func() {
+		limiter.SetRate(
+			float64(settingsRuntime.Int(settings.KeyRateLimitRPS)),
+			settingsRuntime.Int(settings.KeyRateLimitBurst),
+		)
+	})
 	return observability.StandardStack(mux, log, metrics, limiter.Middleware)
 }
 
