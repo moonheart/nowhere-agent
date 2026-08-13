@@ -108,6 +108,34 @@ func TestPGPortRecallKeywordRanks(t *testing.T) {
 	}
 }
 
+// TestPGPortRecallRequiresMatch pins the relevance floor: a query with no
+// keyword overlap must return nothing, not an arbitrary page of unrelated
+// memories ordered by whatever ts_rank tied at zero.
+func TestPGPortRecallRequiresMatch(t *testing.T) {
+	db := pgTestDB(t)
+	p := NewPGPort(db)
+	ctx := context.Background()
+	scope := identity.UserScope("user-nomatch")
+
+	m, _ := p.Store(ctx, Memory{Scope: scope, Kind: KindFact, Content: "prefers dark mode in the editor"})
+	cleanup(t, db, m.ID)
+
+	got, err := p.Recall(ctx, "nonexistentkeywordzzz", []identity.ScopeRef{scope}, 10)
+	if err != nil {
+		t.Fatalf("Recall: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("no-match recall returned %d unrelated memories, want 0: %+v", len(got), got)
+	}
+	got, err = p.RecallSince(ctx, time.Time{}, "nonexistentkeywordzzz", []identity.ScopeRef{scope}, nil, 10)
+	if err != nil {
+		t.Fatalf("RecallSince: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("no-match recall-since returned %d unrelated memories, want 0: %+v", len(got), got)
+	}
+}
+
 func TestPGPortRecallExcludesDeprecated(t *testing.T) {
 	db := pgTestDB(t)
 	p := NewPGPort(db)

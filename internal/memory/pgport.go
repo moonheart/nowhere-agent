@@ -62,10 +62,14 @@ func (p *PGPort) Recall(ctx context.Context, query string, scopes []identity.Sco
 		return nil, nil
 	}
 
-	var orderBy string
+	var orderBy, relevance string
 	if strings.TrimSpace(query) != "" {
 		args = append(args, query)
+		// The relevance floor reuses the query placeholder: a memory with no
+		// keyword overlap has ts_rank 0, and without the filter an arbitrary
+		// page of unrelated memories would be returned as "matches".
 		orderBy = fmt.Sprintf("ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $%d)) DESC", len(args))
+		relevance = fmt.Sprintf("AND ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $%d)) > 0", len(args))
 	} else {
 		orderBy = "created_at DESC"
 	}
@@ -74,9 +78,9 @@ func (p *PGPort) Recall(ctx context.Context, query string, scopes []identity.Sco
 	q := fmt.Sprintf(`
 		SELECT id, scope, user_id, team_id, kind, content, embedding, deprecated, created_at, updated_at
 		FROM memories
-		WHERE NOT deprecated AND (%s)
+		WHERE NOT deprecated AND (%s) %s
 		ORDER BY %s
-		LIMIT $%d`, where, orderBy, len(args))
+		LIMIT $%d`, where, relevance, orderBy, len(args))
 
 	return p.query(ctx, q, args...)
 }
@@ -107,10 +111,13 @@ func (p *PGPort) RecallSince(ctx context.Context, since time.Time, query string,
 		where = fmt.Sprintf("%s AND created_at > $%d", where, len(args))
 	}
 
-	var orderBy string
+	var orderBy, relevance string
 	if strings.TrimSpace(query) != "" {
 		args = append(args, query)
+		// Same relevance floor as Recall: no keyword overlap means ts_rank 0,
+		// which must not read as a match (reused placeholder).
 		orderBy = fmt.Sprintf("ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $%d)) DESC", len(args))
+		relevance = fmt.Sprintf("AND ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', $%d)) > 0", len(args))
 	} else {
 		orderBy = "created_at DESC"
 	}
@@ -119,9 +126,9 @@ func (p *PGPort) RecallSince(ctx context.Context, since time.Time, query string,
 	q := fmt.Sprintf(`
 		SELECT id, scope, user_id, team_id, kind, content, embedding, deprecated, created_at, updated_at
 		FROM memories
-		WHERE NOT deprecated AND (%s)
+		WHERE NOT deprecated AND (%s) %s
 		ORDER BY %s
-		LIMIT $%d`, where, orderBy, len(args))
+		LIMIT $%d`, where, relevance, orderBy, len(args))
 
 	return p.query(ctx, q, args...)
 }
