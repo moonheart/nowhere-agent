@@ -55,7 +55,7 @@ func (regEchoTool) Call(_ context.Context, _ map[string]any) (toolruntime.Result
 func TestRunPersistsFullBlockMessages(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	ms := NewMemMessageStore()
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func (p *usageScriptProvider) Stream(_ context.Context, _ provider.Request) (<-c
 func TestRunRecordsUsageOnMessagesAndRun(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	ms := NewMemMessageStore()
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)

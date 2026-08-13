@@ -37,7 +37,7 @@ func newEnv(t *testing.T) *env {
 	uid := seedUser(t, db)
 
 	rt := session.NewRuntime(session.NewMemStore()).WithBus(session.NewMemBus())
-	rg := session.NewRunRegistry(rt, rt.Bus())
+	rg := session.NewRunRegistry(rt)
 	d := NewDispatcher(s, rt, rg, nil, nil,
 		func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
 			return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}), nil

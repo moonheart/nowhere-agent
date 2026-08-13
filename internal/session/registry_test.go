@@ -52,7 +52,7 @@ func registryLoop(p provider.Adapter) *agent.Loop {
 func newRegistrySession(t *testing.T) (*Runtime, *RunRegistry, Session) {
 	t.Helper()
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
-	rg := NewRunRegistry(rt, rt.Bus())
+	rg := NewRunRegistry(rt)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)

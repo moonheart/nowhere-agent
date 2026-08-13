@@ -46,7 +46,7 @@ func (p *usageToolScriptProvider) Stream(_ context.Context, _ provider.Request) 
 func TestRunStepIntentsWrittenBeforeEffects(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	ms := NewMemMessageStore()
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestRunStepIntentsWrittenBeforeEffects(t *testing.T) {
 func TestUsageLedgerMatchesMessagesAndRun(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	ms := NewMemMessageStore()
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)

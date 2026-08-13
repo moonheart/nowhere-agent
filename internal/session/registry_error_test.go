@@ -35,7 +35,7 @@ func (p *truncatingProvider) Stream(_ context.Context, _ provider.Request) (<-ch
 func TestRunFailedAttachesErrorMetadataToLastAssistantMessage(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	ms := NewMemMessageStore()
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestRunFailedAttachesErrorMetadataToLastAssistantMessage(t *testing.T) {
 func TestRunErrorMetadataScopedToRun(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	ms := NewMemMessageStore()
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +167,7 @@ func (p *errorProvider) Stream(_ context.Context, _ provider.Request) (<-chan pr
 func TestRunFailedWithoutAssistantMessageLeavesNoMetadata(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	ms := NewMemMessageStore()
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +199,7 @@ func TestRunFailedWithoutAssistantMessageLeavesNoMetadata(t *testing.T) {
 func TestRunCancelledLeavesNoErrorMetadata(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
 	ms := NewMemMessageStore()
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(ms)
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)

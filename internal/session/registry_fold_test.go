@@ -111,7 +111,7 @@ func TestFoldBatchSchemaInvalidSiblingNeverExecutes(t *testing.T) {
 // batch durably records ONE snapshot carrying the FULL ordered batch.
 func TestSuspendPersistsBatchSnapshot(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(NewMemMessageStore())
+	rg := NewRunRegistry(rt).WithMessageStore(NewMemMessageStore())
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)

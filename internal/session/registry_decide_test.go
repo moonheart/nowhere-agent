@@ -59,7 +59,7 @@ func createSuspendedInteraction(t *testing.T, rg *RunRegistry, batchIDs []string
 func newDecideRegistry(t *testing.T) (*RunRegistry, MessageStore, Session) {
 	t.Helper()
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
-	rg := NewRunRegistry(rt, rt.Bus())
+	rg := NewRunRegistry(rt)
 	ms := NewMemMessageStore()
 	rg.WithMessageStore(ms)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")

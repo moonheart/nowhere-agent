@@ -51,7 +51,7 @@ func (g gatedTool) Call(context.Context, map[string]any) (toolruntime.Result, er
 // message — leaving no dangling tool_use for EnsurePairing to synthesize.
 func TestRegistryBatchDecisionFlow(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(NewMemMessageStore())
+	rg := NewRunRegistry(rt).WithMessageStore(NewMemMessageStore())
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func (s *failBatchStore) CreateInteractionBatch(ctx context.Context, batch Suspe
 func TestRegistryVoidsLeftoverInteractionsOnFailedRun(t *testing.T) {
 	store := &failBatchStore{MemStore: NewMemStore(), failAfter: 1}
 	rt := NewRuntime(store).WithBus(NewMemBus())
-	rg := NewRunRegistry(rt, rt.Bus()).WithMessageStore(NewMemMessageStore())
+	rg := NewRunRegistry(rt).WithMessageStore(NewMemMessageStore())
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)

@@ -347,7 +347,7 @@ func run() error {
 	// run before hard-deleting its session) all operate on the one worker
 	// table. Created here, outside the provider branch, so the admin console
 	// can reach the same workers the chat endpoint owns.
-	runRegistry := session.NewRunRegistry(sessionRuntime, sessionRuntime.Bus())
+	runRegistry := session.NewRunRegistry(sessionRuntime)
 
 	// Reconcile runs stranded non-terminal by a previous process (their in-memory
 	// workers died with it): mark them failed at startup so they don't read as

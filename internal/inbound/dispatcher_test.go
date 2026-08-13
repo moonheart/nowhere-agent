@@ -36,7 +36,7 @@ func memEnv(t *testing.T) (*Dispatcher, *session.Runtime, *session.RunRegistry, 
 	t.Helper()
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store).WithBus(session.NewMemBus())
-	rg := session.NewRunRegistry(rt, rt.Bus())
+	rg := session.NewRunRegistry(rt)
 	d := NewDispatcher(nil, rt, rg, nil, nil,
 		func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
 			return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}), nil

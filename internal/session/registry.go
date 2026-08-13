@@ -72,8 +72,7 @@ type RunDoneHook func(ctx context.Context, sessionID string, run Run, status Run
 // started it disconnecting. Cancel is transport-independent: any caller can stop
 // the run regardless of which HTTP connections are open.
 type RunRegistry struct {
-	rt  *Runtime
-	bus EventBus
+	rt *Runtime
 
 	// msgStore, when set, receives the loop's assembled messages (user,
 	// assistant, tool-result) for full-block persistence (persist-raw-messages).
@@ -99,11 +98,13 @@ type runWorker struct {
 	done   chan struct{} // closed when the run goroutine returns
 }
 
-// NewRunRegistry creates a registry over a Runtime (state) and EventBus (fan-out).
-func NewRunRegistry(rt *Runtime, bus EventBus) *RunRegistry {
+// NewRunRegistry creates a registry over a Runtime (state). Lifecycle fan-out
+// lives on the Runtime's EventBus (see Runtime.Bus); the registry never held a
+// usable bus — it always pointed at the in-memory bus even under a Redis
+// broker, so a future misuse would have silently dropped lifecycle events.
+func NewRunRegistry(rt *Runtime) *RunRegistry {
 	return &RunRegistry{
 		rt:                  rt,
-		bus:                 bus,
 		workers:             map[string]*runWorker{},
 		interactionHandlers: defaultInteractionHandlers(),
 	}

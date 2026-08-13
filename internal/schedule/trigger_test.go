@@ -100,7 +100,7 @@ func newRuntime(t *testing.T, db *sql.DB) (*session.Runtime, *session.RunRegistr
 	t.Helper()
 	userID := pgNewUser(t, db)
 	rt := session.NewRuntime(session.NewPGStore(db))
-	rg := session.NewRunRegistry(rt, rt.Bus())
+	rg := session.NewRunRegistry(rt)
 	return rt, rg, userID
 }
 

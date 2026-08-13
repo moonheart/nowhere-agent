@@ -120,7 +120,7 @@ func NewHandler(newLoop LoopFactory, systemPrompt string) *Handler {
 // attach path. Pass a custom registry via WithRegistry to override.
 func (h *Handler) WithRuntime(rt *session.Runtime) *Handler {
 	h.runtime = rt
-	h.registry = session.NewRunRegistry(rt, rt.Bus())
+	h.registry = session.NewRunRegistry(rt)
 	return h
 }
 

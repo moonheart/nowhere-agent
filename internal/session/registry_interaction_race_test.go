@@ -40,7 +40,7 @@ func (p *clientToolCallProvider) Stream(_ context.Context, _ provider.Request) (
 // this observes ok=false and fails.
 func TestInteractionRowPersistedBeforeFramePublished(t *testing.T) {
 	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
-	rg := NewRunRegistry(rt, rt.Bus())
+	rg := NewRunRegistry(rt)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)

@@ -89,7 +89,7 @@ func newEnv(t *testing.T) *env {
 	e.sessions = session.NewPGStore(db)
 	e.images = workspace.NewImageStore(t.TempDir())
 	rt := session.NewRuntime(e.sessions)
-	e.registry = session.NewRunRegistry(rt, rt.Bus())
+	e.registry = session.NewRunRegistry(rt)
 
 	h := NewHandler(e.svc, usage.NewStore(db), e.mem).WithPurge(e.sessions, e.images, e.registry)
 	e.mux = http.NewServeMux()
