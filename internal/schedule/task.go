@@ -189,13 +189,22 @@ func (c cronSpecIn) Next(t time.Time) time.Time {
 
 // NextAfter returns the task's next fire time strictly after `from`, in the
 // task's timezone. It is used both to seed next_run_at at creation and to
-// advance it on each claim.
+// advance it on each claim. robfig/cron gives up after a five-year search and
+// answers time.Time{} for expressions that never match (e.g. "0 0 30 2 *" —
+// Feb has no 30th); storing that zero instant would make ListDue match forever
+// and burn a real LLM run on every scan, so a zero next is treated as an
+// invalid schedule. Create/Update surface it to the user; Claim propagates it
+// as a fire failure (a bad row can never be claimed again).
 func (t Task) NextAfter(from time.Time) (time.Time, error) {
 	s, err := t.Schedule()
 	if err != nil {
 		return time.Time{}, err
 	}
-	return s.Next(from), nil
+	next := s.Next(from)
+	if next.IsZero() {
+		return time.Time{}, fmt.Errorf("%w: cron %q has no occurrence within five years", ErrInvalid, t.Cron)
+	}
+	return next, nil
 }
 
 // Due reports whether the task should fire at `now`: enabled, not expired, and

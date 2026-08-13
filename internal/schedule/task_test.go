@@ -1,6 +1,7 @@
 package schedule
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -93,6 +94,37 @@ func TestValidate(t *testing.T) {
 		if !c.ok && err == nil {
 			t.Errorf("%s: expected invalid, got nil", c.name)
 		}
+	}
+}
+
+func TestNextAfter_NeverFiringCron(t *testing.T) {
+	// These expressions parse but never match: robfig/cron's five-year search
+	// fails and it answers time.Time{}, which must surface as ErrInvalid —
+	// a zero next_run_at would otherwise keep the task due on every scan
+	// forever (real LLM runs burning budget each 30s sweep).
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	cases := []string{
+		"0 0 30 2 *", // February has no 30th
+		"0 0 31 4 *", // April has no 31st
+	}
+	for _, cron := range cases {
+		task := Task{Prompt: "x", Cron: cron, OnRunCompleted: OnRunKeep, Multitask: MultitaskReject}
+		if _, err := task.NextAfter(from); !errors.Is(err, ErrInvalid) {
+			t.Errorf("NextAfter(%q) error = %v, want ErrInvalid", cron, err)
+		}
+	}
+}
+
+func TestNextAfter_LeapYearCronFires(t *testing.T) {
+	// "0 0 29 2 *" (Feb 29) is the control: a leap year always falls within
+	// robfig/cron's five-year search window, so it must NOT be rejected.
+	task := Task{Prompt: "x", Cron: "0 0 29 2 *", OnRunCompleted: OnRunKeep, Multitask: MultitaskReject}
+	next, err := task.NextAfter(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("NextAfter(Feb 29) = %v, want a fire", err)
+	}
+	if next.IsZero() {
+		t.Fatal("NextAfter(Feb 29) returned a zero time")
 	}
 }
 
