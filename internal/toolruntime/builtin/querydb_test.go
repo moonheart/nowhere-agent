@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -151,5 +152,58 @@ func TestQueryDBDisabledWhenNoDSNs(t *testing.T) {
 	}
 	if got := NewQueryDB(map[string]string{}, QueryDBOptions{}); got != nil {
 		t.Fatal("empty DSN map must disable the tool")
+	}
+}
+
+// TestQueryDBSerializeRowsKeepsWholeRows pins the truncation shape: the cap
+// must never cut mid-row — the result stays parseable JSON with a truncation
+// note, and the kept prefix is a prefix of the full marshaled array.
+func TestQueryDBSerializeRowsKeepsWholeRows(t *testing.T) {
+	tool := testQueryDB(t)
+	rows := make([]map[string]any, 0, 300)
+	for i := 0; i < 300; i++ {
+		rows = append(rows, map[string]any{
+			"id":   i,
+			"note": strings.Repeat("x", 120),
+		})
+	}
+	got, err := tool.serializeRows(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "...(truncated:") {
+		t.Fatalf("over-cap result missing the truncation note: %q...", got[:80])
+	}
+	// The whole result is one valid JSON document: the note sits after a
+	// closed array, so parse only the array line... the note makes the whole
+	// string non-JSON by design — instead assert the array part is valid JSON.
+	arr := got[:strings.Index(got, "\n...")]
+	var parsed []map[string]any
+	if err := json.Unmarshal([]byte(arr), &parsed); err != nil {
+		t.Fatalf("kept prefix is not valid JSON: %v\n%s", err, arr[:120])
+	}
+	if len(parsed) == 0 || len(parsed) >= len(rows) {
+		t.Fatalf("kept rows = %d, want 0 < kept < %d", len(parsed), len(rows))
+	}
+	if len(arr) > queryDBMaxResultChars {
+		t.Errorf("kept prefix = %d bytes, want <= %d", len(arr), queryDBMaxResultChars)
+	}
+	// The kept rows are the full serialization's prefix (minus the closing
+	// bracket, which the truncation places where the full array continues).
+	full, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(full), arr[:len(arr)-1]) {
+		t.Error("kept rows are not the serialized prefix of the full result")
+	}
+	// Under the cap: no truncation.
+	small := rows[:5]
+	out, err := tool.serializeRows(small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "...(truncated:") {
+		t.Error("under-cap result must not carry the truncation note")
 	}
 }

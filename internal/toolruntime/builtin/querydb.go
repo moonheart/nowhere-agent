@@ -218,7 +218,9 @@ func (t *queryDBTool) queryReadOnly(ctx context.Context, pool *sql.DB, stmt stri
 }
 
 // serializeRows renders the rows as JSON, capping total bytes and appending a
-// truncation note when the cap is hit.
+// truncation note when the cap is hit. The cut keeps WHOLE rows only: the
+// model parses the output, and a mid-row byte cut would leave invalid JSON (an
+// unclosed object or string) it could never parse.
 func (t *queryDBTool) serializeRows(rows []map[string]any) (string, error) {
 	b, err := json.Marshal(rows)
 	if err != nil {
@@ -227,13 +229,31 @@ func (t *queryDBTool) serializeRows(rows []map[string]any) (string, error) {
 	if len(b) <= queryDBMaxResultChars {
 		return string(b), nil
 	}
-	// Truncate at a byte boundary near the cap and note the cut.
-	cut := queryDBMaxResultChars
-	for cut > 0 && b[cut] >= 0x80 {
-		cut--
+	// Count complete row encodings from the start until the next would exceed
+	// the cap, then re-marshal the kept rows — valid by construction ("[" +
+	// rows joined by "," + "]").
+	kept := 0
+	total := 2 // "[" + "]"
+	for ; kept < len(rows); kept++ {
+		part, err := json.Marshal(rows[kept])
+		if err != nil {
+			return "", err
+		}
+		if kept > 0 {
+			total++ // separator comma
+		}
+		if total+len(part) > queryDBMaxResultChars {
+			break
+		}
+		total += len(part)
 	}
-	note := fmt.Sprintf("\n...(truncated: %d rows, %d bytes total)", len(rows), len(b))
-	return string(b[:cut]) + note, nil
+	out := rows[:kept]
+	re, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	note := fmt.Sprintf("\n...(truncated: kept %d of %d rows, %d bytes total)", kept, len(rows), len(b))
+	return string(re) + note, nil
 }
 
 // normalizeCell converts a scanned value into a JSON-safe representation.
