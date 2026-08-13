@@ -298,6 +298,9 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
 
   const moveToTeam = async () => {
     if (!selectedId || !moveTeamId) return;
+    // Moving drops the selection and the draft — guard unsaved edits the same
+    // way the skill-switch and startNew paths do.
+    if (!confirmDiscard()) return;
     setBusy(true);
     setError(null);
     try {
