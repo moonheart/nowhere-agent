@@ -125,10 +125,83 @@ func TestMemBrokerSettleClearsRetainedFrames(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("after Settle, Read = %d frames, want 0 (content is durable in messages)", len(got))
 	}
-	// Offsets continue after settle (a new run doesn't restart at a colliding low).
+	// With no subscribers, Settle reclaimed the entry entirely: the next run's
+	// publish recreates it and offsets restart at 1. Safe because attach filters
+	// catch-up by RunID — a run's offsets are only ever compared within itself.
 	off, _ := b.Publish(ctx, "s1", StreamEvent{Kind: "text", Payload: []byte("y")})
-	if off != 4 {
-		t.Errorf("offset after settle = %d, want 4 (continues, not reset)", off)
+	if off != 1 {
+		t.Errorf("offset after Settle = %d, want 1 (reclaimed entry restarts the ring)", off)
+	}
+}
+
+// A settled session with no subscribers must leave the streams map entirely —
+// the reclamation half of the mem broker's lifecycle (the Redis broker TTLs
+// settled streams instead).
+func TestMemBrokerSettleReclaimsIdleStream(t *testing.T) {
+	b := NewMemBroker(8)
+	ctx := context.Background()
+	mb := b.(*memBroker)
+	if _, err := b.Publish(ctx, "s1", StreamEvent{Kind: "text", Payload: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	mb.mu.Lock()
+	_, ok := mb.streams["s1"]
+	mb.mu.Unlock()
+	if !ok {
+		t.Fatal("stream should exist before settle")
+	}
+	if err := b.Settle(ctx, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	mb.mu.Lock()
+	_, ok = mb.streams["s1"]
+	mb.mu.Unlock()
+	if ok {
+		t.Error("settled stream with no subscribers should be reclaimed")
+	}
+	// An unknown-session settle is a no-op, not an error.
+	if err := b.Settle(ctx, "never-existed"); err != nil {
+		t.Errorf("settle unknown session: %v", err)
+	}
+}
+
+// A stream settled WITH a subscriber is kept (so the attached client still
+// receives the run's terminal frame) and reclaimed when that subscriber
+// detaches — otherwise every settled session would linger forever, which is
+// the common flow (the submitter is attached at settle time).
+func TestMemBrokerSettleKeepsEntryUntilLastUnsub(t *testing.T) {
+	b := NewMemBroker(8)
+	ctx := context.Background()
+	mb := b.(*memBroker)
+	ch, unsub := b.Subscribe("s1", 8)
+	defer unsub()
+
+	if _, err := b.Publish(ctx, "s1", StreamEvent{Kind: "text", Payload: []byte("x")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Settle(ctx, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	mb.mu.Lock()
+	ls, ok := mb.streams["s1"]
+	mb.mu.Unlock()
+	if !ok || len(ls.frames) != 0 || len(ls.subs) != 1 {
+		t.Fatalf("after settle with subscriber: exists=%v frames=%d subs=%d, want kept, empty frames, 1 sub",
+			ok, len(ls.frames), len(ls.subs))
+	}
+
+	// The frame published while subscribed is drained (legitimately delivered).
+	select {
+	case <-ch:
+	default:
+		t.Error("subscribed client did not receive the live frame")
+	}
+	unsub()
+	mb.mu.Lock()
+	_, ok = mb.streams["s1"]
+	mb.mu.Unlock()
+	if ok {
+		t.Error("entry should be reclaimed when the last subscriber of a settled stream detaches")
 	}
 }
 

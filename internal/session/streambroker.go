@@ -143,6 +143,13 @@ func (b *memBroker) Subscribe(sessionID string, buffer int) (<-chan StreamEvent,
 		b.mu.Lock()
 		if ls := b.streams[sessionID]; ls != nil {
 			delete(ls.subs, ch)
+			// Reclaim the entry when the last attached client of a SETTLED
+			// stream detaches (frames are nil only after Settle). A live run's
+			// frames are still retained for reconnect catch-up, so a mid-run
+			// disconnect keeps the entry.
+			if len(ls.subs) == 0 && len(ls.frames) == 0 {
+				delete(b.streams, sessionID)
+			}
 		}
 		b.mu.Unlock()
 	}
@@ -152,11 +159,22 @@ func (b *memBroker) Subscribe(sessionID string, buffer int) (<-chan StreamEvent,
 func (b *memBroker) Settle(_ context.Context, sessionID string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	ls := b.streams[sessionID]
+	if ls == nil {
+		return nil
+	}
 	// Drop retained frames (the run's content is durable in the message store by
 	// now); keep the subscriber set so any still-attached client sees the run's
 	// terminal frame delivered live. A fresh run starts a clean ring.
-	if ls := b.streams[sessionID]; ls != nil {
-		ls.frames = nil
+	ls.frames = nil
+	// Reclaim the entry when nobody is attached anymore: a settled session with
+	// no subscribers must not linger in the map forever (single-instance
+	// default path; the Redis broker TTLs settled streams instead). The next
+	// run's publish recreates the entry with offsets restarting at 1 — attach
+	// filters catch-up by RunID, so the restart can never reorder a stream. A
+	// stream settled WITH subscribers is reaped when the last one unsubscribes.
+	if len(ls.subs) == 0 {
+		delete(b.streams, sessionID)
 	}
 	return nil
 }
