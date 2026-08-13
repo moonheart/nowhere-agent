@@ -60,7 +60,7 @@ Frontend: `useDataStreamRuntime` (assistant-ui) consumes the ui-message-stream; 
 
 ## Conventions worth knowing
 
-- **Go tests**: write `*_test.go` for all new Go code; `go test ./...` must be green before committing. PG tests (`internal/skill`, `internal/skillapi`, etc.) run against the **real dev Postgres** — use unique random names and delete only rows you created, by ID; never an unscoped `DELETE`/`UPDATE`.
+- **Go tests**: write `*_test.go` for all new Go code; `go test ./...` must be green before committing. PG tests (`internal/skill`, `internal/skillapi`, etc.) run against the **real dev Postgres** — use unique random names and delete only rows you created, by ID; never an unscoped `DELETE`/`UPDATE`. All PG tests share ONE instance (the CI `test-postgres` job runs every package's PG tests against a single postgres:16 service), so `TRUNCATE`, fixed ids, and unscoped deletes are forbidden: they corrupt sibling packages' tests and fail only under CI.
 - **`run_events` is deprecated** for new features — record via slog or the `messages`/`sessions` tables instead.
 - **Commits**: no Co-Authored-By / Claude attribution trailer.
 - **openspec** (`openspec/specs`, `openspec/changes`) holds capability specs; treat as design intent. The trustworthy source for "what is wired" is `cmd/server/main.go`.

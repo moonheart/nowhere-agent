@@ -33,10 +33,12 @@ jobs:
 
   # Postgres-backed suite: apply migrations on a fresh postgres:16 service,
   # then point every PG test DSN (and DB_DSN, used by the packages with no
-  # package-specific variable) at it and run the full suite. The PG tests
-  # create only uniquely-named rows and delete them, so a shared instance is
-  # safe. Ubuntu-only: docker services are flaky on the other runners, and the
-  # backend behaviour is host-independent.
+  # package-specific variable) at it and run the full suite. All packages'
+  # PG tests share THIS ONE instance (no per-package database), so a test may
+  # only create uniquely-named rows and delete exactly the rows it created,
+  # by id — TRUNCATE, fixed ids, and unscoped DELETEs would corrupt sibling
+  # packages' runs and fail only under CI. Ubuntu-only: docker services are
+  # flaky on the other runners, and the backend behaviour is host-independent.
   test-postgres:
     runs-on: ubuntu-latest
     services:
