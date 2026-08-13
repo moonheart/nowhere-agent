@@ -83,6 +83,33 @@ func TestSPAHandlerServesRealFiles(t *testing.T) {
 	}
 }
 
+// The SPA is served with a Content-Security-Policy on every response (shell
+// and assets alike): the bearer token lives in localStorage, so a strict
+// script-src is the compensating control for an XSS — injected script must be
+// blocked, never executed.
+func TestSPAHandlerServesContentSecurityPolicy(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "index.html"), "shell")
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "assets", "app-hash123.js"), "console.log(1)")
+
+	for _, p := range []string{"/", "/admin/users", "/assets/app-hash123.js"} {
+		rec := serve(t, spaHandler(dir), p)
+		csp := rec.Header().Get("Content-Security-Policy")
+		if csp == "" {
+			t.Fatalf("%s: no Content-Security-Policy header", p)
+		}
+		if !strings.Contains(csp, "script-src 'self'") {
+			t.Errorf("%s CSP %q lacks script-src 'self'", p, csp)
+		}
+		if strings.Contains(csp, "script-src 'unsafe-inline'") || strings.Contains(csp, "script-src *") {
+			t.Errorf("%s CSP %q lets injected scripts run", p, csp)
+		}
+	}
+}
+
 // The point of the fallback: a client-side route has no file behind it, and a
 // plain FileServer would 404 a shared link or a reload.
 func TestSPAHandlerFallsBackForClientRoutes(t *testing.T) {

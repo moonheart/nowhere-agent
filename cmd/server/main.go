@@ -1978,6 +1978,16 @@ func (noProviderAdapter) Stream(context.Context, provider.Request) (<-chan provi
 // shell would be reused, its stale asset hashes would 404, and the fallback
 // would hand back the same stale shell — the classic "hard refresh required"
 // symptom. Hashed static assets keep the FileServer's default caching.
+// spaCSP is the Content-Security-Policy for the SPA. The build ships no
+// inline scripts — dist/index.html's module tag is a pure external
+// /assets/*.js — so script-src 'self' blocks injected script execution (the
+// Bearer token lives in localStorage, so a strict script policy is the
+// compensating control for an XSS). style-src keeps 'unsafe-inline': the app
+// uses inline style attributes and libraries inject <style> blocks, so a
+// strict style-src would break the UI. img-src admits data:/blob: for inline
+// SVG data and client-side object URLs.
+const spaCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
 func spaHandler(dir string) http.Handler {
 	files := http.FileServer(http.Dir(dir))
 	index := filepath.Join(dir, "index.html")
@@ -1986,6 +1996,7 @@ func spaHandler(dir string) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		w.Header().Set("Content-Security-Policy", spaCSP)
 		// Reject traversal before touching the filesystem: path.Clean on a
 		// rooted path cannot escape, and http.ServeFile would reject it anyway,
 		// but checking here keeps the stat below honest.
