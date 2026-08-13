@@ -25,45 +25,39 @@ func TestSpecIsValidOpenAPIJSON(t *testing.T) {
 	}
 }
 
-// realRoutes is the wire-format contract as the handlers actually register it
-// (cmd/server/main.go mounts every package's Register): each of these MUST be
-// documented. The point is to catch a route rename in code that leaves the
-// spec stale — the /api/me/agent-defs → /api/me/agentdefs drift this test was
-// written for.
-var realRoutes = []string{
-	// identity (internal/identity/http.go, phonehttp.go)
-	"/api/auth/login", "/api/auth/signup", "/api/auth/logout", "/api/auth/totp/verify",
-	"/api/auth/phone/request-code", "/api/auth/phone/verify",
-	// chatapi
-	"/api/chat", "/api/chat/history", "/api/chat/resume", "/api/chat/cancel",
-	"/api/chat/sessions", "/api/chat/sessions/{id}/active", "/api/chat/sessions/{id}/state",
-	// agentdefapi
-	"/api/me/agentdefs",
-	// inbound
-	"/api/inbound/{id}", "/api/me/inbound",
-	// adminapi / scheduleapi / skillapi / agentdefapi self-service
-	"/api/me/scheduled-tasks", "/api/me/scheduled-tasks/{id}/run",
-	"/api/me/tokens", "/api/me/usage",
-	"/api/me/skills",
-	"/api/admin/service-keys", "/api/admin/quotas", "/api/admin/audit",
-	// meta
-	"/healthz", "/openapi.json",
-}
-
-func TestSpecCoversRealRoutes(t *testing.T) {
+// TestSpecRoutesMatchRegisteredRoutes pins the OpenAPI document to the
+// routes the handlers actually register, in BOTH directions (see
+// routes.go for the contract list):
+//
+//  1. every registered (path, method) must be documented — a route renamed
+//     or added in code leaves the spec stale and this fails, and
+//  2. every documented path must be registered — a spec-only route is a lie
+//     and this fails.
+func TestSpecRoutesMatchRegisteredRoutes(t *testing.T) {
 	raw, _ := JSON()
 	var doc map[string]any
 	_ = json.Unmarshal(raw, &doc)
 	paths := doc["paths"].(map[string]any)
-	for _, p := range realRoutes {
-		if _, ok := paths[p]; !ok {
-			t.Errorf("spec missing real route %s — route renamed in code? openapi/paths.go is stale", p)
+
+	// Direction 1: registered ⊆ documented (per path and per method).
+	for p, methods := range registeredRoutes {
+		item, ok := paths[p].(map[string]any)
+		if !ok {
+			t.Errorf("spec missing registered route %s — route added or renamed? openapi/paths.go is stale", p)
+			continue
+		}
+		for _, m := range methods {
+			if _, ok := item[m]; !ok {
+				t.Errorf("spec missing method %s on registered route %s — openapi/paths.go is stale", m, p)
+			}
 		}
 	}
-	// Spellings no handler registers must be gone from the docs.
-	for _, p := range []string{"/api/me/agent-defs", "/api/me/agent_defs"} {
-		if _, ok := paths[p]; ok {
-			t.Errorf("spec documents %s, which no handler registers", p)
+
+	// Direction 2: documented ⊆ registered. The "/" SPA catch-all is not an
+	// API route and is intentionally never documented.
+	for p := range paths {
+		if _, ok := registeredRoutes[p]; !ok {
+			t.Errorf("spec documents %s, which no handler registers — routes.go is stale", p)
 		}
 	}
 }
