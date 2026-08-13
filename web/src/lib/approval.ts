@@ -67,15 +67,18 @@ export function reportInteraction(a: Interaction) {
   const id = a.interactionId || a.approvalId || "";
   if (!id || !a.toolCallId) return;
   const norm = { ...a, interactionId: id };
-  // A re-reported interaction (attach replay, reload echo) means the parked
-  // state was re-asserted: a failure recorded for this tool call is stale.
-  if (failed.has(a.toolCallId)) {
-    failed = new Map(failed);
-    failed.delete(a.toolCallId);
-  }
   pending = new Map(pending).set(a.toolCallId, norm);
   emit();
   if (norm.kind === "client_tool" && !autoRan.has(id)) {
+    // The browser is about to (re-)execute the capability, so a failure
+    // recorded for this tool call is stale and must not linger. When the frame
+    // was already auto-run in this tab (attach replay / reload echo), it is NOT
+    // re-executed — a recorded failure is kept so the card's Retry stays
+    // reachable instead of being wiped into a permanent "Running…".
+    if (failed.has(a.toolCallId)) {
+      failed = new Map(failed);
+      failed.delete(a.toolCallId);
+    }
     autoRan.add(id);
     void executeClientTool(norm);
   }
