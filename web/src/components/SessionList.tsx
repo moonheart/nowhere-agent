@@ -85,13 +85,19 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   const refresh = useCallback(
     async (q: string) => {
       seqRef.current += 1;
+      const seq = seqRef.current;
       setLoading(true);
       const page = await fetchPage(q, "");
+      setLoading(false);
+      // A newer refresh bumped the generation while this one was in flight
+      // (e.g. the current session was deleted mid-refresh): its first page is
+      // the pre-delete list, so applying it would resurrect the deleted
+      // session. Drop it — the newer refresh owns the list now.
+      if (seqRef.current !== seq) return;
       if (page) {
         setSessions(page.sessions);
         setNextCursor(page.nextCursor);
       }
-      setLoading(false);
     },
     [fetchPage],
   );
