@@ -4,6 +4,15 @@
 TBD - created by archiving change init-nowhere-agent. Update Purpose after archive.
 ## Requirements
 ### Requirement: Credential resolution
+> **SUPERSEDED (deprecated):** this requirement describes the deleted
+> `team_api_keys` mechanism (migration 000028 drops the table). Credentials are
+> now owned by provider rows in the provider registry (`provider_registry`,
+> change provider-registry): the platform holds system providers and their
+> keys, and a team may manage its own team-scoped providers; resolution happens
+> per request via `providerreg.Resolver` (`ResolveForTeam`), which degrades to
+> the platform key on any failure. Keep the archived description below for
+> historical context only.
+
 The system SHALL hold platform API keys by default. A team MAY configure its own key, which
 SHALL then take precedence for that team's model calls.
 
@@ -53,6 +62,12 @@ The system SHALL enforce quota and rate limits at two levels: platform (backstop
 - **THEN** calls are rejected or throttled even if team quota remains
 
 ### Requirement: Provider failover
+> **REMOVED (deprecated):** no failover mechanism exists in the current code.
+> The agent loop retries context-overflow mid-stream (shrink + retry) but a
+> failed provider/model call fails the run; there is no policy that retries a
+> request against an alternate provider. The archived requirement below is
+> kept for historical context only.
+
 On provider failure or rate-limiting, the system SHALL fail over to an alternate provider/model per policy.
 
 #### Scenario: Failover on error

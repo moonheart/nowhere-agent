@@ -152,6 +152,14 @@ owner, or demoting the last owner to a lesser role. The membership SHALL be left
 - **THEN** the removal succeeds
 
 ### Requirement: Team provider credential management
+> **SUPERSEDED (deprecated):** this requirement describes the deleted
+> `team_api_keys` mechanism (migration 000028 drops the table). Team
+> credentials are now team-scoped providers in the provider registry (change
+> provider-registry): a team owner/administrator manages the team's own
+> providers and models; provider keys are encrypted at rest, masked in
+> listings, and never returned in plaintext. Keep the archived description
+> below for historical context only.
+
 A team owner or team administrator SHALL be able to list the providers for which the team has
 configured a key, set or rotate the key for a provider, and delete it. Listing SHALL NOT return
 a stored key in plaintext; it SHALL return only the provider, a masked fragment sufficient to
