@@ -232,6 +232,11 @@ func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMess
 	if h.msgStore == nil {
 		return nil, nil
 	}
+	// Full conversation, unbounded (MessagesFor has no LIMIT): the client's
+	// history.load() renders every returned message and has no truncation
+	// semantics, so paging or cutting here would present a partial conversation
+	// as complete. Keeping the read unbounded is the deliberate tradeoff for
+	// long sessions; see PGMessageStore.MessagesFor for the full rationale.
 	stored, err := h.msgStore.MessagesFor(r.Context(), sessionID)
 	if err != nil {
 		return nil, err
