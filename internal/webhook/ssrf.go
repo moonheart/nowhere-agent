@@ -161,9 +161,9 @@ func (g *Guard) allowedIP(ip net.IP, host string) bool {
 	}
 	// Translation schemes reach an embedded IPv4 on the caller's behalf, so
 	// an allowlist keyed on that address must match too — otherwise a
-	// private target smuggled as [64:ff9b::10.0.0.1] evades a 10.0.0.0/8
-	// allowlist that only sees the raw IPv6.
-	if v4 := nat64IPv4(ip); v4 != nil {
+	// private target smuggled as [64:ff9b::10.0.0.1], [2002:a00:1::] or
+	// [::a00:1] evades a 10.0.0.0/8 allowlist that only sees the raw IPv6.
+	if v4 := embeddedIPv4(ip); v4 != nil {
 		for _, n := range g.allowNets {
 			if n.Contains(v4) {
 				return true
@@ -208,36 +208,53 @@ func public6(ip net.IP) bool {
 		ip.IsMulticast(), ip.IsUnspecified():
 		return false
 	}
-	// NAT64 addresses embed an IPv4 that the translator reaches on the
+	// Translation schemes embed an IPv4 the translator reaches on the
 	// caller's behalf: vet THAT address, or a private target smuggled as
-	// [64:ff9b::10.0.0.1] would slip past the IPv6 checks (IsPrivate etc.
-	// do not cover the RFC 6052 well-known prefix).
-	if v4 := nat64IPv4(ip); v4 != nil {
+	// [64:ff9b::10.0.0.1], [2002:a00:1::] or [::a00:1] would slip past the
+	// IPv6 checks (IsPrivate etc. do not cover these encodings).
+	if v4 := embeddedIPv4(ip); v4 != nil {
 		return public4(v4)
 	}
 	return true
 }
 
-// nat64IPv4 returns the IPv4 embedded in an RFC 6052 NAT64 IPv6 address
-// (well-known 64:ff9b::/96 or local-use 64:ff9b:1::/48, RFC 8215), or nil.
+// embeddedIPv4 returns the IPv4 reachable through an IPv6 translation
+// scheme — NAT64 (RFC 6052 well-known 64:ff9b::/96 or RFC 8215 local-use
+// 64:ff9b:1::/48), 6to4 (RFC 3056 2002:V4::/16) or the legacy 4-in-6
+// ::a.b.c.d — or nil when ip carries no embedded address.
 // Per RFC 6052 §2.2 the /96 form carries the IPv4 in the low 32 bits; the
 // /48 form splits it across the reserved "u" octet (bytes 6-7 and 9-10, u
-// at byte 8 MUST be zero).
-func nat64IPv4(ip net.IP) net.IP {
+// at byte 8 MUST be zero). 6to4 puts the IPv4 at bytes 2-5; 4-in-6 in the
+// low 32 bits with the high 96 bits zero.
+func embeddedIPv4(ip net.IP) net.IP {
 	v6 := ip.To16()
-	if v6 == nil || v6[0] != 0 || v6[1] != 0x64 || v6[2] != 0xff || v6[3] != 0x9b {
+	if v6 == nil {
 		return nil
 	}
-	// Well-known prefix 64:ff9b::/96: bytes 4-11 are the zero prefix, the
-	// IPv4 is the low 32 bits.
-	if v6[4] == 0 && v6[5] == 0 && v6[6] == 0 && v6[7] == 0 &&
+	// NAT64 well-known prefix 64:ff9b::/96: bytes 4-11 are the zero
+	// prefix, the IPv4 is the low 32 bits.
+	if v6[0] == 0 && v6[1] == 0x64 && v6[2] == 0xff && v6[3] == 0x9b {
+		if v6[4] == 0 && v6[5] == 0 && v6[6] == 0 && v6[7] == 0 &&
+			v6[8] == 0 && v6[9] == 0 && v6[10] == 0 && v6[11] == 0 {
+			return net.IPv4(v6[12], v6[13], v6[14], v6[15])
+		}
+		// Local-use prefix 64:ff9b:1::/48: IPv4 first half at bytes 6-7,
+		// second half at bytes 9-10, straddling the "u" octet at byte 8.
+		if v6[4] == 0 && v6[5] == 1 && v6[8] == 0 {
+			return net.IPv4(v6[6], v6[7], v6[9], v6[10])
+		}
+		return nil
+	}
+	// 6to4 prefix 2002::/16 (RFC 3056): the IPv4 occupies bytes 2-5.
+	if v6[0] == 0x20 && v6[1] == 0x02 {
+		return net.IPv4(v6[2], v6[3], v6[4], v6[5])
+	}
+	// Legacy 4-in-6 ::a.b.c.d: IPv4 in the low 32 bits of an address
+	// whose high 96 bits are all zero.
+	if v6[0] == 0 && v6[1] == 0 && v6[2] == 0 && v6[3] == 0 &&
+		v6[4] == 0 && v6[5] == 0 && v6[6] == 0 && v6[7] == 0 &&
 		v6[8] == 0 && v6[9] == 0 && v6[10] == 0 && v6[11] == 0 {
 		return net.IPv4(v6[12], v6[13], v6[14], v6[15])
-	}
-	// Local-use prefix 64:ff9b:1::/48: IPv4 first half at bytes 6-7, second
-	// half at bytes 9-10, straddling the "u" octet at byte 8.
-	if v6[4] == 0 && v6[5] == 1 && v6[8] == 0 {
-		return net.IPv4(v6[6], v6[7], v6[9], v6[10])
 	}
 	return nil
 }
