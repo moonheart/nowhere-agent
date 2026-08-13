@@ -301,6 +301,12 @@ func run() error {
 		oidcHandler.Register(mux)
 		mux.Handle("GET /auth/oidc/enabled", oidc.EnabledProbe())
 		log.Info("oidc sso enabled", "issuer", cfg.OIDC.Issuer, "redirect", cfg.OIDC.RedirectURL)
+		// Always surface the state-cookie policy: the default (Secure) is
+		// silently catastrophic on a plain-HTTP deployment — the browser
+		// never sends the cookie and SSO fails with zero requests hitting
+		// the server — so it must be visible in the boot log, not just the
+		// inverted env override.
+		log.Info("oidc sso cookie", "secure", cfg.HTTP.CookieSecure)
 		if !cfg.HTTP.CookieSecure {
 			log.Warn("oidc state cookie not Secure: HTTP_COOKIE_SECURE=false ships it over plain HTTP — intended for local/dev only", "issuer", cfg.OIDC.Issuer)
 		}
