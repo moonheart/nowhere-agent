@@ -22,6 +22,7 @@ import {
   hasPendingInteractions,
   followDecisionStream,
   parseQuestions,
+  retryClientTool,
   type ToolApproval,
 } from "@/lib/approval";
 import { Reasoning } from "@/components/reasoning";
@@ -410,12 +411,23 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
 // ClientToolGate renders the auto-executing state of a client-side tool call:
 // the browser runs the declared capability (clipboard, timezone, …) and POSTs
 // the output — approval.ts drives that automatically the moment the interaction
-// frame arrives, so this card is purely a live indicator, no buttons. When the
-// output posts, the prompt clears and the resumed run streams the tool result
-// into this same card. If the browser capability is unavailable the run folds an
+// frame arrives, so this card is purely a live indicator. When the output
+// posts, the prompt clears and the resumed run streams the tool result into
+// this same card. If the auto-run or verdict POST failed, the card shows why
+// and offers a Retry that re-executes the capability (bypassing the once-only
+// autoRan guard). If the browser capability is unavailable the run folds an
 // is_error result instead and the model reacts to it.
 const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
   const failure = useApprovalFailure(approval.toolCallId);
+  const [retrying, setRetrying] = useState(false);
+  const retry = async () => {
+    setRetrying(true);
+    try {
+      await retryClientTool(approval);
+    } finally {
+      setRetrying(false);
+    }
+  };
   return (
     <div
       className={cn(
@@ -434,6 +446,15 @@ const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
             <span className="font-mono">{approval.toolName}</span> failed in your browser
           </p>
           <p className="mt-0.5 text-[12px] text-muted-foreground">{failure}</p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-2"
+            disabled={retrying}
+            onClick={() => void retry()}
+          >
+            {retrying ? "Retrying…" : "Retry"}
+          </Button>
         </div>
       ) : (
         <p className="text-[13px] text-sky-700 dark:text-sky-300">

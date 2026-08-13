@@ -67,6 +67,12 @@ export function reportInteraction(a: Interaction) {
   const id = a.interactionId || a.approvalId || "";
   if (!id || !a.toolCallId) return;
   const norm = { ...a, interactionId: id };
+  // A re-reported interaction (attach replay, reload echo) means the parked
+  // state was re-asserted: a failure recorded for this tool call is stale.
+  if (failed.has(a.toolCallId)) {
+    failed = new Map(failed);
+    failed.delete(a.toolCallId);
+  }
   pending = new Map(pending).set(a.toolCallId, norm);
   emit();
   if (norm.kind === "client_tool" && !autoRan.has(id)) {
@@ -97,6 +103,16 @@ async function executeClientTool(a: Interaction) {
 function markClientToolFailed(toolCallId: string, message: string) {
   failed = new Map(failed).set(toolCallId, message);
   emit();
+}
+
+// retryClientTool re-executes a client_tool interaction whose auto-run or
+// verdict POST failed: it clears the failure marker and runs the capability
+// again, bypassing the once-only autoRan guard (the user explicitly asked).
+export async function retryClientTool(a: Interaction): Promise<void> {
+  failed = new Map(failed);
+  failed.delete(a.toolCallId);
+  emit();
+  await executeClientTool(a);
 }
 
 // clearApproval drops a toolCallId's prompt after the user decided (the backend
