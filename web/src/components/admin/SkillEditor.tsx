@@ -183,6 +183,7 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
 
   const openVersion = async (v: number) => {
     if (!selectedId || !current) return;
+    if (!confirmDiscard()) return;
     if (v === current.current_version) {
       setViewVersion(null);
       setDraft(draftOf(current));
@@ -245,6 +246,7 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
   };
 
   const startNew = () => {
+    if (!confirmDiscard()) return;
     setSelectedId(null);
     setCurrent(null);
     setDraft({ name: "", description: "", body: "", resources: {}, scripts: {} });
@@ -262,6 +264,13 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
     setCurrent(null);
     setDraft(null);
     await refreshList();
+  };
+
+  // confirmDiscard prompts before a navigation that would drop unsaved edits:
+  // switching skills, starting a new skill, or opening a historical version.
+  const confirmDiscard = (): boolean => {
+    if (!dirty) return true;
+    return window.confirm("You have unsaved changes. Discard them?");
   };
 
   // Toggle the agent-resolution gate without a version bump. The backend returns
@@ -387,7 +396,9 @@ export function SkillEditor({ base, canWrite }: { base: SkillBase; canWrite: boo
               skills.map((sk) => (
                 <button
                   key={sk.id}
-                  onClick={() => setSelectedId(sk.id)}
+                  onClick={() => {
+                    if (confirmDiscard()) setSelectedId(sk.id);
+                  }}
                   className={cn(
                     "flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors",
                     selectedId === sk.id

@@ -46,21 +46,33 @@ export function AgentDefEditor({ base, canWrite }: { base: AgentDefBase; canWrit
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [dirty, setDirty] = useState(false);
+
+  // confirmDiscard prompts before a navigation that would drop unsaved edits
+  // (switching definitions or starting a new one).
+  const confirmDiscard = (): boolean => {
+    if (!dirty) return true;
+    return window.confirm("You have unsaved changes. Discard them?");
+  };
 
   const open = (d: AgentDef) => {
+    if (!confirmDiscard()) return;
     setSelected(d.name);
     setOriginalName(d.name);
     setDraft(d.document);
     setSaveError(null);
     setWarnings([]);
+    setDirty(false);
   };
 
   const openNew = () => {
+    if (!confirmDiscard()) return;
     setSelected("new");
     setOriginalName(null);
     setDraft(TEMPLATE);
     setSaveError(null);
     setWarnings([]);
+    setDirty(false);
   };
 
   const save = async () => {
@@ -74,6 +86,7 @@ export function AgentDefEditor({ base, canWrite }: { base: AgentDefBase; canWrit
       setWarnings(res.warnings ?? []);
       setOriginalName(res.def.name);
       setSelected(res.def.name);
+      setDirty(false);
       reload();
     } catch (e) {
       // Validation errors stay in place so the draft is not lost.
@@ -89,6 +102,7 @@ export function AgentDefEditor({ base, canWrite }: { base: AgentDefBase; canWrit
       setSelected(null);
       setDraft("");
       setOriginalName(null);
+      setDirty(false);
     }
     reload();
   };
@@ -191,7 +205,10 @@ export function AgentDefEditor({ base, canWrite }: { base: AgentDefBase; canWrit
 
             <Textarea
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setDirty(true);
+              }}
               readOnly={!canWrite}
               spellCheck={false}
               className="min-h-[420px] font-mono text-xs"
