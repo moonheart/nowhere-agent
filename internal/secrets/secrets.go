@@ -147,10 +147,12 @@ func (e *Encryptor) Decrypt(value string) (string, error) {
 		return "", fmt.Errorf("%w: bad base64", ErrCiphertext)
 	}
 	// Try every key in the ring. GCM authentication fails for the wrong key, so
-	// this is safe; with a single-key ring it is one attempt.
+	// this is safe; with a single-key ring it is one attempt. A key whose nonce
+	// size does not match the ciphertext is simply not the one — keep scanning
+	// rather than abandoning the rest of the ring.
 	for _, aead := range e.ring {
 		if len(raw) < aead.NonceSize() {
-			break
+			continue
 		}
 		nonce, ct := raw[:aead.NonceSize()], raw[aead.NonceSize():]
 		if pt, err := aead.Open(nil, nonce, ct, nil); err == nil {
