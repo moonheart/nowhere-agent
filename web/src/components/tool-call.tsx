@@ -8,11 +8,13 @@ import {
   Laptop,
   LoaderCircle,
   ShieldAlert,
+  TriangleAlert,
 } from "lucide-react";
 import { reportToolCall, useActivity, activityEpoch, type SubPart } from "@/lib/activity";
 import { usePermissionMode } from "@/lib/permission";
 import {
   useApproval,
+  useApprovalFailure,
   usePendingInteractions,
   respondToApproval,
   respondToAskUser,
@@ -342,18 +344,26 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
   argsText,
 }) => {
   const [busy, setBusy] = useState<"approve" | "deny" | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const decide = async (approved: boolean) => {
     setBusy(approved ? "approve" : "deny");
-    const stream = await respondToApproval(approval.interactionId, approved);
-    if (stream) {
-      clearApproval(approval.toolCallId);
-      // Only watch the resumed run live when the batch is now complete (the
-      // backend started a fresh run). While siblings are still queued the
-      // backend did NOT resume — following its trivial no-content stream would
-      // open an empty assistant bubble.
-      if (!hasPendingInteractions()) followDecisionStream(stream);
-    } else {
-      setBusy(null); // backend rejected (already decided / not waiting) — keep the prompt
+    setError(null);
+    try {
+      const stream = await respondToApproval(approval.interactionId, approved);
+      if (stream) {
+        clearApproval(approval.toolCallId);
+        // Only watch the resumed run live when the batch is now complete (the
+        // backend started a fresh run). While siblings are still queued the
+        // backend did NOT resume — following its trivial no-content stream would
+        // open an empty assistant bubble.
+        if (!hasPendingInteractions()) followDecisionStream(stream);
+      } else {
+        setBusy(null); // resumed with no stream to follow — keep the prompt
+      }
+    } catch (err) {
+      // A rejected verdict must not vanish silently: show why and re-enable.
+      setError((err as Error).message || "the decision failed");
+      setBusy(null);
     }
   };
   return (
@@ -386,6 +396,11 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
               {busy === "deny" ? "Denying…" : "Deny"}
             </Button>
           </div>
+          {error && (
+            <p className="mt-2 rounded border border-destructive/30 bg-destructive/5 px-2 py-1 text-[12px] text-destructive">
+              {error}
+            </p>
+          )}
         </div>
       </div>
     </div>
@@ -399,14 +414,35 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
 // output posts, the prompt clears and the resumed run streams the tool result
 // into this same card. If the browser capability is unavailable the run folds an
 // is_error result instead and the model reacts to it.
-const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => (
-  <div className="flex items-center gap-2 border-t border-sky-500/30 px-3 py-2.5">
-    <Laptop className="size-4 shrink-0 animate-pulse text-sky-600 dark:text-sky-400" />
-    <p className="text-[13px] text-sky-700 dark:text-sky-300">
-      Running <span className="font-mono">{approval.toolName}</span> in your browser…
-    </p>
-  </div>
-);
+const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
+  const failure = useApprovalFailure(approval.toolCallId);
+  return (
+    <div
+      className={cn(
+        "flex items-start gap-2 border-t border-sky-500/30 px-3 py-2.5",
+        failure && "border-destructive/30 bg-destructive/5",
+      )}
+    >
+      {failure ? (
+        <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
+      ) : (
+        <Laptop className="mt-0.5 size-4 shrink-0 animate-pulse text-sky-600 dark:text-sky-400" />
+      )}
+      {failure ? (
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium text-destructive">
+            <span className="font-mono">{approval.toolName}</span> failed in your browser
+          </p>
+          <p className="mt-0.5 text-[12px] text-muted-foreground">{failure}</p>
+        </div>
+      ) : (
+        <p className="text-[13px] text-sky-700 dark:text-sky-300">
+          Running <span className="font-mono">{approval.toolName}</span> in your browser…
+        </p>
+      )}
+    </div>
+  );
+};
 
 // AskUserGate renders the model's ask_user questions as one card: each question
 // is a single- or multi-select over its options (recommended option
@@ -419,6 +455,7 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
   const [answers, setAnswers] = useState<Record<number, string[]>>({});
   const [custom, setCustom] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const choose = (qi: number, next: string[]) => {
     setAnswers((prev) => ({ ...prev, [qi]: next }));
@@ -432,6 +469,7 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
 
   const submit = async () => {
     setBusy(true);
+    setError(null);
     const out: Record<string, string | string[]> = {};
     questions.forEach((q, qi) => {
       const c = (custom[qi] ?? "").trim();
@@ -440,22 +478,33 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
       else if (sel.length === 1) out[q.question] = sel[0];
       else if (sel.length > 1) out[q.question] = sel;
     });
-    const stream = await respondToAskUser(approval.interactionId, out);
-    if (stream) {
-      clearApproval(approval.toolCallId);
-      if (!hasPendingInteractions()) followDecisionStream(stream);
-    } else {
+    try {
+      const stream = await respondToAskUser(approval.interactionId, out);
+      if (stream) {
+        clearApproval(approval.toolCallId);
+        if (!hasPendingInteractions()) followDecisionStream(stream);
+      } else {
+        setBusy(false);
+      }
+    } catch (err) {
+      setError((err as Error).message || "the answer could not be sent");
       setBusy(false);
     }
   };
 
   const skip = async () => {
     setBusy(true);
-    const stream = await respondToAskUser(approval.interactionId, null);
-    if (stream) {
-      clearApproval(approval.toolCallId);
-      if (!hasPendingInteractions()) followDecisionStream(stream);
-    } else {
+    setError(null);
+    try {
+      const stream = await respondToAskUser(approval.interactionId, null);
+      if (stream) {
+        clearApproval(approval.toolCallId);
+        if (!hasPendingInteractions()) followDecisionStream(stream);
+      } else {
+        setBusy(false);
+      }
+    } catch (err) {
+      setError((err as Error).message || "the skip could not be sent");
       setBusy(false);
     }
   };
@@ -534,6 +583,11 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
               Skip
             </Button>
           </div>
+          {error && (
+            <p className="rounded border border-destructive/30 bg-destructive/5 px-2 py-1 text-[12px] text-destructive">
+              {error}
+            </p>
+          )}
         </div>
       </div>
     </div>

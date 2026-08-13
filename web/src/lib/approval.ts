@@ -9,6 +9,7 @@
 import { useSyncExternalStore } from "react";
 import { getToken } from "@/lib/auth";
 import { getSessionId } from "@/lib/thread";
+import { ApiError } from "@/lib/api";
 import { runClientTool } from "@/lib/client-tools";
 
 export type AskOption = {
@@ -49,6 +50,11 @@ const listeners = new Set<() => void>();
 // browser capability and POSTs its output only once.
 const autoRan = new Set<string>();
 
+// failed tracks client_tool interactions whose auto-run or verdict POST failed,
+// keyed by toolCallId → reason. The indicator card renders the reason instead of
+// spinning "Running…" forever; the prompt stays until the run expires.
+let failed = new Map<string, string>();
+
 function emit() {
   for (const l of listeners) l();
 }
@@ -72,21 +78,35 @@ export function reportInteraction(a: Interaction) {
 // executeClientTool runs a client_tool interaction's capability in the browser
 // and POSTs the output (or error) as the verdict, resuming the run.
 async function executeClientTool(a: Interaction) {
-  const result = await runClientTool(a.toolName, a.args);
-  const stream = await respondToClientTool(a.interactionId, result);
-  if (stream) {
-    clearApproval(a.toolCallId);
-    if (!hasPendingInteractions()) followDecisionStream(stream);
+  try {
+    const result = await runClientTool(a.toolName, a.args);
+    const stream = await respondToClientTool(a.interactionId, result);
+    if (stream) {
+      clearApproval(a.toolCallId);
+      if (!hasPendingInteractions()) followDecisionStream(stream);
+    }
+  } catch (err) {
+    // The verdict POST failed (network or server error): the run stays parked,
+    // so mark the card with the reason instead of leaving it running forever.
+    markClientToolFailed(a.toolCallId, (err as Error).message || "the verdict could not be sent");
   }
-  // On a failed decide the prompt stays; the user can retry / the run expires.
+}
+
+// markClientToolFailed records why a client_tool interaction's auto-run or
+// verdict POST failed, so its card can render an error state.
+function markClientToolFailed(toolCallId: string, message: string) {
+  failed = new Map(failed).set(toolCallId, message);
+  emit();
 }
 
 // clearApproval drops a toolCallId's prompt after the user decided (the backend
 // resumed the run; the card re-renders from the resumed stream).
 export function clearApproval(toolCallId: string) {
-  if (!pending.has(toolCallId)) return;
+  if (!pending.has(toolCallId) && !failed.has(toolCallId)) return;
   pending = new Map(pending);
   pending.delete(toolCallId);
+  failed = new Map(failed);
+  failed.delete(toolCallId);
   emit();
 }
 
@@ -102,8 +122,9 @@ export function hasPendingInteractions(): boolean {
 // resetApprovals clears all prompts (new conversation / session switch).
 export function resetApprovals() {
   autoRan.clear();
-  if (pending.size === 0) return;
+  if (pending.size === 0 && failed.size === 0) return;
   pending = new Map();
+  failed = new Map();
   emit();
 }
 
@@ -123,11 +144,33 @@ function getSnapshot(): Interaction[] {
   return snapshot;
 }
 
+const EMPTY_FAILED: { toolCallId: string; message: string }[] = [];
+let failedSnapshot: { toolCallId: string; message: string }[] = EMPTY_FAILED;
+function getFailedSnapshot(): { toolCallId: string; message: string }[] {
+  const cur = Array.from(failed.entries()).map(([toolCallId, message]) => ({ toolCallId, message }));
+  if (
+    failedSnapshot.length === cur.length &&
+    cur.every((c, i) => failedSnapshot[i].toolCallId === c.toolCallId && failedSnapshot[i].message === c.message)
+  ) {
+    return failedSnapshot;
+  }
+  failedSnapshot = cur;
+  return failedSnapshot;
+}
+
 // useApproval returns the pending interaction for one tool call, or undefined.
 export function useApproval(toolCallId: string | undefined): Interaction | undefined {
   const all = useSyncExternalStore(subscribe, getSnapshot);
   if (!toolCallId) return undefined;
   return all.find((a) => a.toolCallId === toolCallId);
+}
+
+// useApprovalFailure returns why a client_tool interaction's auto-run/verdict
+// POST failed, or undefined while it is still running.
+export function useApprovalFailure(toolCallId: string | undefined): string | undefined {
+  useSyncExternalStore(subscribe, getFailedSnapshot);
+  if (!toolCallId) return undefined;
+  return failed.get(toolCallId);
 }
 
 // usePendingInteractions returns the full pending queue in batch (insertion)
@@ -172,7 +215,10 @@ export async function respondToClientTool(
 // postDecision sends the verdict through the chat endpoint (an `approval` field
 // turns POST /api/chat into a resume instead of a new turn) and returns the SSE
 // body streaming the run's continuation — the same attach path a normal turn
-// uses, so no separate decision endpoint or polling is needed.
+// uses, so no separate decision endpoint or polling is needed. A network or
+// server error THROWS (ApiError carrying the server's `error` field) so gates
+// can surface the reason; a success with no stream body returns null (the
+// verdict was accepted but there is nothing to follow).
 async function postDecision(
   approvalId: string,
   verdict: Record<string, unknown>,
@@ -184,7 +230,20 @@ async function postDecision(
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify({ threadId: getSessionId(), approval: { approvalId, ...verdict } }),
   }).catch(() => null);
-  if (res === null || !res.ok || !res.body) return null;
+  if (res === null) {
+    throw new ApiError("the verdict could not reach the server", 0);
+  }
+  if (!res.ok) {
+    let msg = `request failed (${res.status})`;
+    try {
+      const data = (await res.json()) as { error?: string };
+      if (data.error) msg = data.error;
+    } catch {
+      // non-JSON error body; keep the status fallback
+    }
+    throw new ApiError(msg, res.status);
+  }
+  if (!res.body) return null;
   return res.body;
 }
 
