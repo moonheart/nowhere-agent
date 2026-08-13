@@ -301,6 +301,7 @@ func Catalog() []KeyInfo {
 		{Key: KeyLLMThinkingBudget, Group: GroupLLM, Kind: KindInt, Description: "Extended-reasoning token budget (overrides LLM_THINKING_BUDGET). 0 disables."},
 		{Key: KeyLLMStreamIdleTimeout, Group: GroupLLM, Kind: KindInt, Description: "Stream stall guard in seconds: fail a generation that sends no bytes for this long (overrides LLM_STREAM_IDLE_TIMEOUT). 0 disables the guard."},
 		{Key: KeyLLMRawLogDir, Group: GroupLLM, Kind: KindString, Description: "Directory recording raw LLM request/response pairs for inspection (overrides LLM_RAW_LOG_DIR; auth headers never recorded). Empty disables. Applies from the next run."},
+		{Key: KeyLLMRawLogRetentionDays, Group: GroupLLM, Kind: KindInt, Description: "Days raw LLM request/response logs are kept before the hourly sweep deletes them (overrides LLM_RAW_LOG_RETENTION_DAYS). 0 disables the sweep. Applies within an hour."},
 
 		// Sandbox tab.
 		{Key: KeySandboxNetwork, Group: GroupSandbox, Kind: KindString, Description: "Docker-backend container egress policy: deny | open (overrides SANDBOX_NETWORK). allowlist is accepted for compatibility but NOT implemented — the docker backend maps it to deny (zero egress) and the local backend ignores it. Applies to the next session."},
@@ -426,6 +427,10 @@ const (
 	// KeyLLMRawLogDir is the raw LLM wire-traffic recording directory
 	// (overrides LLM_RAW_LOG_DIR); empty disables.
 	KeyLLMRawLogDir = "llm_raw_log_dir"
+	// KeyLLMRawLogRetentionDays is how long raw LLM wire-traffic logs are
+	// kept in days before the hourly sweep deletes them (overrides
+	// LLM_RAW_LOG_RETENTION_DAYS); 0 disables the sweep.
+	KeyLLMRawLogRetentionDays = "llm_raw_log_retention_days"
 
 	// Sandbox tab.
 	// KeySandboxNetwork is the docker-backend container egress policy

@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -177,12 +178,13 @@ func run() error {
 		settings.KeyWebhookSSRFAllowlist: mustJSON(cfg.Webhook.SSRFAllowlist),
 		settings.KeyWebhookSigningSecret: mustJSON(cfg.Webhook.SigningSecret),
 		// LLM.
-		settings.KeySystemLang:           mustJSON(cfg.LLM.SystemLang),
-		settings.KeyLLMContextWindow:     mustJSON(cfg.LLM.ContextWindow),
-		settings.KeyLLMTemperature:       mustJSON(cfg.LLM.Temperature),
-		settings.KeyLLMThinkingBudget:    mustJSON(cfg.LLM.ThinkingBudget),
-		settings.KeyLLMStreamIdleTimeout: mustJSON(int(cfg.LLM.StreamIdleTimeout.Seconds())),
-		settings.KeyLLMRawLogDir:         mustJSON(cfg.LLM.RawLogDir),
+		settings.KeySystemLang:             mustJSON(cfg.LLM.SystemLang),
+		settings.KeyLLMContextWindow:       mustJSON(cfg.LLM.ContextWindow),
+		settings.KeyLLMTemperature:         mustJSON(cfg.LLM.Temperature),
+		settings.KeyLLMThinkingBudget:      mustJSON(cfg.LLM.ThinkingBudget),
+		settings.KeyLLMStreamIdleTimeout:   mustJSON(int(cfg.LLM.StreamIdleTimeout.Seconds())),
+		settings.KeyLLMRawLogDir:           mustJSON(cfg.LLM.RawLogDir),
+		settings.KeyLLMRawLogRetentionDays: mustJSON(cfg.LLM.RawLogRetentionDays),
 		// Sandbox.
 		settings.KeySandboxNetwork:   mustJSON(cfg.Sandbox.Network),
 		settings.KeySandboxLocalExec: mustJSON(cfg.Sandbox.LocalExec),
@@ -381,30 +383,41 @@ func run() error {
 	// files otherwise accumulate without bound; an hourly pass deletes files
 	// older than the retention window (<= 0 disables), mirroring the other
 	// sweeps. The root is re-read per pass, so an admin-console retarget still
-	// sweeps the current dir.
-	if cfg.LLM.RawLogRetentionDays > 0 {
-		go func() {
-			rawLogSweepLog := log
-			ticker := time.NewTicker(time.Hour)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					cutoff := time.Now().UTC().Add(-time.Duration(cfg.LLM.RawLogRetentionDays) * 24 * time.Hour)
-					removed, err := recorder.Sweep(cutoff)
-					if err != nil {
-						rawLogSweepLog.Warn("raw log retention sweep failed", "err", err)
-						continue
-					}
-					if removed > 0 {
-						rawLogSweepLog.Info("raw log retention sweep removed files", "count", removed)
-					}
+	// sweeps the current dir; the retention window itself is runtime-tunable
+	// (llm_raw_log_retention_days) via the 5s settings sync below, so turning
+	// retention on/off needs no restart. The sweeper runs regardless and
+	// skips passes while the window is <= 0, so enabling it at runtime works
+	// even when the boot value disabled it.
+	var rawLogRetention atomic.Int64
+	rawLogRetention.Store(int64(cfg.LLM.RawLogRetentionDays))
+	go func() {
+		rawLogSweepLog := log
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				days := rawLogRetention.Load()
+				if days <= 0 {
+					continue
+				}
+				cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+				removed, err := recorder.Sweep(cutoff)
+				if err != nil {
+					rawLogSweepLog.Warn("raw log retention sweep failed", "err", err)
+					continue
+				}
+				if removed > 0 {
+					rawLogSweepLog.Info("raw log retention sweep removed files", "count", removed)
 				}
 			}
-		}()
-	}
+		}
+	}()
+	settingsSync.Add(func() {
+		rawLogRetention.Store(int64(settingsRuntime.Int(settings.KeyLLMRawLogRetentionDays)))
+	})
 	if _, err := provResolver.ResolveForTeam(ctx, ""); err != nil {
 		log.Warn("no platform provider configured; chat/schedule fail until a provider is added (see the admin console)")
 	}
@@ -1376,22 +1389,22 @@ func run() error {
 				for _, n := range whitelist {
 					allow[n] = true
 				}
-			filtered := toolruntime.NewRegistry()
-			filtered.SetMaxConcurrent(cfg.HTTPTool.MaxConcurrent)
-			for _, t := range full.All() {
-				if allow[t.Name()] {
-					// D3: a whitelisted spawn_agent must scope children from the
-					// FILTERED registry. The spawn tool was built over the full
-					// registry; rebind it, or children would inherit every tool
-					// of the session, whitelist notwithstanding.
-					if st, ok := t.(*subagent.SpawnTool); ok {
-						filtered.Register(st.WithParent(filtered))
-						continue
+				filtered := toolruntime.NewRegistry()
+				filtered.SetMaxConcurrent(cfg.HTTPTool.MaxConcurrent)
+				for _, t := range full.All() {
+					if allow[t.Name()] {
+						// D3: a whitelisted spawn_agent must scope children from the
+						// FILTERED registry. The spawn tool was built over the full
+						// registry; rebind it, or children would inherit every tool
+						// of the session, whitelist notwithstanding.
+						if st, ok := t.(*subagent.SpawnTool); ok {
+							filtered.Register(st.WithParent(filtered))
+							continue
+						}
+						filtered.Register(t)
 					}
-					filtered.Register(t)
 				}
-			}
-			return filtered
+				return filtered
 			}
 			return reg
 		}
@@ -2028,6 +2041,7 @@ func spaHandler(dir string) http.Handler {
 //   - metrics then recovery, innermost around the mux: a panic is recovered,
 //     logged with a stack, and answered 500 — and because recovery sits inside
 //     metrics, that 500 is counted like any other status.
+//
 // rateLimitKey derives the bucket key for one request: the bearer session
 // token when one is presented, else the client IP. Tokens are opaque (there is
 // no parseable JWT subject — resolving one would need a DB lookup in the hot
