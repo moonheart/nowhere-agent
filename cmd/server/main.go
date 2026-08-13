@@ -1276,18 +1276,33 @@ func run() error {
 			if qdb := queryDBFor(); qdb != nil {
 				reg.Register(qdb)
 			}
+			// load_skill and the memory tools all scope to the session owner's
+			// accessible scopes; resolve the session and scopes ONCE here and
+			// share across the blocks (they used to run the same GetSession +
+			// AccessibleScopes pair each). A failed resolution disables BOTH
+			// blocks' tools — unified, fail-closed semantics: before, the
+			// skill block kept trying with a system-only fallback scope set
+			// and the memory block registered recall (and, on a session
+			// lookup failure, skipped write/edit/forget) on scopes that were
+			// never verified against the caller. Now a scope-resolution
+			// failure registers neither block's tools.
+			sess, sessErr := sessionRuntime.GetSession(ctx, sessionID)
+			scopes := []identity.ScopeRef{identity.SystemScope()}
+			if sessErr == nil {
+				if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
+					scopes = sc
+				} else {
+					sessErr = err
+				}
+			}
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
 			// present (independent of the sandbox); scopes mirror the context
 			// builder (caller user + teams + system). It executes nothing.
-			scopes := []identity.ScopeRef{identity.SystemScope()}
-			if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
-				if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
-					scopes = sc
+			if sessErr == nil {
+				if l0, err := skillEngine.LoadL0(ctx, scopes); err == nil && len(l0) > 0 {
+					reg.Register(skill.NewLoadTool(skillEngine, scopes))
 				}
-			}
-			if l0, err := skillEngine.LoadL0(ctx, scopes); err == nil && len(l0) > 0 {
-				reg.Register(skill.NewLoadTool(skillEngine, scopes))
 			}
 			// recall_memory (type-split active-query side, capability K /
 			// context-mgmt): the model fetches summary/insight and other memories
@@ -1296,20 +1311,11 @@ func run() error {
 			// the caller's long-term memory online: all pinned to the session
 			// owner's USER scope (never a model-chosen scope), with edit/forget
 			// verifying the target memory's ownership before touching it.
-			if memPort != nil {
-				scopes := []identity.ScopeRef{identity.SystemScope()}
-				sess, err := sessionRuntime.GetSession(ctx, sessionID)
-				if err == nil {
-					if sc, err := identitySvc.AccessibleScopes(ctx, sess.UserID); err == nil {
-						scopes = sc
-					}
-				}
+			if memPort != nil && sessErr == nil {
 				reg.Register(memory.NewRecallTool(memPort, scopes))
-				if err == nil {
-					reg.Register(memory.NewWriteMemoryTool(memPort, sess.UserID))
-					reg.Register(memory.NewEditMemoryTool(memPort, sess.UserID))
-					reg.Register(memory.NewForgetMemoryTool(memPort, sess.UserID))
-				}
+				reg.Register(memory.NewWriteMemoryTool(memPort, sess.UserID))
+				reg.Register(memory.NewEditMemoryTool(memPort, sess.UserID))
+				reg.Register(memory.NewForgetMemoryTool(memPort, sess.UserID))
 			}
 			if sandboxMgr != nil {
 				h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
