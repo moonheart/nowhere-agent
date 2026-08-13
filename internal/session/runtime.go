@@ -547,6 +547,14 @@ func (rt *Runtime) RegisterCancel(sessionID string, cancel context.CancelFunc) {
 	}
 }
 
+// cancelRegistrationWait bounds how long CancelRun waits for a run's cancel
+// func to be registered before giving up and settling without interrupting.
+// Every production run is started through the registry, which registers its
+// cancel immediately after StartRun; the wait only ever covers that window
+// (and is effectively always resolved by it). The bound is a safety valve so
+// a run that will never register one (tests) cannot block forever.
+const cancelRegistrationWait = 100 * time.Millisecond
+
 // CancelRun stops the session's active run: it invokes the registered cancel
 // func (interrupting the loop + tools) and marks the run RunCancelled, releasing
 // the single-active-run lock so a new run can start. Returns false if no run is
@@ -568,6 +576,31 @@ func (rt *Runtime) CancelRun(ctx context.Context, sessionID string) (bool, error
 	cancel := rs.cancel
 	runID := rs.run.ID
 	rt.mu.Unlock()
+
+	// A registry-started run has its cancel registered a moment AFTER StartRun
+	// creates the runState (Submit → RegisterCancel). In that window the
+	// capture above can see nil; settling now would mark the run cancelled
+	// while its worker keeps executing on a live context. Wait briefly for the
+	// registration (identity-guarded, so a newer run that took the lock in
+	// between is never interrupted), then fall back to the legacy settle-only
+	// behavior if it never arrives.
+	if cancel == nil {
+		for i := 0; i < int(cancelRegistrationWait/time.Millisecond) && cancel == nil; i++ {
+			time.Sleep(time.Millisecond)
+			rt.mu.Lock()
+			rs2, ok := rt.runs[sessionID]
+			if !ok || rs2.run.ID != runID {
+				rt.mu.Unlock()
+				break // the run settled or a newer run owns the lock — settle below is a no-op
+			}
+			cancel = rs2.cancel
+			rt.mu.Unlock()
+		}
+		if cancel == nil {
+			slog.Warn("cancel: run never registered a cancel func; settling without interrupting",
+				"session", sessionID, "run", runID)
+		}
+	}
 
 	// Interrupt the in-flight work first so it stops promptly, then settle the
 	// terminal state. CompleteRun clears the cancel func.

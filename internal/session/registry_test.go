@@ -237,6 +237,114 @@ func TestStaleWorkerCompletionDoesNotClobberNewRun(t *testing.T) {
 	}
 }
 
+// cancelBoundProvider parks its stream until the run context is cancelled, so
+// the worker can never finish on its own — only an interrupt that reaches it
+// releases it. used by TestCancelRunDuringSubmitWindow.
+type cancelBoundProvider struct{}
+
+func (cancelBoundProvider) Name() string { return "bound" }
+
+func (cancelBoundProvider) Stream(ctx context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 4)
+	ch <- provider.Event{Type: provider.EventMessageStart}
+	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+	go func() {
+		defer close(ch)
+		<-ctx.Done()
+	}()
+	return ch, nil
+}
+
+// attributionBlockingStore blocks SetRunAttribution on a channel, holding
+// Submit in the window between StartRun (runState created) and RegisterCancel
+// — the exact window a CancelRun could see a nil cancel. entered closes when
+// SetRunAttribution is reached; block reopens to let Submit proceed.
+type attributionBlockingStore struct {
+	*MemStore
+	entered chan struct{}
+	block   chan struct{}
+}
+
+func (s *attributionBlockingStore) SetRunAttribution(ctx context.Context, runID, teamID, model string) error {
+	close(s.entered)
+	<-s.block
+	return s.MemStore.SetRunAttribution(ctx, runID, teamID, model)
+}
+
+// TestCancelRunDuringSubmitWindow pins the nil-cancel race: a CancelRun that
+// lands while Submit is between StartRun and RegisterCancel must wait for the
+// worker's cancel and actually interrupt the run — not settle it RunCancelled
+// while its worker keeps executing on a live context (which would let a new
+// run interleave with the old worker's frames).
+func TestCancelRunDuringSubmitWindow(t *testing.T) {
+	store := &attributionBlockingStore{
+		MemStore: NewMemStore(),
+		entered:  make(chan struct{}),
+		block:    make(chan struct{}),
+	}
+	rt := NewRuntime(store).WithBus(NewMemBus())
+	rg := NewRunRegistry(rt)
+	sess, err := rt.CreateSession(context.Background(), "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	submitted := make(chan error, 1)
+	go func() {
+		_, err := rg.Submit(context.Background(), sess.ID, RunWork{
+			Loop:   registryLoop(cancelBoundProvider{}),
+			TeamID: "team-a", // forces the SetRunAttribution call the window blocks on
+			Model:  "m",
+		})
+		submitted <- err
+	}()
+
+	// Submit is now parked inside SetRunAttribution: the runState exists but
+	// the worker's cancel is not yet registered — the nil-cancel window.
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("submit never reached the attribution window")
+	}
+
+	cancelResult := make(chan struct {
+		ok  bool
+		err error
+	}, 1)
+	go func() {
+		ok, err := rt.CancelRun(context.Background(), sess.ID)
+		cancelResult <- struct {
+			ok  bool
+			err error
+		}{ok, err}
+	}()
+
+	// Let Submit finish the window: RegisterCancel lands, and CancelRun's wait
+	// loop must pick it up, cancel the worker's context, and settle the run.
+	close(store.block)
+
+	res := <-cancelResult
+	if res.err != nil || !res.ok {
+		t.Fatalf("CancelRun = %v, %v want true, nil", res.ok, res.err)
+	}
+	if err := <-submitted; err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	// The worker must have been ACTUALLY interrupted (its context cancelled),
+	// not just settled over: it exits, and the run reads cancelled.
+	deadline := time.Now().Add(5 * time.Second)
+	for rg.ActiveWorker(sess.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("worker still running after CancelRun — the cancel never reached it (nil-cancel window bug)")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunCancelled {
+		t.Errorf("final status = %v want cancelled", got)
+	}
+}
+
 func hasTerminalEvent(t *testing.T, rt *Runtime, runID string) bool {
 	t.Helper()
 	evs, err := rt.Replay(context.Background(), runID, 0)
