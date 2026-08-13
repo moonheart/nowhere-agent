@@ -180,7 +180,13 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 		}
 
 		for _, tc := range ch.Delta.ToolCalls {
-			if tc.ID != "" {
+			if tc.ID != "" && d.seenToolIDs[tc.Index] != tc.ID {
+				// Some OpenAI-compatible gateways repeat the tool-call id on
+				// every arguments chunk. The block was already started for the
+				// same id at this index — a second BlockStart would violate the
+				// loop's duplicate-block contract and hard-fail the run. A
+				// DIFFERENT id at a reused index still starts (a genuine
+				// protocol violation, which the loop's duplicate check catches).
 				d.seenToolIDs[tc.Index] = tc.ID
 				events = append(events, provider.Event{
 					Type:  provider.EventBlockStart,

@@ -78,6 +78,43 @@ func TestDecoderToolCall(t *testing.T) {
 	}
 }
 
+// TestDecoderRepeatedToolIDNoDuplicateStart pins the gateway quirk some
+// OpenAI-compatible proxies exhibit: the tool-call id repeats on every
+// arguments chunk. The decoder must not re-emit BlockStart for an id it
+// already started at that index — a duplicate start violates the loop's
+// block contract and hard-fails the run.
+func TestDecoderRepeatedToolIDNoDuplicateStart(t *testing.T) {
+	d := newStreamDecoder()
+	payloads := []string{
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":""}]}`,
+		// The id repeats on the arguments chunk (proxy quirk).
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"arguments":"{\"pa"}}]},"finish_reason":""}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"arguments":"th}"}}]},"finish_reason":"tool_calls"}]}`,
+		`[DONE]`,
+	}
+	var starts int
+	var args string
+	for _, p := range payloads {
+		for _, e := range d.feed([]byte(p)) {
+			if e.Type == provider.EventBlockStart && e.Block != nil && e.Block.Type == provider.BlockToolUse {
+				starts++
+				if e.Block.ToolUseID != "c1" {
+					t.Errorf("tool id = %q, want c1", e.Block.ToolUseID)
+				}
+			}
+			if e.Type == provider.EventBlockDelta {
+				args += e.Delta
+			}
+		}
+	}
+	if starts != 1 {
+		t.Errorf("tool block starts = %d, want exactly 1 (repeated id must not re-open the block)", starts)
+	}
+	if args != `{"path}` {
+		t.Errorf("tool args = %q", args)
+	}
+}
+
 func TestDecoderUsage(t *testing.T) {
 	d := newStreamDecoder()
 	events := d.feed([]byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4}}`))
