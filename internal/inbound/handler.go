@@ -25,11 +25,32 @@ import (
 const (
 	// maxBodyBytes bounds a trigger payload (metadata + prompt) at 256 KiB.
 	maxBodyBytes = 256 << 10
+	// maxCreateBodyBytes bounds a management create payload at 64 KiB.
+	maxCreateBodyBytes = 64 << 10
+	// maxToggleBodyBytes bounds the toggle payload (one bool) at 4 KiB.
+	maxToggleBodyBytes = 4 << 10
 	// signatureWindow bounds replay: X-Nowhere-Timestamp must be within
 	// signatureWindow of the server clock.
 	signatureWindow = 5 * time.Minute
 	secretPrefix    = "wh_"
 )
+
+// readBodyMax reads the request body bounded at maxBytes and answers 413 when
+// it exceeds the bound — the caller decodes the returned bytes as JSON. A
+// body beyond the bound must read as "too large", not as truncated invalid
+// JSON.
+func readBodyMax(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	if err != nil {
+		http.Error(w, "read body", http.StatusBadRequest)
+		return nil, false
+	}
+	if int64(len(body)) > maxBytes {
+		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	return body, true
+}
 
 // Handler serves the public trigger endpoint and the authed management API.
 type Handler struct {
@@ -123,13 +144,8 @@ func (h *Handler) serveTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
-	if err != nil {
-		http.Error(w, "read body", http.StatusBadRequest)
-		return
-	}
-	if len(body) > maxBodyBytes {
-		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+	body, ok := readBodyMax(w, r, maxBodyBytes)
+	if !ok {
 		return
 	}
 	if !verifySignature(r, wh.Secret, body, h.now()) {
@@ -269,7 +285,11 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
 	u := caller(r)
 	var req createRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+	body, ok := readBodyMax(w, r, maxCreateBodyBytes)
+	if !ok {
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -318,7 +338,11 @@ func (h *Handler) serveToggle(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Enabled bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req); err != nil {
+	body, ok := readBodyMax(w, r, maxToggleBodyBytes)
+	if !ok {
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}

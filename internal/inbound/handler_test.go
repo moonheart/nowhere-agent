@@ -105,6 +105,17 @@ func (e *env) do(u identity.User, method, path string, body any) *httptest.Respo
 	return rec
 }
 
+// doRaw posts a raw body string (no JSON re-encoding), for oversized-body tests.
+func (e *env) doRaw(u identity.User, method, path, body string) *httptest.ResponseRecorder {
+	e.t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	ctx := identity.NewContextWithUser(req.Context(), u)
+	e.mux.ServeHTTP(rec, req.WithContext(ctx))
+	return rec
+}
+
 // trigger posts a signed request to the public trigger endpoint. Each call
 // draws a fresh nonce unless one is given.
 func (e *env) trigger(payload string, ts int64, secret string) *httptest.ResponseRecorder {
@@ -246,6 +257,25 @@ func TestTriggerRejectsOversizedPayload(t *testing.T) {
 	rec := e.trigger(`{"prompt":"`+big+`"}`, time.Now().Unix(), e.secret)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized: %d, want 413", rec.Code)
+	}
+}
+
+// TestManagementRejectsOversizedBodies pins the 413 contract on the
+// management endpoints: an oversized create/toggle body is answered "payload
+// too large", not a truncated-json 400.
+func TestManagementRejectsOversizedBodies(t *testing.T) {
+	e := newEnv(t)
+
+	bigCreate := strings.Repeat("a", maxCreateBodyBytes+10)
+	rec := e.doRaw(e.user, "POST", "/api/me/inbound", `{"name":"x","system_prompt":"`+bigCreate+`"}`)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized create: %d, want 413", rec.Code)
+	}
+
+	bigToggle := strings.Repeat("a", maxToggleBodyBytes+10)
+	rec = e.doRaw(e.user, "PATCH", "/api/me/inbound/"+e.webhook.ID, `{"enabled":true,"pad":"`+bigToggle+`"}`)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized toggle: %d, want 413", rec.Code)
 	}
 }
 
