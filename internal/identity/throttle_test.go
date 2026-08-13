@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -84,5 +85,52 @@ func TestLoginThrottlerPrunesStaleFailures(t *testing.T) {
 	tr.Fail("alice@corp.cn", "10.0.0.1")
 	if allowed, _ := tr.Check("alice@corp.cn", "10.0.0.1"); !allowed {
 		t.Error("one fresh failure is below the threshold")
+	}
+}
+
+func TestLoginThrottlerCapsDistinctKeys(t *testing.T) {
+	tr := NewLoginThrottler()
+	for i := 0; i < throttleMaxKeys; i++ {
+		tr.Fail(fmt.Sprintf("cap%d@corp.cn", i), "10.0.0.1")
+	}
+	tr.mu.Lock()
+	if n := len(tr.failures); n != throttleMaxKeys {
+		t.Fatalf("map holds %d keys at the cap, want %d", n, throttleMaxKeys)
+	}
+	tr.mu.Unlock()
+
+	// A brand-new key is refused: the map must not grow past the cap.
+	tr.Fail("new@corp.cn", "10.0.0.1")
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if n := len(tr.failures); n != throttleMaxKeys {
+		t.Errorf("map grew to %d keys past the cap", n)
+	}
+	if _, ok := tr.failures[tr.key("new@corp.cn", "10.0.0.1")]; ok {
+		t.Error("a new key must be refused while the map is at the cap")
+	}
+}
+
+func TestLoginThrottlerSweepMakesRoomForExpiredKeys(t *testing.T) {
+	tr := NewLoginThrottler()
+	for i := 0; i < throttleMaxKeys; i++ {
+		tr.Fail(fmt.Sprintf("cap%d@corp.cn", i), "10.0.0.1")
+	}
+	// Age every failure out of the window, then touch a new key: the full
+	// sweep must reclaim the expired entries and admit it.
+	tr.mu.Lock()
+	for k := range tr.failures {
+		tr.failures[k] = []time.Time{time.Now().Add(-loginFailWindow - time.Hour)}
+	}
+	tr.mu.Unlock()
+
+	tr.Fail("fresh@corp.cn", "10.0.0.1")
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if _, ok := tr.failures[tr.key("fresh@corp.cn", "10.0.0.1")]; !ok {
+		t.Error("a full sweep must admit a new key once expired entries are reaped")
+	}
+	if n := len(tr.failures); n >= throttleMaxKeys {
+		t.Errorf("sweep did not reclaim the map (%d keys)", n)
 	}
 }

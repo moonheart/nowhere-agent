@@ -27,6 +27,11 @@ const (
 	loginFailWindow = 15 * time.Minute
 	// loginLockout is how long a locked pair stays locked.
 	loginLockout = 15 * time.Minute
+	// throttleMaxKeys caps how many distinct keys the throttlers track (shared
+	// with OTPThrottler). prune reaps only the key it is given, so a rotating
+	// attacker could otherwise grow the maps without bound; once a map crosses
+	// this cap, new keys are refused after a full sweep of expired entries.
+	throttleMaxKeys = 100_000
 )
 
 // LoginThrottler tracks failed login attempts per (email, ip) pair.
@@ -83,6 +88,9 @@ func (t *LoginThrottler) Fail(email, ip string) {
 	now := time.Now()
 	k := t.key(email, ip)
 	t.prune(k, now)
+	if !t.admit(k, now) {
+		return // at the global cap: refuse to track yet another rotating key
+	}
 	t.failures[k] = append(t.failures[k], now)
 	if len(t.failures[k]) >= loginMaxFailures {
 		t.locked[k] = now.Add(loginLockout)
@@ -99,8 +107,8 @@ func (t *LoginThrottler) Success(email, ip string) {
 	delete(t.locked, k)
 }
 
-// prune drops failures outside the sliding window and reaps dead pairs, so a
-// busy attacker cannot grow the map without bound.
+// prune drops failures outside the sliding window for one key. It reaps only
+// that key — the global bound on map growth is enforced by admit/sweepAll.
 func (t *LoginThrottler) prune(k string, now time.Time) {
 	cutoff := now.Add(-loginFailWindow)
 	kept := t.failures[k][:0]
@@ -114,4 +122,33 @@ func (t *LoginThrottler) prune(k string, now time.Time) {
 	} else {
 		t.failures[k] = kept
 	}
+}
+
+// sweepAll reaps expired entries across every key, so a rotating attacker
+// cannot hold the throttler at its cap forever.
+func (t *LoginThrottler) sweepAll(now time.Time) {
+	for k := range t.failures {
+		t.prune(k, now)
+	}
+	for k, until := range t.locked {
+		if !now.Before(until) {
+			delete(t.locked, k)
+			delete(t.failures, k)
+		}
+	}
+}
+
+// admit reports whether a failure for k may be recorded: always, while the
+// failures map is below throttleMaxKeys; at the cap, only after a full sweep
+// has made room (or the key is already tracked — recording one more failure
+// for a tracked key does not grow the map).
+func (t *LoginThrottler) admit(k string, now time.Time) bool {
+	if len(t.failures) < throttleMaxKeys {
+		return true
+	}
+	t.sweepAll(now)
+	if _, active := t.failures[k]; active {
+		return true
+	}
+	return len(t.failures) < throttleMaxKeys
 }

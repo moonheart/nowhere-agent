@@ -2,6 +2,7 @@ package identity
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -84,5 +85,58 @@ func TestOTPThrottlerSendQuotas(t *testing.T) {
 	th2.now = func() time.Time { return base.Add(otpDay + time.Second) }
 	if err := th2.AllowSend("13900000000", "9.9.9.9"); err != nil {
 		t.Fatalf("quota did not roll over: %v", err)
+	}
+}
+
+func TestOTPThrottlerCapsDistinctKeys(t *testing.T) {
+	th := NewOTPThrottler()
+	base := time.Now()
+	th.now = func() time.Time { return base }
+
+	for i := 0; i < throttleMaxKeys; i++ {
+		th.FailVerify(fmt.Sprintf("1390000%04d", i), "1.2.3.4")
+	}
+	th.mu.Lock()
+	if n := len(th.verify); n != throttleMaxKeys {
+		t.Fatalf("verify map holds %d keys at the cap, want %d", n, throttleMaxKeys)
+	}
+	th.mu.Unlock()
+
+	// A brand-new pair is refused: the map must not grow past the cap.
+	th.FailVerify("13800000000", "1.2.3.4")
+	th.mu.Lock()
+	defer th.mu.Unlock()
+	if n := len(th.verify); n != throttleMaxKeys {
+		t.Errorf("verify map grew to %d keys past the cap", n)
+	}
+	if _, ok := th.verify[th.key("13800000000", "1.2.3.4")]; ok {
+		t.Error("a new key must be refused while the map is at the cap")
+	}
+}
+
+func TestOTPThrottlerSweepMakesRoomForExpiredKeys(t *testing.T) {
+	th := NewOTPThrottler()
+	base := time.Now()
+	th.now = func() time.Time { return base }
+
+	for i := 0; i < throttleMaxKeys; i++ {
+		th.FailVerify(fmt.Sprintf("1390000%04d", i), "1.2.3.4")
+	}
+	// Age every failure out of the window, then touch a new pair: the full
+	// sweep must reclaim the expired entries and admit it.
+	th.mu.Lock()
+	for k := range th.verify {
+		th.verify[k] = []time.Time{base.Add(-otpVerifyWindow - time.Hour)}
+	}
+	th.mu.Unlock()
+
+	th.FailVerify("13800000000", "1.2.3.4")
+	th.mu.Lock()
+	defer th.mu.Unlock()
+	if _, ok := th.verify[th.key("13800000000", "1.2.3.4")]; !ok {
+		t.Error("a full sweep must admit a new key once expired entries are reaped")
+	}
+	if n := len(th.verify); n >= throttleMaxKeys {
+		t.Errorf("sweep did not reclaim the map (%d keys)", n)
 	}
 }

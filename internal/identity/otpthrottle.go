@@ -94,6 +94,9 @@ func (t *OTPThrottler) FailVerify(phone, ip string) {
 	now := t.now()
 	k := t.key(phone, ip)
 	t.prune(t.verify, k, now, otpVerifyWindow)
+	if !t.admit(t.verify, k, now) {
+		return // at the global cap: refuse to track yet another rotating key
+	}
 	t.verify[k] = append(t.verify[k], now)
 	if len(t.verify[k]) >= otpMaxVerifyFailures {
 		t.locked[k] = now.Add(otpVerifyLockout)
@@ -131,11 +134,16 @@ func (t *OTPThrottler) RecordSend(phone, ip string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := t.now()
-	t.sentPhone[phone] = append(t.sentPhone[phone], now)
-	t.sentIP[ip] = append(t.sentIP[ip], now)
+	if t.admit(t.sentPhone, phone, now) {
+		t.sentPhone[phone] = append(t.sentPhone[phone], now)
+	}
+	if t.admit(t.sentIP, ip, now) {
+		t.sentIP[ip] = append(t.sentIP[ip], now)
+	}
 }
 
-// prune drops entries outside the window and reaps dead keys.
+// prune drops entries outside the window and reaps dead keys. It reaps only
+// the given key — the global bound on map growth is enforced by admit/sweepAll.
 func (t *OTPThrottler) prune(m map[string][]time.Time, k string, now time.Time, window time.Duration) {
 	cutoff := now.Add(-window)
 	kept := m[k][:0]
@@ -149,4 +157,39 @@ func (t *OTPThrottler) prune(m map[string][]time.Time, k string, now time.Time, 
 	} else {
 		m[k] = kept
 	}
+}
+
+// sweepAll reaps expired entries across every map, so a rotating attacker
+// cannot hold the throttler at its cap forever.
+func (t *OTPThrottler) sweepAll(now time.Time) {
+	for k := range t.verify {
+		t.prune(t.verify, k, now, otpVerifyWindow)
+	}
+	for k, until := range t.locked {
+		if !now.Before(until) {
+			delete(t.locked, k)
+			delete(t.verify, k)
+		}
+	}
+	for k := range t.sentPhone {
+		t.prune(t.sentPhone, k, now, otpDay)
+	}
+	for k := range t.sentIP {
+		t.prune(t.sentIP, k, now, otpDay)
+	}
+}
+
+// admit reports whether a new entry for k may be recorded in m: always, while
+// m is below throttleMaxKeys; at the cap, only after a full sweep has made
+// room (or the key is already tracked — recording for a tracked key does not
+// grow the map).
+func (t *OTPThrottler) admit(m map[string][]time.Time, k string, now time.Time) bool {
+	if len(m) < throttleMaxKeys {
+		return true
+	}
+	t.sweepAll(now)
+	if _, active := m[k]; active {
+		return true
+	}
+	return len(m) < throttleMaxKeys
 }
