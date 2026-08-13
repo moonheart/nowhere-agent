@@ -178,7 +178,7 @@ func TestTriggerRejectsForeignTargetSession(t *testing.T) {
 
 	spy := &loopSpy{}
 	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
-	if err := tr.submit(context.Background(), created); err == nil {
+	if err := tr.submit(context.Background(), created, false); err == nil {
 		t.Fatal("fire into a foreign session must fail")
 	}
 	if atomic.LoadInt32(&spy.count) != 0 {
@@ -347,7 +347,7 @@ func TestTriggerInterruptCancelsActiveRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := tr.submit(context.Background(), claimed); err != nil {
+	if err := tr.submit(context.Background(), claimed, true); err != nil {
 		t.Fatalf("submit under interrupt: %v", err)
 	}
 
@@ -433,7 +433,7 @@ func TestTriggerInterruptTimeoutRequeuesFiring(t *testing.T) {
 
 	spy := &loopSpy{}
 	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
-	if err := tr.submit(context.Background(), claimed); err != nil {
+	if err := tr.submit(context.Background(), claimed, true); err != nil {
 		t.Fatalf("submit under interrupt timeout: %v", err)
 	}
 
@@ -498,7 +498,7 @@ func TestTriggerRejectBusySession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := tr.submit(context.Background(), claimed); err != nil {
+	if err := tr.submit(context.Background(), claimed, true); err != nil {
 		t.Fatalf("submit should skip cleanly, got %v", err)
 	}
 	if atomic.LoadInt32(&spy.count) != 0 {
@@ -551,7 +551,7 @@ func TestTriggerSkipsPendingInteraction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	if err := tr.submit(context.Background(), claimed); err != nil {
+	if err := tr.submit(context.Background(), claimed, true); err != nil {
 		t.Fatalf("submit should skip cleanly, got %v", err)
 	}
 	if atomic.LoadInt32(&spy.count) != 0 {
@@ -604,6 +604,42 @@ func TestTriggerFireNowLeavesScheduleAlone(t *testing.T) {
 	}
 	if after.LastRunAt != nil {
 		t.Fatalf("manual fire stamped last_run_at: %v", after.LastRunAt)
+	}
+}
+
+// TestTriggerFireNowSkipDoesNotRequeue pins the FireNow/cron contract: an
+// unclaimed manual run skipped by a transient gate (budget exceeded) must NOT
+// rewrite next_run_at — requeueing would push it to now and make the next scan
+// fire the task early, outside its cadence.
+func TestTriggerFireNowSkipDoesNotRequeue(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), validTask(userID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+	before, _ := store.Get(context.Background(), created.ID)
+
+	spy := &loopSpy{}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+	tr.WithBudgetGate(func(ctx context.Context, userID, teamID string) error {
+		return quota.ErrBudgetExceeded
+	})
+	if err := tr.FireNow(context.Background(), created); err != nil {
+		t.Fatalf("firenow over budget: %v", err)
+	}
+	if atomic.LoadInt32(&spy.count) != 0 {
+		t.Fatalf("budget-skipped fire built %d loops, want 0", spy.count)
+	}
+
+	// The schedule is untouched: next_run_at is still the cadence's next
+	// occurrence, NOT requeued to now (which would fire it on the next scan).
+	after, _ := store.Get(context.Background(), created.ID)
+	if !after.NextRunAt.Equal(before.NextRunAt) {
+		t.Fatalf("manual over-budget fire moved next_run_at: %v -> %v", before.NextRunAt, after.NextRunAt)
 	}
 }
 
@@ -734,7 +770,7 @@ func TestTriggerBudgetSkipRequeuesForNextScan(t *testing.T) {
 	tr.WithBudgetGate(func(ctx context.Context, userID, teamID string) error {
 		return quota.ErrBudgetExceeded
 	})
-	if err := tr.submit(context.Background(), claimed); err != nil {
+	if err := tr.submit(context.Background(), claimed, true); err != nil {
 		t.Fatalf("submit should skip cleanly, got %v", err)
 	}
 	// The skip must not build a loop, start a run, or create a session — no
@@ -800,7 +836,7 @@ func TestTriggerLoopBuildFailureLeavesClaimed(t *testing.T) {
 		return nil, errors.New("provider cannot be resolved")
 	}
 	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, build, db, time.Hour)
-	if err := tr.submit(context.Background(), claimed); err == nil {
+	if err := tr.submit(context.Background(), claimed, true); err == nil {
 		t.Fatal("a failing loop build must surface as an error")
 	}
 

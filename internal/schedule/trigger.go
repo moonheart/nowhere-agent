@@ -218,29 +218,33 @@ func (tr *Trigger) fireOnce(ctx context.Context, task Task) error {
 
 	fireCtx, cancel := context.WithTimeout(ctx, tr.fireTimeout)
 	defer cancel()
-	return tr.submit(fireCtx, claimed)
+	return tr.submit(fireCtx, claimed, true)
 }
 
 // FireNow runs one task immediately, out of band. Unlike a scheduled fire it
 // does NOT claim the task, so next_run_at/cron are untouched — a manual run is
 // independent of the cadence. It goes through the same submit path a due fire
-// does. A busy target under reject/enqueue is a quiet skip, same as a sweep;
-// interrupt cancels the active run first.
+// does (with claimed=false, so a transient skip is never requeued — requeueing
+// an unclaimed task would rewrite next_run_at=now and make the next scan fire
+// the task early). A busy target under reject/enqueue is a quiet skip, same as
+// a sweep; interrupt cancels the active run first.
 func (tr *Trigger) FireNow(ctx context.Context, task Task) error {
 	fireCtx, cancel := context.WithTimeout(ctx, tr.fireTimeout)
 	defer cancel()
-	return tr.submit(fireCtx, task)
+	return tr.submit(fireCtx, task, false)
 }
 
 // submit builds the run environment for a claimed task and hands it to the
 // registry. It is the construction half of the "unattended chatapi" (design:
 // run construction). Failure policy splits transient from persistent: a
 // transient skip (pending interaction, budget exceeded) requeues so the next
-// scan retries; a persistent failure (unresolvable prompt source or loop
-// build) leaves the claimed slot advanced and lets the NEXT CRON OCCURRENCE
-// retry — requeueing a misconfigured task would hot-loop the scan
+// scan retries — but ONLY when the fire claimed the task (claimed=true); an
+// unclaimed FireNow must never touch next_run_at, or the manual run would
+// rewrite the cadence. A persistent failure (unresolvable prompt source or
+// loop build) leaves the claimed slot advanced and lets the NEXT CRON
+// OCCURRENCE retry — requeueing a misconfigured task would hot-loop the scan
 // (create/delete session churn every interval) until an operator fixes it.
-func (tr *Trigger) submit(ctx context.Context, task Task) error {
+func (tr *Trigger) submit(ctx context.Context, task Task, claimed bool) error {
 	// Resolve the prompt source into a system prompt, model, and opening turn.
 	// A resolution failure (unknown agent def) is persistent — the claimed slot
 	// stays advanced for the next cron occurrence (see the failure policy
@@ -272,7 +276,9 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 		if err := tr.budgetGate(ctx, task.UserID, teamID); err != nil {
 			if errors.Is(err, quota.ErrBudgetExceeded) {
 				tr.log.Warn("schedule: budget exceeded, skipping firing", "task", task.ID, "user", task.UserID, "team", teamID, "err", err)
-				tr.requeue(ctx, task)
+				if claimed {
+					tr.requeue(ctx, task)
+				}
 				return nil
 			}
 			return err
@@ -338,10 +344,14 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 			// fire was an INTERRUPT that timed out (CancelAndWait's bound), the
 			// pre-empted worker is still unwinding and the claim already
 			// advanced — requeue so the next scan retries, instead of silently
-			// dropping this firing until the next cron occurrence.
+			// dropping this firing until the next cron occurrence. An
+			// unclaimed FireNow is never requeued: its schedule was never
+			// touched, so rewriting next_run_at would fire the task early.
 			if interrupted {
 				tr.log.Warn("schedule: interrupt timed out, worker still active; requeueing firing", "task", task.ID, "session", sessID)
-				tr.requeue(ctx, task)
+				if claimed {
+					tr.requeue(ctx, task)
+				}
 			}
 			tr.cleanupFreshSession(ctx, task, sessID)
 			return nil
