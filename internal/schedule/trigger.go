@@ -250,6 +250,35 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 		return err
 	}
 
+	// Billing attribution (P1-3): the team whose key pays for this task owner's
+	// run, and the model the loop runs — same stamp a human chat run gets.
+	var teamID string
+	if tr.attributor != nil {
+		teamID = tr.attributor(ctx, task.UserID)
+	}
+	// Budget gate (P1-1): skip this firing when the owner's (or billing team's)
+	// monthly budget is met. Fail-open inside the checker means an error here is
+	// a real limit: the budget-exceeded skip is requeued so the next scan
+	// retries once the window rolls or the budget is raised — one over-budget
+	// task must not stall the others, and the claimed slot must not burn a day.
+	// A non-budget error surfaces as a fire failure (sweep logs it) and is left
+	// claimed: an unhealthy checker must not hot-loop the scan.
+	//
+	// The gate runs BEFORE the session is resolved: an over-budget firing is
+	// requeued every scan (next_run_at = now), and without this a fresh task
+	// would create and delete a tagged session on every 30s scan until the
+	// window rolls or the budget is raised — churn for zero work.
+	if tr.budgetGate != nil {
+		if err := tr.budgetGate(ctx, task.UserID, teamID); err != nil {
+			if errors.Is(err, quota.ErrBudgetExceeded) {
+				tr.log.Warn("schedule: budget exceeded, skipping firing", "task", task.ID, "user", task.UserID, "team", teamID, "err", err)
+				tr.requeue(ctx, task)
+				return nil
+			}
+			return err
+		}
+	}
+
 	// Resolve or create the target session (design D2).
 	sessID, fresh, err := tr.resolveSession(ctx, task, kickoff)
 	if err != nil {
@@ -296,31 +325,6 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 		tr.bindTools(ctx, loop, sessID, task.ToolWhitelist)
 	}
 	userMsg := provider.TextMessage(provider.RoleUser, kickoff)
-	// Billing attribution (P1-3): the team whose key pays for this task owner's
-	// run, and the model the loop runs — same stamp a human chat run gets.
-	var teamID string
-	if tr.attributor != nil {
-		teamID = tr.attributor(ctx, task.UserID)
-	}
-	// Budget gate (P1-1): skip this firing when the owner's (or billing team's)
-	// monthly budget is met. Fail-open inside the checker means an error here is
-	// a real limit: the budget-exceeded skip is requeued so the next scan
-	// retries once the window rolls or the budget is raised — one over-budget
-	// task must not stall the others, and the claimed slot must not burn a day.
-	// A non-budget error surfaces as a fire failure (sweep logs it) and is left
-	// claimed: an unhealthy checker must not hot-loop the scan.
-	if tr.budgetGate != nil {
-		if err := tr.budgetGate(ctx, task.UserID, teamID); err != nil {
-			if errors.Is(err, quota.ErrBudgetExceeded) {
-				tr.log.Warn("schedule: budget exceeded, skipping firing", "task", task.ID, "user", task.UserID, "team", teamID, "err", err)
-				tr.cleanupFreshSession(ctx, task, sessID)
-				tr.requeue(ctx, task)
-				return nil
-			}
-			tr.cleanupFreshSession(ctx, task, sessID)
-			return err
-		}
-	}
 	run, err := tr.registry.Submit(ctx, sessID, session.RunWork{
 		Loop:        loop,
 		History:     []provider.Message{userMsg}, // the worker runs History verbatim; it does not merge UserMessage in

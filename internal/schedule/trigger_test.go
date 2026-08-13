@@ -701,27 +701,26 @@ func TestTriggerSweepFiresOnlyDue(t *testing.T) {
 // TestTriggerBudgetSkipRequeuesForNextScan pins the skip-path contract: a fire
 // skipped by the budget gate must NOT burn the slot Claim consumed — next_run_at
 // is pushed back to now, so the next scan retries the task (a daily task would
-// otherwise wait 24h for its next chance). The budget gate sits AFTER the loop
-// is built in submit (the gate only guards the run submission), so the loop
-// count is not pinned — the run count is the contract.
+// otherwise wait 24h for its next chance). The gate runs BEFORE the session is
+// resolved, so an over-budget FRESH task must not create (and later clean up) a
+// tagged session on every scan — the requeue happens with zero session churn.
 func TestTriggerBudgetSkipRequeuesForNextScan(t *testing.T) {
 	db := pgTestDB(t)
 	rt, rg, userID := newRuntime(t, db)
 
-	sess, err := rt.CreateSession(context.Background(), userID, "budget target")
-	if err != nil {
-		t.Fatalf("create session: %v", err)
-	}
-	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID) })
-
 	store := NewPGStore(db)
-	task := validTask(userID)
-	task.TargetSessionID = sess.ID
+	task := validTask(userID) // no target session: the fire would create one
 	created, err := store.Create(context.Background(), task)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+	t.Cleanup(func() {
+		ids, _ := store.ListSessions(context.Background(), created.ID)
+		for _, id := range ids {
+			db.Exec(`DELETE FROM sessions WHERE id = $1`, id)
+		}
+	})
 
 	now := time.Now()
 	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
@@ -738,10 +737,13 @@ func TestTriggerBudgetSkipRequeuesForNextScan(t *testing.T) {
 	if err := tr.submit(context.Background(), claimed); err != nil {
 		t.Fatalf("submit should skip cleanly, got %v", err)
 	}
-	// The skip must not start a run on the target session.
-	runs, err := rt.RunsForSession(context.Background(), sess.ID)
-	if err != nil || len(runs) != 0 {
-		t.Fatalf("budget-skipped fire started %d runs, want 0 (err %v)", len(runs), err)
+	// The skip must not build a loop, start a run, or create a session — no
+	// churn while the task is over budget.
+	if atomic.LoadInt32(&spy.count) != 0 {
+		t.Fatalf("budget-skipped fire built %d loops, want 0", spy.count)
+	}
+	if ids, err := store.ListSessions(context.Background(), created.ID); err != nil || len(ids) != 0 {
+		t.Fatalf("budget-skipped fire created sessions %v (err %v), want none", ids, err)
 	}
 
 	// The claimed slot was not burned: next_run_at is back at (or before) the
