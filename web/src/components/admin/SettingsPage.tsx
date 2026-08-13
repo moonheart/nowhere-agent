@@ -208,7 +208,14 @@ export function PlatformSettingsPage() {
 
   // save submits one key; empty drafts clear the override (back to default).
   const save = async (s: SettingEntry, d?: Draft) => {
-    const draft: Draft = d !== undefined ? d : (drafts[s.key] ?? s.value ?? "");
+    // mcpDraft lives outside drafts (secret rows are never echoed back), so a
+    // plain save must read it or the edited rows are silently dropped.
+    const draft: Draft =
+      s.key === "mcp_servers"
+        ? (mcpDraft ?? [])
+        : d !== undefined
+          ? d
+          : (drafts[s.key] ?? s.value ?? "");
     setBusy(s.key);
     setError(null);
     setSaved(null);
