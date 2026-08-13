@@ -6,13 +6,18 @@
 // delivery time, on every attempt, right before any connection is made:
 //
 //   - ValidateURL rejects anything that is not an absolute http(s) URL.
-//   - CheckURL additionally resolves the host and rejects the target when any
-//     resolved address is loopback/private/link-local/multicast — unless the
-//     host or the address is explicitly allowlisted (the escape hatch for
-//     legitimately internal notification targets: an intranet IM gateway, a
-//     workflow engine on a private subnet, …).
-//   - CheckRedirect re-validates every redirect hop with the same rules, so a
-//     public URL cannot smuggle the request to a private address via a 302.
+//   - CheckURL/ResolveURL additionally resolves the host and rejects the
+//     target when any resolved address is loopback/private/link-local/
+//     multicast — unless the host or the address is explicitly allowlisted
+//     (the escape hatch for legitimately internal notification targets: an
+//     intranet IM gateway, a workflow engine on a private subnet, …).
+//   - ResolveURL returns the vetted addresses, which the delivery client pins
+//     into the request context; Guard.DialContext then dials exactly those
+//     addresses, so a host cannot rebind to a different (private) address
+//     between the check and the connection.
+//   - CheckRedirect re-validates every redirect hop with the same rules and
+//     re-pins it, so a public URL cannot smuggle the request to a private
+//     address via a 302.
 //
 // This mirrors the guard langgraph_api's webhook module applies
 // (allowed_domains/allowed_ports/loopback interception), applied here at the
@@ -101,49 +106,137 @@ func (g *Guard) ValidateURL(raw string) error {
 // any resolved private/loopback/link-local/multicast address is refused unless
 // allowlisted.
 func (g *Guard) CheckURL(ctx context.Context, raw string) error {
+	_, err := g.ResolveURL(ctx, raw)
+	return err
+}
+
+// ResolveURL is CheckURL plus the vetted addresses: it validates raw, resolves
+// the host, and refuses the target when any resolved address is private
+// (unless allowlisted), returning the addresses a delivery to raw may connect
+// to. The caller pins them into the request context so Guard.DialContext can
+// connect to exactly those addresses — closing the check-to-dial window. An
+// allowlisted hostname returns (nil, nil): the operator trusted the name, so
+// its addresses are not vetted and the delivery dials them freely by design.
+func (g *Guard) ResolveURL(ctx context.Context, raw string) ([]net.IP, error) {
 	if err := g.ValidateURL(raw); err != nil {
-		return err
+		return nil, err
 	}
 	u, _ := url.Parse(raw)
 	host := hostnameOnly(u.Host)
 	if ip := net.ParseIP(host); ip != nil {
 		// Literal IP: already decided by ValidateURL via allowedIP.
 		if !g.allowedIP(ip, "") {
-			return ErrBlocked
+			return nil, ErrBlocked
 		}
-		return nil
+		return []net.IP{ip}, nil
 	}
 	// Allowlisted hostname bypasses resolution entirely (an internal name may
 	// not resolve on the platform's public DNS, which is exactly why the
 	// operator allowlisted it).
 	if _, ok := g.allowHosts[strings.ToLower(host)]; ok {
-		return nil
+		return nil, nil
 	}
 	addrs, err := g.resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		// A resolution failure is refused, not passed through: the target
 		// cannot be vetted, and failing closed is the safe side.
-		return fmt.Errorf("%w: resolve %q: %v", ErrBlocked, host, err)
+		return nil, fmt.Errorf("%w: resolve %q: %v", ErrBlocked, host, err)
 	}
 	if len(addrs) == 0 {
-		return fmt.Errorf("%w: %q resolved to no addresses", ErrBlocked, host)
+		return nil, fmt.Errorf("%w: %q resolved to no addresses", ErrBlocked, host)
 	}
+	ips := make([]net.IP, 0, len(addrs))
 	for _, a := range addrs {
 		if !g.allowedIP(a.IP, host) {
-			return fmt.Errorf("%w: %q resolves to %s", ErrBlocked, host, a.IP)
+			return nil, fmt.Errorf("%w: %q resolves to %s", ErrBlocked, host, a.IP)
 		}
+		ips = append(ips, a.IP)
 	}
+	return ips, nil
+}
+
+// pinnedIPKey is the request-context key for the vetted address set of the
+// delivery that context belongs to (see withPinned).
+type pinnedIPKey struct{}
+
+// pinnedDial is the pin ResolveURL stores per delivery: the hostname whose
+// addresses were vetted and the vetted address set DialContext must connect
+// to. The host is kept so a dial for a different host (an HTTP proxy from the
+// environment, say) is not wrongly pinned.
+type pinnedDial struct {
+	host string
+	ips  []net.IP
+}
+
+func withPinned(ctx context.Context, p pinnedDial) context.Context {
+	return context.WithValue(ctx, pinnedIPKey{}, p)
+}
+
+// pinRequest validates raw with ResolveURL and, when addresses were vetted
+// (an allowlisted hostname bypasses vetting and is not pinned), pins them into
+// req's context so the transport dials exactly those addresses. Installed as
+// the http client's CheckRedirect it also re-pins every redirect hop.
+func (g *Guard) pinRequest(req *http.Request, raw string) error {
+	ips, err := g.ResolveURL(req.Context(), raw)
+	if err != nil {
+		return err
+	}
+	if len(ips) == 0 {
+		return nil
+	}
+	u, _ := url.Parse(raw)
+	*req = *req.WithContext(withPinned(req.Context(), pinnedDial{
+		host: strings.ToLower(u.Hostname()),
+		ips:  ips,
+	}))
 	return nil
 }
 
 // CheckRedirect re-validates every redirect hop (installed as the http
-// client's CheckRedirect). Without it a public URL could 302 the request into
-// the private network.
+// client's CheckRedirect) and re-pins the hop's vetted addresses into the hop
+// request, so a 302 cannot smuggle the request to a private address — neither
+// the validation nor the dial can be skipped by the redirect.
 func (g *Guard) CheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("webhook: too many redirects")
 	}
-	return g.CheckURL(req.Context(), req.URL.String())
+	return g.pinRequest(req, req.URL.String())
+}
+
+// DialContext is the http.Transport dial hook that closes the check-to-dial
+// race: when the request context carries a pin (ResolveURL/pinRequest), it
+// connects to exactly those vetted addresses — never re-resolving the host —
+// so a host that rebinds between the SSRF check and the connection cannot
+// redirect the dial to a private address. The URL's host stays the request
+// host (and TLS SNI); only the destination IP is pinned. A dial whose address
+// does not match the pinned host (e.g. an HTTP proxy from the environment) or
+// a request without a pin (an allowlisted hostname, by design) falls back to
+// a plain dial — a proxy is transport plumbing, not a vetted target, and an
+// allowlisted name is the operator's explicit trust.
+func (g *Guard) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{}
+	p, ok := ctx.Value(pinnedIPKey{}).(pinnedDial)
+	if !ok {
+		return d.DialContext(ctx, network, addr)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || !strings.EqualFold(host, p.host) {
+		return d.DialContext(ctx, network, addr)
+	}
+	if len(p.ips) == 0 {
+		return nil, fmt.Errorf("webhook: no pinned addresses for %q", p.host)
+	}
+	var lastErr error
+	for _, ip := range p.ips {
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	// No fallback to the hostname: only the vetted addresses may be dialed,
+	// or a rebinding host could slip the guard after all.
+	return nil, fmt.Errorf("webhook: dial pinned addresses for %q: %w", p.host, lastErr)
 }
 
 // allowedIP reports whether the address may be delivered to: public addresses

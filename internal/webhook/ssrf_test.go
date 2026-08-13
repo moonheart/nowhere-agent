@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -187,6 +188,9 @@ func TestNewGuardRejectsBadCIDR(t *testing.T) {
 	}
 }
 
+// TestCheckRedirectBlocksPrivateHop proves a redirect hop is validated with
+// the same guard as the initial target: a public first hop that 302s to
+// loopback is refused.
 func TestCheckRedirectBlocksPrivateHop(t *testing.T) {
 	g := testGuard(t, nil, nil)
 	// First hop public, redirect target loopback: the hop must be refused.
@@ -197,6 +201,98 @@ func TestCheckRedirectBlocksPrivateHop(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "SSRF") {
 		t.Fatalf("redirect error should name the guard: %v", err)
+	}
+}
+
+// TestCheckRedirectPinsValidatedHop proves a redirect hop is not only
+// validated but pinned: after CheckRedirect the hop request carries the
+// vetted address set in its context, so the hop's dial cannot be re-resolved
+// to a rebinding address either.
+func TestCheckRedirectPinsValidatedHop(t *testing.T) {
+	g := testGuard(t, nil, nil)
+	g.resolver = stubResolver{hosts: map[string][]net.IPAddr{
+		"hop.example": {{IP: net.ParseIP("8.8.8.8")}},
+	}}
+	req := httptest.NewRequest("GET", "http://hop.example/hook", nil)
+	via := []*http.Request{httptest.NewRequest("GET", "http://8.8.8.8/x", nil)}
+	if err := g.CheckRedirect(req, via); err != nil {
+		t.Fatalf("public redirect hop refused: %v", err)
+	}
+	p, ok := req.Context().Value(pinnedIPKey{}).(pinnedDial)
+	if !ok {
+		t.Fatal("redirect hop not pinned in request context")
+	}
+	if p.host != "hop.example" || len(p.ips) != 1 || !p.ips[0].Equal(net.ParseIP("8.8.8.8")) {
+		t.Fatalf("unexpected pin for redirect hop: %+v", p)
+	}
+}
+
+// TestDialContextFallbackOnHostMismatch proves a dial whose address does not
+// match the pinned host (an HTTP proxy from the environment, say) falls back
+// to a plain dial instead of pinning the wrong address: the pin points at an
+// unreachable TEST-NET address, yet the local listener is reached because the
+// dial is for a different host than the pin.
+func TestDialContextFallbackOnHostMismatch(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	g := testGuard(t, nil, nil)
+	ctx := withPinned(context.Background(), pinnedDial{host: "target.example", ips: []net.IP{net.ParseIP("192.0.2.1")}})
+	conn, err := g.DialContext(ctx, "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("mismatched pin must fall back to a plain dial: %v", err)
+	}
+	conn.Close()
+}
+
+// TestDeliverPinsValidatedAddress proves the delivery dials exactly the
+// address the guard vetted: the stub resolver reports a PUBLIC address for
+// "localhost", so the guard vets it and delivery is permitted — but the dial
+// must go to that vetted address, never to the local listener that the real
+// (system) resolution of localhost would reach. A rebinding host that flips
+// to loopback after the check therefore cannot receive the delivery.
+func TestDeliverPinsValidatedAddress(t *testing.T) {
+	received := make(chan struct{}, 1)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case received <- struct{}{}:
+			default:
+			}
+			conn.Close()
+		}
+	}()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	g := testGuard(t, nil, nil)
+	g.resolver = stubResolver{hosts: map[string][]net.IPAddr{
+		"localhost": {{IP: net.ParseIP("8.8.8.8")}},
+	}}
+	n := New(Options{SSRF: g, Timeout: 2 * time.Second, Logger: testLogger(t)})
+	// The hostname vets as public, so delivery is permitted; the pinned
+	// 8.8.8.8 is unreachable, so the delivery fails — and it must fail
+	// without ever dialing the local listener sitting at the same port.
+	err = n.Deliver(context.Background(),
+		fmt.Sprintf("http://localhost:%d/hook", port),
+		RunCompletedPayload{Event: "run.completed"})
+	if err == nil {
+		t.Fatal("delivery to an unreachable pinned address succeeded")
+	}
+	select {
+	case <-received:
+		t.Fatal("delivery dialed the local listener instead of the pinned address")
+	default:
 	}
 }
 

@@ -125,8 +125,17 @@ func New(opts Options) *Notifier {
 func httpClientFor(g *Guard, _ time.Duration) *http.Client {
 	c := &http.Client{}
 	if g != nil {
-		// Re-validate every redirect hop with the same guard, so a public URL
-		// cannot smuggle the request into a private network via a 302.
+		// Dial through the guard: every connection is pinned to the addresses
+		// the guard vetted for the current delivery (Guard.DialContext), and
+		// every redirect hop is re-validated and re-pinned (CheckRedirect), so
+		// neither a rebinding host nor a 302 can route a delivery onto a
+		// private address. Keep-alives are off so a connection opened for one
+		// delivery's vetted address set is never reused by another.
+		c.Transport = &http.Transport{
+			DialContext:       g.DialContext,
+			Proxy:             http.ProxyFromEnvironment,
+			DisableKeepAlives: true,
+		}
 		c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			return g.CheckRedirect(req, via)
 		}
@@ -185,8 +194,10 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 	deliverCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// SSRF screen before anything else: a blocked target is refused without a
-	// single connection attempt. Resolution happens per attempt (DNS can
-	// change between runs), so a rebinding host cannot slip through.
+	// single connection attempt. Every attempt re-resolves and pins the vetted
+	// addresses into the request (pinRequest + Guard.DialContext), so a host
+	// rebinding between the check and the dial cannot slip through; an
+	// allowlisted hostname is the operator's explicit trust, dialed freely.
 	if ssrf != nil {
 		if err := ssrf.CheckURL(deliverCtx, url); err != nil {
 			n.log.Warn("webhook delivery blocked by SSRF guard", "url", url, "run", payload.RunID, "err", err)
@@ -196,7 +207,7 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 	// Domestic IM bots (DingTalk/WeCom/Feishu) take their own payload schema
 	// and need no retry amplification (a 4xx from the bot API is permanent).
 	if n.isIMBotURL(url) {
-		return n.deliverIM(deliverCtx, url, payload)
+		return n.deliverIM(deliverCtx, url, payload, ssrf)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -228,6 +239,16 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 			m := hmac.New(sha256.New, signingSecret)
 			m.Write(body)
 			req.Header.Set("X-Nowhere-Signature", "sha256="+hex.EncodeToString(m.Sum(nil)))
+		}
+		if ssrf != nil {
+			// Validate and pin this attempt's addresses into the request
+			// (Guard.DialContext dials exactly the vetted addresses): the
+			// resolution is per attempt, and the connection can never be
+			// re-resolved to an unvetted address.
+			if err := ssrf.pinRequest(req, url); err != nil {
+				n.log.Warn("webhook delivery blocked by SSRF guard", "url", url, "run", payload.RunID, "err", err)
+				return err
+			}
 		}
 		resp, err := client.Do(req)
 		if err != nil {

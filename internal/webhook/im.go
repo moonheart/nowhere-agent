@@ -139,8 +139,10 @@ func imSendURL(raw string, now time.Time) (string, error) {
 	return u.String(), nil
 }
 
-// deliverIM posts the platform-formatted payload to the bot webhook.
-func (n *Notifier) deliverIM(ctx context.Context, raw string, payload RunCompletedPayload) error {
+// deliverIM posts the platform-formatted payload to the bot webhook. ssrf is
+// the guard snapshot taken by Deliver; when set, the request is pinned to the
+// vetted addresses before it goes out (see Guard.pinRequest).
+func (n *Notifier) deliverIM(ctx context.Context, raw string, payload RunCompletedPayload, ssrf *Guard) error {
 	body, err := n.imPayloadFor(raw, payload)
 	if err != nil {
 		return err
@@ -155,6 +157,11 @@ func (n *Notifier) deliverIM(ctx context.Context, raw string, payload RunComplet
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "nowhere-agent-webhook/1")
+	if ssrf != nil {
+		if err := ssrf.pinRequest(req, target); err != nil {
+			return err
+		}
+	}
 	resp, err := n.client.Do(req)
 	if err != nil {
 		return err
