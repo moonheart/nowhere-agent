@@ -47,6 +47,7 @@ export type I18nKey =
   | "chat.noMatches"
   | "chat.noMatchesHint"
   | "chat.deleteConversation"
+  | "chat.deleteConfirm"
   | "chat.deleteFailed"
   | "chat.untitled"
   | "chat.searching"
@@ -137,6 +138,7 @@ const zh: Record<I18nKey, string> = {
   "chat.noMatches": "没有匹配结果",
   "chat.noMatchesHint": "没有与「{term}」匹配的内容。",
   "chat.deleteConversation": "删除对话",
+  "chat.deleteConfirm": "删除这个对话？此操作不可撤销。",
   "chat.deleteFailed": "无法删除对话，请重试。",
   "chat.untitled": "未命名",
   "chat.searching": "搜索中…",
@@ -228,6 +230,7 @@ const en: Record<I18nKey, string> = {
   "chat.noMatches": "No matches",
   "chat.noMatchesHint": "Nothing matches “{term}”.",
   "chat.deleteConversation": "Delete conversation",
+  "chat.deleteConfirm": "Delete this conversation? This can’t be undone.",
   "chat.deleteFailed": "Couldn’t delete the conversation — try again.",
   "chat.untitled": "Untitled",
   "chat.searching": "Searching…",

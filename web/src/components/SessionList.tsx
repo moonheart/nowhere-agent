@@ -153,6 +153,9 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   }, [loadMore]);
 
   const handleDelete = async (id: string) => {
+    // Deleting hides the whole conversation; confirm before acting (follows
+    // the window.confirm pattern the editors use for destructive actions).
+    if (!window.confirm(t("chat.deleteConfirm"))) return;
     // Cancel any in-flight run first: the server also cancels on delete, but
     // the client-side cancel keeps the run from streaming into a deleting UI
     // and covers gateways that predate the server-side cancel. Best-effort.
