@@ -207,10 +207,10 @@ func (t Task) NextAfter(from time.Time) (time.Time, error) {
 	return next, nil
 }
 
-// Due reports whether the task should fire at `now`: enabled, not expired, and
-// past its next_run_at. This mirrors the due-scan WHERE clause (design: due
-// filter) and is kept here so the scan query and the in-memory store share one
-// definition.
+// Due reports whether the task should fire at `now`: enabled, not expired,
+// past its next_run_at, and not a legacy zero-seeded row. This mirrors the
+// due-scan WHERE clause (design: due filter) and is kept here so the scan
+// query and the in-memory store share one definition.
 func (t Task) Due(now time.Time) bool {
 	if !t.Enabled {
 		return false
@@ -218,5 +218,14 @@ func (t Task) Due(now time.Time) bool {
 	if t.EndTime != nil && now.After(*t.EndTime) {
 		return false
 	}
+	// A zero (or epoch-before) next_run_at is a legacy never-firing row: it
+	// must not re-enter the scan set — every claim would fail NextAfter.
+	if !t.NextRunAt.After(epochStart) {
+		return false
+	}
 	return !t.NextRunAt.After(now)
 }
+
+// epochStart is the lower bound of a sane next_run_at, mirroring the ListDue
+// WHERE clause's cutoff.
+var epochStart = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)

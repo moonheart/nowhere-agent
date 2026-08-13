@@ -218,6 +218,7 @@ func TestPGStoreListDue(t *testing.T) {
 	notDue := mk(nil)
 	expired := mk(func(t *Task) { past := now.Add(-time.Hour); t.EndTime = &past })
 	disabled := mk(func(t *Task) { t.Enabled = false })
+	zeroNext := mk(nil)
 
 	// Force next_run_at into the past for the due + expired + disabled tasks so
 	// only the due filter separates them; notDue stays in the future.
@@ -225,6 +226,9 @@ func TestPGStoreListDue(t *testing.T) {
 		db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), id)
 	}
 	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(time.Hour), notDue.ID)
+	// zeroNext mimics a legacy never-firing row (pre-fix zero seed): zero
+	// next_run_at that ListDue must never hand the trigger.
+	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, time.Time{}, zeroNext.ID)
 
 	got, err := store.ListDue(ctx, now)
 	if err != nil {
@@ -245,6 +249,9 @@ func TestPGStoreListDue(t *testing.T) {
 	}
 	if ids[disabled.ID] {
 		t.Error("disabled task leaked into scan set")
+	}
+	if ids[zeroNext.ID] {
+		t.Error("zero-next_run_at task leaked into scan set")
 	}
 }
 

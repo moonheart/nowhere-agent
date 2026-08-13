@@ -207,11 +207,15 @@ func (s *PGStore) ListForUser(ctx context.Context, userID string) ([]Task, error
 	return scanTasks(rows)
 }
 
-// ListDue returns the trigger's scan set at `now`.
+// ListDue returns the trigger's scan set at `now`. Rows whose next_run_at sits
+// at or before the epoch are legacy never-firing tasks (pre-fix zero seeds of
+// an un-fireable cron): they are filtered out so the trigger never scans — or
+// worse, claims — a row whose NextAfter must fail.
 func (s *PGStore) ListDue(ctx context.Context, now time.Time) ([]Task, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+taskCols+` FROM scheduled_task
 		WHERE enabled AND next_run_at <= $1
+		  AND next_run_at > '1970-01-01 00:00:00+00'
 		  AND (end_time IS NULL OR end_time > $1)
 		ORDER BY next_run_at`, now)
 	if err != nil {
