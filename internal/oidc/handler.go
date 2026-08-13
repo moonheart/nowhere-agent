@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"nowhere-agent/internal/audit"
@@ -175,6 +176,13 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 			redirect := r.URL.Query().Get("redirect_uri")
 			if redirect == "" {
 				redirect = "/"
+			} else if !strings.HasPrefix(redirect, "/") || strings.HasPrefix(redirect, "//") {
+				// Open-redirect guard: only a same-origin relative path is
+				// honored as the post-challenge destination. A scheme-qualified
+				// URL (https://evil.example) or a protocol-relative one (//…)
+				// would hand the authenticated user's browser to an attacker.
+				http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+				return
 			}
 			http.Redirect(w, r, redirect+"#totp_required="+url.QueryEscape(ch), http.StatusFound)
 			return

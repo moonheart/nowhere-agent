@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -164,5 +165,53 @@ func TestCallbackDisabledAccountGetsNoToken(t *testing.T) {
 	}
 	if !strings.Contains(loc, "disabled") {
 		t.Fatalf("disabled account should see a disabled error, got %q", loc)
+	}
+}
+
+// totpHandler wires a handler whose account always requires a second factor,
+// so the callback lands in the TOTP deferral branch.
+func totpHandler(t *testing.T, accounts *stubAccounts) *Handler {
+	t.Helper()
+	f := newFakeIdP(t)
+	f.lastSub = "eve"
+	p := newProviderFor(t, f)
+	h := NewHandler(p, accounts, func(context.Context, identity.User) (string, error) { return "tok", nil })
+	h.WithTotpChallenge(func(context.Context, identity.User) (string, error) { return "ch-1", nil })
+	return h
+}
+
+func TestCallbackTotpUsesRelativeRedirectURI(t *testing.T) {
+	accounts := &stubAccounts{user: identity.User{ID: "u-3", Email: "eve@corp.test"}}
+	h := totpHandler(t, accounts)
+
+	_, cookie := startLogin(t, h)
+	req := httptest.NewRequest(http.MethodGet, "/auth/oidc/callback?state="+cookie.Value+"&code=good&redirect_uri=/settings", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.callback(rec, req)
+	loc := rec.Result().Header.Get("Location")
+	if !strings.Contains(loc, "/settings#totp_required=") {
+		t.Fatalf("TOTP redirect should honor the relative path, got %q", loc)
+	}
+}
+
+func TestCallbackTotpRejectsAbsoluteRedirectURI(t *testing.T) {
+	accounts := &stubAccounts{user: identity.User{ID: "u-3", Email: "eve@corp.test"}}
+	h := totpHandler(t, accounts)
+
+	// An absolute URL (or a protocol-relative one) must be refused outright —
+	// redirecting the authenticated browser there would be an open redirect.
+	for _, bad := range []string{"https://evil.example/phish", "//evil.example/phish", "javascript:alert(1)"} {
+		_, cookie := startLogin(t, h)
+		req := httptest.NewRequest(http.MethodGet, "/auth/oidc/callback?state="+cookie.Value+"&code=good&redirect_uri="+url.QueryEscape(bad), nil)
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.callback(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("redirect_uri=%q -> status %d, want 400", bad, rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); strings.Contains(loc, "totp_required") {
+			t.Errorf("redirect_uri=%q must never redirect to the challenge, got %q", bad, loc)
+		}
 	}
 }
