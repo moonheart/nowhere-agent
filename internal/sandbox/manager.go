@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -96,6 +97,7 @@ func (m *Manager) Sweep(ctx context.Context, now time.Time) ([]string, error) {
 	m.mu.Unlock()
 
 	var destroyed []string
+	var errs []error
 	for _, id := range doomed {
 		m.mu.Lock()
 		e := m.active[id]
@@ -104,13 +106,19 @@ func (m *Manager) Sweep(ctx context.Context, now time.Time) ([]string, error) {
 			continue
 		}
 		if err := m.port.Destroy(ctx, e.handle); err != nil {
-			return destroyed, fmt.Errorf("destroy %s: %w", id, err)
+			// Collect and keep sweeping: one failing sandbox must not leave the
+			// rest of the batch to rot until the next sweep.
+			errs = append(errs, fmt.Errorf("destroy %s: %w", id, err))
+			continue
 		}
 		m.mu.Lock()
 		e.state = StateDestroyed
 		delete(m.active, id)
 		m.mu.Unlock()
 		destroyed = append(destroyed, id)
+	}
+	if len(errs) > 0 {
+		return destroyed, errors.Join(errs...)
 	}
 	return destroyed, nil
 }

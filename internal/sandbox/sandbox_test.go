@@ -2,11 +2,28 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 )
+
+// failingDestroyPort wraps a MemPort whose Destroy fails ONCE for the named
+// sessions, to exercise the Manager's sweep-failure handling and retry.
+type failingDestroyPort struct {
+	*MemPort
+	fail map[string]bool
+	done map[string]bool
+}
+
+func (p *failingDestroyPort) Destroy(ctx context.Context, h Handle) error {
+	if p.fail[h.SessionID] && !p.done[h.SessionID] {
+		p.done[h.SessionID] = true
+		return fmt.Errorf("destroy blocked for %s", h.SessionID)
+	}
+	return p.MemPort.Destroy(ctx, h)
+}
 
 func TestManagerEnsureCreatesOnce(t *testing.T) {
 	m := NewManager(NewMemPort())
@@ -73,6 +90,38 @@ func TestManagerGetOnlyRunning(t *testing.T) {
 	m.MarkSessionEnded("s1", time.Minute)
 	if _, ok := m.Get("s1"); ok {
 		t.Error("stopped sandbox should not be returned by Get")
+	}
+}
+
+func TestManagerSweepAggregatesDestroyFailures(t *testing.T) {
+	m := NewManager(&failingDestroyPort{MemPort: NewMemPort(), fail: map[string]bool{"s2": true}, done: map[string]bool{}})
+	ctx := context.Background()
+	m.Ensure(ctx, "s1", Options{})
+	m.Ensure(ctx, "s2", Options{})
+	m.MarkSessionEnded("s1", 0)
+	m.MarkSessionEnded("s2", 0)
+
+	destroyed, err := m.Sweep(ctx, time.Now().Add(time.Minute))
+	if err == nil {
+		t.Fatal("expected aggregated destroy error")
+	}
+	// The healthy sandbox is still swept despite s2's failure.
+	if len(destroyed) != 1 || destroyed[0] != "s1" {
+		t.Errorf("destroyed = %v, want [s1]", destroyed)
+	}
+	if !strings.Contains(err.Error(), "s2") {
+		t.Errorf("error does not name the failed session: %v", err)
+	}
+	// The failed session stays retryable, and a second sweep succeeds.
+	if m.StateOf("s2") != StateStopped {
+		t.Errorf("state = %q, want stopped (not destroyed) after failed sweep", m.StateOf("s2"))
+	}
+	destroyed, err = m.Sweep(ctx, time.Now().Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if len(destroyed) != 1 || destroyed[0] != "s2" {
+		t.Errorf("second sweep destroyed = %v, want [s2]", destroyed)
 	}
 }
 
