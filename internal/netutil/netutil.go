@@ -39,7 +39,14 @@ func EmbeddedIPv4(ip net.IP) net.IP {
 		if v6[4] == 0 && v6[5] == 1 {
 			return net.IPv4(v6[6], v6[7], v6[9], v6[10])
 		}
-		return nil
+		// An address under 64:ff9b::/32 that is neither /96 nor /48 may
+		// still be ISATAP (RFC 5214): 64:ff9b::5efe:a.b.c.d reaches
+		// a.b.c.d. The unconditional return below used to shadow the ISATAP
+		// check, so bail out only when the 0x00005efe marker is absent and
+		// let the ISATAP branch decode it.
+		if v6[10] != 0x5e || v6[11] != 0xfe {
+			return nil
+		}
 	}
 	// 6to4 prefix 2002::/16 (RFC 3056): the IPv4 occupies bytes 2-5.
 	if v6[0] == 0x20 && v6[1] == 0x02 {

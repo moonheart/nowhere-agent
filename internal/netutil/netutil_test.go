@@ -24,6 +24,13 @@ func TestEmbeddedIPv4(t *testing.T) {
 		{"2001:db8::5efe:a00:1", "10.0.0.1"},
 		{"2001:db8::5efe:808:808", "8.8.8.8"},
 		{"::5efe:a00:1", "10.0.0.1"},
+		// ISATAP marker under the NAT64 well-known prefix: not /96 or /48,
+		// but bytes 10-11 still carry 0x5efe, so the embedded IPv4 at bytes
+		// 12-15 is reachable and must be decoded (no early return).
+		{"64:ff9b::5efe:a00:1", "10.0.0.1"},
+		// /48 address whose identifier bytes also spell 0x5efe: the /48
+		// reading stays primary (prefix priority), not the ISATAP reading.
+		{"64:ff9b:1:0:0:5efe:a00:1", "0.0.0.94"},
 		// Legacy 4-in-6.
 		{"::a00:1", "10.0.0.1"},
 		{"::808:808", "8.8.8.8"},
