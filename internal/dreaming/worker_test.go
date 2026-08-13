@@ -390,6 +390,41 @@ func TestConsolidateEmptyRewriteIgnored(t *testing.T) {
 	}
 }
 
+// TestConsolidateAddSkipsExistingContent pins the retry idempotency guard: a
+// pass that failed partway (Add already stored, later op errored) is re-run
+// with the same material, and the LLM repeating an Add whose content already
+// lives in the store must not duplicate it — it counts as a revision instead.
+func TestConsolidateAddSkipsExistingContent(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.NewMemPort()
+	existing := seed(t, mem, "u1", memory.KindFact, "user prefers dark mode")
+
+	src := &fakeEpisodeSource{
+		sessions: []PendingSession{pending("s1", "u1")},
+		episodes: map[string][]session.StoredMessage{"s1": {textMsg("dark mode again")}},
+	}
+	llm := &fakeLLM{jsonResults: []any{
+		extractResult{Facts: []string{"user prefers dark mode"}},
+		summaryResult{Summary: "dark mode"},
+		consolidateResult{Add: []addOp{{Kind: "fact", Content: "user prefers dark mode"}}},
+	}, tokens: 10}
+	w := NewWorker(src, mem, llm, Budget{MaxTokens: 1000})
+
+	res, err := w.Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.MemoriesWritten != 0 {
+		t.Errorf("written = %d want 0 (content already stored)", res.MemoriesWritten)
+	}
+	if res.MemoriesRevised != 1 {
+		t.Errorf("revised = %d want 1 (the duplicate read as a revision)", res.MemoriesRevised)
+	}
+	if live := liveContents(t, mem, "u1"); len(live) != 1 || live[0] != existing.Content {
+		t.Errorf("live = %v, want the single original memory unchanged", live)
+	}
+}
+
 func TestConsolidateUnknownKindIgnored(t *testing.T) {
 	src := &fakeEpisodeSource{
 		sessions: []PendingSession{pending("s1", "u1")},

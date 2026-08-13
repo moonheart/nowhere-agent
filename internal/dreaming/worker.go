@@ -441,6 +441,16 @@ func (w *Worker) consolidate(ctx context.Context, scope identity.ScopeRef, facts
 			w.log.Warn("dreaming: consolidation returned an unknown kind", "kind", op.Kind)
 			continue
 		}
+		// Idempotency guard: a partial failure mid-pass returns the error without
+		// advancing the watermark, so the retry re-runs consolidation with the
+		// same material — an Add the LLM repeats would otherwise land as a
+		// duplicate of one already stored. A live memory holding the same
+		// content IS that already-applied (or pre-existing) add; count it as a
+		// revision instead of adding again.
+		if hasLiveContent(live, content) {
+			done.revised++
+			continue
+		}
 		if _, err := w.memory.Store(ctx, memory.Memory{Scope: scope, Kind: kind, Content: content}); err != nil {
 			return done, tokens, err
 		}
@@ -556,6 +566,19 @@ func parseKind(s string) (memory.Kind, bool) {
 		return memory.KindSummary, true
 	}
 	return "", false
+}
+
+// hasLiveContent reports whether any live memory already holds the given
+// content (whitespace-normalized). Consolidation is re-run verbatim when a
+// pass fails partway (the watermark does not advance on error), so a repeated
+// Add must not be stored twice.
+func hasLiveContent(live []memory.Memory, content string) bool {
+	for _, m := range live {
+		if strings.TrimSpace(m.Content) == content {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanLines trims and drops blank entries from a structured string list.
