@@ -270,7 +270,10 @@ const FailedTurnNotice: FC = () => {
       if (m.role !== "user") continue;
       const text = userMessageText(m);
       if (!text) continue;
-      threadRuntime.composer.setText(text);
+      // Never clobber a draft the user is typing: append the retried message
+      // to whatever is already in the composer.
+      const draft = threadRuntime.composer.getState().text.trim();
+      threadRuntime.composer.setText(draft ? `${draft}\n${text}` : text);
       threadRuntime.composer.send();
       return;
     }
