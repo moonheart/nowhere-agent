@@ -36,7 +36,10 @@ func TestEmbeddedIPv4(t *testing.T) {
 		// 12-15 is reachable and must be decoded (no early return).
 		{"64:ff9b::5efe:a00:1", "10.0.0.1"},
 		// /48 address whose identifier bytes also spell 0x5efe: the /48
-		// reading stays primary (prefix priority), not the ISATAP reading.
+		// reading stays primary (prefix priority), not the ISATAP reading;
+		// EmbeddedIPv4s appends the ISATAP reading (bytes 12-15) as a
+		// third candidate so a private target under it is refused
+		// fail-closed by guards (see TestEmbeddedIPv4sCandidates).
 		{"64:ff9b:1:0:0:5efe:a00:1", "0.0.0.94"},
 		// Legacy 4-in-6.
 		{"::a00:1", "10.0.0.1"},
@@ -81,6 +84,15 @@ func TestEmbeddedIPv4sCandidates(t *testing.T) {
 		{"64:ff9b:1:0:8:808:800::", []string{"0.0.8.8", "8.8.8.8"}}, // PL=64 target: public 8.8.8.8
 		// The two readings coincide: deduplicated to a single candidate.
 		{"64:ff9b:1:a0a:a:a0a:a00::", []string{"10.10.10.10"}},
+		// /48 address whose bytes 10-11 spell the ISATAP marker: the /48
+		// and PL=64 readings are both public here (0.0.0.94, 0.94.254.10)
+		// but the ISATAP reading reaches 10.0.0.1 at bytes 12-15, appended
+		// as a third candidate so guards refuse the private target
+		// (fail-closed); the /48 reading stays primary.
+		{"64:ff9b:1:0:0:5efe:a00:1", []string{"0.0.0.94", "0.94.254.10", "10.0.0.1"}},
+		// ... and when that ISATAP reading coincides with the PL=64
+		// reading, it is deduplicated.
+		{"64:ff9b:1:0:101:5efe:15e:fe01", []string{"0.0.1.94", "1.94.254.1"}},
 		// ISATAP under the NAT64 prefix: single.
 		{"64:ff9b::5efe:a00:1", []string{"10.0.0.1"}},
 		// 6to4 / 4-in-6: single.

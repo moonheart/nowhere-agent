@@ -44,6 +44,7 @@ func TestValidateURL(t *testing.T) {
 		"http://[64:ff9b:1:a00:0:100::]/hook", // NAT64 local-use /48 embedding 10.0.0.1
 		"http://[64:ff9b:1:a00:101::]/hook",   // NAT64 local-use /48, u octet ≠ 0, embedding 10.0.1.0
 		"http://[64:ff9b:1:0:a:0:100::]/hook",  // NAT64 PL=64: 10.0.0.1 at bytes 9-12 (the /48 reading sees public 0.0.10.0)
+		"http://[64:ff9b:1:0:0:5efe:a00:1]/hook", // NAT64 /48 + ISATAP: bytes 10-11 are 5efe, 10.0.0.1 at bytes 12-15 while /48 readings see public 0.0.0.94/0.94.254.10 — fail closed
 		"http://[2002:a00:1::]/hook",          // 6to4 (RFC 3056) embedding 10.0.0.1 refused
 		"http://[2001:db8::5efe:a00:1]/hook",  // ISATAP (RFC 5214) embedding 10.0.0.1 refused
 		"http://[::a00:1]/hook",               // 4-in-6 embedding 10.0.0.1 refused
@@ -77,6 +78,7 @@ func TestCheckURLPrivateTargets(t *testing.T) {
 		"http://[64:ff9b:1:a00:0:100::]/x", // NAT64 local-use /48 embedding 10.0.0.1
 		"http://[64:ff9b:1:a00:101::]/x",   // NAT64 local-use /48, u octet ≠ 0, embedding 10.0.1.0
 		"http://[64:ff9b:1:0:a:0:100::]/x", // NAT64 PL=64: 10.0.0.1 at bytes 9-12, /48 reading public 0.0.10.0 — fail closed
+		"http://[64:ff9b:1:0:0:5efe:a00:1]/x", // NAT64 /48 + ISATAP: 10.0.0.1 at bytes 12-15, /48 readings public — fail closed
 		"http://[2002:a00:1::]/x",          // 6to4 embedding 10.0.0.1
 		"http://[2001:db8::5efe:a00:1]/x",  // ISATAP embedding 10.0.0.1
 		"http://[::a00:1]/x",               // 4-in-6 embedding 10.0.0.1
@@ -157,6 +159,7 @@ func TestAllowlistOpensPrivateTargets(t *testing.T) {
 		{"http://[64:ff9b:1:a00:0:100::]/h", true},    // NAT64 local-use /48 embedding allowlisted 10.0.0.1
 		{"http://[64:ff9b:1:a00:101::]/h", true},      // NAT64 local-use /48, u octet ≠ 0, embedding allowlisted 10.0.1.0
 		{"http://[64:ff9b:1:0:a:0:100::]/h", true},     // NAT64 PL=64: 10.0.0.1 at bytes 9-12 matches the allowlisted CIDR
+		{"http://[64:ff9b:1:0:0:5efe:a00:1]/h", true},  // NAT64 /48 + ISATAP: 10.0.0.1 at bytes 12-15 matches the allowlisted CIDR
 		{"http://[2002:a00:1::]/h", true},             // 6to4 embedding allowlisted 10.0.0.1
 		{"http://[2001:db8::5efe:a00:1]/h", true},     // ISATAP embedding allowlisted 10.0.0.1
 		{"http://[::a00:1]/h", true},                  // 4-in-6 embedding allowlisted 10.0.0.1

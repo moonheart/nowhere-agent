@@ -30,9 +30,12 @@ func EmbeddedIPv4(ip net.IP) net.IP {
 // at bytes 6-7 and 9-10 around the reserved "u" octet at byte 8 — and the
 // PL=64 reading — IPv4 at bytes 9-12, u at byte 8 — and which translator
 // parameter the network uses is not observable from the address alone, so
-// both candidates are returned (deduplicated). The /48 reading stays first
-// (primary); callers deciding allow/block must fail closed: refuse when any
-// candidate is private, permit only when every candidate is.
+// both candidates are returned (deduplicated). An address under the /48
+// prefix whose bytes 10-11 spell the ISATAP marker (0x00005efe) is
+// additionally reachable as IPv4 at bytes 12-15, so that reading is
+// appended as a third candidate (deduplicated) too. The /48 reading stays
+// first (primary); callers deciding allow/block must fail closed: refuse
+// when any candidate is private, permit only when every candidate is.
 // Per RFC 6052 §2.3 the u octet is removed unconditionally and translators
 // do not enforce it being zero, so a u≠0 address must not be treated as
 // non-embedded (that would let a private target disguised with a nonzero u
@@ -61,10 +64,28 @@ func EmbeddedIPv4s(ip net.IP) []net.IP {
 		if v6[4] == 0 && v6[5] == 1 {
 			a := net.IPv4(v6[6], v6[7], v6[9], v6[10])
 			b := net.IPv4(v6[9], v6[10], v6[11], v6[12])
+			cands := []net.IP{a, b}
 			if a.Equal(b) {
-				return []net.IP{a}
+				cands = []net.IP{a}
 			}
-			return []net.IP{a, b}
+			// A /48 address whose bytes 10-11 spell the ISATAP marker
+			// (0x00005efe) is also reachable as IPv4 at bytes 12-15 under
+			// RFC 5214. The /48 and PL=64 readings of such an address can
+			// both be public — e.g. 64:ff9b:1:0:0:5efe:a00:1 decodes to
+			// the public-looking 0.0.0.94 and 0.94.254.10 — while the
+			// ISATAP reading reaches a private target. Append it as a
+			// third candidate (deduplicated) so fail-closed guards still
+			// refuse it; the /48 prefix reading stays primary.
+			if v6[10] == 0x5e && v6[11] == 0xfe {
+				c := net.IPv4(v6[12], v6[13], v6[14], v6[15])
+				for _, x := range cands {
+					if x.Equal(c) {
+						return cands
+					}
+				}
+				return append(cands, c)
+			}
+			return cands
 		}
 		// An address under 64:ff9b::/32 that is neither /96 nor /48 may
 		// still be ISATAP (RFC 5214): 64:ff9b::5efe:a.b.c.d reaches
