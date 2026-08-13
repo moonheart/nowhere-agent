@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -179,7 +180,7 @@ func TestStreamEventsEndToEnd(t *testing.T) {
 	}, "\n")
 
 	out := make(chan provider.Event, 16)
-	go streamEvents(readCloser{strings.NewReader(sse)}, out)
+	go streamEvents(context.Background(), readCloser{strings.NewReader(sse)}, out)
 
 	var got []provider.EventType
 	for ev := range out {

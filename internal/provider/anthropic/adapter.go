@@ -159,7 +159,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	recorded := io.TeeReader(resp.Body, respSink)
 
 	out := make(chan provider.Event, 16)
-	go streamEvents(provider.NewStallReader(teeCloser{recorded, resp.Body, respSink}, a.idleTimeout), out)
+	go streamEvents(ctx, provider.NewStallReader(teeCloser{recorded, resp.Body, respSink}, a.idleTimeout), out)
 	return out, nil
 }
 
@@ -178,8 +178,11 @@ func (tc teeCloser) Close() error {
 	return err
 }
 
-// streamEvents reads the SSE body and emits canonical events until EOF.
-func streamEvents(body io.ReadCloser, out chan<- provider.Event) {
+// streamEvents reads the SSE body and emits canonical events until EOF. Every
+// send is ctx-aware: the loop's consumer stops reading the moment the run is
+// cancelled, so a full buffer must not leave this goroutine blocked forever —
+// it exits and the deferred body.Close() tears the HTTP stream down.
+func streamEvents(ctx context.Context, body io.ReadCloser, out chan<- provider.Event) {
 	defer close(out)
 	defer body.Close()
 	// A panic while decoding the provider stream must not crash the process.
@@ -187,7 +190,10 @@ func streamEvents(body io.ReadCloser, out chan<- provider.Event) {
 	// event is delivered before close(out).
 	defer func() {
 		if p := recover(); p != nil {
-			out <- provider.Event{Type: provider.EventError, Err: fmt.Errorf("stream panic: %v", p)}
+			select {
+			case out <- provider.Event{Type: provider.EventError, Err: fmt.Errorf("stream panic: %v", p)}:
+			case <-ctx.Done():
+			}
 		}
 	}()
 
@@ -195,20 +201,29 @@ func streamEvents(body io.ReadCloser, out chan<- provider.Event) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var dataBuf bytes.Buffer
 
-	flush := func() {
+	// flush decodes the accumulated data payload and sends the event, returning
+	// false when the run was cancelled so the loop unwinds.
+	flush := func() bool {
 		if dataBuf.Len() == 0 {
-			return
+			return true
 		}
 		if ev, ok := decodeEvent(dataBuf.Bytes()); ok {
-			out <- ev
+			select {
+			case out <- ev:
+			case <-ctx.Done():
+				return false
+			}
 		}
 		dataBuf.Reset()
+		return true
 	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" { // blank line = event boundary
-			flush()
+			if !flush() {
+				return
+			}
 			continue
 		}
 		if len(line) >= 6 && line[:6] == "data: " {
@@ -216,9 +231,14 @@ func streamEvents(body io.ReadCloser, out chan<- provider.Event) {
 		}
 		// ignore "event:" lines; the payload type field discriminates.
 	}
-	flush()
+	if !flush() {
+		return
+	}
 
 	if err := scanner.Err(); err != nil {
-		out <- provider.Event{Type: provider.EventError, Err: err}
+		select {
+		case out <- provider.Event{Type: provider.EventError, Err: err}:
+		case <-ctx.Done():
+		}
 	}
 }

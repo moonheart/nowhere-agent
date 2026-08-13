@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -170,7 +171,7 @@ func TestStreamEventsEndToEnd(t *testing.T) {
 	}, "\n")
 
 	out := make(chan provider.Event, 16)
-	go streamEvents(readCloser{strings.NewReader(sse)}, out)
+	go streamEvents(context.Background(), readCloser{strings.NewReader(sse)}, out)
 
 	var text string
 	var usage *provider.Usage
@@ -310,7 +311,7 @@ func TestRealDeepSeekSSEFixture(t *testing.T) {
 	}
 
 	out := make(chan provider.Event, 256)
-	go streamEvents(readCloser{strings.NewReader(string(data))}, out)
+	go streamEvents(context.Background(), readCloser{strings.NewReader(string(data))}, out)
 
 	var thinking, text string
 	var usage *provider.Usage
