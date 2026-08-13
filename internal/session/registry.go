@@ -843,14 +843,15 @@ func (rg *RunRegistry) BatchFoldState(ctx context.Context, runID string) (folded
 // pending batch is the pending gate's job). "Newest" is by run seq, so the
 // scan is independent of the store's row order.
 //
-// The scan walks runs from newest to oldest and STOPS at the first run that
-// carries a batch snapshot: the pending gate serializes runs (a run only gates
-// after every older run's batch is folded), so at most one unfolded batch
-// exists at a time and that first snapshot decides the whole answer — folded
-// means nothing to reconcile, unfolded with all verdicts in means reconcile,
-// still awaiting verdicts means keep looking older (defensive; should not
-// occur). The common case (newest runs batchless or already folded) therefore
-// costs one SuspendedBatchForRun query instead of one per session run.
+// The scan walks runs from newest to oldest. A folded snapshot does NOT stop
+// it: the submission-time reconcile is fail-open (a fold failure only logs,
+// and the submission proceeds), so a NEWER run's batch can fold while an
+// OLDER run's fold crashed and never ran — stopping at that folded snapshot
+// would orphan the older decided batch's tool_use forever (returning "" with
+// it still decided-but-unfolded). Each run costs at most one
+// SuspendedBatchForRun query and no more: runs without a snapshot skip out at
+// once, folded runs never reach PendingApprovalsForRun, and the common case
+// (newest runs batchless) scans cheaply.
 func (rg *RunRegistry) DecidedButUnfoldedRun(ctx context.Context, sessionID string) (string, error) {
 	runs, err := rg.rt.store.RunsForSession(ctx, sessionID)
 	if err != nil {
@@ -863,7 +864,7 @@ func (rg *RunRegistry) DecidedButUnfoldedRun(ctx context.Context, sessionID stri
 			continue // no suspended batch on this run
 		}
 		if snap.FoldedSeq != nil {
-			return "", nil // this run's batch is folded; older ones were too
+			continue // folded; an older run's fold may still be pending (fail-open reconcile)
 		}
 		pend, err := rg.rt.store.PendingApprovalsForRun(ctx, runs[i].ID)
 		if err != nil {

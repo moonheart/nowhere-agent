@@ -212,6 +212,88 @@ func TestRegistryDecidedButUnfoldedReconcile(t *testing.T) {
 	}
 }
 
+// TestRegistryDecidedButUnfoldedBehindFoldedNewerRun pins the early-stop
+// regression: the submission-time reconcile is fail-open, so a NEWER run's
+// batch can fold while an OLDER run's fold crashed and never ran. The scan
+// must skip the newer run's folded snapshot and still return the older
+// decided-but-unfolded run — stopping there would orphan its tool_use forever.
+func TestRegistryDecidedButUnfoldedBehindFoldedNewerRun(t *testing.T) {
+	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
+	rg := NewRunRegistry(rt).WithMessageStore(NewMemMessageStore())
+	sess, err := rt.CreateSession(context.Background(), "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loop := agent.New(&twoGatedProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100})
+	loop.RegisterTool(gatedTool{name: "edit_a"})
+	loop.RegisterTool(gatedTool{name: "edit_b"})
+	loop.Use(&agent.PermissionMW{Check: func(context.Context, toolruntime.Tool) (bool, string) {
+		return true, agent.ApprovalReasonPrefix + "ask"
+	}})
+
+	// Run A: batch decided, fold "crashes" and never runs.
+	runA, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop})
+	if err != nil {
+		t.Fatalf("submit A: %v", err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Fatalf("run A status = %v, want done (parked)", got)
+	}
+	queue, err := rg.PendingApprovalsForSession(context.Background(), sess.ID)
+	if err != nil || len(queue) != 2 {
+		t.Fatalf("run A pending queue = %+v err %v, want 2", queue, err)
+	}
+	if _, _, err := rg.RecordDecision(context.Background(), queue[0].ID, true, nil); err != nil {
+		t.Fatalf("RecordDecision A1: %v", err)
+	}
+	if _, _, err := rg.RecordDecision(context.Background(), queue[1].ID, false, nil); err != nil {
+		t.Fatalf("RecordDecision A2: %v", err)
+	}
+	if id, _ := rg.DecidedButUnfoldedRun(context.Background(), sess.ID); id != runA.ID {
+		t.Fatalf("DecidedButUnfoldedRun = %q, want run A", id)
+	}
+
+	// Run B in the SAME session: A's batch is decided (no pending interaction
+	// blocks it — the pending gate only intercepts undecided rows), and B's
+	// fold succeeds this time.
+	runB, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop})
+	if err != nil {
+		t.Fatalf("submit B: %v", err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Fatalf("run B status = %v, want done (parked)", got)
+	}
+	queue, err = rg.PendingApprovalsForSession(context.Background(), sess.ID)
+	if err != nil || len(queue) != 2 {
+		t.Fatalf("run B pending queue = %+v err %v, want 2", queue, err)
+	}
+	if _, _, err := rg.RecordDecision(context.Background(), queue[0].ID, true, nil); err != nil {
+		t.Fatalf("RecordDecision B1: %v", err)
+	}
+	if _, _, err := rg.RecordDecision(context.Background(), queue[1].ID, false, nil); err != nil {
+		t.Fatalf("RecordDecision B2: %v", err)
+	}
+	if _, err := rg.FoldBatch(context.Background(), sess.ID, runB.ID, loop.Tools(), nil); err != nil {
+		t.Fatalf("FoldBatch B: %v", err)
+	}
+
+	// The scan sees B's folded snapshot first — it must NOT stop there: A is
+	// still decided-but-unfolded and is the reconciliation target.
+	id, err := rg.DecidedButUnfoldedRun(context.Background(), sess.ID)
+	if err != nil || id != runA.ID {
+		t.Fatalf("DecidedButUnfoldedRun = %q, %v; want run A behind B's folded batch", id, err)
+	}
+
+	// Folding A clears the target.
+	if _, err := rg.FoldBatch(context.Background(), sess.ID, runA.ID, loop.Tools(), nil); err != nil {
+		t.Fatalf("FoldBatch A: %v", err)
+	}
+	if id, _ := rg.DecidedButUnfoldedRun(context.Background(), sess.ID); id != "" {
+		t.Fatalf("folded A still reported: %s", id)
+	}
+}
+
 // failBatchStore wraps MemStore and fails CreateInteractionBatch once it has
 // succeeded failAfter times — a durable write dying mid-way through a gated
 // batch's interrupt frames (earlier rows already persisted).
