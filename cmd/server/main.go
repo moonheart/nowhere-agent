@@ -130,6 +130,34 @@ func run() error {
 	identityStore := identity.NewStore(pool)
 	identitySvc := identity.NewService(identityStore)
 
+	// Credential reaper: expired session tokens, phone OTPs, and service keys
+	// are rejected by every auth path, so their rows are garbage; an hourly
+	// pass deletes credentials dead for more than a day (the grace keeps a
+	// just-expired token's audit trail). Revoked service keys are deliberately
+	// kept — the admin console's revoked list shows them. Best-effort: a
+	// failed pass is logged and retried next hour.
+	go func() {
+		sweepLog := log
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().UTC().Add(-24 * time.Hour)
+				removed, err := identityStore.SweepExpired(ctx, cutoff)
+				if err != nil {
+					sweepLog.Warn("identity credential sweep failed", "err", err)
+					continue
+				}
+				if removed > 0 {
+					sweepLog.Info("identity credential sweep removed rows", "count", removed)
+				}
+			}
+		}
+	}()
+
 	// Runtime-settable platform settings (no-restart configuration): operator
 	// knobs that used to be env-only now default from env at boot and can be
 	// overridden from the admin console (platform_settings table). Each read
