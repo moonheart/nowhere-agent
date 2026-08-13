@@ -73,6 +73,8 @@ const (
 	ActionAdminUserResetPassword Action = "admin.user.reset_password"
 	ActionAdminUserDelete        Action = "admin.user.delete"
 	ActionAdminUserSetRole       Action = "admin.user.set_role"
+	// Hard-delete of a session row (platform purge, no-data-hard-delete).
+	ActionAdminSessionDelete Action = "admin.session.delete"
 
 	// Team administration.
 	ActionTeamCreate       Action = "team.create"

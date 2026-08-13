@@ -13,6 +13,9 @@ import (
 	"nowhere-agent/internal/provider"
 )
 
+// ErrSessionNotFound reports a hard-delete target that does not exist.
+var ErrSessionNotFound = errors.New("session not found")
+
 // Store persists sessions, runs, and events in Postgres. The durable run
 // records double as the episodes the dreaming worker consumes (design D13).
 type PGStore struct {
@@ -349,6 +352,50 @@ func (s *PGStore) DeleteSessionForUser(ctx context.Context, id, userID string) (
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// DeleteSession hard-deletes one session row (runs, messages, events,
+// approvals, suspended batches cascade via FK). A missing row maps to
+// ErrSessionNotFound. Parameterized by id only — never a bulk delete. A
+// malformed (non-uuid) id reads as not-found, matching the identity store's
+// convention so probes and typos never surface as server faults.
+func (s *PGStore) DeleteSession(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+	if identity.IsMalformedID(err) {
+		return ErrSessionNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("hard delete session: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrSessionNotFound
+	}
+	return nil
+}
+
+// SessionIDsForUser returns every session id a user owns (any status), so the
+// admin purge can remove their workspace image dirs before the user row (and
+// with it the session rows) is gone.
+func (s *PGStore) SessionIDsForUser(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id::text FROM sessions WHERE user_id = $1 ORDER BY created_at`, userID)
+	if err != nil {
+		if identity.IsMalformedID(err) {
+			return nil, nil // a malformed id owns nothing
+		}
+		return nil, fmt.Errorf("session ids for user: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan session id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // CreateRun inserts a queued run with the given per-session sequence number.

@@ -391,6 +391,9 @@ export const resetUserPassword = (id: string, password: string) =>
 export const deleteUser = (id: string) =>
   api<void>(`/api/admin/users/${encodeURIComponent(id)}`, { method: "DELETE" });
 
+export const deleteSession = (id: string) =>
+  api<void>(`/api/admin/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+
 export const listAllTeams = (params: { q?: string; limit?: number; offset?: number }) =>
   api<{ teams: Team[]; total: number }>(`/api/admin/teams${qs(params)}`);
 

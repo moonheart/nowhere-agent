@@ -153,13 +153,28 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// deleteUser hard-deletes an account (rows cascade) and, when the purge image
+// store is wired, its workspace images: every session dir plus the user's
+// upload scope. Session ids are captured BEFORE the delete — the cascade
+// removes the session rows, and image dirs keyed by session id would otherwise
+// orphan forever (the retention sweep lists sessions from the DB).
 func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	actor := caller(r)
 	targetID := r.PathValue("id")
+	var sessionIDs []string
+	if h.sessions != nil {
+		ids, err := h.sessions.SessionIDsForUser(r.Context(), targetID)
+		if err != nil {
+			writeServiceError(w, err)
+			return
+		}
+		sessionIDs = ids
+	}
 	if err := h.identity.DeleteAccount(r.Context(), actor.ID, targetID); err != nil {
 		writeServiceError(w, err)
 		return
 	}
+	h.purgeUserImages(r, targetID, sessionIDs)
 	h.record(r, audit.Success(audit.ActionAdminUserDelete).Target("user", targetID))
 	w.WriteHeader(http.StatusNoContent)
 }

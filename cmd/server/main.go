@@ -1692,7 +1692,10 @@ func run() error {
 		WithAudit(auditLogger).
 		WithExporter(export.New(pool, messageStore, memPort, uploadSvc, schedule.NewPGStore(pool))).
 		WithWebhookDeliveries(webhook.NewDeliveryStore(pool)).
-		WithRuntimeSettings(settingsRuntime)
+		WithRuntimeSettings(settingsRuntime).
+		// Platform purge (no-data-hard-delete): hard-delete routes for
+		// sessions and image cleanup on user deletion.
+		WithPurge(sessionStore, imageStore)
 	adminHandler.RegisterAuthed(protected)
 	log.Info("admin console endpoints enabled (auth required)")
 

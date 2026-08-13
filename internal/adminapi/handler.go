@@ -53,6 +53,11 @@ type Handler struct {
 	// allowlists, webhook target, language, rate limits) to platform admins.
 	// Nil disables the routes (503).
 	runtimeSettings SettingStore
+	// sessions + images back the platform purge routes (no-data-hard-delete):
+	// hard-deleting a session row and cleaning its workspace images. Nil
+	// sessions disable the purge route (503); nil images skip image cleanup.
+	sessions SessionPurgeStore
+	images   ImagePurger
 }
 
 // SettingStore is the runtime-settings surface the admin routes need.
@@ -213,6 +218,7 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	route(g, "PATCH /api/admin/users/{id}", h.requireAdmin(h.patchUser))
 	route(g, "POST /api/admin/users/{id}/password", h.requireAdmin(h.resetPassword))
 	route(g, "DELETE /api/admin/users/{id}", h.requireAdmin(h.deleteUser))
+	route(g, "DELETE /api/admin/sessions/{id}", h.requireAdmin(h.deleteSession))
 	route(g, "GET /api/admin/teams", h.requireAdmin(h.listAllTeams))
 	route(g, "POST /api/admin/teams", h.requireAdmin(h.createTeamForOwner))
 	route(g, "GET /api/admin/usage", h.requireAdmin(h.platformUsage))

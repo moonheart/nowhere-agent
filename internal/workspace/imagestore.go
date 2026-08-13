@@ -59,6 +59,10 @@ func NewImageStore(root string) *ImageStore {
 	return &ImageStore{root: root, blobs: &localBlobStore{root: root}}
 }
 
+// Root returns the store's configured root directory (tests and operators
+// inspecting disk layout).
+func (s *ImageStore) Root() string { return s.root }
+
 // blobStore abstracts the durable blob read/write for user-level uploads. The
 // shipped implementation is a local directory; an S3-compatible backend
 // implements the same contract (mirrors the workspace.Store convention).
@@ -340,6 +344,22 @@ func (s *ImageStore) DeleteSessionImages(sessionID string) error {
 		// files (a shared sandbox workspace) remain, this fails and the dir
 		// stays — correct either way, and best-effort by design.
 		_ = os.Remove(dir)
+	}
+	return nil
+}
+
+// DeleteUserUploadScope removes a user's entire upload scope — every blob
+// under <root>/__uploads__/<userID> and the dir itself. The dir contains ONLY
+// that user's blobs, so RemoveAll is confined by construction; the user id is
+// validated like every blob write (no separators), and a missing scope is not
+// an error. Called when the account row is hard-deleted, so its blobs do not
+// orphan.
+func (s *ImageStore) DeleteUserUploadScope(userID string) error {
+	if userID == "" || strings.ContainsAny(userID, `/\`) {
+		return fmt.Errorf("invalid user id %q", userID)
+	}
+	if err := os.RemoveAll(filepath.Join(s.root, uploadsDir, userID)); err != nil {
+		return fmt.Errorf("remove user upload scope: %w", err)
 	}
 	return nil
 }

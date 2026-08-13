@@ -20,7 +20,9 @@ import (
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
+	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/usage"
+	"nowhere-agent/internal/workspace"
 )
 
 // The console's whole job is to let the right person do the right thing, so
@@ -55,6 +57,11 @@ type env struct {
 	mem   memory.Port
 	mux   *http.ServeMux
 
+	// sessions + images back the purge routes (no-data-hard-delete), wired
+	// against the same PG + a temp workspace dir.
+	sessions *session.PGStore
+	images   *workspace.ImageStore
+
 	// actor is who the fake auth middleware presents as the caller. Tests
 	// reassign it to walk the authorization matrix.
 	actor identity.User
@@ -76,8 +83,10 @@ func newEnv(t *testing.T) *env {
 
 	e := &env{t: t, db: db, store: identity.NewStore(db), mem: memory.NewMemPort()}
 	e.svc = identity.NewService(e.store)
+	e.sessions = session.NewPGStore(db)
+	e.images = workspace.NewImageStore(t.TempDir())
 
-	h := NewHandler(e.svc, usage.NewStore(db), e.mem)
+	h := NewHandler(e.svc, usage.NewStore(db), e.mem).WithPurge(e.sessions, e.images)
 	e.mux = http.NewServeMux()
 	// Stand-in for identity's RequireAuth: it puts the current actor on the
 	// context exactly as the real middleware does, without needing a token.
@@ -89,6 +98,32 @@ func newEnv(t *testing.T) *env {
 	h.RegisterAuthed(authed)
 	authed.Mount(e.mux, "/api/")
 	return e
+}
+
+// sessionFor creates a session owned by u, with one run and one message (the
+// cascade proof), and cleans up its rows.
+func (e *env) sessionFor(u identity.User) session.Session {
+	e.t.Helper()
+	sess, err := e.sessions.CreateSession(context.Background(), u.ID, "purge-test")
+	if err != nil {
+		e.t.Fatalf("create session: %v", err)
+	}
+	e.t.Cleanup(func() {
+		// Idempotent: the row may already be hard-deleted by the test.
+		e.db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID)
+	})
+	run, err := e.sessions.CreateRun(context.Background(), sess.ID, 1)
+	if err != nil {
+		e.t.Fatalf("create run: %v", err)
+	}
+	e.t.Cleanup(func() {
+		e.db.Exec(`DELETE FROM runs WHERE id = $1`, run.ID)
+	})
+	if _, err := e.db.Exec(`INSERT INTO messages (session_id, run_id, seq, role, content)
+		VALUES ($1, $2, 1, 'user', '{"text":"x"}'::jsonb)`, sess.ID, run.ID); err != nil {
+		e.t.Fatalf("create message: %v", err)
+	}
+	return sess
 }
 
 // user creates an account with the given platform role.
@@ -779,6 +814,7 @@ func TestMalformedIdentifiersAreNotFoundNotServerErrors(t *testing.T) {
 		{"patch account", admin, "PATCH", "/api/admin/users/not-a-uuid", map[string]string{"display_name": "x"}, http.StatusNotFound},
 		{"delete account", admin, "DELETE", "/api/admin/users/not-a-uuid", nil, http.StatusNotFound},
 		{"reset password", admin, "POST", "/api/admin/users/not-a-uuid/password", map[string]string{"password": "long-enough"}, http.StatusNotFound},
+		{"delete session", admin, "DELETE", "/api/admin/sessions/not-a-uuid", nil, http.StatusNotFound},
 		{"delete memory", admin, "DELETE", "/api/admin/memories/not-a-uuid", nil, http.StatusNotFound},
 	}
 

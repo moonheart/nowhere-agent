@@ -273,6 +273,30 @@ func (m *MemStore) DeleteSessionForUser(_ context.Context, id, userID string) (b
 	return true, nil
 }
 
+// DeleteSession hard-deletes a session from the in-memory store.
+func (m *MemStore) DeleteSession(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.sessions[id]; !ok {
+		return ErrSessionNotFound
+	}
+	delete(m.sessions, id)
+	return nil
+}
+
+// SessionIDsForUser returns every session id the user owns.
+func (m *MemStore) SessionIDsForUser(_ context.Context, userID string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []string
+	for _, s := range m.sessions {
+		if s.UserID == userID {
+			out = append(out, s.ID)
+		}
+	}
+	return out, nil
+}
+
 func (m *MemStore) CreateRun(_ context.Context, sessionID string, seq int) (Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

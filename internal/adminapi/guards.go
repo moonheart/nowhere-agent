@@ -12,6 +12,7 @@ import (
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/providerreg"
+	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/upload"
 )
 
@@ -153,6 +154,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "upload not found")
 	case errors.Is(err, upload.ErrReferenced):
 		writeError(w, http.StatusConflict, "image is used by a conversation; delete it there first")
+	case errors.Is(err, session.ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, "session not found")
 	case identity.IsNotFound(err):
 		writeError(w, http.StatusNotFound, "not found")
 	default:

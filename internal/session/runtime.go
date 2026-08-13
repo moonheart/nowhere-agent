@@ -36,6 +36,14 @@ type Store interface {
 	// DeleteSessionForUser soft-deletes (ends) a session owned by userID,
 	// returning false if no such session exists for that user.
 	DeleteSessionForUser(ctx context.Context, id, userID string) (bool, error)
+	// DeleteSession HARD-deletes a session row; runs, messages, events,
+	// approvals, and suspended batches cascade. Used by the platform admin
+	// purge (no-data-hard-delete); the retention sweep for image cleanup goes
+	// through ListEndedSessionsEndedBefore, never here.
+	DeleteSession(ctx context.Context, id string) error
+	// SessionIDsForUser returns every session id of a user (any status), for
+	// workspace image cleanup before the user row is hard-deleted.
+	SessionIDsForUser(ctx context.Context, userID string) ([]string, error)
 	// ListIdleSessions returns active sessions with no event activity since
 	// the given time (candidates for idle-end by the scheduler).
 	ListIdleSessions(ctx context.Context, idleSinceEventBefore time.Time) ([]Session, error)
