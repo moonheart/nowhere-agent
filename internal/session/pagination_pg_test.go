@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -107,6 +108,56 @@ func TestPGStoreListSessionsSearch(t *testing.T) {
 	}
 	if len(p.Sessions) != 0 || p.NextCursor != nil {
 		t.Fatalf("q=nope -> %d sessions, cursor=%v; want empty + nil cursor", len(p.Sessions), p.NextCursor != nil)
+	}
+}
+
+// TestPGStoreListSessionsSearchAcrossPages covers the gap the single-page
+// search tests leave: a search whose hits span pages. The q term must travel
+// with the keyset cursor — page 2 continues the SAME filtered set, so the
+// walk covers every matching session exactly once and non-matches never
+// appear on either page.
+func TestPGStoreListSessionsSearchAcrossPages(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ctx := context.Background()
+	userID := pgNewUser(t, db)
+
+	// Three matches interleaved with three non-matches; updated_at orders them
+	// i=0 newest, so the hits come back in creation order.
+	for i, title := range []string{"needle one", "haystack", "needle two", "misc", "needle three", "other"} {
+		s, err := store.CreateSession(ctx, userID, title)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(
+			`UPDATE sessions SET updated_at = now() - make_interval(mins => $2) WHERE id = $1`,
+			s.ID, i+1,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var got []string
+	p1, err := store.ListSessionsByUser(ctx, userID, "needle", 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p1.Sessions) != 2 || p1.NextCursor == nil {
+		t.Fatalf("page 1 = %d sessions, cursor set = %v", len(p1.Sessions), p1.NextCursor != nil)
+	}
+	got = append(got, titlesOf(p1)...)
+
+	p2, err := store.ListSessionsByUser(ctx, userID, "needle", 2, p1.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p2.Sessions) != 1 || p2.NextCursor != nil {
+		t.Fatalf("page 2 = %d sessions, cursor set = %v", len(p2.Sessions), p2.NextCursor != nil)
+	}
+	got = append(got, titlesOf(p2)...)
+
+	if want := []string{"needle one", "needle two", "needle three"}; !slices.Equal(got, want) {
+		t.Fatalf("search walk = %v, want %v (hits only, in order, no duplicates)", got, want)
 	}
 }
 

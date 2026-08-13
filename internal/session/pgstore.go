@@ -318,6 +318,11 @@ func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string, q strin
 		WHERE user_id = $1 AND status = $2`
 	args := []any{userID, string(SessionActive)}
 	if q != "" {
+		// The leading wildcard makes the pattern non-prefix, so a plain btree
+		// index on title cannot serve it. Acceptable here: the scan is confined
+		// to ONE user's active sessions, a small set per user, so a sequential
+		// scan is cheap at the scale this serves. If it ever grows, a trigram
+		// GIN index (pg_trgm) is the upgrade path — no query change needed.
 		query += ` AND title ILIKE '%' || $` + strconv.Itoa(len(args)+1) + ` || '%'`
 		args = append(args, escapeLike(q))
 	}

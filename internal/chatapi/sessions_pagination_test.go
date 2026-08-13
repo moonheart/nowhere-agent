@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
+	"strings"
 	"testing"
 
 	"nowhere-agent/internal/agent"
@@ -132,5 +134,62 @@ func TestServeSessionsSearch(t *testing.T) {
 	}
 	if titles, code := get("nope"); code != http.StatusOK || len(titles) != 0 {
 		t.Errorf("q=nope: code=%d titles=%v, want none", code, titles)
+	}
+}
+
+// TestServeSessionsSearchAcrossPages walks a search whose hits span pages: the
+// sidebar loads a page at a time, so the q term must travel with the cursor —
+// page 2 continues the same filtered set, and non-matching sessions never
+// appear on either page (a regression the single-page search test cannot see).
+func TestServeSessionsSearchAcrossPages(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(func(context.Context, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: "searchpager"}
+
+	ctx := context.Background()
+	for _, title := range []string{"needle one", "haystack", "needle two", "misc", "needle three"} {
+		if _, err := rt.CreateSession(ctx, user.ID, title); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fetch := func(cursor string) (titles []string, next string, code int) {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/api/chat/sessions?q=needle&limit=2&cursor="+cursor, nil)
+		req = req.WithContext(identity.NewContextWithUser(req.Context(), user))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		var resp struct {
+			Sessions   []sessionDTO `json:"sessions"`
+			NextCursor string       `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		for _, s := range resp.Sessions {
+			titles = append(titles, s.Title)
+		}
+		return titles, resp.NextCursor, rec.Code
+	}
+
+	t1, cur, code := fetch("")
+	if code != http.StatusOK || len(t1) != 2 || cur == "" {
+		t.Fatalf("page 1: code=%d titles=%v cursor=%q", code, t1, cur)
+	}
+	t2, cur2, code := fetch(cur)
+	if code != http.StatusOK || len(t2) != 1 || cur2 != "" {
+		t.Fatalf("page 2: code=%d titles=%v cursor=%q", code, t2, cur2)
+	}
+	// Set equality, not order: the in-memory store ties same-instant created_at
+	// and falls back to id ordering, so exact order is not part of the contract
+	// here. The contract IS that the q term travels with the cursor: both pages
+	// contain only the three matches, exactly once, non-matches never appear.
+	got := append(append([]string{}, t1...), t2...)
+	sort.Strings(got)
+	if strings.Join(got, ",") != "needle one,needle three,needle two" {
+		t.Errorf("search walk = %v, want exactly the three matches, no duplicates, no non-matches", got)
 	}
 }
