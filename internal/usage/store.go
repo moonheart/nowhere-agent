@@ -216,11 +216,14 @@ func (s *Store) ByTeam(ctx context.Context, rng Range, limit int) ([]Row, error)
 }
 
 // DailyForUser returns an account's usage per day over the range, oldest first.
+// Buckets are UTC days (date_trunc over a timestamptz uses the CONNECTION's
+// timezone, which would split the same UTC day across two buckets on a
+// non-UTC instance — and drift from the budget's UTC month window).
 func (s *Store) DailyForUser(ctx context.Context, userID string, rng Range) ([]Row, error) {
 	from, to := rng.bounds()
 	return s.rows(ctx, `
-		SELECT to_char(date_trunc('day', r.created_at), 'YYYY-MM-DD') AS day,
-		       to_char(date_trunc('day', r.created_at), 'YYYY-MM-DD'), `+selectTokens+`
+		SELECT to_char(date_trunc('day', r.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+		       to_char(date_trunc('day', r.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD'), `+selectTokens+`
 		FROM runs r
 		JOIN sessions s ON s.id = r.session_id
 		WHERE s.user_id = $3 AND r.created_at >= $1 AND r.created_at < $2
@@ -229,11 +232,12 @@ func (s *Store) DailyForUser(ctx context.Context, userID string, rng Range) ([]R
 }
 
 // DailyForTeam returns a team's usage per day over the range, oldest first.
+// Buckets are UTC days (see DailyForUser).
 func (s *Store) DailyForTeam(ctx context.Context, teamID string, rng Range) ([]Row, error) {
 	from, to := rng.bounds()
 	return s.rows(ctx, `
-		SELECT to_char(date_trunc('day', r.created_at), 'YYYY-MM-DD') AS day,
-		       to_char(date_trunc('day', r.created_at), 'YYYY-MM-DD'), `+selectTokens+`
+		SELECT to_char(date_trunc('day', r.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+		       to_char(date_trunc('day', r.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD'), `+selectTokens+`
 		FROM runs r
 		JOIN sessions s ON s.id = r.session_id
 		WHERE (r.team_id = $3 OR (r.team_id IS NULL AND EXISTS (
@@ -245,11 +249,12 @@ func (s *Store) DailyForTeam(ctx context.Context, teamID string, rng Range) ([]R
 }
 
 // DailyTotals returns platform-wide usage per day over the range, oldest first.
+// Buckets are UTC days (see DailyForUser).
 func (s *Store) DailyTotals(ctx context.Context, rng Range) ([]Row, error) {
 	from, to := rng.bounds()
 	return s.rows(ctx, `
-		SELECT to_char(date_trunc('day', r.created_at), 'YYYY-MM-DD') AS day,
-		       to_char(date_trunc('day', r.created_at), 'YYYY-MM-DD'), `+selectTokens+`
+		SELECT to_char(date_trunc('day', r.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+		       to_char(date_trunc('day', r.created_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD'), `+selectTokens+`
 		FROM runs r
 		WHERE r.created_at >= $1 AND r.created_at < $2
 		GROUP BY day

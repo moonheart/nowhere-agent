@@ -335,6 +335,41 @@ func TestDailyForUserBucketsByDay(t *testing.T) {
 	}
 }
 
+// TestDailyBucketsAreUTCDays pins the bucketing timezone: daily buckets must be
+// UTC days regardless of the connection's TimeZone. The store reads through a
+// pool pinned to America/New_York, where a run at 2026-03-10 00:30 UTC is still
+// 2026-03-09 — date_trunc over a timestamptz would split it into the wrong
+// bucket (and drift from the budget's UTC month window) without the explicit
+// AT TIME ZONE 'UTC'.
+func TestDailyBucketsAreUTCDays(t *testing.T) {
+	tzDB, err := sql.Open("pgx", testDSN()+"&timezone=America/New_York")
+	if err != nil {
+		t.Fatalf("open tz-pinned db: %v", err)
+	}
+	t.Cleanup(func() { tzDB.Close() })
+	f := newFixture(t, tzDB)
+	store := NewStore(tzDB)
+
+	// 00:30 UTC on March 10 — still March 9 in New York.
+	at := time.Date(2026, 3, 10, 0, 30, 0, 0, time.UTC)
+	f.addRun(t, at, ip(7), ip(1), nil, nil)
+
+	rows, err := store.DailyForUser(context.Background(), f.UserID,
+		Range{From: at.Add(-time.Hour), To: at.Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("DailyForUser: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1", len(rows))
+	}
+	if rows[0].ID != "2026-03-10" {
+		t.Fatalf("bucket = %q, want the UTC day 2026-03-10 (connection tz would say 2026-03-09)", rows[0].ID)
+	}
+	if rows[0].Tokens.Input != 7 {
+		t.Errorf("bucket input = %d, want 7", rows[0].Tokens.Input)
+	}
+}
+
 func TestTotalsCoversAllUsers(t *testing.T) {
 	db := pgTestDB(t)
 	store := NewStore(db)
