@@ -1,5 +1,6 @@
 import { useMemo, type FC } from "react";
 import type { TextMessagePartProps } from "@assistant-ui/react";
+import DOMPurify from "dompurify";
 import { marked } from "marked";
 
 // GFM so the model's tables/strikethrough/task-lists render; breaks so single
@@ -13,12 +14,17 @@ marked.setOptions({ gfm: true, breaks: true });
  * and tool calls keep their own components).
  */
 export const MarkdownText: FC<TextMessagePartProps> = ({ text }) => {
-  const html = useMemo(() => marked.parse(text) as string, [text]);
+  const html = useMemo(() => {
+    const raw = marked.parse(text) as string;
+    // marked (v5+) does NOT escape raw HTML — it passes tags straight
+    // through — and its sanitize option was removed; model output (chat text,
+    // tool results, subagent parts) is therefore untrusted and must be
+    // stripped before it lands in dangerouslySetInnerHTML.
+    return DOMPurify.sanitize(raw);
+  }, [text]);
   return (
     <div
       className="markdown-body leading-relaxed"
-      // Content is model output rendered into the user's own session; marked
-      // escapes raw HTML by default, so this stays inert.
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
