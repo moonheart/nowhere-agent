@@ -2,7 +2,6 @@ package identity
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -94,8 +93,7 @@ func (h *PhoneHandler) serveRequestCode(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req phoneRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+	if !readAuthBody(w, r, &req) {
 		return
 	}
 	phone := NormalizePhone(req.Phone)
@@ -131,8 +129,7 @@ func (h *PhoneHandler) serveRequestCode(w http.ResponseWriter, r *http.Request) 
 
 func (h *PhoneHandler) serveVerify(w http.ResponseWriter, r *http.Request) {
 	var req phoneVerifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+	if !readAuthBody(w, r, &req) {
 		return
 	}
 	phone := NormalizePhone(req.Phone)

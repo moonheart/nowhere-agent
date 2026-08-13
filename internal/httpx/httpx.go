@@ -18,11 +18,32 @@ package httpx
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 )
 
 // Middleware is the standard http middleware shape.
 type Middleware = func(http.Handler) http.Handler
+
+// ErrBodyTooLarge is returned by ReadBodyMax when the request body exceeds the
+// bound. Callers map it to HTTP 413 (request entity too large) before decoding.
+var ErrBodyTooLarge = errors.New("request body too large")
+
+// ReadBodyMax reads the request body bounded at maxBytes. A body beyond the
+// bound must surface as "too large" (ErrBodyTooLarge), never as truncated
+// invalid JSON — callers decode the returned bytes after checking the error.
+// The LimitReader reads at most maxBytes+1, so an oversized body is detected
+// without buffering the whole request.
+func ReadBodyMax(r *http.Request, maxBytes int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, ErrBodyTooLarge
+	}
+	return body, nil
+}
 
 // JSON writes v as a JSON response with the given status. It is the single
 // wire-format home for API bodies; per-package writeJSON helpers delegate here

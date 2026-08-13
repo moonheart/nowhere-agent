@@ -2,6 +2,7 @@ package chatapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"nowhere-agent/internal/httpx"
@@ -35,7 +36,18 @@ func (h *Handler) serveSetSessionState(w http.ResponseWriter, r *http.Request) {
 		Key   string          `json:"key"`
 		Value json.RawMessage `json:"value"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	// Bound the state write at 4 MiB, the same as the chat request body —
+	// the value is a settings blob, never a file payload.
+	raw, err := httpx.ReadBodyMax(r, 4<<20)
+	if err != nil {
+		if errors.Is(err, httpx.ErrBodyTooLarge) {
+			http.Error(w, `{"error":"payload too large"}`, http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}

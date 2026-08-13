@@ -61,6 +61,24 @@ func TestServeChatStreamsUIProtocol(t *testing.T) {
 	}
 }
 
+func TestServeChatRejectsOversizedBody(t *testing.T) {
+	h := NewHandler(newTestLoop, "sys")
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	// A body over the 4 MiB chat bound must answer 413, not a truncated-json
+	// 400 — an attacker cannot push unbounded bytes through the chat POST.
+	big := strings.Repeat("x", 4<<20)
+	body := `{"messages":[{"role":"user","content":"` + big + `"}]}`
+	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d body=%s, want 413", rec.Code, rec.Body.String())
+	}
+}
+
 func TestToHistoryExtractsText(t *testing.T) {
 	req := dataStreamRequest{
 		Messages: []incomingMessage{

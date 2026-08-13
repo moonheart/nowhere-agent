@@ -98,8 +98,21 @@ func (h *Handler) authorizeSkillScope(w http.ResponseWriter, r *http.Request, id
 
 // ---- request plumbing ----
 
+// maxBodyBytes bounds a skill-management request body at 1 MiB (the same
+// bound scheduleapi/agentdefapi use); larger bodies get 413 before decoding.
+const maxBodyBytes = 1 << 20
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	body, err := httpx.ReadBodyMax(r, maxBodyBytes)
+	if err != nil {
+		if errors.Is(err, httpx.ErrBodyTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return false
+	}
+	if err := json.Unmarshal(body, v); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return false
 	}

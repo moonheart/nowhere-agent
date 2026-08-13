@@ -124,10 +124,33 @@ func toTeamMembershipDTOs(teams []TeamWithRole) []teamMembershipDTO {
 	return out
 }
 
+// maxAuthBodyBytes bounds an auth request body at 1 MiB. Credential payloads
+// are tiny (email, password, codes); anything larger gets 413 before decoding.
+const maxAuthBodyBytes = 1 << 20
+
+// readAuthBody decodes a JSON auth body into v, answering the response itself
+// on failure: 413 for an oversized body (never decoded as truncated JSON),
+// 400 for unreadable or malformed input.
+func readAuthBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	body, err := httpx.ReadBodyMax(r, maxAuthBodyBytes)
+	if err != nil {
+		if errors.Is(err, httpx.ErrBodyTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return false
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return false
+	}
+	return true
+}
+
 func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 	var req credentialsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
+	if !readAuthBody(w, r, &req) {
 		return
 	}
 	if req.Email == "" || req.Password == "" {
@@ -155,8 +178,7 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	var req credentialsRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
+	if !readAuthBody(w, r, &req) {
 		return
 	}
 	// Login throttling gate: a locked (email, ip) pair is refused before any
@@ -249,8 +271,7 @@ func (h *Handler) totpVerify(w http.ResponseWriter, r *http.Request) {
 		TotpToken string `json:"totp_token"`
 		Code      string `json:"code"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
+	if !readAuthBody(w, r, &req) {
 		return
 	}
 	token, u, err := h.svc.CompleteTOTPChallenge(r.Context(), req.TotpToken, req.Code)

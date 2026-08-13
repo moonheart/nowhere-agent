@@ -302,8 +302,20 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	// maxChatBodyBytes bounds the chat request (history, tool args, context)
+	// at 4 MiB — images ride the dedicated upload endpoints, not this body.
+	const maxChatBodyBytes = 4 << 20
 	var req dataStreamRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := httpx.ReadBodyMax(r, maxChatBodyBytes)
+	if err != nil {
+		if errors.Is(err, httpx.ErrBodyTooLarge) {
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}

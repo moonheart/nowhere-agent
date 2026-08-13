@@ -97,10 +97,24 @@ func caller(r *http.Request) identity.User {
 
 // ---- request plumbing ----
 
+// maxBodyBytes bounds an admin-management request body at 1 MiB (the same
+// bound scheduleapi/agentdefapi use); larger bodies get 413 before decoding.
+const maxBodyBytes = 1 << 20
+
 // decode reads a JSON body into v, answering 400 and reporting false on
-// malformed input.
+// malformed input. An oversized body answers 413 instead of decoding a
+// truncated blob.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	body, err := httpx.ReadBodyMax(r, maxBodyBytes)
+	if err != nil {
+		if errors.Is(err, httpx.ErrBodyTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return false
+	}
+	if err := json.Unmarshal(body, v); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return false
 	}
