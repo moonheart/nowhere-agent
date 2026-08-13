@@ -11,6 +11,8 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -316,6 +318,42 @@ func TestQuotaZeroCapsAreUnlimited(t *testing.T) {
 	list, _ := s.List(ctx, userID)
 	if len(list) != 3 {
 		t.Errorf("list = %+v, want all three uploads", list)
+	}
+}
+
+// failCreateStore wraps a Store and fails every Create, simulating the
+// metadata-insert failure that leaves a written blob unreferenced.
+type failCreateStore struct {
+	Store
+}
+
+func (f failCreateStore) Create(context.Context, Upload) (Upload, error) {
+	return Upload{}, errors.New("simulated record insert failure")
+}
+
+// TestUploadCompensatesOrphanBlob: when the record insert fails after the blob
+// landed, the blob must be removed again — a failed upload must not leak an
+// orphan blob that quota (record-based) can never reclaim.
+func TestUploadCompensatesOrphanBlob(t *testing.T) {
+	db := pgTestDB(t)
+	blobs := workspace.NewImageStore(t.TempDir())
+	s := NewService(failCreateStore{NewPGStore(db)}, blobs, nil)
+	userID := createUser(t, db)
+
+	if _, err := s.Upload(context.Background(), userID, "photo.png", makePNG(t)); err == nil {
+		t.Fatal("upload should fail when the record insert fails")
+	}
+	// The blob must have been compensated away: nothing exists under the
+	// user's upload scope (<root>/__uploads__/<userID>).
+	userDir := filepath.Join(blobs.Root(), "__uploads__", userID)
+	entries, err := os.ReadDir(userDir)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read upload scope: %v", err)
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".webp") {
+			t.Errorf("blob %s left behind after failed upload (orphan not compensated)", e.Name())
+		}
 	}
 }
 

@@ -56,7 +56,9 @@ var ErrQuotaExceeded = errors.New("upload: per-user quota exceeded")
 // Upload validates the image bytes via the blob store (which WebP-normalizes),
 // then records the metadata row under the same id the blob path carries. The
 // per-user quota is enforced BEFORE any blob is written, so an over-quota
-// attempt costs nothing.
+// attempt costs nothing. If the record insert fails after the blob landed, the
+// blob is removed again — a failed upload must not leak an orphan blob (quota
+// counts only records, so an orphan would also be unreclaimable by the user).
 func (s *Service) Upload(ctx context.Context, userID, name string, raw []byte) (Upload, error) {
 	if s.quota != nil {
 		q := s.quota()
@@ -79,7 +81,16 @@ func (s *Service) Upload(ctx context.Context, userID, name string, raw []byte) (
 		MediaType: "image/webp",
 		CreatedAt: time.Now().UTC(),
 	}
-	return s.store.Create(ctx, u)
+	created, err := s.store.Create(ctx, u)
+	if err != nil {
+		// Compensate: the blob is written but the record never existed, so no
+		// retry of Create can ever reference it. Best-effort — a cleanup
+		// failure is logged by the blob store, and the orphan is bounded (one
+		// file per failed insert).
+		_ = s.blobs.DeleteUserUpload(userID, id)
+		return Upload{}, err
+	}
+	return created, nil
 }
 
 // checkQuota rejects the upload when the user already holds the max file count
