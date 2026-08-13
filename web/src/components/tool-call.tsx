@@ -37,6 +37,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { cn } from "@/lib/utils";
+import { t } from "@/lib/i18n";
 
 /**
  * Renders a tool call (file read/write, etc.) as a collapsible block in the
@@ -332,7 +333,7 @@ const QueuedNote: FC = () => (
   <div className="flex items-center gap-2 border-t border-amber-500/30 px-3 py-2.5">
     <ShieldAlert className="size-4 shrink-0 text-amber-600/60 dark:text-amber-500/60" />
     <p className="text-[13px] text-muted-foreground">
-      Waiting for the earlier approval above…
+      {t("approval.waitingEarlier")}
     </p>
   </div>
 );
@@ -373,7 +374,7 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
         <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-500" />
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium text-amber-700 dark:text-amber-400">
-            Approve running <span className="font-mono">{approval.toolName}</span>?
+            {t("approval.approveRunning", { tool: approval.toolName })}
           </p>
           {argsText && (
             <pre className="mt-1 max-h-24 overflow-y-auto rounded bg-amber-500/10 p-1.5 font-mono text-[11px] break-all whitespace-pre-wrap text-amber-800 dark:text-amber-300">
@@ -386,7 +387,7 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
               disabled={busy !== null}
               onClick={() => void decide(true)}
             >
-              {busy === "approve" ? "Approving…" : "Approve"}
+              {busy === "approve" ? t("approval.approving") : t("approval.approve")}
             </Button>
             <Button
               size="sm"
@@ -394,7 +395,7 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
               disabled={busy !== null}
               onClick={() => void decide(false)}
             >
-              {busy === "deny" ? "Denying…" : "Deny"}
+              {busy === "deny" ? t("approval.denying") : t("approval.deny")}
             </Button>
           </div>
           {error && (
@@ -443,7 +444,7 @@ const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
       {failure ? (
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium text-destructive">
-            <span className="font-mono">{approval.toolName}</span> failed in your browser
+            {t("clientTool.failedInBrowser", { tool: approval.toolName })}
           </p>
           <p className="mt-0.5 text-[12px] text-muted-foreground">{failure}</p>
           <Button
@@ -453,12 +454,12 @@ const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
             disabled={retrying}
             onClick={() => void retry()}
           >
-            {retrying ? "Retrying…" : "Retry"}
+            {retrying ? t("clientTool.retrying") : t("clientTool.retry")}
           </Button>
         </div>
       ) : (
         <p className="text-[13px] text-sky-700 dark:text-sky-300">
-          Running <span className="font-mono">{approval.toolName}</span> in your browser…
+          {t("clientTool.runningInBrowser", { tool: approval.toolName })}
         </p>
       )}
     </div>
@@ -584,8 +585,8 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
                   value={customText}
                   disabled={busy}
                   onChange={(e) => setCustomAnswer(qi, e.target.value)}
-                  placeholder="Or type your own answer…"
-                  aria-label="Custom answer"
+                  placeholder={t("ask.customPlaceholder")}
+                  aria-label={t("ask.customAria")}
                   className="mt-1.5 h-7 bg-background text-xs"
                 />
               </div>
@@ -593,7 +594,7 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
           })}
           <div className="flex gap-2 pt-1">
             <Button size="sm" disabled={busy} onClick={() => void submit()}>
-              {busy ? "Sending…" : "Submit"}
+              {busy ? t("ask.sending") : t("ask.submit")}
             </Button>
             <Button
               size="sm"
@@ -601,7 +602,7 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
               disabled={busy}
               onClick={() => void skip()}
             >
-              Skip
+              {t("ask.skip")}
             </Button>
           </div>
           {error && (

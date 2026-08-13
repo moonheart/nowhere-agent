@@ -47,6 +47,26 @@ export type I18nKey =
   | "chat.noMatches"
   | "chat.noMatchesHint"
   | "chat.deleteConversation"
+  | "chat.deleteFailed"
+  | "chat.untitled"
+  | "chat.searching"
+  | "chat.loadingMore"
+  | "chat.webpImage"
+  | "approval.approveRunning"
+  | "approval.approve"
+  | "approval.approving"
+  | "approval.deny"
+  | "approval.denying"
+  | "approval.waitingEarlier"
+  | "clientTool.failedInBrowser"
+  | "clientTool.runningInBrowser"
+  | "clientTool.retry"
+  | "clientTool.retrying"
+  | "ask.submit"
+  | "ask.sending"
+  | "ask.skip"
+  | "ask.customPlaceholder"
+  | "ask.customAria"
   | "profile.exportData"
   | "login.phone"
   | "login.phoneSubtitle"
@@ -117,6 +137,26 @@ const zh: Record<I18nKey, string> = {
   "chat.noMatches": "没有匹配结果",
   "chat.noMatchesHint": "没有与「{term}」匹配的内容。",
   "chat.deleteConversation": "删除对话",
+  "chat.deleteFailed": "无法删除对话，请重试。",
+  "chat.untitled": "未命名",
+  "chat.searching": "搜索中…",
+  "chat.loadingMore": "加载中…",
+  "chat.webpImage": "WebP 图片",
+  "approval.approveRunning": "批准运行 {tool}？",
+  "approval.approve": "批准",
+  "approval.approving": "批准中…",
+  "approval.deny": "拒绝",
+  "approval.denying": "拒绝中…",
+  "approval.waitingEarlier": "等待上方的审批完成…",
+  "clientTool.failedInBrowser": "{tool} 在浏览器中执行失败",
+  "clientTool.runningInBrowser": "正在浏览器中运行 {tool}…",
+  "clientTool.retry": "重试",
+  "clientTool.retrying": "重试中…",
+  "ask.submit": "提交",
+  "ask.sending": "发送中…",
+  "ask.skip": "跳过",
+  "ask.customPlaceholder": "或输入你自己的回答…",
+  "ask.customAria": "自定义回答",
   "profile.exportData": "导出我的数据",
   "login.phone": "手机号",
   "login.phoneSubtitle": "使用手机号 + 验证码登录或注册。",
@@ -188,6 +228,26 @@ const en: Record<I18nKey, string> = {
   "chat.noMatches": "No matches",
   "chat.noMatchesHint": "Nothing matches “{term}”.",
   "chat.deleteConversation": "Delete conversation",
+  "chat.deleteFailed": "Couldn’t delete the conversation — try again.",
+  "chat.untitled": "Untitled",
+  "chat.searching": "Searching…",
+  "chat.loadingMore": "Loading…",
+  "chat.webpImage": "WebP image",
+  "approval.approveRunning": "Approve running {tool}?",
+  "approval.approve": "Approve",
+  "approval.approving": "Approving…",
+  "approval.deny": "Deny",
+  "approval.denying": "Denying…",
+  "approval.waitingEarlier": "Waiting for the earlier approval above…",
+  "clientTool.failedInBrowser": "{tool} failed in your browser",
+  "clientTool.runningInBrowser": "Running {tool} in your browser…",
+  "clientTool.retry": "Retry",
+  "clientTool.retrying": "Retrying…",
+  "ask.submit": "Submit",
+  "ask.sending": "Sending…",
+  "ask.skip": "Skip",
+  "ask.customPlaceholder": "Or type your own answer…",
+  "ask.customAria": "Custom answer",
   "profile.exportData": "Export my data",
   "login.phone": "Phone",
   "login.phoneSubtitle": "Sign in or register with a mobile number and one-time code.",

@@ -400,7 +400,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
                 </AttachmentMedia>
                 <AttachmentContent>
                   <AttachmentTitle>{p.name}</AttachmentTitle>
-                  <AttachmentDescription>WebP image</AttachmentDescription>
+                  <AttachmentDescription>{t("chat.webpImage")}</AttachmentDescription>
                 </AttachmentContent>
                 <AttachmentActions>
                   <AttachmentAction

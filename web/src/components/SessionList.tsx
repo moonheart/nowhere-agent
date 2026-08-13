@@ -158,7 +158,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
     // and covers gateways that predate the server-side cancel. Best-effort.
     await cancelSession(id);
     if (!(await deleteSession(id))) {
-      reportNotice("Could not delete the conversation — try again.");
+      reportNotice(t("chat.deleteFailed"));
       return;
     }
     if (id === currentId) {
@@ -243,7 +243,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
           {loading && sessions.length > 0 && (
             <div className="flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground">
               <Loader2 className="size-3.5 animate-spin" />
-              Searching…
+              {t("chat.searching")}
             </div>
           )}
           <ul className="flex flex-col gap-0.5">
@@ -276,7 +276,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
                     <ItemContent className="min-w-0 gap-0.5">
                       <ItemTitle className="w-full min-w-0">
                         <span className="truncate">
-                          {s.title || "Untitled"}
+                          {s.title || t("chat.untitled")}
                         </span>
                       </ItemTitle>
                       <ItemDescription className="text-xs">
@@ -305,7 +305,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
           {loadingMore && (
             <div className="flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground">
               <Loader2 className="size-3.5 animate-spin" />
-              Loading…
+              {t("chat.loadingMore")}
             </div>
           )}
         </div>
