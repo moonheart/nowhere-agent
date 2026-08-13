@@ -121,7 +121,7 @@ func (tr *Trigger) WithTeamAttributor(a TeamAttributor) *Trigger {
 // WithBudgetGate wires monthly token-budget enforcement (P1-1): before a firing
 // starts spending, the gate checks the task owner's (and billing team's)
 // current-month usage and skips over-budget firings. A skipped firing is logged
-// and left due so it retries on the next scan once the window rolls or the
+// and requeued so it retries on the next scan once the window rolls or the
 // budget is raised — it is not a hard failure of the trigger.
 func (tr *Trigger) WithBudgetGate(g BudgetChecker) *Trigger {
 	tr.budgetGate = g
@@ -260,25 +260,27 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 
 	// Pending-interaction gate (capability suspend-batch-snapshot): a session
 	// with undecided interactions rejects new submissions — a scheduled firing
-	// must not bury a human's pending approval either. Skip this firing; the
-	// task stays due and retries on the next scan. Fail-open on a store error,
-	// mirroring the budget gate.
+	// must not bury a human's pending approval either. Skip this firing and
+	// requeue it so the next scan retries (a claim already advanced the
+	// schedule). Fail-open on a store error, mirroring the budget gate.
 	if pending, err := tr.registry.PendingApprovalsForSession(ctx, sessID); err == nil && len(pending) > 0 {
 		tr.log.Info("schedule: session has pending interactions, skipping firing", "task", task.ID, "session", sessID, "pending", len(pending))
 		tr.cleanupFreshSession(ctx, task, sessID)
+		tr.requeue(ctx, task)
 		return nil
 	}
 
 	// Build the whitelisted loop and submit through the shared registry — from
 	// here on it is byte-identical to a human chat run. A loop build failure
-	// (unresolvable provider/model) fails this firing; the task stays due and
-	// retries on the next scan once the operator fixes the reference.
+	// (unresolvable provider/model) fails this firing; the task is requeued so
+	// the next scan retries once the operator fixes the reference.
 	loop, err := tr.buildLoop(ctx, task, system, model)
 	if err != nil {
 		if fresh {
 			tr.cleanupFreshSession(ctx, task, sessID)
 		}
 		tr.log.Warn("schedule: loop build failed", "task", task.ID, "err", err)
+		tr.requeue(ctx, task)
 		return err
 	}
 	if tr.bindTools != nil {
@@ -293,13 +295,17 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 	}
 	// Budget gate (P1-1): skip this firing when the owner's (or billing team's)
 	// monthly budget is met. Fail-open inside the checker means an error here is
-	// a real limit, so we leave the task due (it retries next scan) rather than
-	// error the sweep — one over-budget task must not stall the others.
+	// a real limit: the budget-exceeded skip is requeued so the next scan
+	// retries once the window rolls or the budget is raised — one over-budget
+	// task must not stall the others, and the claimed slot must not burn a day.
+	// A non-budget error surfaces as a fire failure (sweep logs it) and is left
+	// claimed: an unhealthy checker must not hot-loop the scan.
 	if tr.budgetGate != nil {
 		if err := tr.budgetGate(ctx, task.UserID, teamID); err != nil {
 			if errors.Is(err, quota.ErrBudgetExceeded) {
 				tr.log.Warn("schedule: budget exceeded, skipping firing", "task", task.ID, "user", task.UserID, "team", teamID, "err", err)
 				tr.cleanupFreshSession(ctx, task, sessID)
+				tr.requeue(ctx, task)
 				return nil
 			}
 			tr.cleanupFreshSession(ctx, task, sessID)
@@ -446,6 +452,18 @@ func (tr *Trigger) cleanupFreshSession(ctx context.Context, task Task, sessID st
 		if _, err := tr.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, sessID); err != nil {
 			tr.log.Warn("schedule: cleanup fresh session failed", "session", sessID, "err", err)
 		}
+	}
+}
+
+// requeue pushes a claimed-but-skipped task's next_run_at back to now so the
+// next scan retries it. Claim already advanced the schedule; a pre-submit skip
+// (budget gate, pending interaction, loop build failure) must not burn the slot
+// the claim consumed — a daily task would otherwise wait 24h for its next
+// chance. Best-effort: a requeue failure is logged, never allowed to mask the
+// skip (the sweep already logged its reason).
+func (tr *Trigger) requeue(ctx context.Context, task Task) {
+	if err := tr.store.RequeueDue(ctx, task.ID, tr.now()); err != nil {
+		tr.log.Warn("schedule: requeue skipped task failed", "task", task.ID, "err", err)
 	}
 }
 

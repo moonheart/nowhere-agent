@@ -59,6 +59,13 @@ type Store interface {
 	// already claimed by a racing instance) — the caller treats that as "skip",
 	// not an error (design D4).
 	Claim(ctx context.Context, id string, now time.Time) (Task, error)
+	// RequeueDue pushes a claimed-but-skipped task's NextRunAt back to `now` so
+	// the next scan retries it. Claim already advanced the schedule; a
+	// pre-submit skip (budget gate, pending interaction, loop build failure)
+	// must not burn the slot the claim consumed — a daily task would otherwise
+	// wait 24h for its next chance. ErrNotFound when the task no longer exists
+	// (deleted between claim and requeue — a fine no-op).
+	RequeueDue(ctx context.Context, id string, now time.Time) error
 	// ListSessions returns the ids of active sessions a task produced, newest
 	// first. Ended (cleared) sessions are hidden, matching the sidebar's rule.
 	ListSessions(ctx context.Context, taskID string) ([]string, error)
@@ -232,6 +239,25 @@ func (s *PGStore) Claim(ctx context.Context, id string, now time.Time) (Task, er
 		  AND (end_time IS NULL OR end_time > $3)
 		RETURNING `+taskCols, id, next, now)
 	return scanTask(row)
+}
+
+// RequeueDue pushes a task's next_run_at back to `now` so the next scan picks
+// it up again — the counterweight to Claim for pre-submit skips (design note:
+// a skip must not burn the slot the claim consumed). A zero-row update means
+// the task vanished between claim and requeue; ErrNotFound is fine there.
+func (s *PGStore) RequeueDue(ctx context.Context, id string, now time.Time) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE scheduled_task SET next_run_at = $2, updated_at = now() WHERE id = $1`, id, now)
+	if err != nil {
+		if identity.IsMalformedID(err) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("requeue task: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListSessions returns the ids of active sessions a task produced, newest
@@ -567,6 +593,19 @@ func (m *MemStore) Claim(ctx context.Context, id string, now time.Time) (Task, e
 	t.UpdatedAt = now
 	m.tasks[id] = t
 	return t, nil
+}
+
+// RequeueDue pushes the task's NextRunAt back to `now` (MemStore mirror of the
+// PG skip-path counterweight to Claim).
+func (m *MemStore) RequeueDue(ctx context.Context, id string, now time.Time) error {
+	t, ok := m.tasks[id]
+	if !ok {
+		return ErrNotFound
+	}
+	t.NextRunAt = now
+	t.UpdatedAt = now
+	m.tasks[id] = t
+	return nil
 }
 
 func (m *MemStore) ListSessions(ctx context.Context, taskID string) ([]string, error) {
