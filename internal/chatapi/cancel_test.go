@@ -249,6 +249,39 @@ func TestCancelRequiresThreadID(t *testing.T) {
 	}
 }
 
+// TestDeleteSessionCancelsActiveRun is the regression test for deleting a
+// session with an in-flight run: the DELETE must cancel the run (like the
+// Stop button) before soft-deleting the session, so a deleted conversation
+// cannot keep generating headless in the background.
+func TestDeleteSessionCancelsActiveRun(t *testing.T) {
+	h, rt, pp := newParkedHandler()
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: testUserID}
+
+	sessID, wait := startParkedChat(t, mux, h, user)
+	<-pp.start // run is mid-stream
+
+	req := httptest.NewRequest("DELETE", "/api/chat/sessions/"+sessID, nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	wait() // the chat handler unwinds once the run is cancelled
+
+	// The run settled as cancelled, not failed/done — the delete interrupted it.
+	runs, err := rt.RunsForSession(context.Background(), sessID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Status != session.RunCancelled {
+		t.Errorf("run status = %+v want cancelled", runs)
+	}
+}
+
 // dripProvider streams text deltas indefinitely until its ctx is cancelled —
 // a generation that never finishes on its own, so the only way the run settles
 // is via cancellation (Stop / client disconnect).

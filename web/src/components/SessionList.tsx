@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, MessageSquare, Plus, Search, Trash2 } from "lucide-react";
 import {
+  cancelSession,
   deleteSession,
   listSessions,
   relTime,
@@ -152,6 +153,10 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   }, [loadMore]);
 
   const handleDelete = async (id: string) => {
+    // Cancel any in-flight run first: the server also cancels on delete, but
+    // the client-side cancel keeps the run from streaming into a deleting UI
+    // and covers gateways that predate the server-side cancel. Best-effort.
+    await cancelSession(id);
     if (!(await deleteSession(id))) {
       reportNotice("Could not delete the conversation — try again.");
       return;

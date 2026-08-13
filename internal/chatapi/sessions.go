@@ -112,9 +112,11 @@ func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveDeleteSession handles DELETE /api/chat/sessions/{id}: it soft-deletes
-// (ends) a session the caller owns, removing it from their sidebar. It returns
-// 404 when the session doesn't exist or belongs to someone else (indistinguishable
-// to avoid leaking existence), 204 on success.
+// (ends) a session the caller owns, removing it from their sidebar. An active
+// run is cancelled first, so a deleted conversation does not keep generating
+// headless in the background. It returns 404 when the session doesn't exist or
+// belongs to someone else (indistinguishable to avoid leaking existence), 204
+// on success.
 func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
 		http.Error(w, `{"error":"sessions unavailable"}`, http.StatusServiceUnavailable)
@@ -129,6 +131,18 @@ func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
 		return
+	}
+
+	// A session with an in-flight run must be cancelled before the soft delete:
+	// ending the session only hides it from the sidebar, while the run would
+	// otherwise keep executing headless — model generating, tools running —
+	// until it settles on its own. Cancel is transport-independent (the same
+	// path the Stop button uses). It runs only after the ownership check, so a
+	// DELETE on a foreign session cannot cancel someone else's run; existence
+	// and ownership stay indistinguishable (both 404), matching the
+	// DeleteSessionForUser contract below.
+	if s, err := h.runtime.GetSession(r.Context(), id); err == nil && sessionVisibleTo(s, user.ID) && h.registry != nil {
+		h.registry.Cancel(id)
 	}
 
 	deleted, err := h.runtime.DeleteSessionForUser(r.Context(), id, user.ID)
