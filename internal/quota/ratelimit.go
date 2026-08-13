@@ -28,6 +28,13 @@ type RateLimiter struct {
 
 	mu      sync.Mutex
 	buckets map[string]*bucket
+
+	// sweepOnce starts the bucket-sweep goroutine exactly once, on the first
+	// time the limiter is (or becomes) enabled. sweepInterval/sweepTTL are the
+	// sweep cadence (defaults in NewRateLimiter; tests shrink them).
+	sweepOnce     sync.Once
+	sweepInterval time.Duration
+	sweepTTL      time.Duration
 }
 
 // bucket is one key's limiter plus the last time it was seen, so the sweeper can
@@ -40,22 +47,34 @@ type bucket struct {
 // NewRateLimiter builds a limiter allowing rps requests per second sustained with
 // a burst of burst, keyed by keyFn. rps <= 0 or burst <= 0 disables limiting
 // (Middleware passes everything through). A sweeper goroutine reclaims idle
-// buckets; call Close to stop it.
+// buckets; it starts on the first enable — at construction when the limiter
+// boots enabled, or the first time SetRate turns a disabled limiter on — so a
+// limiter enabled live from the admin console still converges.
 func NewRateLimiter(rps float64, burst int, keyFn KeyFunc) *RateLimiter {
 	rl := &RateLimiter{
-		rps:     rate.Limit(rps),
-		burst:   burst,
-		keyFn:   keyFn,
-		now:     func() time.Time { return time.Now().UTC() },
-		buckets: make(map[string]*bucket),
+		rps:           rate.Limit(rps),
+		burst:         burst,
+		keyFn:         keyFn,
+		now:           func() time.Time { return time.Now().UTC() },
+		buckets:       make(map[string]*bucket),
+		sweepInterval: time.Minute,
+		sweepTTL:      10 * time.Minute,
 	}
 	if rl.enabled() {
-		go rl.sweep()
+		rl.ensureSweep()
 	}
 	return rl
 }
 
 func (rl *RateLimiter) enabled() bool { return rl != nil && rl.rps > 0 && rl.burst > 0 }
+
+// ensureSweep starts the bucket-sweep goroutine once, the first time the
+// limiter is enabled. A limiter constructed disabled and enabled later via
+// SetRate must still reclaim idle buckets — otherwise the bucket map grows
+// forever once limiting is turned on from the console.
+func (rl *RateLimiter) ensureSweep() {
+	rl.sweepOnce.Do(func() { go rl.sweep() })
+}
 
 // SetClock overrides the limiter clock (tests).
 func (rl *RateLimiter) SetClock(now func() time.Time) {
@@ -81,14 +100,19 @@ func (rl *RateLimiter) bucketFor(key string) *rate.Limiter {
 // NEW buckets immediately, and every existing bucket's rate is adjusted
 // (x/time/rate's SetLimit). Burst changes apply to new buckets; existing
 // buckets keep their burst until the sweeper evicts them (≤10 minutes), which
-// is the documented convergence window for a live retune.
+// is the documented convergence window for a live retune. The first time a
+// disabled limiter is enabled here, the bucket sweeper starts (see ensureSweep).
 func (rl *RateLimiter) SetRate(rps float64, burst int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	wasEnabled := rl.enabled()
 	rl.rps = rate.Limit(rps)
 	rl.burst = burst
 	for _, b := range rl.buckets {
 		b.lim.SetLimit(rl.rps)
+	}
+	if !wasEnabled && rl.enabled() {
+		rl.ensureSweep()
 	}
 }
 
@@ -97,13 +121,11 @@ func (rl *RateLimiter) SetRate(rps float64, burst int) {
 // bucket is evicted simply gets a fresh (full) bucket on its next request, which
 // is the same state it would have after refilling during that idle time.
 func (rl *RateLimiter) sweep() {
-	const interval = time.Minute
-	const ttl = 10 * time.Minute
-	t := time.NewTicker(interval)
+	t := time.NewTicker(rl.sweepInterval)
 	defer t.Stop()
 	for range t.C {
 		rl.mu.Lock()
-		cutoff := rl.now().Add(-ttl)
+		cutoff := rl.now().Add(-rl.sweepTTL)
 		for k, b := range rl.buckets {
 			if b.lastSeen.Before(cutoff) {
 				delete(rl.buckets, k)

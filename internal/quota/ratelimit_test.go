@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/trustedproxy"
 )
@@ -14,6 +15,25 @@ func TestRateLimiterDisabledPassesEverything(t *testing.T) {
 		if !rl.Allow("k") {
 			t.Fatal("disabled limiter must allow everything")
 		}
+	}
+}
+
+// A limiter constructed DISABLED and enabled live via SetRate (the admin
+// console path in main.go) must still start its bucket sweeper — otherwise
+// every key seen while limiting is on accumulates a bucket forever.
+func TestRateLimiterSweepStartsOnSetRateEnable(t *testing.T) {
+	rl := NewRateLimiter(0, 0, nil)
+	rl.sweepInterval = 10 * time.Millisecond
+	rl.sweepTTL = 30 * time.Millisecond
+	rl.SetRate(10, 5)
+
+	rl.Allow("stale")
+	time.Sleep(150 * time.Millisecond)
+	rl.mu.Lock()
+	_, ok := rl.buckets["stale"]
+	rl.mu.Unlock()
+	if ok {
+		t.Fatal("idle bucket survived SetRate-enable: the sweep goroutine never started")
 	}
 }
 
