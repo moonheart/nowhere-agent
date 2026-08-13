@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -49,16 +51,56 @@ func (b *redisEventBus) Publish(sessionID string, e Event) {
 // The returned unsubscribe cancels the forwarder and closes the Redis
 // subscription; the Go channel is left open so an in-flight forward never panics
 // on a closed channel (mirroring memBus).
+//
+// A transient Redis error must not kill the subscription: the forwarder backs
+// off exponentially (1s → 30s cap, matching the MCP reconnect pattern) and
+// rebuilds the Pub/Sub subscription before retrying. Events published during
+// the gap are lost — Pub/Sub has no replay — which is the documented best-effort
+// contract; the durable run log and Replay fill any gap. Only ctx cancellation
+// is terminal.
 func (b *redisEventBus) Subscribe(sessionID string, buffer int) (<-chan Event, func()) {
 	ch := make(chan Event, buffer)
 	ctx, cancel := context.WithCancel(context.Background())
-	pubsub := b.cli.Subscribe(ctx, b.channel(sessionID))
+
+	// current is the live Pub/Sub handle, replaced on every reconnect. The
+	// mutex guards it so the unsubscribe path always closes the CURRENT handle,
+	// never a stale one (a stale close would leak the replacement).
+	var mu sync.Mutex
+	current := b.cli.Subscribe(ctx, b.channel(sessionID))
+
+	// reconnect closes the dead handle and subscribes fresh.
+	reconnect := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = current.Close()
+		current = b.cli.Subscribe(ctx, b.channel(sessionID))
+	}
+
 	go func() {
+		backoff := time.Second
 		for {
-			msg, err := pubsub.ReceiveMessage(ctx)
+			mu.Lock()
+			ps := current
+			mu.Unlock()
+			msg, err := ps.ReceiveMessage(ctx)
 			if err != nil {
-				return // ctx cancelled or subscription closed
+				if ctx.Err() != nil {
+					return // cancelled
+				}
+				// Transient error: the subscription is dead; rebuild it and
+				// back off before the next attempt.
+				reconnect()
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
+				continue
 			}
+			backoff = time.Second
 			var e Event
 			if err := json.Unmarshal([]byte(msg.Payload), &e); err != nil {
 				continue
@@ -71,6 +113,8 @@ func (b *redisEventBus) Subscribe(sessionID string, buffer int) (<-chan Event, f
 	}()
 	return ch, func() {
 		cancel()
-		_ = pubsub.Close()
+		mu.Lock()
+		_ = current.Close()
+		mu.Unlock()
 	}
 }

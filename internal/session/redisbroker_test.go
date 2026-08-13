@@ -187,6 +187,49 @@ func TestRedisBrokerSessionsIsolated(t *testing.T) {
 	}
 }
 
+// TestRedisBrokerSubscriberSurvivesTransientError pins the pollLoop fix: a
+// transient Redis error (simulated with miniredis.SetError) must NOT kill the
+// subscription — after the error clears, the poller resumes from its last
+// delivered position and the live stream keeps flowing.
+func TestRedisBrokerSubscriberSurvivesTransientError(t *testing.T) {
+	b, mr := newTestRedisBroker(t)
+	ctx := context.Background()
+	ch, unsub := b.Subscribe("s1", 8)
+	defer unsub()
+
+	// Baseline: a frame flows before the outage.
+	time.Sleep(50 * time.Millisecond)
+	if _, err := b.Publish(ctx, "s1", StreamEvent{RunID: "r1", Kind: "text", Payload: []byte("before")}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ev := <-ch:
+		if string(ev.Payload) != "before" {
+			t.Errorf("baseline payload = %q", ev.Payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("baseline frame not delivered")
+	}
+
+	// Simulate an outage: every command fails. The poller must not exit.
+	mr.SetError("ERR simulated outage")
+	time.Sleep(150 * time.Millisecond)
+	mr.SetError("")
+
+	// After recovery, a new frame must still arrive — the subscriber survived.
+	if _, err := b.Publish(ctx, "s1", StreamEvent{RunID: "r1", Kind: "text", Payload: []byte("after")}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ev := <-ch:
+		if string(ev.Payload) != "after" {
+			t.Errorf("post-recovery payload = %q, want the frame published after the outage", ev.Payload)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber died on the transient error: no frame after recovery")
+	}
+}
+
 func TestStreamIDOffsetMappingMonotonic(t *testing.T) {
 	// The offset mapping must be monotonic across seq and ms boundaries so
 	// Read(after) ordering is correct.

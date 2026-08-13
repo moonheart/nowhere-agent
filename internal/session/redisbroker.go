@@ -123,8 +123,14 @@ func (b *redisBroker) Subscribe(sessionID string, buffer int) (<-chan StreamEven
 // already-delivered ones are never duplicated) and forwarded once the channel
 // drains. This is what keeps a dropped live frame recoverable — both via the
 // retry here and via Read, which serves the same retained stream.
+//
+// A transient Redis error must not kill the subscription: the stream survives
+// (it is retained until Settle's TTL), so the poller backs off exponentially
+// (1s → 30s cap, matching the MCP reconnect pattern) and retries from the same
+// `last` position — only ctx cancellation is terminal.
 func (b *redisBroker) pollLoop(ctx context.Context, sessionID string, ch chan<- StreamEvent) {
 	last := b.tailID(ctx, sessionID)
+	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
 			return
@@ -138,8 +144,21 @@ func (b *redisBroker) pollLoop(ctx context.Context, sessionID string, ch chan<- 
 			if errors.Is(err, redis.Nil) || ctx.Err() != nil {
 				continue // timeout, no new entries — poll again
 			}
-			return // terminal error; subscriber recovers via reconnect/Read
+			// Transient error (Redis restart, network blip): back off and retry
+			// from the same position rather than dying — a subscriber that
+			// returns on a hiccup freezes the client's live stream until the
+			// run settles.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
 		}
+		backoff = time.Second
 		for _, stream := range res {
 			for _, m := range stream.Messages {
 				ev := messageToStreamEvent(m)
