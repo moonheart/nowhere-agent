@@ -78,15 +78,21 @@ func TestRunDueOnlyAfterInterval(t *testing.T) {
 }
 
 func TestJobErrorDoesNotCrashScheduler(t *testing.T) {
+	var ran atomic.Int32
 	s := New(nil, Job{Name: "bad", Interval: time.Second, Run: func(context.Context) error {
+		ran.Add(1)
 		return errors.New("boom")
 	}})
-	// Should not panic.
+	// Should not panic: the error is contained and the scheduler survives.
+	// lastRun is stamped synchronously at dispatch, so wait on the RUN itself
+	// (mirroring TestCatchUpRunsNeverRunJobs) or a dispatch that never executes
+	// would pass.
 	s.catchUp(context.Background())
-	waitFor(t, func() bool {
-		_, ok := s.LastRun("bad")
-		return ok
-	})
+	waitFor(t, func() bool { return ran.Load() == 1 })
+	time.Sleep(50 * time.Millisecond)
+	if ran.Load() != 1 {
+		t.Errorf("job ran %d times want 1", ran.Load())
+	}
 }
 
 // A slow job runs in its own goroutine: while it is blocked, sibling jobs must
