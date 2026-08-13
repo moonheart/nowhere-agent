@@ -253,7 +253,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
-	token := bearerToken(r)
+	token := BearerToken(r)
 	if token != "" {
 		_ = h.svc.Logout(r.Context(), token)
 		if u, ok := UserFromContext(r.Context()); ok {
@@ -332,7 +332,7 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 // requireAuth is middleware that resolves the bearer token to a user.
 func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := bearerToken(r)
+		token := BearerToken(r)
 		if token == "" {
 			// No query-param fallback (removed): a ?token= in the URL would
 			// leak into reverse-proxy logs, browser history and Referer headers.
@@ -350,8 +350,10 @@ func (h *Handler) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// bearerToken extracts the token from the Authorization header.
-func bearerToken(r *http.Request) string {
+// BearerToken extracts the token from the Authorization header. Exported so
+// non-auth middleware (e.g. the gateway's rate limiter) can key on the bearer
+// session without parsing credentials.
+func BearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimPrefix(h, "Bearer ")

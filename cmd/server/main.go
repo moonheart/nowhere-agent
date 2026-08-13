@@ -3,6 +3,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1966,15 +1968,30 @@ func spaHandler(dir string) http.Handler {
 //   - metrics then recovery, innermost around the mux: a panic is recovered,
 //     logged with a stack, and answered 500 — and because recovery sits inside
 //     metrics, that 500 is counted like any other status.
+// rateLimitKey derives the bucket key for one request: the bearer session
+// token when one is presented, else the client IP. Tokens are opaque (there is
+// no parseable JWT subject — resolving one would need a DB lookup in the hot
+// path), but each token is unique per session and unguessable, so authenticated
+// users behind one NAT no longer share a bucket, and a spoofed Authorization
+// header cannot hijack a bucket. A missing/malformed bearer falls back to the
+// IP key, so anonymous flood smoothing is unchanged.
+func rateLimitKey(r *http.Request, proxies *trustedproxy.Set) string {
+	// Never throttle probes: a flooded API must not blind the operator.
+	if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
+		return ""
+	}
+	if tok := identity.BearerToken(r); tok != "" {
+		sum := sha256.Sum256([]byte(tok))
+		return "auth:" + hex.EncodeToString(sum[:])
+	}
+	return quota.ClientIPKey(r, proxies)
+}
+
 func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metrics *observability.Metrics, settingsRuntime *settings.Runtime, settingsSync *settings.Watcher, mux *http.ServeMux) http.Handler {
 	proxies := trustedproxy.New(cfg.HTTP.TrustedProxyCIDRs)
 	limiter := quota.NewRateLimiter(cfg.HTTP.RateLimitRPS, cfg.HTTP.RateLimitBurst,
 		func(r *http.Request) string {
-			// Never throttle probes: a flooded API must not blind the operator.
-			if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
-				return ""
-			}
-			return quota.ClientIPKey(r, proxies)
+			return rateLimitKey(r, proxies)
 		})
 	// Live retune: pick up the runtime settings (0/0 = disabled); existing
 	// buckets converge within the limiter's sweep TTL. The settings watcher

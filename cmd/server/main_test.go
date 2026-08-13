@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,9 +17,57 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"nowhere-agent/internal/permission"
+	"nowhere-agent/internal/trustedproxy"
 )
 
 // ---- SPA fallback ----
+
+// TestRateLimitKeyKeysAuthenticatedBySession pins the limiter's key choice:
+// a bearer token keys by the session (not the IP, so NAT-mates never share a
+// bucket), anonymous stays on the client IP, probes opt out, and a malformed
+// bearer falls back to the IP key (anonymous flood smoothing unchanged).
+func TestRateLimitKey(t *testing.T) {
+	proxies := trustedproxy.New(nil)
+
+	for _, p := range []string{"/healthz", "/metrics"} {
+		req := httptest.NewRequest("GET", p, nil)
+		if got := rateLimitKey(req, proxies); got != "" {
+			t.Errorf("rateLimitKey(%s) = %q, want \"\" (probe opt-out)", p, got)
+		}
+	}
+
+	anon := httptest.NewRequest("GET", "/api/chat", nil)
+	ip := anon.RemoteAddr
+	if host, _, err := net.SplitHostPort(anon.RemoteAddr); err == nil {
+		ip = host
+	}
+	if got := rateLimitKey(anon, proxies); got != ip {
+		t.Errorf("anonymous key = %q, want client IP %q", got, ip)
+	}
+
+	auth := httptest.NewRequest("GET", "/api/chat", nil)
+	auth.Header.Set("Authorization", "Bearer abc123")
+	got := rateLimitKey(auth, proxies)
+	if !strings.HasPrefix(got, "auth:") || len(got) != len("auth:")+64 {
+		t.Errorf("bearer key = %q, want \"auth:\" + sha256 hex", got)
+	}
+	other := httptest.NewRequest("GET", "/api/chat", nil)
+	other.Header.Set("Authorization", "Bearer xyz789")
+	if got == rateLimitKey(other, proxies) {
+		t.Error("different sessions must map to different buckets")
+	}
+
+	malformed := httptest.NewRequest("GET", "/api/chat", nil)
+	malformed.Header.Set("Authorization", "Bearer ")
+	if got := rateLimitKey(malformed, proxies); got != ip {
+		t.Errorf("empty bearer key = %q, want fallback to client IP %q", got, ip)
+	}
+	basic := httptest.NewRequest("GET", "/api/chat", nil)
+	basic.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	if got := rateLimitKey(basic, proxies); got != ip {
+		t.Errorf("non-bearer auth key = %q, want fallback to client IP %q", got, ip)
+	}
+}
 
 func TestSPAHandlerServesRealFiles(t *testing.T) {
 	dir := t.TempDir()
