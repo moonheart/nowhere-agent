@@ -187,8 +187,16 @@ func (tr *Trigger) WithEnabledFunc(f func() bool) *Trigger {
 	return tr
 }
 
-// sweep finds due tasks and fires each. A single task's failure is logged and
-// never aborts the sweep.
+// maxConcurrentFires bounds how many due tasks one sweep fires in parallel.
+// Claim is atomic per task (design D4), so parallel fires keep the
+// single-instance claim semantics while removing the serial worst case: N
+// tasks due together used to start the last one up to N×fireTimeout late.
+const maxConcurrentFires = 4
+
+// sweep finds due tasks and fires each through a bounded worker pool. A
+// single task's failure is logged and never aborts the sweep. Each fire keeps
+// its own timeout ctx (fireOnce's context.WithTimeout), so one slow fire never
+// delays its siblings' pre-submit work.
 func (tr *Trigger) sweep(ctx context.Context) {
 	if tr.enabledFunc != nil && !tr.enabledFunc() {
 		return // auto-trigger switched off from the admin console
@@ -198,15 +206,28 @@ func (tr *Trigger) sweep(ctx context.Context) {
 		tr.log.Error("schedule: due scan failed", "err", err)
 		return
 	}
-	for _, t := range due {
-		if err := tr.fireOnce(ctx, t); err != nil {
-			if errors.Is(err, ErrNotFound) {
-				// Lost the claim race or the task changed under us — normal, skip.
-				continue
+	fires := make(chan Task)
+	var wg sync.WaitGroup
+	for range min(len(due), maxConcurrentFires) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range fires {
+				if err := tr.fireOnce(ctx, t); err != nil {
+					if errors.Is(err, ErrNotFound) {
+						// Lost the claim race or the task changed under us — normal, skip.
+						continue
+					}
+					tr.log.Error("schedule: fire failed", "task", t.ID, "err", err)
+				}
 			}
-			tr.log.Error("schedule: fire failed", "task", t.ID, "err", err)
-		}
+		}()
 	}
+	for _, t := range due {
+		fires <- t
+	}
+	close(fires)
+	wg.Wait()
 }
 
 // fireOnce claims the task and, on a successful claim, submits the run.
