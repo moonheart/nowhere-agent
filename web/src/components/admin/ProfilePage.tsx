@@ -138,6 +138,8 @@ function TotpCard() {
       const res = await enableTotp();
       setSecret(res.secret);
       setUri(res.uri);
+      setCode(""); // a previous cycle's code must not leak into the new one
+      setDone(false);
       setPhase("enrolled");
     } catch (err) {
       setError((err as Error).message);
@@ -151,6 +153,9 @@ function TotpCard() {
     setError(null);
     try {
       await confirmTotp(code);
+      // Drop the used code so the disable input starts empty — a 30s TOTP
+      // window means the enable code is stale by the time Disable is clicked.
+      setCode("");
       setPhase("enabled");
       setDone(true);
     } catch (err) {
