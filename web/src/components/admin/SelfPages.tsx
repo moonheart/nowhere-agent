@@ -86,7 +86,7 @@ export function MyMemoriesPage() {
     <>
       <PageHeader
         title="My memories"
-        description="What the agent has remembered about you across sessions. Deleting a memory is permanent."
+        description="What the agent has remembered about you across sessions. Deleting a memory is permanent. Recall is keyword-based today — semantic vector recall is not yet wired."
         actions={
           dream.available && (
             <Button onClick={dream.trigger} disabled={dream.running} variant="outline">

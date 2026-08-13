@@ -641,7 +641,7 @@ export function PlatformMemoriesPage() {
     <>
       <PageHeader
         title="Memories"
-        description="Long-term memory in any scope. Scope is explicit rather than inferred, so an accidental query cannot sweep every account's private memories into one view."
+        description="Long-term memory in any scope. Scope is explicit rather than inferred, so an accidental query cannot sweep every account's private memories into one view. Recall is keyword-based today — semantic vector recall is not yet wired."
       />
       <form
         onSubmit={(e) => {

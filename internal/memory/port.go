@@ -4,6 +4,14 @@
 // tools (write_memory/edit_memory/forget_memory) maintain it online on the
 // caller's behalf. Short-term memory is the in-context conversation and does
 // NOT go through this port.
+//
+// Recall status: online recall is KEYWORD-BASED today. The vector path
+// (Memory.Embedding + RecallVector, pgvector cosine) is implemented and tested
+// (pgport_test.go), but no embedding generator is wired into the product yet —
+// the provider adapters expose no embedding capability, so writers store no
+// embeddings and Recall falls back to full-text/keyword matching. Plugging in
+// an embedder is the documented wiring point: generate an embedding at Store
+// time and a query embedding at Recall time, then call RecallVector.
 package memory
 
 import (
