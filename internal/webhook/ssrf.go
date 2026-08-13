@@ -286,11 +286,21 @@ func isBlockedIP(ip net.IP) bool {
 }
 
 func public4(ip net.IP) bool {
+	// Normalize to the 4-byte form: net.IPv4(a,b,c,d) returns a 16-byte
+	// slice (IPv4-mapped), so index checks like ip[0] must not read the
+	// mapping prefix. public6 feeds embedded readings straight in here.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
 	switch {
 	case ip.IsLoopback(), ip.IsPrivate(), ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast(),
-		ip.IsMulticast(), ip.IsUnspecified(), ip.Equal(net.IPv4zero):
+		ip.IsMulticast(), ip.IsUnspecified(), ip[0] == 0:
 		return false
 	}
+	// 0.0.0.0/8 is "this network" (RFC 6890): the kernel routes the whole
+	// range to the local host (route table local → lo), so 0.0.0.x dials
+	// reach a local service just like 127.0.0.x — IsUnspecified only covers
+	// 0.0.0.0 itself. The ip[0] == 0 case above blocks the full /8.
 	// 100.64.0.0/10 (CGNAT) and 192.0.0.0/24 (IETF protocol assignments).
 	if ip[0] == 100 && ip[1]&0xC0 == 64 {
 		return false
