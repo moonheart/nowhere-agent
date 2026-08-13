@@ -16,6 +16,8 @@ import (
 //     keeps throttled floods traceable instead of anonymous.
 //   - access-log next: one line per completed request (status/latency/ttfb/
 //     bytes, 499 on client disconnect), so rejected requests are also seen.
+//   - security-headers before the limiter: even throttled responses carry the
+//     baseline security headers.
 //   - rate-limit before metrics: a flood must not churn metric series; probes
 //     are opted out so monitoring stays up during a flood.
 //   - metrics then recovery, innermost around h: a panic is recovered, logged
@@ -29,6 +31,7 @@ func StandardStack(h http.Handler, log *slog.Logger, metrics *Metrics, limiter M
 	return Chain(h,
 		RequestID(log),
 		AccessLog,
+		SecurityHeaders,
 		limiter,
 		metrics.Middleware,
 		Recovery,

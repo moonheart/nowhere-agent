@@ -79,6 +79,27 @@ func Recovery(next http.Handler) http.Handler {
 	})
 }
 
+// SecurityHeaders sets the baseline security response headers on every
+// response: content-type sniffing off (X-Content-Type-Options), referrer
+// containment (Referrer-Policy), and frame denial (X-Frame-Options). Placed
+// outside the rate limiter so even throttled responses carry them.
+//
+// A Content-Security-Policy is deliberately NOT set here: the SPA renders
+// inline styles through React style attributes and library-injected <style>
+// blocks, which a strict style-src would block and a permissive one would
+// weaken to near-uselessness; shipping a policy that can only be sent with
+// 'unsafe-inline' deserves a dedicated pass over the whole UI, not a silent
+// relaxation in a baseline middleware.
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("X-Frame-Options", "DENY")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // AccessLog emits one structured log line per completed request: status,
 // latency, time-to-first-byte, and response bytes, on the request-scoped
 // logger (so the line carries request_id/method/path for free). A client that

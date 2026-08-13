@@ -112,5 +112,33 @@ func TestStandardStackOrder(t *testing.T) {
 		if !strings.Contains(scrape(t, m), `status="204"`) {
 			t.Error("healthy request not metered")
 		}
+		// SecurityHeaders: every response carries the baseline headers.
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+		}
+		if got := rec.Header().Get("Referrer-Policy"); got == "" {
+			t.Error("Referrer-Policy missing")
+		}
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Errorf("X-Frame-Options = %q, want DENY", got)
+		}
+	})
+
+	t.Run("security headers reach rejected responses", func(t *testing.T) {
+		h := StandardStack(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("handler reached through a rejecting limiter")
+		}), slog.New(slog.NewTextHandler(io.Discard, nil)), NewMetrics(), rejectAll)
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/chat", nil)
+		req.Pattern = "GET /api/chat"
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("code = %d, want 429", rec.Code)
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("rejected response X-Content-Type-Options = %q, want nosniff — SecurityHeaders must sit outside the limiter", got)
+		}
 	})
 }
