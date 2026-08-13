@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/provider"
 )
 
 // TestPGInteractionBatchAtomicAndIdempotent pins the snapshot write path: the
 // batch row commits with the first interaction, and a second gated call of the
+// same run adds its interaction WITHOUT rewriting the snapshot.
 // same run adds its interaction WITHOUT rewriting the snapshot.
 func TestPGInteractionBatchAtomicAndIdempotent(t *testing.T) {
 	db := pgTestDB(t)
@@ -47,6 +49,57 @@ func TestPGInteractionBatchAtomicAndIdempotent(t *testing.T) {
 	pending, err := store.PendingApprovalsForRun(ctx, runID)
 	if err != nil || len(pending) != 2 {
 		t.Fatalf("pending interactions = %+v err %v, want 2", pending, err)
+	}
+}
+
+// TestPGSweepExpiredInteractions marks stale pendings expired (releasing the
+// session's pending gate) while fresh/decided rows survive, and a stale verdict
+// on an expired row is refused.
+func TestPGSweepExpiredInteractions(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ctx := context.Background()
+	sessID, runID := setupMessageSession(t, ctx, db, store)
+
+	old, err := store.CreateApproval(ctx, Interaction{RunID: runID, SessionID: sessID, ToolCallID: "old", ToolName: "danger"})
+	if err != nil {
+		t.Fatalf("create old: %v", err)
+	}
+	// Backdate ONLY the row this test created, so the sweep's WHERE clause can
+	// never touch sibling tests' rows.
+	if _, err := db.Exec(`UPDATE approvals SET created_at = now() - interval '48 hours' WHERE id = $1`, old.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	fresh, err := store.CreateApproval(ctx, Interaction{RunID: runID, SessionID: sessID, ToolCallID: "fresh", ToolName: "danger"})
+	if err != nil {
+		t.Fatalf("create fresh: %v", err)
+	}
+
+	n, err := store.SweepExpiredInteractions(ctx, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n < 1 {
+		t.Fatalf("swept = %d, want at least the backdated pending", n)
+	}
+	// The session's pending gate now reads empty.
+	pending, err := store.PendingApprovalsForSession(ctx, sessID)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending after sweep = %+v err %v, want only the fresh one", pending, err)
+	}
+	if pending[0].ID != fresh.ID {
+		t.Errorf("pending after sweep = %+v, want the fresh interaction", pending[0])
+	}
+	got, err := store.GetApproval(ctx, old.ID)
+	if err != nil || got.Status != InteractionExpired {
+		t.Fatalf("swept row = %+v err %v, want expired", got, err)
+	}
+	if got.DecidedAt != nil {
+		t.Error("expiry must not set decided_at (the row was never decided)")
+	}
+	// A stale verdict is refused: the row is no longer pending.
+	if _, err := store.DecideApproval(ctx, old.ID, true, nil); !errors.Is(err, ErrNoPendingApproval) {
+		t.Fatalf("decide expired = %v, want ErrNoPendingApproval", err)
 	}
 }
 

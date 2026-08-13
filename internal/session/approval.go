@@ -208,8 +208,27 @@ func (m *MemStore) DecideApproval(_ context.Context, id string, approve bool, re
 	return *a, nil
 }
 
-// --- PGStore (Postgres, production) ---
+// SweepExpiredInteractions marks every interaction still pending since before
+// cutoff as expired. It is the store half of the pending-gate reaper (the
+// hourly loop lives in cmd/server): without it a client that never decides
+// locks the session's pending-interaction gate forever (every new submission
+// answers 409 pending_interaction). Expired rows keep their decided_at NULL —
+// they were never decided, only aged out; a fold of an expired batch reports
+// each call as rejected.
+func (m *MemStore) SweepExpiredInteractions(_ context.Context, cutoff time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for _, a := range m.approvals {
+		if a.Status == InteractionPending && a.CreatedAt.Before(cutoff) {
+			a.Status = InteractionExpired
+			n++
+		}
+	}
+	return n, nil
+}
 
+// --- PGStore (Postgres, production) ---
 // approvalCols is the shared column list for approvals scans (kind + answer
 // included so every read returns the full record). tool_input maps to Payload,
 // answer to Result.
@@ -352,6 +371,25 @@ func (s *PGStore) DecideApproval(ctx context.Context, id string, approve bool, r
 		return Interaction{}, fmt.Errorf("decide interaction: %w", err)
 	}
 	return a, nil
+}
+
+// SweepExpiredInteractions marks every interaction still pending since before
+// cutoff as expired (the pending-gate reaper's store half; the hourly loop
+// lives in cmd/server). A client that never decides must not lock the
+// session's pending-interaction gate forever — every new submission would
+// answer 409 pending_interaction. Expired rows keep decided_at NULL (never
+// decided, only aged out); if the client later returns, DecideApproval refuses
+// the stale verdict (status is no longer pending) and a fold reports each
+// expired call as rejected.
+func (s *PGStore) SweepExpiredInteractions(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE approvals SET status = 'expired'
+		WHERE status = 'pending' AND created_at < $1`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("sweep expired interactions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // nullableJSON maps an empty result to SQL NULL (the answer column is nullable).

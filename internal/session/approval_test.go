@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 )
 
 // TestMemStoreApprovalLifecycle covers create → pending lookup → decide, plus
@@ -149,5 +150,58 @@ func TestMemStoreApprovalUnknown(t *testing.T) {
 	}
 	if _, ok, _ := s.PendingApprovalForSession(context.Background(), "no-session"); ok {
 		t.Fatal("no pending approval expected for unknown session")
+	}
+}
+
+// TestMemStoreApprovalSweepExpiresStale pins the Mem sweep: pendings older than
+// the cutoff become expired (releasing the session's pending gate), a fresh
+// pending survives, and an already-decided row is untouched.
+func TestMemStoreApprovalSweepExpiresStale(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	sess, _ := s.CreateSession(ctx, "u1", "t")
+	run, _ := s.CreateRun(ctx, sess.ID, 1)
+
+	old, err := s.CreateApproval(ctx, Approval{RunID: run.ID, SessionID: sess.ID, ToolCallID: "old", ToolName: "n"})
+	if err != nil {
+		t.Fatalf("CreateApproval old: %v", err)
+	}
+	backdateApproval(s, old, time.Now().Add(-48*time.Hour))
+	fresh, _ := s.CreateApproval(ctx, Approval{RunID: run.ID, SessionID: sess.ID, ToolCallID: "fresh", ToolName: "n"})
+	if _, err := s.DecideApproval(ctx, fresh.ID, true, nil); err != nil {
+		t.Fatalf("decide fresh: %v", err)
+	}
+
+	n, err := s.SweepExpiredInteractions(ctx, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("swept = %d, want 1 (only the backdated pending)", n)
+	}
+	got, err := s.GetApproval(ctx, old.ID)
+	if err != nil || got.Status != InteractionExpired {
+		t.Fatalf("swept row = %+v err=%v, want expired", got, err)
+	}
+	if got.DecidedAt != nil {
+		t.Error("expiry must not set decided_at (the row was never decided)")
+	}
+	// The session's pending gate reads the sweep result: nothing pending left.
+	if _, ok, _ := s.PendingApprovalForSession(ctx, sess.ID); ok {
+		t.Fatal("swept session must have no pending interaction left")
+	}
+	// A stale verdict is refused: the row is no longer pending.
+	if _, err := s.DecideApproval(ctx, old.ID, true, nil); !errors.Is(err, ErrNoPendingApproval) {
+		t.Fatalf("decide expired: %v, want ErrNoPendingApproval", err)
+	}
+}
+
+// backdateApproval rewrites a Mem approval's created_at in place (the sweep
+// test's backdate hook; the MemStore keeps no public setter).
+func backdateApproval(s *MemStore, a Approval, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stored, ok := s.approvals[a.ID]; ok {
+		stored.CreatedAt = at
 	}
 }

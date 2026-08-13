@@ -153,6 +153,13 @@ type Store interface {
 	// DecideApproval resolves a pending approval, or ErrNoPendingApproval. answer
 	// is the user's structured response for ask_user (nil for a permission approval).
 	DecideApproval(ctx context.Context, id string, approve bool, answer json.RawMessage) (Approval, error)
+	// SweepExpiredInteractions marks every interaction still pending since
+	// before cutoff as expired, returning how many rows were updated. A client
+	// that walks away must not be able to hold a session's pending-interaction
+	// gate forever; the hourly sweep (cmd/server) reclaims stale rows so the
+	// session accepts new submissions. An expired row folds as rejected if the
+	// client ever returns (ApprovalsForRun reports it non-resolved).
+	SweepExpiredInteractions(ctx context.Context, cutoff time.Time) (int64, error)
 
 	// Suspended-batch snapshots (capability suspend-batch-snapshot, migration
 	// 000019): the durable identity of a suspended tool batch.

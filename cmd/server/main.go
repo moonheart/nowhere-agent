@@ -377,6 +377,34 @@ func run() error {
 	// can reach the same workers the chat endpoint owns.
 	runRegistry := session.NewRunRegistry(sessionRuntime)
 
+	// Pending-interaction reaper: a client that never answers a suspended
+	// batch's interaction must not lock the session's pending gate forever (new
+	// submissions would 409). An hourly pass ages out pendings older than a day
+	// (created_at based, so a verdict raced by the sweep still wins via the
+	// status='pending' predicate). Best-effort like the credential sweep: a
+	// failed pass is logged and retried next hour.
+	go func() {
+		approvalSweepLog := log
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().UTC().Add(-24 * time.Hour)
+				removed, err := sessionStore.SweepExpiredInteractions(ctx, cutoff)
+				if err != nil {
+					approvalSweepLog.Warn("pending-interaction sweep failed", "err", err)
+					continue
+				}
+				if removed > 0 {
+					approvalSweepLog.Info("pending-interaction sweep expired rows", "count", removed)
+				}
+			}
+		}
+	}()
+
 	// Reconcile runs stranded non-terminal by a previous process (their in-memory
 	// workers died with it): mark them failed at startup so they don't read as
 	// active forever and hang clients that attach to them.
