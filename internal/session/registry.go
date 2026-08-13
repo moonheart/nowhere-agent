@@ -842,32 +842,39 @@ func (rg *RunRegistry) BatchFoldState(ctx context.Context, runID string) (folded
 // no snapshot, already folded, or still awaiting verdicts are skipped (a
 // pending batch is the pending gate's job). "Newest" is by run seq, so the
 // scan is independent of the store's row order.
+//
+// The scan walks runs from newest to oldest and STOPS at the first run that
+// carries a batch snapshot: the pending gate serializes runs (a run only gates
+// after every older run's batch is folded), so at most one unfolded batch
+// exists at a time and that first snapshot decides the whole answer — folded
+// means nothing to reconcile, unfolded with all verdicts in means reconcile,
+// still awaiting verdicts means keep looking older (defensive; should not
+// occur). The common case (newest runs batchless or already folded) therefore
+// costs one SuspendedBatchForRun query instead of one per session run.
 func (rg *RunRegistry) DecidedButUnfoldedRun(ctx context.Context, sessionID string) (string, error) {
 	runs, err := rg.rt.store.RunsForSession(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
-	best, bestSeq := "", -1
+	slices.SortFunc(runs, func(a, b Run) int { return b.Seq - a.Seq })
 	for i := range runs {
 		snap, err := rg.rt.store.SuspendedBatchForRun(ctx, runs[i].ID)
 		if err != nil {
 			continue // no suspended batch on this run
 		}
 		if snap.FoldedSeq != nil {
-			continue // already folded
+			return "", nil // this run's batch is folded; older ones were too
 		}
 		pend, err := rg.rt.store.PendingApprovalsForRun(ctx, runs[i].ID)
 		if err != nil {
 			return "", err
 		}
 		if len(pend) > 0 {
-			continue // still awaiting verdicts
+			continue // still awaiting verdicts; keep looking older
 		}
-		if runs[i].Seq > bestSeq {
-			best, bestSeq = runs[i].ID, runs[i].Seq
-		}
+		return runs[i].ID, nil
 	}
-	return best, nil
+	return "", nil
 }
 
 // append persists an event through the Runtime (which fans it out to subscribers
