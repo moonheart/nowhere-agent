@@ -30,7 +30,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/serve
 FROM debian:bookworm-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates bash \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --create-home --home-dir /app app
 WORKDIR /app
 COPY --from=gobuild /out/server /usr/local/bin/server
 COPY --from=gobuild /out/migrate /usr/local/bin/migrate
@@ -39,5 +40,21 @@ COPY --from=web /web/dist ./web/dist
 COPY migrations/ ./migrations/
 
 ENV WEB_DIR=/app/web/dist
+# The only mutable paths the server can touch: WORKSPACE_DIR (session images +
+# local sandbox workspaces; unset by default, which keeps image uploads and
+# the local sandbox OFF and all durable state in Postgres) and LLM_RAW_LOG_DIR
+# (raw LLM capture; unset = off). /app/workspace exists and is owned by the
+# app user so `docker run --read-only` deployments work out of the box for
+# the default unset-config; operators who DO set WORKSPACE_DIR or
+# LLM_RAW_LOG_DIR must mount writable volumes there.
+RUN mkdir -p /app/workspace && chown -R app:app /app
+VOLUME ["/app/workspace"]
+
+# Hardening: run as an unprivileged user (uid 10001), never root. Drop the
+# remaining Linux capabilities at runtime (not expressible in the image):
+#   docker run --cap-drop=ALL --security-opt no-new-privileges:true --read-only
+# The docker sandbox backend additionally needs the docker socket mounted and
+# the app user admitted to its group.
+USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["server"]
