@@ -78,6 +78,12 @@ type Handler struct {
 	// user-image-uploads): session-independent upload + owner read, which is
 	// what lets a brand-new conversation's first message carry an image.
 	uploads upload.Uploader
+	// imageQuota, when set, caps session image uploads (POST
+	// .../sessions/{id}/images) per session: the returned quota is read on
+	// every upload and enforced against the session's stored image count and
+	// bytes BEFORE a blob is written (mirrors the user-level upload quota;
+	// nil = unlimited).
+	imageQuota func() upload.Quota
 	// msgStore, when set, is the authoritative conversation record: serveChat
 	// rebuilds cross-run history from it (ignoring client-sent history) and the
 	// run registry persists assembled messages into it.
@@ -170,6 +176,15 @@ func (h *Handler) WithImageStore(is *workspace.ImageStore) *Handler {
 // "uploads/…" image references.
 func (h *Handler) WithUploads(u upload.Uploader) *Handler {
 	h.uploads = u
+	return h
+}
+
+// WithImageQuota wires a per-session quota for session image uploads: the
+// quota is read live on every upload (so an admin-console retune applies
+// without a restart) and enforced against the session's stored image files.
+// Nil leaves session image uploads uncapped.
+func (h *Handler) WithImageQuota(q func() upload.Quota) *Handler {
+	h.imageQuota = q
 	return h
 }
 

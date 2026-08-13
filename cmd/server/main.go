@@ -1369,6 +1369,18 @@ func run() error {
 			WithBudgetGate(chatapi.BudgetChecker(budgetGate))
 		if imageStore != nil {
 			handler = handler.WithImageStore(imageStore)
+			// Session image uploads share the user-level upload quota knobs,
+			// enforced PER SESSION against the session's stored image files
+			// (the sandbox workspace shares the session dir; only WebP image
+			// files count). Per-user aggregation would scan every session dir
+			// the user owns on each upload — too heavy for the hot path — so
+			// the per-session cap is the minimal ceiling.
+			handler = handler.WithImageQuota(func() upload.Quota {
+				return upload.Quota{
+					MaxFiles: settingsRuntime.Int(settings.KeyUploadMaxFilesPerUser),
+					MaxBytes: int64(settingsRuntime.Int(settings.KeyUploadMaxBytesPerUser)),
+				}
+			})
 		}
 		if uploadSvc != nil {
 			handler = handler.WithUploads(uploadSvc)

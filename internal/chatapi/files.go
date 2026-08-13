@@ -45,6 +45,31 @@ func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce the per-session image quota BEFORE any blob is written (the same
+	// check-then-write shape as the user-level upload quota): the session's
+	// stored images are counted from disk, so an over-quota attempt costs
+	// nothing. Session images and the session's sandbox workspace share the
+	// session dir; SessionUsage counts only WebP files, the format Save
+	// normalizes to.
+	if h.imageQuota != nil {
+		q := h.imageQuota()
+		if q.MaxFiles > 0 || q.MaxBytes > 0 {
+			files, used, err := h.images.SessionUsage(sessID)
+			if err != nil {
+				http.Error(w, `{"error":"image save failed"}`, http.StatusInternalServerError)
+				return
+			}
+			if q.MaxFiles > 0 && files >= q.MaxFiles {
+				http.Error(w, `{"error":"upload quota exceeded"}`, http.StatusRequestEntityTooLarge)
+				return
+			}
+			if q.MaxBytes > 0 && used+int64(len(body)) > q.MaxBytes {
+				http.Error(w, `{"error":"upload quota exceeded"}`, http.StatusRequestEntityTooLarge)
+				return
+			}
+		}
+	}
+
 	// The store decodes the payload (PNG/JPEG/GIF/WebP), rejects unsupported or
 	// malformed bytes, and re-encodes to WebP under the session dir.
 	name := "upload.webp"

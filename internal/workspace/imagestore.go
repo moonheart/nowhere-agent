@@ -350,6 +350,38 @@ func (s *ImageStore) DeleteSessionImages(sessionID string) (bool, error) {
 	return removed, nil
 }
 
+// SessionUsage counts the session's stored images and their total on-disk
+// bytes. It is the quota input for session image uploads (POST
+// .../sessions/{id}/images): the session dir is shared with the sandbox
+// workspace, so only WebP files count — the storage format Save normalizes
+// to — and a missing dir is zero usage. The snapshot is read before the
+// save, so concurrent uploads can each pass the check and overshoot
+// slightly (the same accepted ceiling as the user-level upload quota).
+func (s *ImageStore) SessionUsage(sessionID string) (files int, bytes int64, err error) {
+	if sessionID == "" || sessionID == "." || sessionID == ".." || strings.ContainsAny(sessionID, `/\`) {
+		return 0, 0, fmt.Errorf("invalid session id %q", sessionID)
+	}
+	entries, err := os.ReadDir(filepath.Join(s.root, sessionID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, 0, nil // nothing stored for this session
+		}
+		return 0, 0, fmt.Errorf("read session dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".webp") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // stat hiccup on one file must not abort the whole check
+		}
+		files++
+		bytes += info.Size()
+	}
+	return files, bytes, nil
+}
+
 // DeleteUserUploadScope removes a user's entire upload scope — every blob
 // under <root>/__uploads__/<userID> and the dir itself. The dir contains ONLY
 // that user's blobs, so RemoveAll is confined by construction; the user id is

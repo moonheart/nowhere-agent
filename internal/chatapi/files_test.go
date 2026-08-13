@@ -205,6 +205,76 @@ func TestServeImageUploadRejectsOversize(t *testing.T) {
 	}
 }
 
+func setupQuotaHandler(t *testing.T, q upload.Quota) (*Handler, *session.Runtime, http.Handler) {
+	t.Helper()
+	rt := session.NewRuntime(session.NewMemStore())
+	is := workspace.NewImageStore(t.TempDir())
+	h := NewHandler(newTestLoop, "sys").
+		WithRuntime(rt).
+		WithImageStore(is).
+		WithImageQuota(func() upload.Quota { return q })
+	mux := http.NewServeMux()
+	h.Register(mux)
+	return h, rt, mux
+}
+
+func TestServeImageUploadQuotaCapsSessionFileCount(t *testing.T) {
+	_, rt, mux := setupQuotaHandler(t, upload.Quota{MaxFiles: 1})
+	sess, _ := rt.CreateSession(context.Background(), "owner1", "t")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, uploadReq(t, sess.ID, testPNG(t), "owner1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, uploadReq(t, sess.ID, testPNG(t), "owner1"))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("second upload status = %d want 413", rec.Code)
+	}
+	// A second session has its own independent budget.
+	sess2, _ := rt.CreateSession(context.Background(), "owner1", "t")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, uploadReq(t, sess2.ID, testPNG(t), "owner1"))
+	if rec.Code != http.StatusOK {
+		t.Errorf("upload to a fresh session status = %d want 200", rec.Code)
+	}
+}
+
+func TestServeImageUploadQuotaCapsSessionBytes(t *testing.T) {
+	// The byte check adds the incoming raw payload to the session's stored
+	// (WebP-encoded) bytes. Set the cap one byte above the raw payload: the
+	// first upload passes (0 + raw), and the second must trip because the
+	// stored WebP is at least the 12-byte RIFF header.
+	raw := testPNG(t)
+	_, rt, mux := setupQuotaHandler(t, upload.Quota{MaxBytes: int64(len(raw) + 1)})
+	sess, _ := rt.CreateSession(context.Background(), "owner1", "t")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, uploadReq(t, sess.ID, raw, "owner1"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, uploadReq(t, sess.ID, raw, "owner1"))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("second upload status = %d want 413", rec.Code)
+	}
+}
+
+func TestServeImageUploadQuotaExemptWhenUnlimited(t *testing.T) {
+	_, rt, mux := setupQuotaHandler(t, upload.Quota{MaxFiles: 0, MaxBytes: 0})
+	sess, _ := rt.CreateSession(context.Background(), "owner1", "t")
+
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, uploadReq(t, sess.ID, testPNG(t), "owner1"))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("upload %d status = %d want 200", i, rec.Code)
+		}
+	}
+}
+
 // ---- user-level uploads (change user-image-uploads) ----
 
 // fakeUploader implements upload.Uploader over the workspace ImageStore, so the
