@@ -49,6 +49,11 @@ const (
 	// UsageAdjustment is application-supplied accounting (corrections,
 	// estimates, reconciliation). Negative values are legal.
 	UsageAdjustment UsageCause = "adjustment"
+	// UsageOverflow is a DISCARDED response from the recoverable-truncation
+	// path: its tokens were consumed (and reported in the live usage frame)
+	// but no message ever persisted, so the ledger row is the only durable
+	// record. No ResultMessageID (nothing was provisioned into a message).
+	UsageOverflow UsageCause = "overflow"
 )
 
 // UsageRecord is one durable per-request usage row. Written at settle time,

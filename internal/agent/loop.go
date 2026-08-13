@@ -456,7 +456,12 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				return state.Produced, truncErr
 			}
 			state.overflowRecovered = true
-			_ = emit.Emit(ctx, KindOverflowRecovery, nil)
+			// Carry the discarded response's usage on the signal: the retry's
+			// KindMessage only records the surviving attempt's tokens, so
+			// without this the durable usage ledger misses what the truncated
+			// call actually consumed — while the live data-usage frame (the
+			// accumulated RunState.Usage) includes it.
+			_ = emit.Emit(ctx, KindOverflowRecovery, res.Usage)
 			l.emitStepFinish(ctx, emit, res, "length", true)
 			continue
 		}

@@ -906,6 +906,20 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 	// bounds the loop; the row is the durable audit trail and future resume
 	// input. A failure is logged, not fatal — the run continues.
 	if kind == agent.KindOverflowRecovery {
+		// The discarded response's tokens were consumed (and reported live via
+		// KindUsage) but no message persisted, so record them on the usage
+		// ledger — the only durable accounting for the truncated attempt. Its
+		// step intent is popped with it (the retry's BeforeModel provisions a
+		// fresh id; the discarded attempt's provisioned id must not linger in
+		// the pending queue).
+		in := e.pending.popAssistant()
+		if u, ok := payload.(*provider.Usage); ok && u != nil {
+			if err := e.rg.rt.store.AppendUsageRecord(context.Background(), UsageRecord{
+				RunID: e.runID, Cause: UsageOverflow, Attempt: in.attempt, Usage: *u,
+			}); err != nil {
+				slog.Warn("record overflow usage ledger", "run", e.runID, "err", err)
+			}
+		}
 		if _, err := e.rg.appendStep(context.Background(), e.runID, StepOverflowCompact, "", nil); err != nil {
 			slog.Warn("record overflow recovery", "run", e.runID, "err", err)
 		}

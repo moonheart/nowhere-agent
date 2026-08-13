@@ -259,6 +259,113 @@ func TestAdjustmentDoesNotMutateMessageUsage(t *testing.T) {
 	}
 }
 
+// overflowUsageProvider truncates (recoverably) on the first call and answers
+// fully on the second: the discarded attempt's usage must still reach the
+// ledger.
+type overflowUsageProvider struct{ calls int }
+
+func (p *overflowUsageProvider) Name() string { return "overflow-usage" }
+
+func (p *overflowUsageProvider) Stream(_ context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 8)
+	p.calls++
+	if p.calls == 1 {
+		// Recoverable truncation: max_tokens stop below the intended cap.
+		ch <- provider.Event{Type: provider.EventMessageStart}
+		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "cut"}
+		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopMaxTokens,
+			Usage: &provider.Usage{InputTokens: 10, OutputTokens: 3}}
+	} else {
+		ch <- provider.Event{Type: provider.EventMessageStart}
+		ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "done"}
+		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn,
+			Usage: &provider.Usage{InputTokens: 7, OutputTokens: 2}}
+	}
+	close(ch)
+	return ch, nil
+}
+
+// TestUsageLedgerRecordsDiscardedOverflowResponse: the recoverable-truncation
+// path discards the truncated response — no message ever persists — but its
+// tokens were consumed and reported live (KindUsage accumulates them), so the
+// ledger must carry them as an overflow record for the durable aggregate and
+// the live frame to agree.
+func TestUsageLedgerRecordsDiscardedOverflowResponse(t *testing.T) {
+	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
+	ms := NewMemMessageStore()
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
+	sess, err := rt.CreateSession(context.Background(), "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loop := agent.New(&overflowUsageProvider{}, toolruntime.NewRegistry(),
+		agent.Config{Model: "m", MaxTokens: 100})
+	// Enough history for the overflow guard to drop a round (a bare single
+	// user message has nothing safe to drop and the run would fail).
+	history := []provider.Message{
+		provider.TextMessage(provider.RoleUser, "u1"),
+		provider.TextMessage(provider.RoleAssistant, "a1"),
+		provider.TextMessage(provider.RoleUser, "u2"),
+		provider.TextMessage(provider.RoleAssistant, "a2"),
+		provider.TextMessage(provider.RoleUser, "hi"),
+	}
+	run, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop, History: history, UserMessage: &history[4]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Fatalf("status = %v want done", got)
+	}
+
+	store := rt.store.(*MemStore)
+	records := store.usageRecords[run.ID]
+	if len(records) != 2 {
+		t.Fatalf("usage records = %d, want 2 (surviving assistant + overflow)", len(records))
+	}
+	var overflow, assistant *UsageRecord
+	for i := range records {
+		r := &records[i]
+		switch r.Cause {
+		case UsageOverflow:
+			overflow = r
+		case UsageAssistant:
+			assistant = r
+		default:
+			t.Errorf("unexpected record cause %q", r.Cause)
+		}
+	}
+	if overflow == nil {
+		t.Fatal("no overflow usage record for the discarded response")
+	}
+	if overflow.Attempt != 1 {
+		t.Errorf("overflow record attempt = %d, want 1 (the discarded attempt)", overflow.Attempt)
+	}
+	if overflow.Usage.InputTokens != 10 || overflow.Usage.OutputTokens != 3 {
+		t.Errorf("overflow record usage = %+v, want the truncated attempt's 10/3", overflow.Usage)
+	}
+	if overflow.ResultMessageID != nil {
+		t.Error("overflow record must not claim a message id")
+	}
+	if assistant == nil || assistant.Usage.InputTokens != 7 || assistant.Usage.OutputTokens != 2 {
+		t.Errorf("surviving assistant record = %+v, want usage 7/2", assistant)
+	}
+
+	// The run aggregate (recomputed from the ledger) includes the discarded
+	// attempt — matching the live data-usage frame's accumulated totals.
+	sum, err := store.SumUsage(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.InputTokens != 17 || sum.OutputTokens != 5 {
+		t.Errorf("ledger sum = %+v, want input=17 output=5 (discarded attempt included)", sum)
+	}
+}
+
 // TestAppendRunStepAttemptCounters verifies durable per-(run, kind) attempt
 // counters: they increment within one run and kind, and restart across runs.
 func TestAppendRunStepAttemptCounters(t *testing.T) {
