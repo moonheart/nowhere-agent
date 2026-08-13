@@ -158,7 +158,11 @@ func (n *Notifier) deliverIM(ctx context.Context, raw string, payload RunComplet
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "nowhere-agent-webhook/1")
 	if ssrf != nil {
+		// pinRequest runs the guard's ResolveURL — the single validation of
+		// this IM target (scheme/host check, DNS, private-range refusal) —
+		// and pins the vetted addresses before the request goes out.
 		if err := ssrf.pinRequest(req, target); err != nil {
+			n.log.Warn("webhook delivery blocked by SSRF guard", "url", raw, "err", err)
 			return err
 		}
 	}

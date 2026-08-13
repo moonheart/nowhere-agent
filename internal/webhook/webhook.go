@@ -193,17 +193,6 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 	n.mu.RUnlock()
 	deliverCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	// SSRF screen before anything else: a blocked target is refused without a
-	// single connection attempt. Every attempt re-resolves and pins the vetted
-	// addresses into the request (pinRequest + Guard.DialContext), so a host
-	// rebinding between the check and the dial cannot slip through; an
-	// allowlisted hostname is the operator's explicit trust, dialed freely.
-	if ssrf != nil {
-		if err := ssrf.CheckURL(deliverCtx, url); err != nil {
-			n.log.Warn("webhook delivery blocked by SSRF guard", "url", url, "run", payload.RunID, "err", err)
-			return err
-		}
-	}
 	// Domestic IM bots (DingTalk/WeCom/Feishu) take their own payload schema
 	// and need no retry amplification (a 4xx from the bot API is permanent).
 	if n.isIMBotURL(url) {
@@ -241,10 +230,15 @@ func (n *Notifier) Deliver(ctx context.Context, url string, payload RunCompleted
 			req.Header.Set("X-Nowhere-Signature", "sha256="+hex.EncodeToString(m.Sum(nil)))
 		}
 		if ssrf != nil {
-			// Validate and pin this attempt's addresses into the request
-			// (Guard.DialContext dials exactly the vetted addresses): the
-			// resolution is per attempt, and the connection can never be
-			// re-resolved to an unvetted address.
+			// Single validation point for this attempt: pinRequest runs
+			// ResolveURL (scheme/host check + DNS + private-range refusal)
+			// and pins the vetted addresses into the request context, so a
+			// blocked target is refused before any connection and a rebinding
+			// host cannot re-resolve to an unvetted address between check and
+			// dial (Guard.DialContext dials exactly the vetted addresses).
+			// An allowlisted hostname is the operator's explicit trust, dialed
+			// freely. This per-attempt resolution is the only DNS the
+			// delivery performs — no separate pre-screen.
 			if err := ssrf.pinRequest(req, url); err != nil {
 				n.log.Warn("webhook delivery blocked by SSRF guard", "url", url, "run", payload.RunID, "err", err)
 				return err
