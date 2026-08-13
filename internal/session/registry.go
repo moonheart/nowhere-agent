@@ -252,7 +252,7 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 			// The panic bypasses the emitter, so the error text is passed
 			// straight to the message-metadata attach.
 			rg.attachRunError(bg, sessionID, run.ID, errText)
-			_ = rg.rt.CompleteRun(bg, sessionID, RunFailed)
+			_ = rg.rt.CompleteRunForRun(bg, sessionID, run.ID, RunFailed)
 		}
 	}()
 
@@ -352,7 +352,7 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 			rg.attachRunError(bg, sessionID, run.ID, errText)
 		}
 	}
-	_ = rg.rt.CompleteRun(bg, sessionID, status)
+	_ = rg.rt.CompleteRunForRun(bg, sessionID, run.ID, status)
 
 	// Run-completion hooks (webhook notifications and friends): fire each on
 	// its own goroutine so a slow consumer can never delay the next run on the

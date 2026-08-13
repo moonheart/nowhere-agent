@@ -342,12 +342,28 @@ func isContentKind(kind string) bool {
 
 // CompleteRun marks the active run done/failed/cancelled and releases the lock.
 func (rt *Runtime) CompleteRun(ctx context.Context, sessionID string, status RunStatus) error {
+	rt.mu.Lock()
+	rs, ok := rt.runs[sessionID]
+	rt.mu.Unlock()
+	if !ok {
+		return ErrNoActiveRun
+	}
+	return rt.CompleteRunForRun(ctx, sessionID, rs.run.ID, status)
+}
+
+// CompleteRunForRun is CompleteRun guarded by run identity: it settles the
+// session's active run only when that run is still the one given. A stale
+// completion — a cancelled run's worker still unwinding after a newer run took
+// the lock (the schedule MultitaskInterrupt path cancels run A then immediately
+// submits run B) — is a no-op returning ErrNoActiveRun, so it can neither
+// delete the newer run's lock nor clobber its status.
+func (rt *Runtime) CompleteRunForRun(ctx context.Context, sessionID, runID string, status RunStatus) error {
 	if !status.Terminal() {
 		return errors.New("status must be terminal")
 	}
 	rt.mu.Lock()
 	rs, ok := rt.runs[sessionID]
-	if !ok {
+	if !ok || rs.run.ID != runID {
 		rt.mu.Unlock()
 		return ErrNoActiveRun
 	}
@@ -356,7 +372,7 @@ func (rt *Runtime) CompleteRun(ctx context.Context, sessionID string, status Run
 	// The run is settling: its live content stream has served its purpose and is
 	// scheduled for cleanup (durable content is already in the message store).
 	_ = rt.broker.Settle(ctx, sessionID)
-	return rt.store.UpdateRunStatus(ctx, rs.run.ID, status)
+	return rt.store.UpdateRunStatus(ctx, runID, status)
 }
 
 // ActiveRun returns the active run for a session, or false.

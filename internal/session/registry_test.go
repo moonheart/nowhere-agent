@@ -180,6 +180,77 @@ func TestCancelWithNoActiveRun(t *testing.T) {
 	}
 }
 
+// TestStaleWorkerCompletionDoesNotClobberNewRun is the regression for the
+// schedule MultitaskInterrupt race: CancelRun settles run A cancelled and
+// releases the lock, then Submit starts run B while A's worker is still
+// unwinding. A's trailing CompleteRun must be a no-op — it must neither delete
+// B's lock nor mark B cancelled in the durable store.
+func TestStaleWorkerCompletionDoesNotClobberNewRun(t *testing.T) {
+	rt, rg, sess := newRegistrySession(t)
+	gateA := make(chan struct{})
+	gateB := make(chan struct{})
+	runA, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: registryLoop(&stubProvider{deltas: []string{"x"}, gate: gateA})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond) // let worker A park on the gate
+
+	// Interrupt exactly like the schedule MultitaskInterrupt branch does:
+	// CancelRun settles A cancelled and releases the single-active-run lock.
+	if ok, err := rt.CancelRun(context.Background(), sess.ID); err != nil || !ok {
+		t.Fatalf("CancelRun = %v, %v want true, nil", ok, err)
+	}
+	runB, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: registryLoop(&stubProvider{deltas: []string{"y"}, gate: gateB})})
+	if err != nil {
+		t.Fatalf("submit after interrupt: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond) // let worker B park on the gate
+
+	// Unblock A so its worker unwinds. Its terminal event is persisted right
+	// before its settle call, so seeing it means the stale CompleteRun is done.
+	close(gateA)
+	deadline := time.Now().Add(2 * time.Second)
+	for !hasTerminalEvent(t, rt, runA.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("run A did not unwind")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// B must still hold the lock and read running in the durable store.
+	if _, active, err := rt.ActiveRun(context.Background(), sess.ID); err != nil || !active {
+		t.Fatalf("run B lost the lock after A's worker unwound (active=%v err=%v)", active, err)
+	}
+	runs, err := rt.RunsForSession(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range runs {
+		if r.ID == runB.ID && r.Status != RunRunning {
+			t.Errorf("run B status = %v want running", r.Status)
+		}
+	}
+
+	close(gateB)
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Errorf("run B final status = %v want done", got)
+	}
+}
+
+func hasTerminalEvent(t *testing.T, rt *Runtime, runID string) bool {
+	t.Helper()
+	evs, err := rt.Replay(context.Background(), runID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range evs {
+		if e.Kind == string(agent.KindDone) || e.Kind == string(agent.KindCancelled) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestTerminalEventPrecedesSettle is the regression for the attach-side race: an
 // observer replaying the run after it reports inactive must still find the
 // terminal event in the durable log (persisted before settle).
