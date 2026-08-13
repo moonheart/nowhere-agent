@@ -37,7 +37,7 @@ import { getToken, logout, consumeSSORedirect } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
 import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, activityEpoch, type SubagentSignal } from "@/lib/activity";
-import { reportInteraction, resetApprovals, registerDecisionFollower, hasPendingInteractions, type Interaction } from "@/lib/approval";
+import { reportInteraction, resetApprovals, registerDecisionFollower, hasPendingInteractions, approvalEpoch, type Interaction } from "@/lib/approval";
 import { clearNotice, reportNotice } from "@/lib/notice";
 import { clientToolDeclarations } from "@/lib/client-tools";
 import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
@@ -65,6 +65,11 @@ function Chat({
   // Captured once per mounted conversation. Subagent signals stream from the
   // backend; if a late frame arrives after a reset/switch, the store drops it.
   const chatEpoch = activityEpoch();
+  // Interaction frames are tagged with the APPROVAL store's epoch — the same
+  // counter the verdict/attach streams in lib/history.ts report against — so
+  // all interaction-frame reporters share one reset counter instead of two
+  // that only stay in sync because every reset site bumps both.
+  const interactionEpoch = approvalEpoch();
   // Images staged for the CURRENT send: the body closure takes the batch from
   // the attachment store (clearing the chips), and a FAILED send puts it back
   // so the chips — and the batch — survive a retry. Success keeps them cleared
@@ -118,7 +123,7 @@ function Chat({
         // transient, not the message. ("tool-approval" is the legacy frame name.)
         // Tagged with the conversation epoch so a late frame from a session
         // that was reset meanwhile can't land in the new conversation.
-        reportInteraction(d.data as Interaction, chatEpoch);
+        reportInteraction(d.data as Interaction, interactionEpoch);
       } else if (d.name === "session-state") {
         // Session-level state push (O1): the plan_write tool's plan, pushed
         // live. Feeds the top plan panel. The permission_mode setting rides the
