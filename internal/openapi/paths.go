@@ -62,6 +62,33 @@ func paths() map[string]PathItem {
 				},
 			},
 		},
+		"/api/auth/totp/verify": {
+			"post": Operation{
+				Summary:     "Complete a password+TOTP login: redeem the one-shot challenge with the authenticator code",
+				Tags:        []string{"auth"},
+				RequestBody: jsonBody(map[string]any{"type": "object", "required": []string{"totp_token", "code"}, "properties": map[string]any{"totp_token": map[string]any{"type": "string"}, "code": map[string]any{"type": "string"}}}),
+				Responses:   jsonResp("token + user", ref("AuthResponse")),
+			},
+		},
+		"/api/auth/phone/request-code": {
+			"post": Operation{
+				Summary:     "Send a verification code to a phone number",
+				Tags:        []string{"auth"},
+				RequestBody: jsonBody(map[string]any{"type": "object", "required": []string{"phone"}, "properties": map[string]any{"phone": map[string]any{"type": "string"}}}),
+				Responses: map[string]Response{
+					"204": {Description: "code sent"},
+					"429": {Description: "code sent too recently or daily quota exceeded"},
+				},
+			},
+		},
+		"/api/auth/phone/verify": {
+			"post": Operation{
+				Summary:     "Verify a phone code and receive a bearer token",
+				Tags:        []string{"auth"},
+				RequestBody: jsonBody(map[string]any{"type": "object", "required": []string{"phone", "code"}, "properties": map[string]any{"phone": map[string]any{"type": "string"}, "code": map[string]any{"type": "string"}}}),
+				Responses:   jsonResp("token + user", ref("AuthResponse")),
+			},
+		},
 
 		// ---- chat (the core embedding surface) ----
 		"/api/chat": {
@@ -106,6 +133,44 @@ func paths() map[string]PathItem {
 					{Name: "cursor", In: "query", Description: "updated_at+id cursor from the previous page", Schema: map[string]any{"type": "string"}},
 				},
 				Responses: jsonResp("sessions + next cursor", ref("SessionPage")),
+			},
+		},
+		"/api/chat/resume": {
+			"post": Operation{
+				Summary:     "Re-stream an in-flight run from an offset",
+				Description: "Attaches to the session's active run and streams its ui-message-stream continuation from `after`; a settled run has nothing to re-stream.",
+				Tags:        []string{"chat"},
+				Security:    bearer,
+				Parameters: []Parameter{
+					{Name: "threadId", In: "query", Required: true, Schema: map[string]any{"type": "string"}},
+					{Name: "after", In: "query", Schema: map[string]any{"type": "integer", "description": "broker offset to resume from (0 = from the start)"}},
+				},
+				Responses: map[string]Response{
+					"200": {Description: "ui-message-stream SSE (data: <json>\\n\\n … data: [DONE])"},
+					"401": {Description: "invalid or missing bearer token"},
+				},
+			},
+		},
+		"/api/chat/sessions/{id}/active": {
+			"get": Operation{
+				Summary:  "Report whether the session has a run in flight",
+				Tags:     []string{"chat"},
+				Security: bearer,
+				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
+				Responses: jsonResp("active flag", map[string]any{"type": "object", "properties": map[string]any{"active": map[string]any{"type": "boolean"}}}),
+			},
+		},
+		"/api/chat/sessions/{id}/state": {
+			"post": Operation{
+				Summary:     "Write one client-settable session-state key",
+				Tags:        []string{"chat"},
+				Security:    bearer,
+				Parameters:  []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
+				RequestBody: jsonBody(map[string]any{"type": "object", "required": []string{"key"}, "properties": map[string]any{"key": map[string]any{"type": "string"}, "value": map[string]any{"type": "object"}}}),
+				Responses: map[string]Response{
+					"200": {Description: "written", Content: map[string]Content{"application/json": {Schema: map[string]any{"type": "object", "properties": map[string]any{"ok": map[string]any{"type": "boolean"}, "key": map[string]any{"type": "string"}}}}}},
+					"403": {Description: "key not client-settable"},
+				},
 			},
 		},
 
@@ -177,7 +242,7 @@ func paths() map[string]PathItem {
 		},
 
 		// ---- agent definitions & skills ----
-		"/api/me/agent-defs": {
+		"/api/me/agentdefs": {
 			"get": Operation{
 				Summary:  "List the caller's agent definitions",
 				Tags:     []string{"agent-defs"},
@@ -205,6 +270,21 @@ func paths() map[string]PathItem {
 					"type":     "object",
 					"required": []string{"skills"},
 					"properties": map[string]any{"skills": map[string]any{"type": "array", "items": ref("Skill")}},
+				}),
+			},
+		},
+		"/api/me/usage": {
+			"get": Operation{
+				Summary:     "The caller's token usage",
+				Tags:        []string{"me"},
+				Security:    bearer,
+				Parameters:  []Parameter{{Name: "from", In: "query", Schema: map[string]any{"type": "string", "description": "RFC3339 range start (empty = since the beginning)"}}, {Name: "to", In: "query", Schema: map[string]any{"type": "string", "description": "RFC3339 range end (empty = now)"}}},
+				Responses: jsonResp("total + daily buckets", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"total": map[string]any{"type": "object", "properties": map[string]any{"input": map[string]any{"type": "integer"}, "output": map[string]any{"type": "integer"}, "cache_read": map[string]any{"type": "integer"}, "cache_write": map[string]any{"type": "integer"}, "runs": map[string]any{"type": "integer"}}},
+						"daily": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+					},
 				}),
 			},
 		},
@@ -448,7 +528,17 @@ func schemas() map[string]any {
 				"mode":        map[string]any{"type": "string", "description": "response_mode: chat | resume", "enum": []string{"chat", "resume"}},
 				"system_prompt": map[string]any{"type": "string", "description": "override the system prompt for this run"},
 				"model":       map[string]any{"type": "string", "description": "model override on the resolved provider"},
-				"images":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "base64/url image inputs"},
+				"images": map[string]any{
+					"type":        "array",
+					"description": "images attached to the current user turn, pre-uploaded to the session workspace",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path":      map[string]any{"type": "string", "description": "session-relative workspace path (the upload endpoint's response)"},
+							"mediaType": map[string]any{"type": "string", "description": "image media type; defaults to image/webp when empty"},
+						},
+					},
+				},
 			},
 		},
 		"Message": map[string]any{
