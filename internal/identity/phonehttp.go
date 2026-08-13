@@ -146,7 +146,11 @@ func (h *PhoneHandler) serveVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	token, u, err := h.svc.VerifyPhoneOTP(r.Context(), phone, req.Code)
 	if err != nil {
-		h.throttle.FailVerify(phone, ip)
+		// Only a genuinely wrong code counts as a failed guess; a DB hiccup or
+		// a malformed number must not lock the (phone, ip) pair for 15 minutes.
+		if errors.Is(err, ErrInvalidCode) {
+			h.throttle.FailVerify(phone, ip)
+		}
 		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"method": "phone"}))
 		switch {
 		case errors.Is(err, ErrInvalidPhone):

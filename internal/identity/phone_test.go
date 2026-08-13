@@ -5,6 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -199,5 +202,61 @@ func TestPhoneOTPExpiredCode(t *testing.T) {
 	}
 	if _, _, err := svc.VerifyPhoneOTP(ctx, phone, sms.delivered[phone]); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expired code: %v, want ErrInvalidCode", err)
+	}
+}
+
+func TestPhoneVerifyNonCodeErrorsDoNotCount(t *testing.T) {
+	svc, sms, store, ctx := phoneEnv(t)
+	phone := phoneNumber()
+	t.Cleanup(func() {
+		store.db.Exec(`DELETE FROM users WHERE phone = $1`, phone)
+		store.db.Exec(`DELETE FROM phone_otps WHERE phone = $1`, phone)
+	})
+
+	h := NewPhoneHandler(svc, sms)
+	th := NewOTPThrottler()
+	th.now = svc.now
+	h.throttle = th
+
+	// A wrong code IS a failed guess: it must count toward the lockout.
+	if err := svc.RequestPhoneOTP(ctx, phone, sms); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/phone/verify",
+		strings.NewReader(fmt.Sprintf(`{"phone":%q,"code":"000000"}`, phone)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.serveVerify(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-code status = %d, want 401", rec.Code)
+	}
+	th.mu.Lock()
+	if n := len(th.verify); n != 1 {
+		t.Fatalf("wrong code must count once, got %d entries", n)
+	}
+	th.mu.Unlock()
+
+	// Verifying the CORRECT code of a disabled user fails with ErrUserDisabled
+	// — a server-side state error, not a failed guess: the throttle must not
+	// count it (a DB hiccup or state error must not lock the pair).
+	u, err := store.CreatePhoneUser(ctx, phone, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetUserDisabled(ctx, u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/phone/verify",
+		strings.NewReader(fmt.Sprintf(`{"phone":%q,"code":%q}`, phone, sms.delivered[phone])))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.serveVerify(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("disabled-user status = %d, want 403", rec.Code)
+	}
+	th.mu.Lock()
+	defer th.mu.Unlock()
+	if n := len(th.verify); n != 1 {
+		t.Errorf("non-code errors must not count toward the verify throttle (map holds %d entries)", n)
 	}
 }
