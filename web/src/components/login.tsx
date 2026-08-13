@@ -57,6 +57,7 @@ export const LoginForm: FC<{
     initialTotpToken,
   );
   const [totpCode, setTotpCode] = useState("");
+  const [showForgotHint, setShowForgotHint] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -349,6 +350,24 @@ export const LoginForm: FC<{
                     onChange={(e) => setPassword(e.target.value)}
                   />
                 </Field>
+                {mode === "login" && (
+                  <div>
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="px-0"
+                      onClick={() => setShowForgotHint((s) => !s)}
+                    >
+                      {t("login.forgotPassword")}
+                    </Button>
+                    {showForgotHint && (
+                      <p className="text-xs text-muted-foreground">
+                        {t("login.forgotHint")}
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {error && (
                   <Alert variant="destructive">
