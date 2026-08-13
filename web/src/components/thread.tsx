@@ -356,10 +356,18 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
     if (files.length === 0) return;
     e.preventDefault();
     setUploading(true);
+    // Parallel uploads share one spinner: count in-flight uploads and only
+    // clear it when the last one settles — the first .finally() alone would
+    // close the spinner while the rest are still uploading.
+    let inFlight = 0;
     files.forEach((file) => {
+      inFlight++;
       uploadFile(file)
         .catch(() => reportNotice("Could not upload the pasted image — try again."))
-        .finally(() => setUploading(false));
+        .finally(() => {
+          inFlight--;
+          if (inFlight === 0) setUploading(false);
+        });
     });
   };
 
