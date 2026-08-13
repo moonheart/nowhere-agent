@@ -248,7 +248,10 @@ func TestSweepEndedSessionImagesRemovesOnlyListedOldSessions(t *testing.T) {
 		if !before.Equal(cutoff) || limit != 10 {
 			t.Errorf("lister args = (%v, %d), want (%v, 10)", before, limit, cutoff)
 		}
-		return []string{"old-sess"}, nil
+		// "old-sess" has images; "no-dir-sess" has no dir at all — the latter
+		// must NOT be counted, or the count inflates across passes that
+		// re-list rows whose dirs a previous pass (or a purge) already cleared.
+		return []string{"old-sess", "no-dir-sess"}, nil
 	}
 
 	removed, err := SweepEndedSessionImages(context.Background(), nil, s, listEnded, cutoff, 10)
@@ -290,8 +293,10 @@ func TestDeleteSessionImagesKeepsNonImageSiblingFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.DeleteSessionImages("sess1"); err != nil {
+	if ok, err := s.DeleteSessionImages("sess1"); err != nil {
 		t.Fatalf("DeleteSessionImages: %v", err)
+	} else if !ok {
+		t.Error("DeleteSessionImages reported no removal for a session with images")
 	}
 	if _, err := s.Open("sess1", "photo.webp"); err == nil {
 		t.Error("session image should be gone")
@@ -304,7 +309,7 @@ func TestDeleteSessionImagesKeepsNonImageSiblingFiles(t *testing.T) {
 func TestDeleteSessionImagesRejectsTraversal(t *testing.T) {
 	s := NewImageStore(t.TempDir())
 	for _, id := range []string{"..", "../evil", "a/b", `..\evil`, "", "."} {
-		if err := s.DeleteSessionImages(id); err == nil {
+		if _, err := s.DeleteSessionImages(id); err == nil {
 			t.Errorf("DeleteSessionImages(%q) should be rejected", id)
 		}
 	}
@@ -312,8 +317,12 @@ func TestDeleteSessionImagesRejectsTraversal(t *testing.T) {
 
 func TestDeleteSessionImagesMissingDirIsNoop(t *testing.T) {
 	s := NewImageStore(t.TempDir())
-	if err := s.DeleteSessionImages("no-such-session"); err != nil {
+	ok, err := s.DeleteSessionImages("no-such-session")
+	if err != nil {
 		t.Errorf("missing dir should be a no-op, got %v", err)
+	}
+	if ok {
+		t.Error("missing dir must not count as a removal")
 	}
 }
 

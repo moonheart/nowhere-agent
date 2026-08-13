@@ -26,9 +26,9 @@ type SessionPurgeStore interface {
 
 // ImagePurger removes workspace images for hard-deleted data. *workspace.
 // ImageStore satisfies it; nil-safe (a deployment without a workspace dir has
-// no images to remove).
+// no images to remove). The bool reports whether anything was removed.
 type ImagePurger interface {
-	DeleteSessionImages(sessionID string) error
+	DeleteSessionImages(sessionID string) (bool, error)
 	DeleteUserUploadScope(userID string) error
 }
 
@@ -95,7 +95,7 @@ func (h *Handler) purgeSessionImages(r *http.Request, sessionID string) {
 	if h.images == nil {
 		return
 	}
-	if err := h.images.DeleteSessionImages(sessionID); err != nil {
+	if _, err := h.images.DeleteSessionImages(sessionID); err != nil {
 		slog.Warn("purge: session image cleanup failed", "session", sessionID, "err", err)
 	}
 }
@@ -108,7 +108,7 @@ func (h *Handler) purgeUserImages(r *http.Request, userID string, sessionIDs []s
 		return
 	}
 	for _, id := range sessionIDs {
-		if err := h.images.DeleteSessionImages(id); err != nil {
+		if _, err := h.images.DeleteSessionImages(id); err != nil {
 			slog.Warn("purge: session image cleanup failed", "session", id, "err", err)
 		}
 	}

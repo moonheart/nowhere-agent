@@ -316,18 +316,20 @@ func (s *ImageStore) DeleteUserUpload(userID, pathOrID string) error {
 // traversal), so a hostile id can never escape the root. Only IMAGE files are
 // touched: the local sandbox backend may share the same root, so a sibling
 // file or subdirectory in the session dir (a sandbox workspace) must survive.
-// A missing dir is not an error.
-func (s *ImageStore) DeleteSessionImages(sessionID string) error {
+// A missing dir is not an error. The bool reports whether any file was
+// actually removed — the retention sweep counts only real removals, so a
+// session whose dir is already gone is not re-counted on every pass.
+func (s *ImageStore) DeleteSessionImages(sessionID string) (bool, error) {
 	if sessionID == "" || sessionID == "." || sessionID == ".." || strings.ContainsAny(sessionID, `/\`) {
-		return fmt.Errorf("invalid session id %q", sessionID)
+		return false, fmt.Errorf("invalid session id %q", sessionID)
 	}
 	dir := filepath.Join(s.root, sessionID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil // nothing stored for this session
+			return false, nil // nothing stored for this session
 		}
-		return fmt.Errorf("read session dir: %w", err)
+		return false, fmt.Errorf("read session dir: %w", err)
 	}
 	var removed bool
 	for _, e := range entries {
@@ -335,7 +337,7 @@ func (s *ImageStore) DeleteSessionImages(sessionID string) error {
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
-			return fmt.Errorf("remove session image: %w", err)
+			return false, fmt.Errorf("remove session image: %w", err)
 		}
 		removed = true
 	}
@@ -345,7 +347,7 @@ func (s *ImageStore) DeleteSessionImages(sessionID string) error {
 		// stays — correct either way, and best-effort by design.
 		_ = os.Remove(dir)
 	}
-	return nil
+	return removed, nil
 }
 
 // DeleteUserUploadScope removes a user's entire upload scope — every blob
@@ -402,13 +404,19 @@ func SweepEndedSessionImages(ctx context.Context, log *slog.Logger, images *Imag
 			return removed, nil
 		}
 		for _, id := range ids {
-			if err := images.DeleteSessionImages(id); err != nil {
+			ok, err := images.DeleteSessionImages(id)
+			if err != nil {
 				if log != nil {
 					log.Warn("sweep: remove session images failed", "session", id, "err", err)
 				}
 				continue
 			}
-			removed++
+			// Count only REAL removals: a session whose dir is already gone
+			// (previous pass, purge) reports ok=false, so the count cannot
+			// inflate across passes that re-list the same rows.
+			if ok {
+				removed++
+			}
 		}
 		cursor = ids[len(ids)-1]
 		if len(ids) < limit {
