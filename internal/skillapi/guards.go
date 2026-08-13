@@ -1,7 +1,6 @@
 package skillapi
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -103,20 +102,7 @@ func (h *Handler) authorizeSkillScope(w http.ResponseWriter, r *http.Request, id
 const maxBodyBytes = 1 << 20
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	body, err := httpx.ReadBodyMax(r, maxBodyBytes)
-	if err != nil {
-		if errors.Is(err, httpx.ErrBodyTooLarge) {
-			writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
-			return false
-		}
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return false
-	}
-	if err := json.Unmarshal(body, v); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return false
-	}
-	return true
+	return httpx.DecodeBody(w, r, maxBodyBytes, v)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
