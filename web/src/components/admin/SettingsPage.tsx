@@ -174,6 +174,8 @@ export function PlatformSettingsPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  // notice marks a Save click that had nothing to change ("Nothing to change.").
+  const [notice, setNotice] = useState<string | null>(null);
 
   const setDraft = (key: string, v: Draft) =>
     setDrafts((d) => ({ ...d, [key]: v }));
@@ -208,6 +210,18 @@ export function PlatformSettingsPage() {
 
   // save submits one key; empty drafts clear the override (back to default).
   const save = async (s: SettingEntry, d?: Draft) => {
+    // Secret rows never echo their value back, so an untouched Save would PUT
+    // null and wipe the configured override. Exactly these two can tell "no
+    // local edit" apart from a deliberate clear: mcpDraft stays null until the
+    // table is touched, and the secret field only enters drafts once typed.
+    if (
+      (s.key === "mcp_servers" && mcpDraft === null) ||
+      (s.key === "webhook_signing_secret" && drafts[s.key] === undefined)
+    ) {
+      setSaved(null);
+      setNotice(s.key);
+      return;
+    }
     // mcpDraft lives outside drafts (secret rows are never echoed back), so a
     // plain save must read it or the edited rows are silently dropped.
     const draft: Draft =
@@ -219,6 +233,7 @@ export function PlatformSettingsPage() {
     setBusy(s.key);
     setError(null);
     setSaved(null);
+    setNotice(null);
     try {
       const wire = wireValue(s, draft);
       if (s.secret && typeof wire === "string" && wire === "") {
@@ -504,6 +519,11 @@ export function PlatformSettingsPage() {
                             {saved === s.key && (
                               <p className="text-sm text-muted-foreground">
                                 Applied — no restart needed.
+                              </p>
+                            )}
+                            {notice === s.key && (
+                              <p className="text-sm text-muted-foreground">
+                                Nothing to change.
                               </p>
                             )}
                           </CardContent>
