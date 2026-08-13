@@ -7,6 +7,7 @@ package sandbox
 import (
 	"context"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -52,6 +53,50 @@ type ExecResult struct {
 	Stdout   string
 	Stderr   string
 	Duration time.Duration
+}
+
+// maxExecCaptureBytes bounds each Exec output stream (stdout/stderr) so a
+// runaway command cannot balloon the gateway's memory before the tool layer's
+// spill cap (builtin capAndSpill) ever sees the result: run_command allows a
+// 120s budget, during which `yes` or `cat /dev/zero` would otherwise push the
+// process into gigabytes. Both Port backends (local, docker) capture through
+// this same bound.
+const maxExecCaptureBytes = 1 << 20 // 1 MiB per stream
+
+// execTruncationMarker is appended to a stream that exceeded the capture
+// bound, so consumers can tell truncation apart from a complete output.
+const execTruncationMarker = "\n… [output truncated: exceeded 1 MiB capture limit]\n"
+
+// boundedCapture accumulates at most maxExecCaptureBytes of a stream, then
+// keeps discarding and appends execTruncationMarker to String(). Bytes within
+// the bound are returned verbatim; Write always reports the full length so
+// exec/stdcopy keep draining without erroring.
+type boundedCapture struct {
+	buf       strings.Builder
+	truncated bool
+}
+
+func (b *boundedCapture) Write(p []byte) (int, error) {
+	if !b.truncated {
+		remaining := maxExecCaptureBytes - b.buf.Len()
+		if remaining <= 0 {
+			b.truncated = true
+		} else if len(p) > remaining {
+			b.buf.Write(p[:remaining])
+			b.truncated = true
+		} else {
+			b.buf.Write(p)
+		}
+	}
+	return len(p), nil
+}
+
+func (b *boundedCapture) String() string {
+	s := b.buf.String()
+	if b.truncated {
+		s += execTruncationMarker
+	}
+	return s
 }
 
 // Port is the minimal verb set the agent loop and skill engine use. Consumers

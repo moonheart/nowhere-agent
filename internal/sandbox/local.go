@@ -199,7 +199,7 @@ func (p *LocalPort) Exec(ctx context.Context, h Handle, argv []string) (ExecResu
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
-	var stdout, stderr strings.Builder
+	var stdout, stderr boundedCapture
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()

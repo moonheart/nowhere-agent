@@ -199,6 +199,61 @@ func TestLocalPortDestroy(t *testing.T) {
 	}
 }
 
+func TestBoundedCaptureTruncates(t *testing.T) {
+	var b boundedCapture
+	big := strings.Repeat("x", maxExecCaptureBytes)
+	if _, err := b.Write([]byte(big)); err != nil {
+		t.Fatal(err)
+	}
+	// Exactly at the bound: no truncation yet.
+	if got := b.String(); got != big {
+		t.Errorf("within-bound output changed: len %d want %d", len(got), len(big))
+	}
+	// One byte over: the first maxExecCaptureBytes stay, the marker is appended.
+	if _, err := b.Write([]byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	got := b.String()
+	if !strings.HasPrefix(got, big) {
+		t.Error("truncated output lost its prefix")
+	}
+	if !strings.HasSuffix(got, execTruncationMarker) {
+		t.Errorf("truncated output missing marker: %q", got[len(got)-len(execTruncationMarker):])
+	}
+	if n := len(got) - len(execTruncationMarker); n != maxExecCaptureBytes {
+		t.Errorf("captured %d bytes, want %d", n, maxExecCaptureBytes)
+	}
+	// Writes after truncation keep draining without growing the buffer.
+	if _, err := b.Write([]byte("zzz")); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(b.String()) - len(execTruncationMarker); n != maxExecCaptureBytes {
+		t.Errorf("buffer grew after truncation: %d", n)
+	}
+}
+
+func TestLocalPortExecBoundedCapture(t *testing.T) {
+	p, h := newLocalSandbox(t)
+	ctx := context.Background()
+	argv, err := p.ShellArgv("yes x | head -c 2000000")
+	if err != nil {
+		t.Skipf("no shell: %v", err)
+	}
+	res, err := p.Exec(ctx, h, argv)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	if len(res.Stdout) != maxExecCaptureBytes+len(execTruncationMarker) {
+		t.Errorf("stdout = %d bytes, want %d (bound + marker)", len(res.Stdout), maxExecCaptureBytes+len(execTruncationMarker))
+	}
+	if !strings.HasSuffix(res.Stdout, execTruncationMarker) {
+		t.Error("runaway stdout missing truncation marker")
+	}
+	if !strings.HasPrefix(res.Stdout, strings.Repeat("x\n", 512)) {
+		t.Error("runaway stdout lost its prefix")
+	}
+}
+
 func TestLocalPortManagerLifecycle(t *testing.T) {
 	root := t.TempDir()
 	mgr := NewManager(NewLocalPort(root))

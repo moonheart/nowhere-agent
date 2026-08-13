@@ -400,9 +400,10 @@ func sanitizeName(s string) string {
 	return b.String()
 }
 
-// demuxDockerStream splits Docker's multiplexed stdout/stderr stream.
+// demuxDockerStream splits Docker's multiplexed stdout/stderr stream, each side
+// bounded by maxExecCaptureBytes like the local backend's Exec.
 func demuxDockerStream(r io.Reader) (string, string, error) {
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr boundedCapture
 	_, err := stdcopy.StdCopy(&stdout, &stderr, r)
 	return stdout.String(), stderr.String(), err
 }
