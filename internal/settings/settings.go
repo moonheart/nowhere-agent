@@ -303,7 +303,7 @@ func Catalog() []KeyInfo {
 		{Key: KeyLLMRawLogDir, Group: GroupLLM, Kind: KindString, Description: "Directory recording raw LLM request/response pairs for inspection (overrides LLM_RAW_LOG_DIR; auth headers never recorded). Empty disables. Applies from the next run."},
 
 		// Sandbox tab.
-		{Key: KeySandboxNetwork, Group: GroupSandbox, Kind: KindString, Description: "Docker-backend container egress policy: deny | open | allowlist (overrides SANDBOX_NETWORK). The local backend ignores it. Applies to the next session."},
+		{Key: KeySandboxNetwork, Group: GroupSandbox, Kind: KindString, Description: "Docker-backend container egress policy: deny | open (overrides SANDBOX_NETWORK). allowlist is accepted for compatibility but NOT implemented — the docker backend maps it to deny (zero egress) and the local backend ignores it. Applies to the next session."},
 		{Key: KeySandboxLocalExec, Group: GroupSandbox, Kind: KindBool, Description: "Enable the run_command tool on the local (host) sandbox backend (overrides SANDBOX_LOCAL_EXEC). Trusted single-tenant switch; multi-tenant deployments should use docker. Applies to the next session."},
 
 		// Permissions tab.

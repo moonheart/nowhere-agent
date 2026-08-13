@@ -117,7 +117,10 @@ const ENUM_KEYS: Record<string, { value: string; label: string }[]> = {
   sandbox_network: [
     { value: "deny", label: "deny" },
     { value: "open", label: "open" },
-    { value: "allowlist", label: "allowlist" },
+    {
+      value: "allowlist",
+      label: "allowlist (not implemented — zero egress)",
+    },
   ],
   redact_strategy: [
     { value: "redact", label: "redact" },
