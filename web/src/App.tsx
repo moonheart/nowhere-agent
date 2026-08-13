@@ -86,6 +86,10 @@ function Chat({
       // the attachment store). Consuming them here clears the chips — the batch
       // is exactly what this send carries. Kept in sendImages so onError can
       // restore the chips when the send fails.
+      // Reset at the start of every send: a turn without images must not keep
+      // the previous turn's batch staged, or a later failure would restore
+      // stale images into the composer.
+      sendImages = [];
       const images = takeImages();
       if (images.length > 0) sendImages = images;
       return {
