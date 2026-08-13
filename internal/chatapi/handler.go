@@ -533,7 +533,8 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 			http.Error(w, `{"error":"approval not found"}`, http.StatusNotFound)
 			return
 		}
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Warn("resolve approval", "approvalID", av.ApprovalID, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, ap.SessionID); !ok {
@@ -583,7 +584,8 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 		ap2 = ap
 		folded, pending, serr := h.registry.BatchFoldState(r.Context(), ap.RunID)
 		if serr != nil {
-			httpx.Error(w, http.StatusInternalServerError, serr.Error())
+			slog.Warn("read batch fold state", "approvalID", av.ApprovalID, "err", serr)
+			httpx.ErrorFrom(w, serr)
 			return
 		}
 		if folded {
@@ -594,7 +596,8 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 		err = nil
 	}
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Warn("record decision", "approvalID", av.ApprovalID, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 

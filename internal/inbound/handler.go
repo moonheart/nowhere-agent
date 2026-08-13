@@ -287,7 +287,8 @@ func (h *Handler) serveList(w http.ResponseWriter, r *http.Request) {
 	u := caller(r)
 	whs, err := h.store.ListByUser(r.Context(), u.ID)
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		h.log.Warn("inbound: list webhooks failed", "user", u.ID, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	out := make([]webhookDTO, 0, len(whs))
@@ -336,7 +337,8 @@ func (h *Handler) serveCreate(w http.ResponseWriter, r *http.Request) {
 		Enabled:         true,
 	})
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		h.log.Warn("inbound: create webhook failed", "user", u.ID, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	h.record(r, audit.Success(audit.ActionInboundWebhookCreate).Target("inbound_webhook", wh.ID))
@@ -366,7 +368,8 @@ func (h *Handler) serveToggle(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		h.log.Warn("inbound: toggle webhook failed", "webhook", id, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	h.record(r, audit.Success(audit.ActionInboundWebhookToggle).Target("inbound_webhook", id).Detail(map[string]any{"enabled": req.Enabled}))
@@ -378,7 +381,8 @@ func (h *Handler) serveDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ok, err := h.store.Delete(r.Context(), id, u.ID)
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		h.log.Warn("inbound: delete webhook failed", "webhook", id, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	if !ok {
@@ -402,7 +406,8 @@ func (h *Handler) serveRotate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		h.log.Warn("inbound: rotate webhook secret failed", "webhook", id, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	h.record(r, audit.Success(audit.ActionInboundWebhookRotate).Target("inbound_webhook", id))

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -95,7 +96,8 @@ func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 
 	page, err := h.runtime.ListSessionsByUser(r.Context(), user.ID, q, limit, cursor)
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Warn("list sessions", "user", user.ID, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 
@@ -147,7 +149,8 @@ func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 
 	deleted, err := h.runtime.DeleteSessionForUser(r.Context(), id, user.ID)
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Warn("delete session", "session", id, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	if !deleted {

@@ -3,6 +3,7 @@ package chatapi
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"nowhere-agent/internal/httpx"
@@ -60,7 +61,8 @@ func (h *Handler) serveSetSessionState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.runtime.SetSessionStateKV(r.Context(), sessionID, body.Key, body.Value); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Warn("set session state", "session", sessionID, "key", body.Key, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

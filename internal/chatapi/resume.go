@@ -1,6 +1,7 @@
 package chatapi
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -32,7 +33,8 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	// Pick the run to resume: the in-flight one if any, else the latest.
 	run, ok, err := h.runtime.ActiveRun(r.Context(), threadID)
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Warn("resolve run to resume", "thread", threadID, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 	if !ok {

@@ -3,6 +3,7 @@ package chatapi
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"nowhere-agent/internal/httpx"
@@ -139,7 +140,8 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 
 	msgs, err := h.buildHistory(r, threadID)
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, err.Error())
+		slog.Warn("history rebuild failed", "thread", threadID, "err", err)
+		httpx.ErrorFrom(w, err)
 		return
 	}
 
