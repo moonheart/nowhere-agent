@@ -360,3 +360,42 @@ func TestCreateValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestTriggerDispatchErrorDoesNotLeakDetail: the public trigger endpoint must
+// answer a dispatcher failure with a fixed text, never the wrapped error —
+// the error chain can carry provider/DB detail (loop build, session resolve,
+// registry submit) that must not reach an unauthenticated caller.
+func TestTriggerDispatchErrorDoesNotLeakDetail(t *testing.T) {
+	e := newEnv(t)
+	rt := session.NewRuntime(session.NewMemStore()).WithBus(session.NewMemBus())
+	rg := session.NewRunRegistry(rt)
+	d := NewDispatcher(e.h.store, rt, rg, nil, nil,
+		func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
+			return nil, fmt.Errorf("provider connect failed: dial tcp 10.0.0.5:5432: password authentication failed")
+		}, func() string { return "base" }, nil)
+	h := NewHandler(e.h.store, d)
+	mux := http.NewServeMux()
+	h.RegisterPublic(mux)
+
+	payload := `{"prompt":"x"}`
+	ts := time.Now().Unix()
+	nonce := fmt.Sprintf("n-%d-%d", ts, time.Now().UnixNano())
+	req := httptest.NewRequest("POST", "/api/inbound/"+e.webhook.ID, strings.NewReader(payload))
+	req.Header.Set("X-Nowhere-Timestamp", fmt.Sprintf("%d", ts))
+	req.Header.Set("X-Nowhere-Nonce", nonce)
+	req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(payload, ts, nonce, e.secret))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "dial tcp") || strings.Contains(body, "10.0.0.5") ||
+		strings.Contains(body, "authentication failed") || strings.Contains(body, "provider connect") {
+		t.Errorf("internal detail leaked to the caller: %s", body)
+	}
+	if !strings.Contains(body, "dispatch failed") {
+		t.Errorf("body = %q, want the fixed dispatch-failed text", body)
+	}
+}

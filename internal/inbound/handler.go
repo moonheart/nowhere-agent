@@ -193,7 +193,21 @@ func (h *Handler) serveTrigger(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, quota.ErrBudgetExceeded):
 			status = http.StatusTooManyRequests
 		}
-		httpx.Error(w, status, err.Error())
+		// Public endpoint: never echo the wrapped error — it can carry
+		// provider/DB detail (buildLoop, resolveSession, registry submit).
+		// Fixed text per status; the real cause stays in the log line above.
+		msg := "dispatch failed"
+		switch {
+		case errors.Is(err, ErrDisabled):
+			msg = "invalid or disabled webhook"
+		case errors.Is(err, ErrPendingInteraction):
+			msg = "session has pending interactions"
+		case errors.Is(err, ErrNotOwner):
+			msg = "target session is not owned by this webhook"
+		case errors.Is(err, quota.ErrBudgetExceeded):
+			msg = "monthly token budget exceeded"
+		}
+		httpx.Error(w, status, msg)
 		return
 	}
 
