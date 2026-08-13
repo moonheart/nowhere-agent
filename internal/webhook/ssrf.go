@@ -197,7 +197,38 @@ func public6(ip net.IP) bool {
 		ip.IsMulticast(), ip.IsUnspecified():
 		return false
 	}
+	// NAT64 addresses embed an IPv4 that the translator reaches on the
+	// caller's behalf: vet THAT address, or a private target smuggled as
+	// [64:ff9b::10.0.0.1] would slip past the IPv6 checks (IsPrivate etc.
+	// do not cover the RFC 6052 well-known prefix).
+	if v4 := nat64IPv4(ip); v4 != nil {
+		return public4(v4)
+	}
 	return true
+}
+
+// nat64IPv4 returns the IPv4 embedded in an RFC 6052 NAT64 IPv6 address
+// (well-known 64:ff9b::/96 or local-use 64:ff9b:1::/48, RFC 8215), or nil.
+// Per RFC 6052 §2.2 the /96 form carries the IPv4 in the low 32 bits; the
+// /48 form splits it across the reserved "u" octet (bytes 6-7 and 9-10, u
+// at byte 8 MUST be zero).
+func nat64IPv4(ip net.IP) net.IP {
+	v6 := ip.To16()
+	if v6 == nil || v6[0] != 0 || v6[1] != 0x64 || v6[2] != 0xff || v6[3] != 0x9b {
+		return nil
+	}
+	// Well-known prefix 64:ff9b::/96: bytes 4-11 are the zero prefix, the
+	// IPv4 is the low 32 bits.
+	if v6[4] == 0 && v6[5] == 0 && v6[6] == 0 && v6[7] == 0 &&
+		v6[8] == 0 && v6[9] == 0 && v6[10] == 0 && v6[11] == 0 {
+		return net.IPv4(v6[12], v6[13], v6[14], v6[15])
+	}
+	// Local-use prefix 64:ff9b:1::/48: IPv4 first half at bytes 6-7, second
+	// half at bytes 9-10, straddling the "u" octet at byte 8.
+	if v6[4] == 0 && v6[5] == 1 && v6[8] == 0 {
+		return net.IPv4(v6[6], v6[7], v6[9], v6[10])
+	}
+	return nil
 }
 
 // hostnameOnly strips the port from a URL host ("host:port" → "host") and the

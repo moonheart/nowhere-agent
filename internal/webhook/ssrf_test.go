@@ -40,6 +40,8 @@ func TestValidateURL(t *testing.T) {
 		"http://127.0.0.1:8080/hook", // literal loopback refused even without DNS
 		"http://10.1.2.3/hook",       // literal private refused
 		"http://[::1]/hook",          // IPv6 loopback refused
+		"http://[64:ff9b::a00:1]/hook",   // NAT64 (RFC 6052) embedding 10.0.0.1 refused
+		"http://[64:ff9b:1:a00:0:100::]/hook", // NAT64 local-use /48 embedding 10.0.0.1
 	} {
 		if err := g.ValidateURL(bad); err == nil {
 			t.Errorf("ValidateURL(%q): accepted, want block", bad)
@@ -66,6 +68,8 @@ func TestCheckURLPrivateTargets(t *testing.T) {
 		"http://100.64.0.1/x",                     // CGNAT
 		"http://[::1]/x",
 		"http://[fc00::1]/x",
+		"http://[64:ff9b::a00:1]/x",       // NAT64 well-known prefix embedding 10.0.0.1
+		"http://[64:ff9b:1:a00:0:100::]/x", // NAT64 local-use /48 embedding 10.0.0.1
 		"http://localhost:8080/x", // resolves loopback via real DNS
 	} {
 		if err := g.CheckURL(ctx, u); err == nil {
@@ -80,6 +84,8 @@ func TestCheckURLPublicTargets(t *testing.T) {
 	for _, u := range []string{
 		"https://example.com/hook", "http://8.8.8.8/x", "http://1.1.1.1:8080/x",
 		"https://[2606:4700:4700::1111]/x", // Cloudflare DNS
+		"http://[64:ff9b::808:808]/x",      // NAT64 embedding public 8.8.8.8
+		"http://[64:ff9b:1:808:8:800::]/x", // NAT64 local-use /48 embedding public 8.8.8.8
 	} {
 		if err := g.CheckURL(ctx, u); err != nil {
 			t.Errorf("CheckURL(%q): %v, want ok", u, err)
@@ -94,6 +100,7 @@ func TestCheckURLDNSPolicy(t *testing.T) {
 		"rebinding.example":    {{IP: net.ParseIP("169.254.169.254")}},
 		"private.example":      {{IP: net.ParseIP("10.1.2.3")}},
 		"mixed.example":        {{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP("10.0.0.1")}},
+		"nat64.example":        {{IP: net.ParseIP("64:ff9b::a00:1")}}, // DNS64 answer for 10.0.0.1
 		"unresolvable.example": {},
 	}}
 	ctx := context.Background()
@@ -105,6 +112,7 @@ func TestCheckURLDNSPolicy(t *testing.T) {
 		{"http://rebinding.example/h", false},
 		{"http://private.example/h", false},
 		{"http://mixed.example/h", false},        // any private address refuses the target
+		{"http://nat64.example/h", false},        // DNS64 NAT64 answer for a private IPv4
 		{"http://unresolvable.example/h", false}, // fail-closed
 	} {
 		err := g.CheckURL(ctx, tc.url)
