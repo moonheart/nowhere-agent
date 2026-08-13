@@ -58,6 +58,9 @@ type Handler struct {
 	// sessions disable the purge route (503); nil images skip image cleanup.
 	sessions SessionPurgeStore
 	images   ImagePurger
+	// runs stops an in-flight run before a session hard-delete (see
+	// RunCancellor). Nil skips the cancel — the purge still proceeds.
+	runs RunCancellor
 }
 
 // SettingStore is the runtime-settings surface the admin routes need.

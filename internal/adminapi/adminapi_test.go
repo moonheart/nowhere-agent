@@ -61,6 +61,9 @@ type env struct {
 	// against the same PG + a temp workspace dir.
 	sessions *session.PGStore
 	images   *workspace.ImageStore
+	// registry owns run execution (workers); the purge route uses it to stop
+	// an in-flight run before hard-deleting the session.
+	registry *session.RunRegistry
 
 	// actor is who the fake auth middleware presents as the caller. Tests
 	// reassign it to walk the authorization matrix.
@@ -85,8 +88,10 @@ func newEnv(t *testing.T) *env {
 	e.svc = identity.NewService(e.store)
 	e.sessions = session.NewPGStore(db)
 	e.images = workspace.NewImageStore(t.TempDir())
+	rt := session.NewRuntime(e.sessions)
+	e.registry = session.NewRunRegistry(rt, rt.Bus())
 
-	h := NewHandler(e.svc, usage.NewStore(db), e.mem).WithPurge(e.sessions, e.images)
+	h := NewHandler(e.svc, usage.NewStore(db), e.mem).WithPurge(e.sessions, e.images, e.registry)
 	e.mux = http.NewServeMux()
 	// Stand-in for identity's RequireAuth: it puts the current actor on the
 	// context exactly as the real middleware does, without needing a token.

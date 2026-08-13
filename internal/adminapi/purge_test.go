@@ -11,8 +11,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/identity"
+	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/session"
+	"nowhere-agent/internal/toolruntime"
 )
 
 // purgePNG encodes a small solid-color PNG, decodable by the image store.
@@ -111,6 +116,86 @@ func TestAdminSessionPurgeRemovesImages(t *testing.T) {
 	if _, err := os.Stat(otherDir); err != nil {
 		t.Errorf("other session's image dir must survive the purge: %v", err)
 	}
+}
+
+// TestAdminSessionPurgeCancelsActiveRun pins the active-run contract: purging
+// a session with an in-flight run must interrupt the worker FIRST — a hard
+// delete under a live worker would fail its next DB write (FK cascade) with a
+// bogus error while the LLM stream keeps spending tokens. The purge returns
+// 204, the row is gone, and the worker unwinds (it must not linger against a
+// deleted run).
+func TestAdminSessionPurgeCancelsActiveRun(t *testing.T) {
+	e := newEnv(t)
+	admin := e.user(identity.PlatformRoleAdmin)
+	owner := e.user(identity.PlatformRoleUser)
+	sess := e.sessionFor(owner)
+	// sessionFor leaves a queued run row; settle it so the single-active-run
+	// lock does not reject the new submit.
+	if _, err := e.db.Exec(`UPDATE runs SET status = 'done' WHERE session_id = $1 AND status <> 'done'`, sess.ID); err != nil {
+		t.Fatalf("settle queued run: %v", err)
+	}
+
+	// Submit a run whose provider blocks until the test ends, so a worker is
+	// actively executing for the session.
+	release := make(chan struct{})
+	defer close(release)
+	msg := provider.TextMessage(provider.RoleUser, "hold")
+	if _, err := e.registry.Submit(context.Background(), sess.ID, session.RunWork{
+		Loop:        agent.New(gateProvider{release: release}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}),
+		UserMessage: &msg,
+	}); err != nil {
+		t.Fatalf("submit blocking run: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !e.registry.ActiveWorker(sess.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("run worker never became active")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if rec := e.as(admin, "DELETE", "/api/admin/sessions/"+sess.ID, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("admin purge = %d (%s), want 204", rec.Code, rec.Body.String())
+	}
+	if _, err := e.sessions.GetSession(context.Background(), sess.ID); err == nil {
+		t.Error("session survived the purge")
+	}
+
+	// The worker was interrupted and must unwind — cancel settles the run
+	// cancelled; the row is gone, so its leftover writes fail harmlessly, but
+	// the worker exits (no more token burn against a deleted run).
+	deadline = time.Now().Add(5 * time.Second)
+	for e.registry.ActiveWorker(sess.ID) {
+		if time.Now().After(deadline) {
+			t.Fatal("purged session's run worker is still active after the purge")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// gateProvider blocks each run in Stream until released or cancelled, keeping
+// the run active (a live worker) — the state a purge must cancel before the
+// hard delete.
+type gateProvider struct{ release <-chan struct{} }
+
+func (gateProvider) Name() string { return "gate" }
+
+func (p gateProvider) Stream(ctx context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 4)
+	ch <- provider.Event{Type: provider.EventMessageStart}
+	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}}
+	go func() {
+		defer close(ch)
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.release:
+		}
+		ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "ok"}
+		ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
+		ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopEndTurn}
+	}()
+	return ch, nil
 }
 
 // TestAdminDeleteUserRemovesImages verifies user deletion cleans the user's

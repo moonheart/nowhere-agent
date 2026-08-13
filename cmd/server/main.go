@@ -342,6 +342,12 @@ func run() error {
 	// and the run log doubles as the episodes for dreaming.
 	sessionStore := session.NewPGStore(pool)
 	sessionRuntime := session.NewRuntime(sessionStore)
+	// Shared run-execution registry: the chat handler's runs, scheduled-task
+	// firings, and the admin session purge (which must interrupt an in-flight
+	// run before hard-deleting its session) all operate on the one worker
+	// table. Created here, outside the provider branch, so the admin console
+	// can reach the same workers the chat endpoint owns.
+	runRegistry := session.NewRunRegistry(sessionRuntime, sessionRuntime.Bus())
 
 	// Reconcile runs stranded non-terminal by a previous process (their in-memory
 	// workers died with it): mark them failed at startup so they don't read as
@@ -1277,6 +1283,7 @@ func run() error {
 
 		handler := chatapi.NewHandler(newChatLoop, baseSystemFor()).
 			WithRuntime(sessionRuntime).
+			WithRegistry(runRegistry).
 			WithMessageStore(messageStore).
 			WithContextBuilder(ctxBuilder).
 			WithTeamAttributor(teamAttributor).
@@ -1598,8 +1605,9 @@ func run() error {
 		WithWebhookDeliveries(webhook.NewDeliveryStore(pool)).
 		WithRuntimeSettings(settingsRuntime).
 		// Platform purge (no-data-hard-delete): hard-delete routes for
-		// sessions and image cleanup on user deletion.
-		WithPurge(sessionStore, imageStore)
+		// sessions and image cleanup on user deletion. The shared run registry
+		// stops an in-flight run before the session row goes.
+		WithPurge(sessionStore, imageStore, runRegistry)
 	adminHandler.RegisterAuthed(protected)
 	log.Info("admin console endpoints enabled (auth required)")
 

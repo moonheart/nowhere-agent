@@ -31,12 +31,23 @@ type ImagePurger interface {
 	DeleteUserUploadScope(userID string) error
 }
 
+// RunCancellor stops a session's in-flight run worker. *session.RunRegistry
+// satisfies it (Cancel is transport-independent and interrupts the loop, so
+// token burn stops promptly). Nil-safe: a purge without one skips the cancel
+// and proceeds with the delete.
+type RunCancellor interface {
+	Cancel(sessionID string) bool
+}
+
 // WithPurge wires the hard-delete routes (platform purge): sessions
 // (DELETE /api/admin/sessions/{id}) and the image cleanup that rides on user
-// deletion. Left nil, the session purge answers 503; image cleanup is skipped.
-func (h *Handler) WithPurge(s SessionPurgeStore, images ImagePurger) *Handler {
+// deletion. runs stops an active run before the session row goes (nil skips
+// the cancel). Left sessions nil, the session purge answers 503; image cleanup
+// is skipped.
+func (h *Handler) WithPurge(s SessionPurgeStore, images ImagePurger, runs RunCancellor) *Handler {
 	h.sessions = s
 	h.images = images
+	h.runs = runs
 	return h
 }
 
@@ -50,6 +61,14 @@ func (h *Handler) deleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	// Stop an in-flight run BEFORE the hard delete. The cascade would otherwise
+	// rip the run's rows out from under the worker, which fails its next write
+	// with a bogus FK error while the LLM stream keeps spending. Cancelling
+	// first interrupts the loop and the worker settles cancelled; its leftover
+	// writes then fail harmlessly — those rows are going anyway.
+	if h.runs != nil {
+		h.runs.Cancel(id)
+	}
 	if err := h.sessions.DeleteSession(r.Context(), id); err != nil {
 		writeServiceError(w, err)
 		return
