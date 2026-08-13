@@ -83,16 +83,19 @@ func TestRuntimeDefaultsAndOverrides(t *testing.T) {
 func TestRuntimeTypedAccess(t *testing.T) {
 	store := NewStore(testDB(t))
 	rt := NewRuntime(store, map[string]json.RawMessage{
-		"rate_limit_rps":   raw(t, 20),
-		"llm_system_lang":  raw(t, "zh"),
-		"missing":          raw(t, "ignored"),
+		"rate_limit_rps":  raw(t, 2.5),
+		"llm_system_lang": raw(t, "zh"),
+		"missing":         raw(t, "ignored"),
 	}, slog.Default())
 	defer func() {
 		store.db.Exec(`DELETE FROM platform_settings WHERE key IN ('rate_limit_rps','llm_system_lang')`)
 	}()
 
-	if got := rt.Int("rate_limit_rps"); got != 20 {
-		t.Fatalf("int = %d, want 20", got)
+	// rate_limit_rps is a KindFloat key: consumers must read it via Float64.
+	// Reading it via Int would drop a fractional value — json.Unmarshal of
+	// "2.5" into int fails → 0 — which silently disabled the global limiter.
+	if got := rt.Float64("rate_limit_rps"); got != 2.5 {
+		t.Fatalf("float = %v, want 2.5", got)
 	}
 	if got := rt.String("llm_system_lang"); got != "zh" {
 		t.Fatalf("lang = %q, want zh", got)

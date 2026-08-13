@@ -1861,14 +1861,16 @@ func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metri
 	// Live retune: pick up the runtime settings (0/0 = disabled); existing
 	// buckets converge within the limiter's sweep TTL. The settings watcher
 	// keeps the rate in sync with the admin console, so retuning
-	// rate_limit_rps / rate_limit_burst needs no restart.
+	// rate_limit_rps / rate_limit_burst needs no restart. rps is a KindFloat
+	// key — read via Float64, or a fractional value (e.g. 2.5) would unmarshal
+	// into int as 0 and silently disable the limiter.
 	limiter.SetRate(
-		float64(settingsRuntime.Int(settings.KeyRateLimitRPS)),
+		settingsRuntime.Float64(settings.KeyRateLimitRPS),
 		settingsRuntime.Int(settings.KeyRateLimitBurst),
 	)
 	settingsSync.Add(func() {
 		limiter.SetRate(
-			float64(settingsRuntime.Int(settings.KeyRateLimitRPS)),
+			settingsRuntime.Float64(settings.KeyRateLimitRPS),
 			settingsRuntime.Int(settings.KeyRateLimitBurst),
 		)
 	})
