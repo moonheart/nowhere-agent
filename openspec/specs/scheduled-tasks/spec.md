@@ -119,7 +119,8 @@ a run with no tools.
 A task SHALL carry a `multitask_strategy` (`reject`, `interrupt`, or `enqueue`, default `reject`)
 governing what happens when a fire is due but the target session already has an active run.
 `reject` SHALL skip the fire; `interrupt` SHALL cancel the active run and start the new one;
-`enqueue` SHALL wait for the active run to finish before starting.
+`enqueue` SHALL skip the fire and let the next scheduled occurrence start once the active run
+has drained (the single-active-run registry enforces the ordering; the fire is not queued).
 
 #### Scenario: Reject skips a busy session
 - **WHEN** a fire is due and its target session has an active run under `reject`
