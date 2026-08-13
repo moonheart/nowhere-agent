@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"nowhere-agent/internal/netutil"
 	"nowhere-agent/internal/toolruntime"
 )
 
@@ -198,10 +199,25 @@ func Allowlist(patterns []string) (AllowlistFunc, error) {
 		}
 		h, p := splitHostPort(u.Host)
 		h = strings.ToLower(h)
+		// url.Parse keeps the brackets on a portless IPv6 literal
+		// ("[::1]" instead of "::1"), so strip them or the literal can
+		// never be vetted as an IP (mirrors webhook's hostnameOnly).
+		h = strings.Trim(h, "[]")
 		if ip := net.ParseIP(h); ip != nil {
 			for _, r := range rules {
 				if r.ipNet != nil && r.ipNet.Contains(ip) {
 					return true
+				}
+			}
+			// Translation schemes (NAT64/6to4/ISATAP/4-in-6) reach an
+			// embedded IPv4 on the caller's behalf: match the CIDR rules
+			// against that too, or a [64:ff9b::10.0.0.1] target misses a
+			// 10.0.0.0/8 rule in an IPv6-only (NAT64) setup.
+			if v4 := netutil.EmbeddedIPv4(ip); v4 != nil {
+				for _, r := range rules {
+					if r.ipNet != nil && r.ipNet.Contains(v4) {
+						return true
+					}
 				}
 			}
 			// Exact-host rules also match IP literals.
