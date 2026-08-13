@@ -251,6 +251,10 @@ func TestPGStoreListDue(t *testing.T) {
 // TestPGStoreClaimRace is the multi-instance safety check (design D4): two
 // concurrent claims of one due task must yield exactly one winner — the loser's
 // WHERE next_run_at <= now() matches zero rows after the winner commits.
+// TestPGStoreClaimRace pins the atomicity contract (design D4): exactly one of
+// N racing claims wins, and the loser(s) get ErrNotFound. The final
+// next_run_at = <read> guard added later also survives this: every racer read
+// the same due value, so only the first UPDATE to land matches it.
 func TestPGStoreClaimRace(t *testing.T) {
 	db := pgTestDB(t)
 	ctx := context.Background()
@@ -301,6 +305,66 @@ func TestPGStoreClaimRace(t *testing.T) {
 	}
 	if after.LastRunAt == nil {
 		t.Fatal("claim did not record last_run_at")
+	}
+}
+
+// TestPGStoreClaimDoesNotClobberEditedSchedule pins the Get→UPDATE window
+// guard: a claim whose computed next occurrence is based on a stale read must
+// not overwrite a schedule an operator changed in that window. The window is
+// inside Claim (read → UPDATE, microseconds, not injectable), so the guard's
+// WHERE clause is exercised directly with the exact SQL Claim runs: a
+// mismatched expected next_run_at matches zero rows (ErrNotFound), while the
+// operator's edit stays intact.
+func TestPGStoreClaimDoesNotClobberEditedSchedule(t *testing.T) {
+	db := pgTestDB(t)
+	ctx := context.Background()
+	userID := pgNewUser(t, db)
+
+	store := NewPGStore(db)
+	created, err := store.Create(ctx, validTask(userID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	now := time.Now()
+	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
+
+	// The claim's read saw next_run_at = A; an operator's concurrent edit left
+	// next_run_at = B (also due, different value). Claim's UPDATE must not match.
+	staleRead := now.Add(-time.Minute)
+	operatorEdit := now.Add(-30 * time.Second)
+	if _, err := db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, operatorEdit, created.ID); err != nil {
+		t.Fatalf("simulate operator edit: %v", err)
+	}
+	res, err := db.Exec(`
+		UPDATE scheduled_task
+		SET next_run_at = $2, last_run_at = $3, updated_at = now()
+		WHERE id = $1 AND enabled AND next_run_at <= $3
+		  AND (end_time IS NULL OR end_time > $3)
+		  AND next_run_at = $4`,
+		created.ID, operatorEdit.Add(time.Hour), now, staleRead)
+	if err != nil {
+		t.Fatalf("claim update with stale read: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 0 {
+		t.Fatalf("stale claim matched %d rows, want 0 — the operator edit was clobbered", n)
+	}
+
+	// The operator's value survives untouched (timestamptz stores microseconds).
+	after, _ := store.Get(ctx, created.ID)
+	if !after.NextRunAt.Truncate(time.Microsecond).Equal(operatorEdit.Truncate(time.Microsecond)) {
+		t.Fatalf("operator edit clobbered: next_run_at = %v, want %v", after.NextRunAt, operatorEdit)
+	}
+
+	// A claim whose read matches the stored value still advances the schedule
+	// (real Claim path): the stored next_run_at is still due, so it wins.
+	claimed, err := store.Claim(ctx, created.ID, now)
+	if err != nil {
+		t.Fatalf("claim after edit: %v", err)
+	}
+	if !claimed.NextRunAt.After(now) {
+		t.Fatalf("claim did not advance next_run_at past now: %v", claimed.NextRunAt)
 	}
 }
 

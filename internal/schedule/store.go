@@ -224,7 +224,11 @@ func (s *PGStore) ListDue(ctx context.Context, now time.Time) ([]Task, error) {
 // Claim advances a still-due task atomically (design D4). The WHERE re-checks
 // due-ness so a racing instance that already advanced next_run_at (or an
 // operator who disabled/expired the task between scan and claim) matches zero
-// rows; we map that to ErrNotFound, which the trigger reads as "skip".
+// rows; we map that to ErrNotFound, which the trigger reads as "skip". The
+// final `next_run_at = $4` guard closes the Get→UPDATE window: the next
+// occurrence is computed from the row read above, and if an operator's edit
+// (cron change → fresh next_run_at, or a requeue) landed between that read and
+// this UPDATE, the stale computation must not clobber the new schedule.
 func (s *PGStore) Claim(ctx context.Context, id string, now time.Time) (Task, error) {
 	// Read the current schedule first to compute the next occurrence; the
 	// UPDATE's WHERE guards the race, so a stale read here only costs a skipped
@@ -242,7 +246,8 @@ func (s *PGStore) Claim(ctx context.Context, id string, now time.Time) (Task, er
 		SET next_run_at = $2, last_run_at = $3, updated_at = now()
 		WHERE id = $1 AND enabled AND next_run_at <= $3
 		  AND (end_time IS NULL OR end_time > $3)
-		RETURNING `+taskCols, id, next, now)
+		  AND next_run_at = $4
+		RETURNING `+taskCols, id, next, now, cur.NextRunAt)
 	return scanTask(row)
 }
 
