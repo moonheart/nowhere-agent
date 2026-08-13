@@ -97,6 +97,23 @@ func TestAttachStreamsSessionScopedStateFrame(t *testing.T) {
 		t.Fatalf("second run created a new session %q, want %q", sessID2, sessID)
 	}
 
+	// p.started is a ONE-SHOT signal (it closes on the first Stream call), so
+	// startRunAsync returns immediately for run 2 — the attach below could beat
+	// run 2's Submit and resolve against the settled run 1, whose terminal
+	// attach path serves no session_state frame. Wait until run 2 is actually
+	// the session's active (in-flight) run before attaching.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		run, active, err := rt.ActiveRun(context.Background(), sessID)
+		if err == nil && active && !run.Status.Terminal() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run 2 never became the session's active run")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	attached := make(chan string, 1)
 	go func() {
 		req := httptest.NewRequest("POST", "/api/chat/resume?threadId="+sessID+"&after=0", nil)
