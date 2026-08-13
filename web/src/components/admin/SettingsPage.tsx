@@ -190,8 +190,15 @@ export function PlatformSettingsPage() {
         if (rows.length === 0) return null;
         return rows.map((r) => `${r.name}=${r.dsn}`).join(", ");
       }
-      case "mcp_servers":
-        return mcpRowsToJson(d as McpServerRow[]);
+      case "mcp_servers": {
+        // An empty table must CLEAR the override (back to the env default),
+        // not persist "[]": the runtime's raw() prefers any stored row over
+        // the env default, so a persisted "[]" would mask MCP_SERVERS and
+        // applyMCP would tear down every env-configured server. Same
+        // null-on-empty convention as query_db_dsns / webhook_signing_secret.
+        const json = mcpRowsToJson(d as McpServerRow[]);
+        return json === "[]" ? null : json;
+      }
       case "webhook_signing_secret":
         return (d as string) === "" ? null : (d as string);
       default:
