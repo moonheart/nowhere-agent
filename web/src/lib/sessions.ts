@@ -35,9 +35,17 @@ export async function listSessions(
   const params = new URLSearchParams({ limit: String(SESSION_PAGE_SIZE) });
   if (cursor) params.set("cursor", cursor);
   if (q) params.set("q", q);
-  const res = await fetch(`/api/chat/sessions?${params}`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/api/chat/sessions?${params}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+  } catch {
+    // A network rejection (offline, DNS, refused connection) must surface as
+    // the same "request failed" signal as a non-OK response — callers render
+    // an error state instead of mistaking it for an empty list.
+    return null;
+  }
   if (!res.ok) return null;
   let data: { sessions?: SessionSummary[]; nextCursor?: string };
   try {
@@ -48,15 +56,20 @@ export async function listSessions(
   return { sessions: data.sessions ?? [], nextCursor: data.nextCursor ?? "" };
 }
 
-// deleteSession removes a conversation; returns true on success.
+// deleteSession removes a conversation; returns true on success. A network
+// rejection counts as failure so callers can surface it instead of throwing.
 export async function deleteSession(id: string): Promise<boolean> {
   const token = getToken();
   if (!token) return false;
-  const res = await fetch(`/api/chat/sessions/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: { authorization: `Bearer ${token}` },
-  });
-  return res.ok;
+  try {
+    const res = await fetch(`/api/chat/sessions/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 // cancelSession stops the session's in-flight run server-side. The client's

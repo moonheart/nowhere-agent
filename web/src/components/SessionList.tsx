@@ -205,7 +205,10 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
               </Button>
             </div>
           )}
-          {!loading && sessions.length === 0 && debounced === "" && (
+          {/* The error banner and the empty states are mutually exclusive: a
+              failed load must not read as "no conversations yet", so the
+              empty states yield to loadError. */}
+          {!loading && !loadError && sessions.length === 0 && debounced === "" && (
             <Empty className="p-4">
               <EmptyHeader>
                 <EmptyMedia variant="icon">
@@ -218,7 +221,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
               </EmptyHeader>
             </Empty>
           )}
-          {!loading && sessions.length === 0 && debounced !== "" && (
+          {!loading && !loadError && sessions.length === 0 && debounced !== "" && (
             <Empty className="p-4">
               <EmptyHeader>
                 <EmptyMedia variant="icon">
