@@ -284,6 +284,7 @@ func Catalog() []KeyInfo {
 		// Tools tab.
 		{Key: KeyHTTPToolAllowlist, Group: GroupTools, Kind: KindString, Description: "Comma-separated http_request host allowlist (same syntax as HTTP_TOOL_ALLOWLIST): api.example.com, *.example.com, 10.0.0.0/8, or *. Empty disables the tool. Applies to the next run."},
 		{Key: KeyHTTPToolTimeout, Group: GroupTools, Kind: KindInt, Description: "http_request per-call timeout in seconds (overrides HTTP_TOOL_TIMEOUT)."},
+		{Key: KeyHTTPToolMaxConcurrent, Group: GroupTools, Kind: KindInt, Description: "Max tool executions one run may have in flight at once, across the whole tool registry (overrides HTTP_TOOL_MAX_CONCURRENT). 0 = unlimited. Applies to the next run."},
 		{Key: KeyQueryDBDsns, Group: GroupTools, Kind: KindString, Secret: true, Description: "Comma-separated name=dsn business databases for query_db (same syntax as QUERY_DB_DSNS), e.g. erp=postgres://ro:secret@pg.internal:5432/erp. Empty disables the tool. DSNs may carry database passwords — the value is never echoed back. Applies to the next run."},
 		{Key: KeyQueryDBTimeout, Group: GroupTools, Kind: KindInt, Description: "query_db per-call timeout in seconds (overrides QUERY_DB_TIMEOUT)."},
 
@@ -340,6 +341,7 @@ func Catalog() []KeyInfo {
 		{Key: KeyRateLimitBurst, Group: GroupHTTP, Kind: KindInt, Description: "Per-IP HTTP rate limit burst size (overrides HTTP_RATE_LIMIT_BURST). 0 = disabled. Retuned live within a few seconds."},
 		{Key: KeyUploadMaxFilesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max user-level image uploads one user may hold (overrides UPLOAD_MAX_FILES_PER_USER). 0 = unlimited. Applied to the next upload."},
 		{Key: KeyUploadMaxBytesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max total stored upload bytes per user in bytes (overrides UPLOAD_MAX_BYTES_PER_USER). 0 = unlimited. Applied to the next upload."},
+		{Key: KeyWorkspaceRetentionDays, Group: GroupBackground, Kind: KindInt, Description: "Days an ENDED session's image directory is kept before the hourly sweep deletes it (overrides WORKSPACE_RETENTION_DAYS). 0 disables the sweep. Applies within an hour."},
 
 		// Auth / SSO.
 		{Key: KeyPhoneSMSURL, Group: GroupAuth, Kind: KindString, Description: "SMS-OTP gateway for phone login (overrides PHONE_SMS_URL): an http(s) URL that receives {\"phone\",\"code\"}, or log:// to print codes to the server log (dev only). Empty disables phone login on the login page. Applies to the next code request."},
@@ -384,6 +386,10 @@ const (
 	// KeyHTTPToolTimeout is the http_request per-call timeout in seconds
 	// (overrides HTTP_TOOL_TIMEOUT).
 	KeyHTTPToolTimeout = "http_tool_timeout"
+	// KeyHTTPToolMaxConcurrent caps a run's in-flight tool executions across
+	// the whole tool registry (overrides HTTP_TOOL_MAX_CONCURRENT); 0 =
+	// unlimited.
+	KeyHTTPToolMaxConcurrent = "http_tool_max_concurrent"
 	// KeyQueryDBDsns is the comma-separated name=dsn list for query_db (same
 	// syntax as QUERY_DB_DSNS).
 	KeyQueryDBDsns = "query_db_dsns"
@@ -480,6 +486,10 @@ const (
 	// (<= 0 = no cap; overrides UPLOAD_MAX_BYTES_PER_USER). Applied to the
 	// next upload.
 	KeyUploadMaxBytesPerUser = "upload_max_bytes_per_user"
+	// KeyWorkspaceRetentionDays is how long an ENDED session's image dir is
+	// kept before the hourly sweep deletes it (overrides
+	// WORKSPACE_RETENTION_DAYS); <= 0 disables the sweep.
+	KeyWorkspaceRetentionDays = "workspace_retention_days"
 
 	// Auth / SSO.
 	// KeyPhoneSMSURL is the SMS-OTP gateway for phone login (overrides

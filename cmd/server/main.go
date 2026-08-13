@@ -167,10 +167,11 @@ func run() error {
 	// path below consults this snapshot, so a change applies on the next use.
 	settingsRuntime := settings.NewRuntime(settings.NewStore(pool), map[string]json.RawMessage{
 		// Tools.
-		settings.KeyHTTPToolAllowlist: mustJSON(cfg.HTTPTool.Allowlist),
-		settings.KeyHTTPToolTimeout:   mustJSON(int(cfg.HTTPTool.Timeout.Seconds())),
-		settings.KeyQueryDBDsns:       mustJSON(cfg.QueryDB.DSNS),
-		settings.KeyQueryDBTimeout:    mustJSON(int(cfg.QueryDB.Timeout.Seconds())),
+		settings.KeyHTTPToolAllowlist:     mustJSON(cfg.HTTPTool.Allowlist),
+		settings.KeyHTTPToolTimeout:       mustJSON(int(cfg.HTTPTool.Timeout.Seconds())),
+		settings.KeyHTTPToolMaxConcurrent: mustJSON(cfg.HTTPTool.MaxConcurrent),
+		settings.KeyQueryDBDsns:           mustJSON(cfg.QueryDB.DSNS),
+		settings.KeyQueryDBTimeout:        mustJSON(int(cfg.QueryDB.Timeout.Seconds())),
 		// Webhooks.
 		settings.KeyWebhookURL:           mustJSON(cfg.Webhook.URL),
 		settings.KeyWebhookTimeout:       mustJSON(int(cfg.Webhook.Timeout.Seconds())),
@@ -215,6 +216,8 @@ func run() error {
 		// HTTP layer.
 		settings.KeyRateLimitRPS:   mustJSON(cfg.HTTP.RateLimitRPS),
 		settings.KeyRateLimitBurst: mustJSON(cfg.HTTP.RateLimitBurst),
+		// Workspace image retention (overrides WORKSPACE_RETENTION_DAYS live).
+		settings.KeyWorkspaceRetentionDays: mustJSON(cfg.Workspace.RetentionDays),
 		// User image uploads (user-image-uploads quota; overrides
 		// UPLOAD_MAX_FILES_PER_USER / UPLOAD_MAX_BYTES_PER_USER live).
 		settings.KeyUploadMaxFilesPerUser: mustJSON(cfg.Upload.MaxFilesPerUser),
@@ -538,31 +541,42 @@ func run() error {
 		// WORKSPACE_RETENTION_DAYS ago (<= 0 disables). Only the session's own
 		// image files are removed — a shared sandbox workspace, the upload
 		// scope, and active sessions are never touched. One bounded scan per
-		// tick, non-blocking, best-effort.
-		if cfg.Workspace.RetentionDays > 0 {
+		// tick, non-blocking, best-effort. The retention window is
+		// runtime-tunable (workspace_retention_days) via the 5s settings sync
+		// below, mirroring the raw-log sweep: the loop runs regardless and
+		// skips passes while the window is <= 0, so enabling retention at
+		// runtime works even when the boot value disabled it.
+		var imageRetention atomic.Int64
+		imageRetention.Store(int64(cfg.Workspace.RetentionDays))
+		go func() {
 			imageSweepLog := log
-			go func() {
-				ticker := time.NewTicker(time.Hour)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						cutoff := time.Now().UTC().Add(-time.Duration(cfg.Workspace.RetentionDays) * 24 * time.Hour)
-						removed, err := workspace.SweepEndedSessionImages(ctx, imageSweepLog, imageStore,
-							sessionStore.ListEndedSessionsEndedBefore, cutoff, 200)
-						if err != nil {
-							imageSweepLog.Warn("image retention sweep failed", "err", err)
-							continue
-						}
-						if removed > 0 {
-							imageSweepLog.Info("image retention sweep removed session images", "count", removed)
-						}
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					days := imageRetention.Load()
+					if days <= 0 {
+						continue
+					}
+					cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+					removed, err := workspace.SweepEndedSessionImages(ctx, imageSweepLog, imageStore,
+						sessionStore.ListEndedSessionsEndedBefore, cutoff, 200)
+					if err != nil {
+						imageSweepLog.Warn("image retention sweep failed", "err", err)
+						continue
+					}
+					if removed > 0 {
+						imageSweepLog.Info("image retention sweep removed session images", "count", removed)
 					}
 				}
-			}()
-		}
+			}
+		}()
+		settingsSync.Add(func() {
+			imageRetention.Store(int64(settingsRuntime.Int(settings.KeyWorkspaceRetentionDays)))
+		})
 	}
 
 	// Sandbox for built-in tools (file-tools): a per-session sandbox Manager
@@ -1238,7 +1252,7 @@ func run() error {
 		}
 		buildToolRegistry := func(ctx context.Context, sessionID string, whitelist []string) *toolruntime.Registry {
 			full := toolruntime.NewRegistry()
-			full.SetMaxConcurrent(cfg.HTTPTool.MaxConcurrent)
+			full.SetMaxConcurrent(settingsRuntime.Int(settings.KeyHTTPToolMaxConcurrent))
 			reg := full
 			// Structured user questions (capability O-ask): the model asks 1–4
 			// questions; the loop suspends the run on this tool and the user's
@@ -1403,7 +1417,7 @@ func run() error {
 					allow[n] = true
 				}
 				filtered := toolruntime.NewRegistry()
-				filtered.SetMaxConcurrent(cfg.HTTPTool.MaxConcurrent)
+				filtered.SetMaxConcurrent(settingsRuntime.Int(settings.KeyHTTPToolMaxConcurrent))
 				for _, t := range full.All() {
 					if allow[t.Name()] {
 						// D3: a whitelisted spawn_agent must scope children from the
