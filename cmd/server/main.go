@@ -1942,6 +1942,12 @@ func (noProviderAdapter) Stream(context.Context, provider.Request) (<-chan provi
 // preference to "GET /". A request that reaches here asking for a missing asset
 // (a stale .js hash, say) gets index.html rather than a 404, which is the
 // standard SPA trade-off — the alternative is enumerating asset extensions.
+//
+// The shell (index.html) is served with Cache-Control: no-cache so browsers
+// revalidate it on every navigation: after a deploy, a heuristically cached
+// shell would be reused, its stale asset hashes would 404, and the fallback
+// would hand back the same stale shell — the classic "hard refresh required"
+// symptom. Hashed static assets keep the FileServer's default caching.
 func spaHandler(dir string) http.Handler {
 	files := http.FileServer(http.Dir(dir))
 	index := filepath.Join(dir, "index.html")
@@ -1958,6 +1964,9 @@ func spaHandler(dir string) http.Handler {
 			files.ServeHTTP(w, r)
 			return
 		}
+		// The shell — for "/" and every fallback (client routes, stale asset
+		// hashes). Must be revalidated, never heuristically cached.
+		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFile(w, r, index)
 	})
 }

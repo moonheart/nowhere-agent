@@ -97,6 +97,9 @@ func TestSPAHandlerFallsBackForClientRoutes(t *testing.T) {
 		if rec.Body.String() != "<!doctype html><title>shell</title>" {
 			t.Errorf("%s served %q, want the app shell", p, rec.Body.String())
 		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Errorf("%s Cache-Control = %q, want no-cache (shell must be revalidated)", p, cc)
+		}
 	}
 }
 
@@ -107,6 +110,29 @@ func TestSPAHandlerServesIndexAtRoot(t *testing.T) {
 	rec := serve(t, spaHandler(dir), "/")
 	if rec.Code != http.StatusOK || rec.Body.String() != "shell" {
 		t.Errorf("/ = %d %q, want 200 with the shell", rec.Code, rec.Body.String())
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("/ Cache-Control = %q, want no-cache", cc)
+	}
+}
+
+// Hashed static assets keep the FileServer's default caching: only the shell
+// gets no-cache, so a deploy never serves a stale index.html but assets stay
+// browser-cacheable.
+func TestSPAHandlerDoesNotCacheControlAssets(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "index.html"), "shell")
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "assets", "app-hash123.js"), "console.log(1)")
+
+	rec := serve(t, spaHandler(dir), "/assets/app-hash123.js")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("asset = %d, want 200", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "" {
+		t.Errorf("asset Cache-Control = %q, want unset (default caching)", cc)
 	}
 }
 
