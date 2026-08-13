@@ -82,6 +82,20 @@ func (m *MemStore) SuspendedBatchForRun(_ context.Context, runID string) (Suspen
 	return *b, nil
 }
 
+// SuspendedBatchesForSession returns every suspended-batch snapshot of a
+// session (all runs), in no particular order.
+func (m *MemStore) SuspendedBatchesForSession(_ context.Context, sessionID string) ([]SuspendedBatch, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []SuspendedBatch
+	for _, b := range m.batches {
+		if b.SessionID == sessionID {
+			out = append(out, *b)
+		}
+	}
+	return out, nil
+}
+
 func (m *MemStore) MarkBatchFolded(_ context.Context, runID string, foldedSeq int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -170,6 +184,28 @@ func (s *PGStore) SuspendedBatchForRun(ctx context.Context, runID string) (Suspe
 		return SuspendedBatch{}, fmt.Errorf("suspended batch for run: %w", err)
 	}
 	return b, nil
+}
+
+// SuspendedBatchesForSession returns every suspended-batch snapshot of a
+// session (all runs), so the reconcile scan fetches the session's snapshot set
+// in one query instead of probing each run.
+func (s *PGStore) SuspendedBatchesForSession(ctx context.Context, sessionID string) ([]SuspendedBatch, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+suspendedBatchCols+`
+		FROM suspended_batches WHERE session_id = $1`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("suspended batches for session: %w", err)
+	}
+	defer rows.Close()
+	var out []SuspendedBatch
+	for rows.Next() {
+		b, err := scanSuspendedBatch(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan suspended batch: %w", err)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 func (s *PGStore) MarkBatchFolded(ctx context.Context, runID string, foldedSeq int) error {

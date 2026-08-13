@@ -103,6 +103,61 @@ func TestPGSweepExpiredInteractions(t *testing.T) {
 	}
 }
 
+// TestPGSuspendedBatchesForSession: one query returns every snapshot of a
+// session across runs (and nothing from other sessions), so the reconcile
+// scan stops probing per run.
+func TestPGSuspendedBatchesForSession(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ctx := context.Background()
+	sessID, runID1 := setupMessageSession(t, ctx, db, store)
+	if _, err := store.CreateInteractionBatch(ctx, SuspendedBatch{RunID: runID1, SessionID: sessID, ToolCallIDs: []string{"tu1"}}, Interaction{
+		RunID: runID1, SessionID: sessID, ToolCallID: "tu1", ToolName: "danger", Kind: KindToolApproval,
+	}); err != nil {
+		t.Fatalf("CreateInteractionBatch 1: %v", err)
+	}
+	// Settle run 1 so a second run is allowed (one active run per session).
+	if err := store.UpdateRunStatus(ctx, runID1, RunDone); err != nil {
+		t.Fatalf("settle run1: %v", err)
+	}
+	run2, err := store.CreateRun(ctx, sessID, 2)
+	if err != nil {
+		t.Fatalf("create run2: %v", err)
+	}
+	if _, err := store.CreateInteractionBatch(ctx, SuspendedBatch{RunID: run2.ID, SessionID: sessID, ToolCallIDs: []string{"tu2"}}, Interaction{
+		RunID: run2.ID, SessionID: sessID, ToolCallID: "tu2", ToolName: "danger", Kind: KindToolApproval,
+	}); err != nil {
+		t.Fatalf("CreateInteractionBatch 2: %v", err)
+	}
+
+	got, err := store.SuspendedBatchesForSession(ctx, sessID)
+	if err != nil {
+		t.Fatalf("SuspendedBatchesForSession: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("SuspendedBatchesForSession = %d snapshots, want 2 (%+v)", len(got), got)
+	}
+	byRun := make(map[string]bool, len(got))
+	for _, b := range got {
+		byRun[b.RunID] = true
+	}
+	if !byRun[runID1] || !byRun[run2.ID] {
+		t.Errorf("session snapshots miss runs run1=%s run2=%s: %+v", runID1, run2.ID, got)
+	}
+
+	// A sibling session's batch must not leak into the result.
+	sess2ID, run3ID := setupMessageSession(t, ctx, db, store)
+	if _, err := store.CreateInteractionBatch(ctx, SuspendedBatch{RunID: run3ID, SessionID: sess2ID, ToolCallIDs: []string{"tu3"}}, Interaction{
+		RunID: run3ID, SessionID: sess2ID, ToolCallID: "tu3", ToolName: "danger", Kind: KindToolApproval,
+	}); err != nil {
+		t.Fatalf("CreateInteractionBatch 3: %v", err)
+	}
+	got, err = store.SuspendedBatchesForSession(ctx, sessID)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("after sibling-session batch = %d snapshots err %v, want still 2", len(got), err)
+	}
+}
+
 // TestPGSuspendedBatchForRunMissing: a run without a snapshot errors, never
 // silently folds.
 func TestPGSuspendedBatchForRunMissing(t *testing.T) {

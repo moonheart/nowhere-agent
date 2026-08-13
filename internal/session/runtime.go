@@ -169,6 +169,10 @@ type Store interface {
 	// SuspendedBatchForRun returns a run's suspended-batch snapshot, or
 	// ErrNoSuspendedBatch.
 	SuspendedBatchForRun(ctx context.Context, runID string) (SuspendedBatch, error)
+	// SuspendedBatchesForSession returns every suspended-batch snapshot of a
+	// session (across all runs), so a session-wide scan resolves the snapshot
+	// set in one query instead of probing each run.
+	SuspendedBatchesForSession(ctx context.Context, sessionID string) ([]SuspendedBatch, error)
 	// MarkBatchFolded records the seq of the batch's folded tool_result message.
 	MarkBatchFolded(ctx context.Context, runID string, foldedSeq int) error
 }

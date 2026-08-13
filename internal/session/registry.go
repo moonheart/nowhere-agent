@@ -848,19 +848,29 @@ func (rg *RunRegistry) BatchFoldState(ctx context.Context, runID string) (folded
 // and the submission proceeds), so a NEWER run's batch can fold while an
 // OLDER run's fold crashed and never ran — stopping at that folded snapshot
 // would orphan the older decided batch's tool_use forever (returning "" with
-// it still decided-but-unfolded). Each run costs at most one
-// SuspendedBatchForRun query and no more: runs without a snapshot skip out at
-// once, folded runs never reach PendingApprovalsForRun, and the common case
-// (newest runs batchless) scans cheaply.
+// it still decided-but-unfolded). The whole scan costs exactly two queries —
+// RunsForSession plus one SuspendedBatchesForSession — plus at most one
+// PendingApprovalsForRun probe per run that has an unfolded snapshot: runs
+// without a snapshot skip out in memory, folded runs never reach
+// PendingApprovalsForRun, and the common case (newest runs batchless) scans
+// cheaply.
 func (rg *RunRegistry) DecidedButUnfoldedRun(ctx context.Context, sessionID string) (string, error) {
 	runs, err := rg.rt.store.RunsForSession(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
+	batches, err := rg.rt.store.SuspendedBatchesForSession(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	byRun := make(map[string]SuspendedBatch, len(batches))
+	for _, b := range batches {
+		byRun[b.RunID] = b
+	}
 	slices.SortFunc(runs, func(a, b Run) int { return b.Seq - a.Seq })
 	for i := range runs {
-		snap, err := rg.rt.store.SuspendedBatchForRun(ctx, runs[i].ID)
-		if err != nil {
+		snap, ok := byRun[runs[i].ID]
+		if !ok {
 			continue // no suspended batch on this run
 		}
 		if snap.FoldedSeq != nil {
