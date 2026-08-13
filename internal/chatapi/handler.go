@@ -653,6 +653,11 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 // as soon as the parking run is gone, instead of failing on a transient conflict.
 func (h *Handler) waitForIdle(ctx context.Context, sessionID string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	// Poll with exponential backoff (10ms up to 200ms): the common case is a
+	// parking run settling in the next instant, so the first few polls stay
+	// snappy; long waits no longer hammer ActiveRun (a DB backstop) at 100Hz.
+	delay := 10 * time.Millisecond
+	const maxDelay = 200 * time.Millisecond
 	for {
 		if _, active, err := h.runtime.ActiveRun(ctx, sessionID); err == nil && !active {
 			return true
@@ -663,7 +668,11 @@ func (h *Handler) waitForIdle(ctx context.Context, sessionID string, timeout tim
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(delay):
+		}
+		delay *= 2
+		if delay > maxDelay {
+			delay = maxDelay
 		}
 	}
 }
