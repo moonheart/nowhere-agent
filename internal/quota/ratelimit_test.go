@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"nowhere-agent/internal/trustedproxy"
 )
 
 func TestRateLimiterDisabledPassesEverything(t *testing.T) {
@@ -97,11 +99,23 @@ func TestRateLimiterMiddlewareDisabledPassesThrough(t *testing.T) {
 	}
 }
 
-func TestClientIPKeyPrefersForwardedFor(t *testing.T) {
+// With no trusted proxy configured (the default), a forged X-Forwarded-For
+// must be ignored: the socket peer is the bucket identity.
+func TestClientIPKeyIgnoresForwardedForByDefault(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "10.0.0.9:5555"
 	r.Header.Set("X-Forwarded-For", "203.0.113.7, 70.41.3.18")
-	if got := ClientIPKey(r); got != "203.0.113.7" {
+	if got := ClientIPKey(r, trustedproxy.New(nil)); got != "10.0.0.9" {
+		t.Fatalf("untrusted proxy must not be honoured, got %q", got)
+	}
+}
+
+// Once the proxy's CIDR is trusted, the first X-Forwarded-For hop wins.
+func TestClientIPKeyPrefersForwardedForWhenProxyTrusted(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "10.0.0.9:5555"
+	r.Header.Set("X-Forwarded-For", "203.0.113.7, 70.41.3.18")
+	if got := ClientIPKey(r, trustedproxy.New([]string{"10.0.0.0/8"})); got != "203.0.113.7" {
 		t.Fatalf("should take the first X-Forwarded-For hop, got %q", got)
 	}
 }
@@ -109,7 +123,7 @@ func TestClientIPKeyPrefersForwardedFor(t *testing.T) {
 func TestClientIPKeyStripsPort(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "192.0.2.1:9999"
-	if got := ClientIPKey(r); got != "192.0.2.1" {
+	if got := ClientIPKey(r, trustedproxy.New(nil)); got != "192.0.2.1" {
 		t.Fatalf("should strip the source port, got %q", got)
 	}
 }
@@ -119,7 +133,22 @@ func TestClientIPKeySharesAcrossSourcePorts(t *testing.T) {
 	a.RemoteAddr = "192.0.2.1:1111"
 	b := httptest.NewRequest(http.MethodGet, "/", nil)
 	b.RemoteAddr = "192.0.2.1:2222"
-	if ClientIPKey(a) != ClientIPKey(b) {
+	if ClientIPKey(a, trustedproxy.New(nil)) != ClientIPKey(b, trustedproxy.New(nil)) {
 		t.Fatal("one client across many source ports should share a bucket")
+	}
+}
+
+func TestClientIPKeyIPv6(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "[2001:db8::1]:443"
+	r.Header.Set("X-Forwarded-For", "2001:db8::99")
+	if got := ClientIPKey(r, trustedproxy.New(nil)); got != "2001:db8::1" {
+		t.Fatalf("untrusted IPv6 peer must be the client, got %q", got)
+	}
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.RemoteAddr = "[2001:db8::1]:443"
+	r2.Header.Set("X-Forwarded-For", "2001:db8::99")
+	if got := ClientIPKey(r2, trustedproxy.New([]string{"2001:db8::/32"})); got != "2001:db8::99" {
+		t.Fatalf("trusted IPv6 proxy should forward XFF, got %q", got)
 	}
 }

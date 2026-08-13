@@ -194,6 +194,27 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 }
 
+func TestTrustedProxyCIDRsFromEnv(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.HTTP.TrustedProxyCIDRs) != 0 {
+		t.Errorf("default trusted proxy CIDRs = %v, want empty", cfg.HTTP.TrustedProxyCIDRs)
+	}
+
+	t.Setenv("HTTP_TRUSTED_PROXY_CIDRS", "10.0.0.0/8,::1/128")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"10.0.0.0/8", "::1/128"}
+	if len(cfg.HTTP.TrustedProxyCIDRs) != len(want) ||
+		cfg.HTTP.TrustedProxyCIDRs[0] != want[0] || cfg.HTTP.TrustedProxyCIDRs[1] != want[1] {
+		t.Errorf("got %v, want %v", cfg.HTTP.TrustedProxyCIDRs, want)
+	}
+}
+
 func TestLoadReadsDotEnv(t *testing.T) {
 	// A .env in the working directory is loaded automatically.
 	dir := t.TempDir()

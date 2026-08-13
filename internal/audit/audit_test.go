@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"nowhere-agent/internal/trustedproxy"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -43,6 +45,14 @@ func randHex() string {
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// SetTrustedProxiesForTest points the process-wide trusted-proxy set at cidrs
+// for the duration of the test and restores the secure default afterwards.
+func SetTrustedProxiesForTest(t *testing.T, cidrs []string) {
+	t.Helper()
+	trustedproxy.SetDefault(cidrs)
+	t.Cleanup(func() { trustedproxy.SetDefault(nil) })
 }
 
 // cleanupActor deletes only the audit rows this test created, keyed by a unique
@@ -174,7 +184,11 @@ func TestListFiltersAndPagination(t *testing.T) {
 	}
 }
 
+// ClientIP honours XFF only for peers inside the configured trusted-proxy set.
+// With the secure default (no trusted proxy) a forged header is ignored.
 func TestClientIPPrefersForwardedFor(t *testing.T) {
+	SetTrustedProxiesForTest(t, []string{"10.0.0.0/8"})
+
 	r := httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "10.0.0.1:9999"
 	r.Header.Set("X-Forwarded-For", "198.51.100.23, 10.0.0.1")
@@ -186,6 +200,15 @@ func TestClientIPPrefersForwardedFor(t *testing.T) {
 	r2.RemoteAddr = "10.0.0.1:9999"
 	if got := ClientIP(r2); got != "10.0.0.1" {
 		t.Errorf("ClientIP without XFF = %q, want peer host", got)
+	}
+}
+
+func TestClientIPIgnoresProxyHeadersByDefault(t *testing.T) {
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "10.0.0.1:9999"
+	r.Header.Set("X-Forwarded-For", "198.51.100.23, 10.0.0.1")
+	if got := ClientIP(r); got != "10.0.0.1" {
+		t.Errorf("untrusted proxy must be ignored, got %q", got)
 	}
 }
 

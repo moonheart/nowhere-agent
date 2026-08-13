@@ -24,10 +24,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
-	"strings"
 	"time"
+
+	"nowhere-agent/internal/trustedproxy"
 )
 
 // Outcome is whether the recorded action succeeded.
@@ -184,25 +184,15 @@ func (e Event) Detail(kv map[string]any) Event {
 	return e
 }
 
-// ClientIP extracts the best-effort client IP. It honours X-Forwarded-For (the
-// platform sits behind a reverse proxy / gateway in a typical internal deploy)
-// and falls back to the peer address. Only the first forwarded hop is trusted —
-// the client can append arbitrary later hops, so the proxy-supplied origin is
-// the leftmost entry.
+// ClientIP extracts the best-effort client IP. It honours X-Forwarded-For and
+// X-Real-IP only when the direct peer is a configured trusted proxy (see
+// trustedproxy.SetDefault / HTTP_TRUSTED_PROXY_CIDRS) — with the default empty
+// set the socket peer address is the client, so a spoofable header cannot
+// forge the audited origin. Only the first forwarded hop is trusted — the
+// client can append arbitrary later hops, so the proxy-supplied origin is the
+// leftmost entry.
 func ClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
-			return strings.TrimSpace(first)
-		}
-	}
-	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
-		return xr
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return trustedproxy.ClientIP(r.RemoteAddr, r.Header)
 }
 
 // Entry is a persisted audit row as the query API returns it.

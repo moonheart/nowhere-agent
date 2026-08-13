@@ -2,9 +2,10 @@ package quota
 
 import (
 	"net/http"
-	"strings"
 	"sync"
 	"time"
+
+	"nowhere-agent/internal/trustedproxy"
 
 	"golang.org/x/time/rate"
 )
@@ -142,21 +143,12 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// ClientIPKey is a KeyFunc keyed on the client IP, honoring X-Forwarded-For's
-// first hop when behind a proxy. Use for unauthenticated edge smoothing; prefer
-// a principal-based key for authenticated APIs so one user behind a NAT is not
-// throttled by their neighbors.
-func ClientIPKey(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		if i := strings.IndexByte(fwd, ','); i > 0 {
-			return strings.TrimSpace(fwd[:i])
-		}
-		return strings.TrimSpace(fwd)
-	}
-	// RemoteAddr is host:port; keep just the host so one client's many source
-	// ports share a bucket.
-	if i := strings.LastIndexByte(r.RemoteAddr, ':'); i > 0 {
-		return r.RemoteAddr[:i]
-	}
-	return r.RemoteAddr
+// ClientIPKey is a KeyFunc keyed on the client IP. Proxy headers are honoured
+// only when the direct peer falls inside proxies (secure default: an empty set
+// never trusts X-Forwarded-For / X-Real-IP — the socket peer is the client, so
+// a spoofable header cannot become the bucket identity). Use for unauthenticated
+// edge smoothing; prefer a principal-based key for authenticated APIs so one
+// user behind a NAT is not throttled by their neighbors.
+func ClientIPKey(r *http.Request, proxies *trustedproxy.Set) string {
+	return proxies.ClientIP(r.RemoteAddr, r.Header)
 }

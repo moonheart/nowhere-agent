@@ -424,6 +424,15 @@ type HTTP struct {
 	// (the default), keeping local/dev unrestricted; set both to enable.
 	RateLimitRPS   float64 `envconfig:"HTTP_RATE_LIMIT_RPS" default:"0"`
 	RateLimitBurst int     `envconfig:"HTTP_RATE_LIMIT_BURST" default:"0"`
+	// TrustedProxyCIDRs is the comma-separated CIDR list of reverse proxies
+	// whose X-Forwarded-For / X-Real-IP headers are honoured for client-IP
+	// resolution (rate-limit keys, audit trail, login throttle). Empty (the
+	// default) trusts NO proxy headers: the client IP is the socket peer, which
+	// is the secure posture — a spoofable header must not become the identity
+	// that limits and audits. Set it to the proxy's egress CIDRs when the
+	// gateway sits behind a reverse proxy, or rate-limit/audit keys silently
+	// switch to the proxy's address.
+	TrustedProxyCIDRs []string `envconfig:"HTTP_TRUSTED_PROXY_CIDRS" default:""`
 }
 
 // DB configures Postgres.

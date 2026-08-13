@@ -54,6 +54,7 @@ import (
 	"nowhere-agent/internal/subagent"
 	"nowhere-agent/internal/toolruntime"
 	"nowhere-agent/internal/toolruntime/builtin"
+	"nowhere-agent/internal/trustedproxy"
 	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/usage"
 	"nowhere-agent/internal/webhook"
@@ -76,6 +77,14 @@ func run() error {
 	}
 	log := logging.New(cfg.Log.Level, cfg.Log.Format)
 	slog.SetDefault(log)
+
+	// Client-IP trust boundary (P0-1): proxy headers (X-Forwarded-For,
+	// X-Real-IP) are honoured only for peers in HTTP_TRUSTED_PROXY_CIDRS. The
+	// empty default trusts nothing, so a spoofable header cannot forge the IP
+	// the rate limiter and audit trail key on. This is a global process
+	// setting because the audit path resolves IPs at event-build time, far from
+	// any handler that could carry the set.
+	trustedproxy.SetDefault(cfg.HTTP.TrustedProxyCIDRs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -1886,13 +1895,14 @@ func spaHandler(dir string) http.Handler {
 //     logged with a stack, and answered 500 — and because recovery sits inside
 //     metrics, that 500 is counted like any other status.
 func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metrics *observability.Metrics, settingsRuntime *settings.Runtime, mux *http.ServeMux) http.Handler {
+	proxies := trustedproxy.New(cfg.HTTP.TrustedProxyCIDRs)
 	limiter := quota.NewRateLimiter(cfg.HTTP.RateLimitRPS, cfg.HTTP.RateLimitBurst,
 		func(r *http.Request) string {
 			// Never throttle probes: a flooded API must not blind the operator.
 			if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
 				return ""
 			}
-			return quota.ClientIPKey(r)
+			return quota.ClientIPKey(r, proxies)
 		})
 	// Live retune: pick up the runtime settings (0/0 = disabled); existing
 	// buckets converge within the limiter's sweep TTL. A background loop keeps
