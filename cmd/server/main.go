@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1392,33 +1391,15 @@ func run() error {
 			}
 			return 10 * time.Second
 		}
-		notifyTarget := func(ctx context.Context, sessionID string) (string, error) {
-			var taskID sql.NullString
-			var source sql.NullString
-			var webhookID string
-			if err := pool.QueryRowContext(ctx,
-				`SELECT task_id, source, COALESCE(metadata->>'webhook_id','') FROM sessions WHERE id = $1`, sessionID).
-				Scan(&taskID, &source, &webhookID); err != nil {
-				return "", err
-			}
-			if taskID.Valid && taskID.String != "" {
-				var u sql.NullString
-				if err := pool.QueryRowContext(ctx, `SELECT webhook_url FROM scheduled_task WHERE id = $1`, taskID.String).Scan(&u); err == nil && u.Valid && u.String != "" {
-					return u.String, nil
-				}
-			}
-			// An inbound-webhook run (sessions.source = 'inbound') notifies its
-			// own notify_url when set, before falling back to the global URL.
-			if source.String == "inbound" && webhookID != "" {
-				var u sql.NullString
-				if err := pool.QueryRowContext(ctx, `SELECT notify_url FROM inbound_webhooks WHERE id = $1`, webhookID).Scan(&u); err == nil && u.Valid && u.String != "" {
-					return u.String, nil
-				}
-			}
-			// Global target: read live from the runtime settings (admin console
-			// can retarget all notifications without a restart).
-			return settingsRuntime.String(settings.KeyWebhookURL), nil
-		}
+		// Target resolution for a run's completion notification (webhook
+		// package): the task's webhook_url wins over the inbound webhook's
+		// notify_url, which wins over the global WEBHOOK_URL — read live from
+		// the runtime settings, so the admin console retargets all
+		// notifications without a restart. Runs with no URL anywhere stay
+		// silent.
+		targetResolver := webhook.NewTargetResolver(pool, func() string {
+			return settingsRuntime.String(settings.KeyWebhookURL)
+		})
 		// runSummary returns the last assistant text of the session, truncated,
 		// for the notification payload. Read from the durable message store so
 		// the payload works even for a run whose live content already aged out.
@@ -1460,7 +1441,7 @@ func run() error {
 			// applies to new notifications.
 			deliverCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookTimeoutFor())
 			defer cancel()
-			target, err := notifyTarget(deliverCtx, sessionID)
+			target, err := targetResolver.Resolve(deliverCtx, sessionID)
 			if err != nil || target == "" {
 				return // no URL (or a lookup hiccup): nothing to notify
 			}
@@ -1511,56 +1492,13 @@ func run() error {
 				log.Warn("webhook outbox mark delivered failed", "delivery", d.ID, "err", err)
 			}
 		})
-		// Outbox sweeper: retries pending deliveries with backoff
-		// (1m → 5m → 15m → 1h → 4h → 12h → 24h, then dead-letter), and purges
-		// dead letters older than 30 days. Claims carry a 5-minute lease, so
-		// a slow in-flight attempt is not re-claimed by another instance;
+		// Outbox sweeper (webhook package): retries pending deliveries with
+		// backoff (1m → 5m → 15m → 1h → 4h → 12h → 24h, then dead-letter), and
+		// purges dead letters older than 30 days. Claims carry a 5-minute lease,
+		// so a slow in-flight attempt is not re-claimed by another instance;
 		// claims are atomic, so concurrent sweepers never double-send.
-		webhookBackoffs := []time.Duration{time.Minute, 5 * time.Minute, 15 * time.Minute, time.Hour, 4 * time.Hour, 12 * time.Hour, 24 * time.Hour}
-		outboxSweep := func(ctx context.Context) error {
-			if _, err := outbox.PurgeExpired(ctx, time.Now().UTC()); err != nil {
-				log.Warn("webhook outbox purge failed", "err", err)
-			}
-			for {
-				d, err := outbox.ClaimNext(ctx, time.Now().UTC())
-				if errors.Is(err, webhook.ErrNoPending) {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-				var payload webhook.RunCompletedPayload
-				if err := json.Unmarshal(d.Payload, &payload); err != nil {
-					// Unreadable payload: dead-letter immediately.
-					_ = outbox.MarkFailed(ctx, d.ID, time.Now().Add(-time.Minute), "unreadable payload: "+err.Error())
-					continue
-				}
-				if err := notifier.Deliver(ctx, d.TargetURL, payload); err != nil {
-					// A 4xx is a PERMANENT consumer rejection — dead-letter
-					// right away rather than hammering the consumer for days.
-					// Past the backoff list → dead-letter (failed, final). The
-					// MarkFailed CASE reads the timestamp, so a past time flips
-					// the status; an in-list failure stays pending for the next
-					// sweep.
-					if webhook.IsRejected(err) || d.Attempts > len(webhookBackoffs) {
-						_ = outbox.MarkFailed(ctx, d.ID, time.Now().Add(-time.Minute), err.Error())
-						metrics.RecordWebhookDelivery("dead_lettered")
-						log.Warn("webhook outbox delivery dead-lettered", "delivery", d.ID, "attempts", d.Attempts, "err", err)
-						continue
-					}
-					next := time.Now().UTC().Add(webhookBackoffs[d.Attempts-1])
-					_ = outbox.MarkFailed(ctx, d.ID, next, err.Error())
-					metrics.RecordWebhookDelivery("failed")
-					log.Warn("webhook outbox retry failed", "delivery", d.ID, "attempt", d.Attempts, "next", next, "err", err)
-					continue
-				}
-				metrics.RecordWebhookDelivery("delivered")
-				if err := outbox.MarkDelivered(ctx, d.ID, time.Now().UTC()); err != nil {
-					log.Warn("webhook outbox mark delivered failed", "delivery", d.ID, "err", err)
-				}
-			}
-		}
-		go scheduler.New(log, scheduler.Job{Name: "webhook-outbox", Interval: 30 * time.Second, Run: outboxSweep}).Start(ctx)
+		sweeper := webhook.NewSweeper(outbox, notifier, metrics.RecordWebhookDelivery, log)
+		go scheduler.New(log, scheduler.Job{Name: "webhook-outbox", Interval: 30 * time.Second, Run: sweeper.Sweep}).Start(ctx)
 		log.Info("webhook outbox sweeper enabled (interval 30s, backoff to dead-letter)")
 		// Keep the notifier's policy in sync with the runtime settings: the
 		// admin console's webhook_* keys (timeout, retries, signing secret,
