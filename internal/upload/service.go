@@ -87,6 +87,11 @@ func (s *Service) Upload(ctx context.Context, userID, name string, raw []byte) (
 // cap. The totals come from the metadata store — the authoritative record of
 // what the user owns (orphaned blobs count nothing, which is the correct
 // incentive: quota is about owned records).
+//
+// The check is snapshot-based: it reads a ListByUser snapshot and the blob is
+// written and recorded AFTERWARDS, so concurrent uploads can each pass the
+// check and overshoot the cap slightly. That is an accepted cost ceiling, not
+// an exact limit — strict atomicity would serialize uploads for no real gain.
 func (s *Service) checkQuota(ctx context.Context, userID string, q Quota, incoming int64) error {
 	uploads, err := s.store.ListByUser(ctx, userID)
 	if err != nil {
