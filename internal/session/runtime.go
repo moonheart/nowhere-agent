@@ -552,6 +552,12 @@ func (rt *Runtime) RegisterCancel(sessionID string, cancel context.CancelFunc) {
 // the single-active-run lock so a new run can start. Returns false if no run is
 // active. The actual loop observes ctx cancellation and emits a KindCancelled
 // event before unwinding.
+//
+// The run identity is captured under the lock and the settle goes through
+// CompleteRunForRun: if the interrupted worker self-settled first and a NEWER
+// run took the lock in between, the settle is a no-op (ErrNoActiveRun) rather
+// than charging the newer run with RunCancelled. That no-op still counts as a
+// successful cancel — the run we interrupted did stop.
 func (rt *Runtime) CancelRun(ctx context.Context, sessionID string) (bool, error) {
 	rt.mu.Lock()
 	rs, ok := rt.runs[sessionID]
@@ -560,6 +566,7 @@ func (rt *Runtime) CancelRun(ctx context.Context, sessionID string) (bool, error
 		return false, nil
 	}
 	cancel := rs.cancel
+	runID := rs.run.ID
 	rt.mu.Unlock()
 
 	// Interrupt the in-flight work first so it stops promptly, then settle the
@@ -567,7 +574,12 @@ func (rt *Runtime) CancelRun(ctx context.Context, sessionID string) (bool, error
 	if cancel != nil {
 		cancel()
 	}
-	if err := rt.CompleteRun(ctx, sessionID, RunCancelled); err != nil {
+	err := rt.CompleteRunForRun(ctx, sessionID, runID, RunCancelled)
+	if errors.Is(err, ErrNoActiveRun) {
+		// The worker already settled the run we cancelled — nothing to settle.
+		return true, nil
+	}
+	if err != nil {
 		return false, err
 	}
 	return true, nil

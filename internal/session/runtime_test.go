@@ -211,6 +211,74 @@ func TestCancelRunNoActiveRun(t *testing.T) {
 	}
 }
 
+// TestCancelRunDoesNotSettleNewerRun pins the TOCTOU guard: CancelRun captures
+// the run identity under the lock, so when the interrupted worker self-settles
+// and a NEWER run takes the lock before CancelRun's settle runs, the settle is
+// a no-op (ErrNoActiveRun) instead of charging the newer run with RunCancelled.
+func TestCancelRunDoesNotSettleNewerRun(t *testing.T) {
+	rt, store, sess := setup(t)
+	ctx := context.Background()
+
+	runA, err := rt.StartRun(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The cancel func blocks, widening the window between CancelRun capturing
+	// run A and settling — exactly the race where the worker self-settles A
+	// and run B takes the lock in between.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	rt.RegisterCancel(sess.ID, func() { close(entered); <-release })
+
+	var ok bool
+	var cancelErr error
+	done := make(chan struct{})
+	go func() {
+		ok, cancelErr = rt.CancelRun(ctx, sess.ID)
+		close(done)
+	}()
+	<-entered // CancelRun captured A and is now "interrupting" it
+	// The worker wins the settle race: run A self-settles and run B takes the
+	// lock before CancelRun's settle would run.
+	if err := rt.CompleteRun(ctx, sess.ID, RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+	runB, err := rt.StartRun(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	<-done
+
+	if cancelErr != nil {
+		t.Fatalf("CancelRun: %v", cancelErr)
+	}
+	if !ok {
+		t.Fatal("CancelRun should report the captured run was active")
+	}
+	run, active, err := rt.ActiveRun(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !active || run.ID != runB.ID {
+		t.Errorf("newer run must stay active, got %+v active=%v", run, active)
+	}
+	runs, err := store.RunsForSession(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[string]RunStatus{}
+	for _, r := range runs {
+		statuses[r.ID] = r.Status
+	}
+	if statuses[runA.ID] != RunCancelled {
+		t.Errorf("run A status = %s, want %s", statuses[runA.ID], RunCancelled)
+	}
+	if statuses[runB.ID] != RunRunning {
+		t.Errorf("run B status = %s, want %s (not clobbered by the stale settle)", statuses[runB.ID], RunRunning)
+	}
+}
+
 // TestAppendEventAfterSettleContinuesOffset covers the cancel race: CancelRun
 // settles the run (releasing the in-memory offset) while the loop is still
 // unwinding its terminal KindCancelled event. That late event must persist at a
