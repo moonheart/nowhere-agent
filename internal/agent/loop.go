@@ -748,7 +748,12 @@ func (l *Loop) emitStepFinish(ctx context.Context, emit Emitter, res ModelResult
 // the OverflowMW fallback (middleware.go): the leading summary is preserved
 // first, the drop is recorded in viewDropped so the view rebuild skips it, and
 // the compression cache is advanced or invalidated to stay aligned with what is
-// actually sent. Returns false when nothing safe is left to drop.
+// actually sent. The loop's view never carries a compression summary — the
+// rebuild draws from durable history and compression rewrites only the
+// per-attempt copy — so the cache branch is defensive; in practice the drop
+// always lands before the summary and is carried by viewDropped, whose effect
+// the cache's byte fingerprint re-baselines on the next compress. Returns false
+// when nothing safe is left to drop.
 func (l *Loop) dropOldestRoundForOverflow(state *RunState) bool {
 	shrunk, ok := contextmgmt.DropOldestRoundPreservingSummary(state.View)
 	if !ok {
@@ -767,7 +772,15 @@ func (l *Loop) dropOldestRoundForOverflow(state *RunState) bool {
 		} else {
 			cache.Invalidate()
 		}
-	} else if state.compressCache == nil {
+	} else {
+		// No cache, or a cache with no summary in the view — always the case
+		// here: the loop's view is rebuilt from durable history and never
+		// carries the compression copy (compression rewrites only the
+		// per-attempt messages), so the drop always falls before where a
+		// summary would be. Record it on the run state or the dropped round
+		// returns next iteration and the same truncation recurs. With a cache
+		// present this is still safe: the shrunk prefix no longer matches the
+		// cache's byte fingerprint, so the next compression re-baselines it.
 		state.viewDropped += len(state.View) - len(shrunk)
 	}
 	return true

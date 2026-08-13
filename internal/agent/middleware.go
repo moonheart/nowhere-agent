@@ -51,9 +51,12 @@ type RunState struct {
 	// instead of re-summarized from scratch every iteration.
 	compressCache *contextmgmt.CompressionCache
 	// viewDropped counts leading history messages the overflow fallback dropped
-	// with no compression cache to carry the drop (compression disabled). The
-	// loop's view rebuild skips them, or every iteration would re-overflow on
-	// the same prefix and burn the retry budget again.
+	// from the working view. The loop's view is rebuilt from durable history
+	// every iteration and never carries the compression copy, so the drop must
+	// be carried here whether or not compression is enabled: without it the
+	// dropped round would return next iteration and overflow again. When a
+	// compression cache exists its byte fingerprint re-baselines against the
+	// shrunk view, so the counters never double-drop.
 	viewDropped int
 	// overflowRecovered records that a recoverable truncation already discarded
 	// a response and retried once (change durable-run-accounting): the

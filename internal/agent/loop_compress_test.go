@@ -271,6 +271,59 @@ func TestLoopOverflowDropPersistsAcrossIterations(t *testing.T) {
 	}
 }
 
+// TestLoopInlineOverflowDropPersistsWithCompression pins the compression-enabled
+// inline recovery path (change durable-run-accounting): a recoverable max_tokens
+// truncation drops the oldest round, but the loop's view never carries the
+// compression summary (compression rewrites only the per-attempt copy), so the
+// cache-Advance branch cannot fire. The drop must persist via viewDropped; the
+// retry then sees the shrunk view, whose prefix no longer matches the cache's
+// fingerprint, and the summarizer re-baselines — instead of re-sending the same
+// full view and truncating again.
+func TestLoopInlineOverflowDropPersistsWithCompression(t *testing.T) {
+	comp := &stubCompressor{}
+	reg := toolruntime.NewRegistry()
+	reg.Register(echoTool{})
+	truncated := []provider.Event{
+		{Type: provider.EventMessageStart},
+		{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{Type: provider.BlockText}},
+		{Type: provider.EventBlockDelta, Index: 0, Delta: "cut off"},
+		{Type: provider.EventBlockStop, Index: 0},
+		// Stop below the intended cap with no tool call: recoverable context
+		// pressure, not a genuine output-limit stop.
+		{Type: provider.EventMessageStop, StopReason: provider.StopMaxTokens, Usage: &provider.Usage{InputTokens: 1, OutputTokens: 10}},
+	}
+	sp := &scriptProvider{script: [][]provider.Event{
+		truncated,
+		toolUseResponse("t1", "echo", "{}"),
+		textResponse("done"),
+	}}
+	loop := New(sp, reg, Config{Model: "m", MaxTokens: 100})
+	loop.Use(&CompressMW{Compressor: comp, Window: 200, MaxTokens: 100})
+
+	history := bigConversation(8, 50) // 16 msgs, est ≫ (200-100-overhead)*0.8
+	if _, err := loop.Run(context.Background(), history, &memEmitter{}); err != nil {
+		t.Fatal(err)
+	}
+	if sp.calls != 3 {
+		t.Fatalf("provider calls = %d, want 3 (truncated + retry + final)", sp.calls)
+	}
+	// The drop must persist: the retry's shrunk prefix no longer matches the
+	// cache's byte fingerprint, so the summarizer re-runs. Without viewDropped
+	// persistence the retry would re-send the same full view, the cache would
+	// stay valid, and only ONE summarization would happen.
+	if comp.calls != 2 {
+		t.Fatalf("summarizer calls = %d, want 2 (initial + re-summarize after the drop)", comp.calls)
+	}
+	// The re-summarize input is the shrunk prefix: 13 msgs, leading with
+	// history[1] — the oldest round stays dropped.
+	if len(comp.got) < 2 || len(comp.got[1]) != 13 {
+		t.Fatalf("re-summarize input = %d msgs, want 13 (oldest round dropped)", len(comp.got[1]))
+	}
+	if len(comp.got) >= 2 && comp.got[1][0].Content[0].Text != history[1].Content[0].Text {
+		t.Error("re-summarize input must lead with history[1] (the dropped round never returns)")
+	}
+}
+
 func TestLoopRepairsUnpairedHistoryBeforeSend(t *testing.T) {
 	rp := &recordingProvider{reply: "final"}
 	// History with a dangling tool_use (cancelled before the result): the loop
