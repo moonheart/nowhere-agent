@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/contextmgmt"
@@ -744,6 +745,32 @@ func (rg *RunRegistry) Cancel(sessionID string) bool {
 		return false
 	}
 	w.cancel()
+	return true
+}
+
+// CancelAndWait stops the session's in-flight run like Cancel, then waits up to
+// timeout for the worker goroutine to fully exit. A caller about to delete the
+// session's rows (purge, account erasure) uses this so the worker's final
+// writes land BEFORE the cascade removes its tables — deleting under a live
+// worker fails its next write with a bogus FK error at best, and a stale
+// CompleteRun could clobber a newer run's state at worst. Returns false if no
+// run is active; a worker that does not exit within the timeout is logged and
+// left to unwind on its own (the delete proceeds — its writes fail harmlessly
+// against the removed rows).
+func (rg *RunRegistry) CancelAndWait(sessionID string, timeout time.Duration) bool {
+	rg.mu.Lock()
+	w, ok := rg.workers[sessionID]
+	rg.mu.Unlock()
+	if !ok {
+		return false
+	}
+	w.cancel()
+	select {
+	case <-w.done:
+	case <-time.After(timeout):
+		slog.Warn("run worker did not exit within the cancel timeout; proceeding without it",
+			"session", sessionID, "run", w.runID, "timeout", timeout)
+	}
 	return true
 }
 

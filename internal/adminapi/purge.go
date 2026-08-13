@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"nowhere-agent/internal/audit"
 	"nowhere-agent/internal/session"
@@ -32,12 +33,21 @@ type ImagePurger interface {
 }
 
 // RunCancellor stops a session's in-flight run worker. *session.RunRegistry
-// satisfies it (Cancel is transport-independent and interrupts the loop, so
-// token burn stops promptly). Nil-safe: a purge without one skips the cancel
-// and proceeds with the delete.
+// satisfies it (CancelAndWait is transport-independent, interrupts the loop so
+// token burn stops promptly, and waits for the worker to exit so its final
+// writes land before the rows are deleted). Nil-safe: a purge without one
+// skips the cancel and proceeds with the delete.
 type RunCancellor interface {
-	Cancel(sessionID string) bool
+	// CancelAndWait cancels the session's active run and waits up to timeout
+	// for its worker goroutine to exit. Returns false when no run is active.
+	CancelAndWait(sessionID string, timeout time.Duration) bool
 }
+
+// runStopTimeout bounds how long a delete path waits for a cancelled run's
+// worker to unwind before the session's rows are removed. A worker that does
+// not exit in time is left to unwind against the cascade — its leftover writes
+// fail harmlessly (those rows are going anyway).
+const runStopTimeout = 3 * time.Second
 
 // WithPurge wires the hard-delete routes (platform purge): sessions
 // (DELETE /api/admin/sessions/{id}) and the image cleanup that rides on user
@@ -64,10 +74,10 @@ func (h *Handler) deleteSession(w http.ResponseWriter, r *http.Request) {
 	// Stop an in-flight run BEFORE the hard delete. The cascade would otherwise
 	// rip the run's rows out from under the worker, which fails its next write
 	// with a bogus FK error while the LLM stream keeps spending. Cancelling
-	// first interrupts the loop and the worker settles cancelled; its leftover
-	// writes then fail harmlessly — those rows are going anyway.
+	// first interrupts the loop; the bounded wait ensures the worker's final
+	// writes land before the rows go, so nothing touches a half-deleted row.
 	if h.runs != nil {
-		h.runs.Cancel(id)
+		h.runs.CancelAndWait(id, runStopTimeout)
 	}
 	if err := h.sessions.DeleteSession(r.Context(), id); err != nil {
 		writeServiceError(w, err)

@@ -173,12 +173,12 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	// Stop any in-flight runs BEFORE the account delete. The cascade would
 	// otherwise rip the runs' rows out from under their workers, which fail
 	// their next write with a bogus FK error while the LLM stream keeps
-	// spending. Cancel is per-session, process-local best effort: in a
+	// spending. CancelAndWait is per-session, process-local best effort: in a
 	// multi-instance deployment it only reaches runs owned by this process,
 	// but the rows go regardless.
 	if h.runs != nil {
 		for _, id := range sessionIDs {
-			h.runs.Cancel(id)
+			h.runs.CancelAndWait(id, runStopTimeout)
 		}
 	}
 	if err := h.identity.DeleteAccount(r.Context(), actor.ID, targetID); err != nil {
@@ -211,7 +211,7 @@ func (h *Handler) deleteMe(w http.ResponseWriter, r *http.Request) {
 	// Same in-flight-run stop as deleteUser, before the cascade (see there).
 	if h.runs != nil {
 		for _, id := range sessionIDs {
-			h.runs.Cancel(id)
+			h.runs.CancelAndWait(id, runStopTimeout)
 		}
 	}
 	if err := h.identity.DeleteSelf(r.Context(), u.ID); err != nil {

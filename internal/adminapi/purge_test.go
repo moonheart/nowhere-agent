@@ -161,15 +161,11 @@ func TestAdminSessionPurgeCancelsActiveRun(t *testing.T) {
 		t.Error("session survived the purge")
 	}
 
-	// The worker was interrupted and must unwind — cancel settles the run
-	// cancelled; the row is gone, so its leftover writes fail harmlessly, but
-	// the worker exits (no more token burn against a deleted run).
-	deadline = time.Now().Add(5 * time.Second)
-	for e.registry.ActiveWorker(sess.ID) {
-		if time.Now().After(deadline) {
-			t.Fatal("purged session's run worker is still active after the purge")
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The handler waits for the worker to unwind BEFORE deleting (bounded
+	// CancelAndWait), so by the time the purge returns there is no live worker
+	// left to write into the cascade.
+	if e.registry.ActiveWorker(sess.ID) {
+		t.Error("purged session's run worker is still active after the purge returned")
 	}
 }
 
@@ -221,14 +217,10 @@ func TestAdminDeleteUserCancelsActiveRuns(t *testing.T) {
 				t.Fatalf("delete = %d (%s), want 204", rec.Code, rec.Body.String())
 			}
 
-			// The worker was interrupted and must unwind (no more token burn
-			// against a deleted account).
-			deadline = time.Now().Add(5 * time.Second)
-			for e.registry.ActiveWorker(sess.ID) {
-				if time.Now().After(deadline) {
-					t.Fatal("deleted user's run worker is still active after the delete")
-				}
-				time.Sleep(10 * time.Millisecond)
+			// The handler waits for the worker to unwind BEFORE deleting
+			// (bounded CancelAndWait), so no live worker survives the delete.
+			if e.registry.ActiveWorker(sess.ID) {
+				t.Error("deleted user's run worker is still active after the delete returned")
 			}
 		})
 	}
