@@ -137,3 +137,46 @@ func TestDispatchAgentDefPromptSource(t *testing.T) {
 		t.Fatalf("dispatch with unresolvable def: %v", err)
 	}
 }
+
+// TestDispatchTargetSessionGetsWebhookTag pins the reused-session provenance
+// stamp: a webhook firing into its owner's existing target session must tag
+// that session source='inbound' + metadata->>'webhook_id' — the same marks a
+// fresh session gets — so run-completion notifications can resolve the
+// webhook's notify_url for reused sessions too (target.go reads exactly those
+// two columns).
+func TestDispatchTargetSessionGetsWebhookTag(t *testing.T) {
+	db := pgTestDB(t)
+	uid := seedUser(t, db)
+
+	rt := session.NewRuntime(session.NewPGStore(db))
+	rg := session.NewRunRegistry(rt)
+	d := NewDispatcher(NewStore(db), rt, rg, nil, nil,
+		func(ctx context.Context, userID, teamID, system, model string) (*agent.Loop, error) {
+			return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}), nil
+		}, func() string { return "base" }, db)
+
+	// The webhook's owner's pre-existing session (e.g. created by a human chat).
+	var sessID string
+	if err := db.QueryRow(`INSERT INTO sessions (user_id, title) VALUES ($1, 'erp target') RETURNING id`, uid).Scan(&sessID); err != nil {
+		t.Fatalf("seed target session: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, sessID) })
+
+	wh := testWebhook(uid)
+	wh.ID = "inb-" + randHex()
+	wh.TargetSessionID = sessID
+	if _, _, err := d.Dispatch(context.Background(), wh, "hello", nil); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	var source, webhookID string
+	if err := db.QueryRow(`SELECT source, COALESCE(metadata->>'webhook_id','') FROM sessions WHERE id = $1`, sessID).Scan(&source, &webhookID); err != nil {
+		t.Fatalf("read session tag: %v", err)
+	}
+	if source != "inbound" {
+		t.Errorf("reused target session source = %q, want inbound", source)
+	}
+	if webhookID != wh.ID {
+		t.Errorf("reused target session webhook_id = %q, want %q", webhookID, wh.ID)
+	}
+}

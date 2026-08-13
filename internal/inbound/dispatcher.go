@@ -235,6 +235,19 @@ func (d *Dispatcher) resolveSession(ctx context.Context, wh Webhook, prompt stri
 		if sess.UserID != wh.UserID {
 			return "", false, ErrNotOwner
 		}
+		// Provenance stamp (mirror of the fresh-session branch): a REUSED target
+		// session must still carry the webhook back-reference, or run-completion
+		// notifications cannot resolve this webhook's notify_url (target.go
+		// matches on source = 'inbound' AND metadata->>'webhook_id'). The tag
+		// must not clobber sibling metadata keys, so it goes through jsonb_set.
+		if d.db != nil {
+			if _, err := d.db.ExecContext(ctx, `
+				UPDATE sessions SET source = 'inbound',
+					metadata = jsonb_set(metadata, '{webhook_id}', to_jsonb($1::text), true)
+				WHERE id = $2`, wh.ID, wh.TargetSessionID); err != nil {
+				return "", false, err
+			}
+		}
 		return wh.TargetSessionID, false, nil
 	}
 	title := truncate(prompt, 60)
