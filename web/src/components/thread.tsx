@@ -112,9 +112,7 @@ const EmptyState: FC = () => (
         n
       </EmptyMedia>
       <EmptyTitle className="text-base">{t("chat.help")}</EmptyTitle>
-      <EmptyDescription>
-        Ask anything, or have me work with files in your workspace.
-      </EmptyDescription>
+      <EmptyDescription>{t("chat.emptyState")}</EmptyDescription>
     </EmptyHeader>
   </Empty>
 );
@@ -287,11 +285,11 @@ const FailedTurnNotice: FC = () => {
         variant="outline"
         size="sm"
         disabled={isRunning}
-        title="Re-run the previous message"
+        title={t("chat.rerunTitle")}
         onClick={retry}
         className="shrink-0"
       >
-        Retry
+        {t("chat.retry")}
       </Button>
     </div>
   );
@@ -479,8 +477,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
         </InputGroup>
       </ComposerPrimitive.Root>
       <p className="mx-auto mt-2 max-w-3xl text-center text-[11px] text-muted-foreground">
-        nowhere-agent can read and write files in your workspace. Double-check
-        important output.
+        {t("chat.disclaimer")}
       </p>
     </div>
   );

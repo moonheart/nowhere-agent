@@ -32,6 +32,17 @@ export type I18nKey =
   | "chat.stop"
   | "chat.loading"
   | "chat.error"
+  | "chat.emptyState"
+  | "chat.rerunTitle"
+  | "chat.retry"
+  | "chat.disclaimer"
+  | "chat.searchChats"
+  | "chat.loadError"
+  | "chat.noConversations"
+  | "chat.noConversationsHint"
+  | "chat.noMatches"
+  | "chat.noMatchesHint"
+  | "chat.deleteConversation"
   | "profile.exportData"
   | "login.phone"
   | "login.phoneSubtitle"
@@ -87,6 +98,17 @@ const zh: Record<I18nKey, string> = {
   "chat.stop": "停止",
   "chat.loading": "加载中…",
   "chat.error": "出错了",
+  "chat.emptyState": "随便问点什么,或让我处理你工作区里的文件。",
+  "chat.rerunTitle": "重新运行上一条消息",
+  "chat.retry": "重试",
+  "chat.disclaimer": "nowhere-agent 可以读写你工作区中的文件。重要输出请仔细核对。",
+  "chat.searchChats": "搜索对话",
+  "chat.loadError": "无法加载会话列表。",
+  "chat.noConversations": "还没有对话",
+  "chat.noConversationsHint": "点击「新建对话」开始。",
+  "chat.noMatches": "没有匹配结果",
+  "chat.noMatchesHint": "没有与「{term}」匹配的内容。",
+  "chat.deleteConversation": "删除对话",
   "profile.exportData": "导出我的数据",
   "login.phone": "手机号",
   "login.phoneSubtitle": "使用手机号 + 验证码登录或注册。",
@@ -143,6 +165,17 @@ const en: Record<I18nKey, string> = {
   "chat.stop": "Stop",
   "chat.loading": "Loading…",
   "chat.error": "Something went wrong",
+  "chat.emptyState": "Ask anything, or have me work with files in your workspace.",
+  "chat.rerunTitle": "Re-run the previous message",
+  "chat.retry": "Retry",
+  "chat.disclaimer": "nowhere-agent can read and write files in your workspace. Double-check important output.",
+  "chat.searchChats": "Search chats",
+  "chat.loadError": "Couldn’t load conversations.",
+  "chat.noConversations": "No conversations yet",
+  "chat.noConversationsHint": "Start one with “New chat”.",
+  "chat.noMatches": "No matches",
+  "chat.noMatchesHint": "Nothing matches “{term}”.",
+  "chat.deleteConversation": "Delete conversation",
   "profile.exportData": "Export my data",
   "login.phone": "Phone",
   "login.phoneSubtitle": "Sign in or register with a mobile number and one-time code.",
@@ -180,10 +213,17 @@ const lang: "zh" | "en" = navigator.language.toLowerCase().startsWith("zh")
   ? "zh"
   : "en";
 
-// t returns the localized string for key.
-export function t(key: I18nKey): string {
+// t returns the localized string for key. vars, when given, substitutes
+// {name} placeholders in the translation (e.g. t("chat.noMatchesHint", {term})).
+export function t(key: I18nKey, vars?: Record<string, string | number>): string {
   const dict = lang === "zh" ? zh : en;
-  return dict[key];
+  let s = dict[key];
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) {
+      s = s.replaceAll(`{${k}}`, String(v));
+    }
+  }
+  return s;
 }
 
 // isZh reports whether the UI is currently rendering Chinese, for the rare

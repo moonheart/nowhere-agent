@@ -183,8 +183,8 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
             <InputGroupInput
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search chats"
-              aria-label="Search chats"
+              placeholder={t("chat.searchChats")}
+              aria-label={t("chat.searchChats")}
             />
           </InputGroup>
         )}
@@ -194,14 +194,14 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
         <div className="p-2">
           {loadError && (
             <div className="mb-1 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-              <span>Couldn’t load conversations.</span>
+              <span>{t("chat.loadError")}</span>
               <Button
                 variant="ghost"
                 size="sm"
                 className="h-auto px-2 py-0.5"
                 onClick={() => void refresh(debounced)}
               >
-                Retry
+                {t("chat.retry")}
               </Button>
             </div>
           )}
@@ -214,10 +214,8 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
                 <EmptyMedia variant="icon">
                   <MessageSquare />
                 </EmptyMedia>
-                <EmptyTitle>No conversations yet</EmptyTitle>
-                <EmptyDescription>
-                  Start one with “New chat”.
-                </EmptyDescription>
+                <EmptyTitle>{t("chat.noConversations")}</EmptyTitle>
+                <EmptyDescription>{t("chat.noConversationsHint")}</EmptyDescription>
               </EmptyHeader>
             </Empty>
           )}
@@ -227,12 +225,12 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
                 <EmptyMedia variant="icon">
                   <Search />
                 </EmptyMedia>
-                <EmptyTitle>No matches</EmptyTitle>
+                <EmptyTitle>{t("chat.noMatches")}</EmptyTitle>
                 {/* The debounced term is what the backend actually searched:
                     the live query would lag the real search during the
                     debounce window. */}
                 <EmptyDescription>
-                  Nothing matches “{debounced}”.
+                  {t("chat.noMatchesHint", { term: debounced })}
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>
@@ -284,8 +282,8 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
                   <Button
                     variant="ghost"
                     size="icon-xs"
-                    aria-label="Delete conversation"
-                    title="Delete conversation"
+                    aria-label={t("chat.deleteConversation")}
+                    title={t("chat.deleteConversation")}
                     onClick={(e) => {
                       e.stopPropagation();
                       void handleDelete(s.id);
