@@ -1410,18 +1410,18 @@ func run() error {
 		//
 		// SSRF guard: webhook URLs are user-written, so every delivery target
 		// is screened against private/loopback ranges before any connection
-		// (WEBHOOK_SSRF_ALLOWLIST opens legitimately internal targets). A
-		// malformed allowlist CIDR fails boot — a typo must not silently
-		// disable the guard.
-		var webhookGuard *webhook.Guard
-		if list := splitComma(cfg.Webhook.SSRFAllowlist); len(list) > 0 {
-			g, err := webhook.NewGuard(list, nil)
-			if err != nil {
-				return err
-			}
-			webhookGuard = g
-			log.Info("webhook SSRF guard enabled with allowlist", "entries", list)
+		// (WEBHOOK_SSRF_ALLOWLIST opens legitimately internal targets). The
+		// guard is ALWAYS built: an empty allowlist is the default and means
+		// "strict: public targets only" (see settings.KeyWebhookSSRFAllowlist),
+		// not "no guard" — a missing guard would silently disable screening
+		// under the default configuration. A malformed allowlist CIDR fails
+		// boot — a typo must not silently disable the guard either.
+		webhookAllowlist := splitComma(cfg.Webhook.SSRFAllowlist)
+		webhookGuard, err := newWebhookGuard(webhookAllowlist)
+		if err != nil {
+			return err
 		}
+		log.Info("webhook SSRF guard enabled", "allowlist_entries", webhookAllowlist)
 		notifier := webhook.New(webhook.Options{
 			Timeout:       cfg.Webhook.Timeout,
 			Retries:       cfg.Webhook.Retries,
@@ -1436,23 +1436,22 @@ func run() error {
 		// (admin console): timeout/retries/signing secret change immediately,
 		// and the SSRF allowlist swaps the guard (a malformed runtime list
 		// keeps the previous guard and logs — unlike the boot allowlist,
-		// which fails startup).
+		// which fails startup). An empty runtime list means "strict: public
+		// targets only", so it builds a strict guard rather than disabling
+		// screening — clearing the allowlist must tighten delivery, not open
+		// it up.
 		applyWebhookPolicy := func() {
 			notifier.SetPolicy(
 				settingsRuntime.Duration(settings.KeyWebhookTimeout),
 				settingsRuntime.Int(settings.KeyWebhookRetries),
 				settingsRuntime.String(settings.KeyWebhookSigningSecret),
 			)
-			if list := splitComma(settingsRuntime.String(settings.KeyWebhookSSRFAllowlist)); len(list) > 0 {
-				g, err := webhook.NewGuard(list, nil)
-				if err != nil {
-					log.Warn("webhook SSRF allowlist invalid; keeping previous guard", "err", err)
-					return
-				}
-				notifier.SetGuard(g)
-			} else {
-				notifier.SetGuard(nil)
+			g, err := newWebhookGuard(splitComma(settingsRuntime.String(settings.KeyWebhookSSRFAllowlist)))
+			if err != nil {
+				log.Warn("webhook SSRF allowlist invalid; keeping previous guard", "err", err)
+				return
 			}
+			notifier.SetGuard(g)
 		}
 		// webhookTimeoutFor bounds one delivery attempt (and the outbox
 		// context), falling back to 10s when unset — a console 0 must not
@@ -1663,9 +1662,9 @@ func run() error {
 		inboundDispatcher.SetLogger(log)
 		inboundHandler := inbound.NewHandler(inboundStore, inboundDispatcher).
 			WithAudit(auditLogger)
-		if webhookGuard != nil {
-			inboundHandler.WithURLGuard(webhookGuard)
-		}
+		// The guard is always built (an empty allowlist = strict), so inbound
+		// targets are screened unconditionally too.
+		inboundHandler.WithURLGuard(webhookGuard)
 		inboundHandler.SetLogger(log)
 		inboundHandler.RegisterPublic(mux)
 		inboundHandler.RegisterAuthed(protected)
@@ -1992,6 +1991,16 @@ func buildEncryptor(cfg config.Config) (*secrets.Encryptor, error) {
 		return nil, nil
 	}
 	return secrets.NewSingle([]byte(cfg.Secrets.MasterKey))
+}
+
+// newWebhookGuard builds the SSRF guard for webhook delivery from the
+// allowlist entries. It always returns a guard: an empty list yields the
+// strict guard (public targets only), so the default configuration still
+// screens private/loopback targets — a nil guard is never the outcome of an
+// empty allowlist. Only a malformed CIDR is an error; callers decide what
+// that means (boot: fail; runtime: keep the previous guard).
+func newWebhookGuard(entries []string) (*webhook.Guard, error) {
+	return webhook.NewGuard(entries, nil)
 }
 
 // splitComma splits a comma-separated list, trimming whitespace and dropping

@@ -148,6 +148,36 @@ func randSuffix() string {
 // TestClampPermissionDecision pins the fail-closed clamp: a known value passes
 // through, and anything else (corrupt setting, manual DB edit) becomes deny so
 // neither execution gate can silently open.
+// TestNewWebhookGuardEmptyListIsStrict pins the fail-closed wiring: the
+// default (empty) allowlist must still produce a guard — not nil — and that
+// guard must refuse private targets while passing public ones. The guard is
+// the only thing screening user-written webhook URLs, so an empty allowlist
+// must never silently disable it.
+func TestNewWebhookGuardEmptyListIsStrict(t *testing.T) {
+	g, err := newWebhookGuard(nil)
+	if err != nil {
+		t.Fatalf("empty allowlist must build a guard, got error: %v", err)
+	}
+	if g == nil {
+		t.Fatal("empty allowlist built a nil guard")
+	}
+	// Literal-IP targets are decided without DNS, keeping the test hermetic.
+	for _, u := range []string{"http://127.0.0.1:1/x", "http://10.0.0.1/x", "http://[::1]/x", "http://169.254.169.254/x"} {
+		if err := g.CheckURL(context.Background(), u); err == nil {
+			t.Errorf("CheckURL(%q): accepted, want block under the empty allowlist", u)
+		}
+	}
+	if err := g.CheckURL(context.Background(), "http://8.8.8.8/x"); err != nil {
+		t.Errorf("CheckURL(public): %v, want ok under the empty allowlist", err)
+	}
+	if _, err := newWebhookGuard([]string{"not-a-cidr"}); err == nil {
+		t.Error("malformed allowlist CIDR must be an error, not a silent skip")
+	}
+	if _, err := newWebhookGuard([]string{"10.0.0.0/8", "172.16.0.0/12"}); err != nil {
+		t.Errorf("well-formed allowlist must build a guard: %v", err)
+	}
+}
+
 func TestClampPermissionDecision(t *testing.T) {
 	for _, v := range []string{"allow", "ask", "deny"} {
 		if got := clampPermissionDecision(v, "k"); got != permission.Decision(v) {
