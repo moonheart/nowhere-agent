@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -38,15 +37,17 @@ const (
 // readBodyMax reads the request body bounded at maxBytes and answers 413 when
 // it exceeds the bound — the caller decodes the returned bytes as JSON. A
 // body beyond the bound must read as "too large", not as truncated invalid
-// JSON.
+// JSON. It delegates the bounded read to httpx (the one shared implementation)
+// and answers through httpx.Error, so the error surface matches the rest of
+// the API.
 func readBodyMax(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
+	body, err := httpx.ReadBodyMax(r, maxBytes)
 	if err != nil {
-		http.Error(w, "read body", http.StatusBadRequest)
-		return nil, false
-	}
-	if int64(len(body)) > maxBytes {
-		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+		if errors.Is(err, httpx.ErrBodyTooLarge) {
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "payload too large")
+			return nil, false
+		}
+		httpx.Error(w, http.StatusBadRequest, "read body")
 		return nil, false
 	}
 	return body, true

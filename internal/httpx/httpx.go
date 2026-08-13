@@ -45,6 +45,28 @@ func ReadBodyMax(r *http.Request, maxBytes int64) ([]byte, error) {
 	return body, nil
 }
 
+// DecodeBody reads a JSON request body bounded at maxBytes into v, answering
+// the standard error responses itself: 413 for an oversized body, 400 for a
+// read failure or malformed JSON. It reports false when the response has
+// already been written. This is the shared implementation of the per-package
+// `decode` helpers, so error wording cannot drift between handlers.
+func DecodeBody(w http.ResponseWriter, r *http.Request, maxBytes int64, v any) bool {
+	body, err := ReadBodyMax(r, maxBytes)
+	if err != nil {
+		if errors.Is(err, ErrBodyTooLarge) {
+			Error(w, http.StatusRequestEntityTooLarge, "payload too large")
+			return false
+		}
+		Error(w, http.StatusBadRequest, "read body")
+		return false
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		Error(w, http.StatusBadRequest, "invalid json")
+		return false
+	}
+	return true
+}
+
 // JSON writes v as a JSON response with the given status. It is the single
 // wire-format home for API bodies; per-package writeJSON helpers delegate here
 // so the shape cannot drift between handlers.

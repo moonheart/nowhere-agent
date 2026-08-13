@@ -1,9 +1,7 @@
 package agentdefapi
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 
 	"nowhere-agent/internal/agentdef"
@@ -79,21 +77,10 @@ func caller(r *http.Request) identity.User {
 // before decoding.
 const maxBodyBytes = 1 << 20
 
+// decode reads a JSON body into v, answering 400/413 and reporting false on
+// malformed or oversized input (shared implementation in httpx).
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "read body")
-		return false
-	}
-	if len(body) > maxBodyBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
-		return false
-	}
-	if err := json.Unmarshal(body, v); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return false
-	}
-	return true
+	return httpx.DecodeBody(w, r, maxBodyBytes, v)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
