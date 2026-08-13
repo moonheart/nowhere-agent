@@ -185,6 +185,37 @@ func TestPGStoreCRUD(t *testing.T) {
 	}
 }
 
+// A task whose end_time is already in the past can never fire: Create must
+// refuse it, while Update stays permissive (a task expiring mid-life is
+// legitimate — the row is only disabled in effect).
+func TestPGStoreCreateRejectsPastEndTime(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ctx := context.Background()
+	userID := pgNewUser(t, db)
+
+	past := time.Now().Add(-time.Hour)
+	if _, err := store.Create(ctx, func() Task {
+		t := validTask(userID)
+		t.EndTime = &past
+		return t
+	}()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("create with past end_time = %v, want ErrInvalid", err)
+	}
+
+	// Update with the same past end_time is fine: the row stays visible and
+	// editable, it just never fires again.
+	created, err := store.Create(ctx, validTask(userID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+	created.EndTime = &past
+	if _, err := store.Update(ctx, created); err != nil {
+		t.Fatalf("update with past end_time should stay permissive, got %v", err)
+	}
+}
+
 func TestPGStoreMalformedID(t *testing.T) {
 	db := pgTestDB(t)
 	store := NewPGStore(db)
@@ -216,19 +247,32 @@ func TestPGStoreListDue(t *testing.T) {
 	now := time.Now()
 	due := mk(nil)
 	notDue := mk(nil)
-	expired := mk(func(t *Task) { past := now.Add(-time.Hour); t.EndTime = &past })
+	expired := mk(nil)
 	disabled := mk(func(t *Task) { t.Enabled = false })
 	zeroNext := mk(nil)
 
 	// Force next_run_at into the past for the due + expired + disabled tasks so
-	// only the due filter separates them; notDue stays in the future.
+	// only the due filter separates them; notDue stays in the future. expired's
+	// end_time is set straight in SQL: Create refuses a past end_time by
+	// design, while a legacy row may legitimately hold one. Exec errors are
+	// checked: a silently failed backdate would wrongly drop `due` from the
+	// scan set.
 	for _, id := range []string{due.ID, expired.ID, disabled.ID} {
-		db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), id)
+		if _, err := db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), id); err != nil {
+			t.Fatalf("backdate %s: %v", id, err)
+		}
 	}
-	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(time.Hour), notDue.ID)
+	if _, err := db.Exec(`UPDATE scheduled_task SET end_time = $1 WHERE id = $2`, now.Add(-time.Hour), expired.ID); err != nil {
+		t.Fatalf("set end_time on %s: %v", expired.ID, err)
+	}
+	if _, err := db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(time.Hour), notDue.ID); err != nil {
+		t.Fatalf("futurize %s: %v", notDue.ID, err)
+	}
 	// zeroNext mimics a legacy never-firing row (pre-fix zero seed): zero
 	// next_run_at that ListDue must never hand the trigger.
-	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, time.Time{}, zeroNext.ID)
+	if _, err := db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, time.Time{}, zeroNext.ID); err != nil {
+		t.Fatalf("zero %s: %v", zeroNext.ID, err)
+	}
 
 	got, err := store.ListDue(ctx, now)
 	if err != nil {

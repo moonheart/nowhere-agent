@@ -100,7 +100,7 @@ const taskCols = `id, user_id, COALESCE(team_id::text,''), COALESCE(agent_def_na
 
 // Create inserts a validated task with its first NextRunAt seeded.
 func (s *PGStore) Create(ctx context.Context, t Task) (Task, error) {
-	if err := t.Validate(); err != nil {
+	if err := t.validateCreate(time.Now()); err != nil {
 		return Task{}, err
 	}
 	next, err := t.NextAfter(time.Now())
@@ -508,7 +508,7 @@ func NewMemStore() *MemStore {
 }
 
 func (m *MemStore) Create(ctx context.Context, t Task) (Task, error) {
-	if err := t.Validate(); err != nil {
+	if err := t.validateCreate(time.Now()); err != nil {
 		return Task{}, err
 	}
 	next, err := t.NextAfter(time.Now())

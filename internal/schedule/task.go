@@ -134,6 +134,20 @@ func (t Task) Validate() error {
 	return nil
 }
 
+// validateCreate is Validate plus the create-only rules: an end_time at or
+// before now is refused — the task could never fire, and the row would sit
+// dormant until manually edited. Update stays permissive (a task expiring
+// mid-life is legitimate), so this is only called on the Create path.
+func (t Task) validateCreate(now time.Time) error {
+	if err := t.Validate(); err != nil {
+		return err
+	}
+	if t.EndTime != nil && !t.EndTime.After(now) {
+		return fmt.Errorf("%w: end_time must be in the future", ErrInvalid)
+	}
+	return nil
+}
+
 // validWebhookURL reports whether u is an absolute http(s) URL — the only
 // targets the notifier will POST to. Anything else (javascript:, file:, a bare
 // hostname) is refused at write time so a task can never point notifications at
