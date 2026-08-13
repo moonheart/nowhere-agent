@@ -133,7 +133,9 @@ func (s *Service) CompleteTOTPChallenge(ctx context.Context, challengeToken, cod
 		return "", User{}, err
 	}
 	if !ok {
-		return "", User{}, ErrInvalidTOTP
+		// Carry the resolved user along with the error so the caller can
+		// attribute the failure (throttling) without a second lookup.
+		return "", u, ErrInvalidTOTP
 	}
 	if u.Disabled() {
 		return "", User{}, ErrUserDisabled

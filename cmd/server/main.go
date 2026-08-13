@@ -238,7 +238,7 @@ func run() error {
 	// Components register their callback where they are wired; the loop
 	// starts once at the end of run().
 	settingsSync := settings.NewWatcher()
-	identityHandler := identity.NewHandler(identitySvc).WithThrottle(identity.NewLoginThrottler())
+	identityHandler := identity.NewHandler(identitySvc).WithThrottle(identity.NewLoginThrottler()).WithTOTPThrottle(identity.NewLoginThrottler())
 	identityHandler.Register(mux)
 
 	// Protected route tier (httpx.Router): auth — and any future per-route

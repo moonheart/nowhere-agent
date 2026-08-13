@@ -36,6 +36,11 @@ type Handler struct {
 	// throttle, when set, locks a (email, ip) pair after repeated login
 	// failures (credential-stuffing defense).
 	throttle *LoginThrottler
+	// totpThrottle, when set, locks a (userID, ip) pair after repeated wrong
+	// second-factor codes — a TOTP account's password is already known to the
+	// caller, so the 6-digit code is the only secret left to protect. The same
+	// pair gates how many challenge tokens a login may mint.
+	totpThrottle *LoginThrottler
 }
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
@@ -44,6 +49,13 @@ func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 // no per-pair lockout (the gateway's global request limiter still applies).
 func (h *Handler) WithThrottle(t *LoginThrottler) *Handler {
 	h.throttle = t
+	return h
+}
+
+// WithTOTPThrottle wires second-factor throttling. Left nil, /api/auth/totp/
+// verify has no per-pair lockout.
+func (h *Handler) WithTOTPThrottle(t *LoginThrottler) *Handler {
+	h.totpThrottle = t
 	return h
 }
 
@@ -203,6 +215,16 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		// this is a 200 with a challenge, not an error: the credential half
 		// succeeded and the flow continues.
 		u, _ = h.svc.LookupByEmail(r.Context(), req.Email)
+		// Minting is gated on the same (user, ip) pair as verify: a locked
+		// pair must not be able to refresh its one-shot token to retry, and a
+		// lockout must not be drownable in fresh challenges.
+		if h.totpThrottle != nil {
+			if allowed, retryAfter := h.totpThrottle.Check(u.ID, audit.ClientIP(r)); !allowed {
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
+				writeError(w, http.StatusTooManyRequests, "too many login attempts; try again later")
+				return
+			}
+		}
 		challenge, cerr := h.svc.BeginTOTPChallenge(r.Context(), u)
 		if cerr != nil {
 			h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"email": req.Email, "reason": "totp_challenge_failed"}))
@@ -263,6 +285,14 @@ func (h *Handler) totpVerify(w http.ResponseWriter, r *http.Request) {
 	token, u, err := h.svc.CompleteTOTPChallenge(r.Context(), req.TotpToken, req.Code)
 	if err != nil {
 		if errors.Is(err, ErrInvalidTOTP) {
+			// Count wrong codes per (user, ip); a challenge token can only be
+			// obtained with the right password, so failures here are a focused
+			// brute-force on the 6-digit secret. Failures with no resolvable
+			// user (forged/expired token) are not counted: a random 256-bit
+			// token cannot be guessed and minting is gated at login.
+			if h.totpThrottle != nil && u.ID != "" {
+				h.totpThrottle.Fail(u.ID, audit.ClientIP(r))
+			}
 			h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"method": "totp", "reason": "invalid_code"}))
 			writeError(w, http.StatusUnauthorized, "invalid verification code")
 			return
@@ -275,6 +305,9 @@ func (h *Handler) totpVerify(w http.ResponseWriter, r *http.Request) {
 		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Detail(map[string]any{"method": "totp", "reason": "internal"}))
 		writeError(w, http.StatusInternalServerError, "verification failed")
 		return
+	}
+	if h.totpThrottle != nil {
+		h.totpThrottle.Success(u.ID, audit.ClientIP(r))
 	}
 	h.record(audit.Success(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).
 		Target("user", u.ID).Detail(map[string]any{"method": "password+totp"}))

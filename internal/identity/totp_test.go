@@ -4,7 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -147,6 +152,91 @@ func TestTOTPSkewTolerance(t *testing.T) {
 }
 
 // --- helpers ---
+
+// TestTOTPVerifyThrottling locks a (user, ip) pair after repeated wrong codes:
+// the verify endpoint refuses the pair and, once locked, login no longer mints
+// challenge tokens for it. A correct code clears the counter.
+func TestTOTPVerifyThrottling(t *testing.T) {
+	svc, _, store, ctx := totpEnv(t)
+	u := totpUser(t, store)
+	secret, _, err := svc.EnrollTOTP(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	code, _ := totpCode(secret, time.Now())
+	if err := svc.ConfirmTOTP(ctx, u.ID, code); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+
+	h := NewHandler(svc).WithTOTPThrottle(NewLoginThrottler())
+	ip := "203.0.113.7"
+	challenge := func(email string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/api/auth/login",
+			strings.NewReader(fmt.Sprintf(`{"email":%q,"password":"secret-pass-123"}`, email)))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = ip + ":45678"
+		w := httptest.NewRecorder()
+		h.login(w, req)
+		return w
+	}
+
+	for i := 0; i < 5; i++ {
+		w := challenge(u.Email)
+		if w.Code != http.StatusOK {
+			t.Fatalf("challenge %d: status %d, want 200", i, w.Code)
+		}
+		var ch struct {
+			Token string `json:"totp_token"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &ch); err != nil || ch.Token == "" {
+			t.Fatalf("challenge %d: no token", i)
+		}
+		if w := verify(t, h, ip, fmt.Sprintf(`{"totp_token":%q,"code":"000000"}`, ch.Token)); w.Code != http.StatusUnauthorized {
+			t.Fatalf("verify %d: status %d, want 401", i, w.Code)
+		}
+	}
+
+	// The pair is now locked: login no longer mints challenge tokens for it.
+	if w := challenge(u.Email); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("challenge after lock: status %d, want 429", w.Code)
+	}
+
+	// A fresh pair (different user) still works, then a success clears it.
+	u2 := totpUser(t, store)
+	secret2, _, err := svc.EnrollTOTP(ctx, u2.ID)
+	if err != nil {
+		t.Fatalf("enroll u2: %v", err)
+	}
+	code2, _ := totpCode(secret2, time.Now())
+	if err := svc.ConfirmTOTP(ctx, u2.ID, code2); err != nil {
+		t.Fatalf("confirm u2: %v", err)
+	}
+	w := challenge(u2.Email)
+	if w.Code != http.StatusOK {
+		t.Fatalf("challenge for untouched pair: status %d, want 200", w.Code)
+	}
+	var ch struct {
+		Token string `json:"totp_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &ch); err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	if w := verify(t, h, ip, fmt.Sprintf(`{"totp_token":%q,"code":%q}`, ch.Token, code2)); w.Code != http.StatusOK {
+		t.Fatalf("verify with right code: status %d, want 200", w.Code)
+	}
+}
+
+// verifyBody posts a totp verify request from ip and returns the recorder.
+func verify(t *testing.T, h *Handler, ip, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/api/auth/totp/verify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = ip + ":45678"
+	w := httptest.NewRecorder()
+	h.totpVerify(w, req)
+	return w
+}
 
 func totpEnv(t *testing.T) (*Service, *recordingSMS, *Store, context.Context) {
 	t.Helper()
