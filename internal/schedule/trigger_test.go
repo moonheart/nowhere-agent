@@ -60,6 +60,52 @@ func (p *captureProvider) Stream(ctx context.Context, req provider.Request) (<-c
 	return p.stubProvider.Stream(ctx, req)
 }
 
+// stuckTool blocks on a gate forever, ignoring ctx cancellation — the
+// stand-in for a tool call stuck in an unbounded operation (a hung network
+// call) that never observes the interrupt. Its hour-long timeout keeps the
+// call alive well past interruptWaitTimeout. entered (when non-nil) is closed
+// once Call is entered, so a test can wait until the run is genuinely parked
+// inside the tool.
+type stuckTool struct {
+	gate    <-chan struct{}
+	entered chan struct{}
+}
+
+func (t stuckTool) Name() string        { return "stuck" }
+func (t stuckTool) Description() string { return "blocks until released" }
+func (t stuckTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (t stuckTool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
+func (t stuckTool) Timeout() time.Duration { return time.Hour }
+func (t stuckTool) Call(_ context.Context, _ map[string]any) (toolruntime.Result, error) {
+	if t.entered != nil {
+		close(t.entered)
+	}
+	<-t.gate
+	return toolruntime.Result{Content: "released"}, nil
+}
+
+// toolUseScriptProvider emits one tool_use turn (dispatching "stuck"), then a
+// plain text turn once the tool's result is fed back — enough to drive a run
+// that parks inside the stuck tool call.
+type toolUseScriptProvider struct{}
+
+func (p toolUseScriptProvider) Name() string { return "script" }
+
+func (p toolUseScriptProvider) Stream(_ context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 16)
+	ch <- provider.Event{Type: provider.EventMessageStart}
+	ch <- provider.Event{Type: provider.EventBlockStart, Index: 0, Block: &provider.Block{
+		Type: provider.BlockToolUse, ToolUseID: "tu1", ToolName: "stuck", ToolInput: map[string]any{},
+	}}
+	ch <- provider.Event{Type: provider.EventBlockDelta, Index: 0, Delta: "{}"}
+	ch <- provider.Event{Type: provider.EventBlockStop, Index: 0}
+	ch <- provider.Event{Type: provider.EventMessageStop, StopReason: provider.StopToolUse}
+	close(ch)
+	return ch, nil
+}
+
 type fakeScopes struct{ scopes []identity.ScopeRef }
 
 func (f fakeScopes) AccessibleScopes(ctx context.Context, userID string) ([]identity.ScopeRef, error) {
@@ -332,6 +378,82 @@ func TestTriggerInterruptCancelsActiveRun(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// TestTriggerInterruptTimeoutRequeuesFiring pins the interrupt-timeout path: a
+// worker that ignores the cancel and stays active past interruptWaitTimeout
+// makes the new fire's Submit fail with ErrRunActive. The claim already
+// advanced, so a silent skip would defer this firing to the NEXT cron
+// occurrence — the fix requeues it so the next scan retries.
+func TestTriggerInterruptTimeoutRequeuesFiring(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	sess, err := rt.CreateSession(context.Background(), userID, "stuck target")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID) })
+
+	// Run A is parked inside a tool call that ignores ctx cancellation; it
+	// cannot unwind until the gate closes (at test end).
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	reg := toolruntime.NewRegistry()
+	reg.Register(stuckTool{gate: gate, entered: entered})
+	msg := provider.TextMessage(provider.RoleUser, "hold")
+	if _, err := rg.Submit(context.Background(), sess.ID, session.RunWork{
+		Loop:        agent.New(toolUseScriptProvider{}, reg, agent.Config{Model: "m", MaxTokens: 100}),
+		UserMessage: &msg,
+	}); err != nil {
+		t.Fatalf("submit stuck run: %v", err)
+	}
+	select {
+	case <-entered: // run A is now genuinely parked inside the stuck tool
+	case <-time.After(5 * time.Second):
+		t.Fatal("run never entered the stuck tool")
+	}
+
+	task := validTask(userID)
+	task.TargetSessionID = sess.ID
+	task.Multitask = MultitaskInterrupt
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), task)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	now := time.Now()
+	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
+	claimed, err := store.Claim(context.Background(), created.ID, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	spy := &loopSpy{}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+	if err := tr.submit(context.Background(), claimed); err != nil {
+		t.Fatalf("submit under interrupt timeout: %v", err)
+	}
+
+	// The stuck worker still holds the lock: no new run may have started.
+	runs, err := rt.RunsForSession(context.Background(), sess.ID)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("interrupt-timeout fire started a run; runs = %d, want 1 (err %v)", len(runs), err)
+	}
+
+	// The claimed slot was not burned: next_run_at is back to <= now, so the
+	// next scan retries this firing instead of waiting for the next cron.
+	after, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("get after skip: %v", err)
+	}
+	if after.NextRunAt.After(time.Now()) {
+		t.Fatalf("interrupt-timeout task next_run_at = %v, want requeued to <= now", after.NextRunAt)
+	}
+
+	close(gate) // release the stuck run so the worker unwinds at test end
 }
 
 // TestTriggerRejectBusySession pins the reject branch: a busy target under

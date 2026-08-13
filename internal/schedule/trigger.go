@@ -258,7 +258,7 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 
 	// Concurrency strategy: what to do about an already-active run on the
 	// target session (design: multitask).
-	proceed, err := tr.gateMultitask(ctx, task, sessID)
+	proceed, interrupted, err := tr.gateMultitask(ctx, task, sessID)
 	if err != nil || !proceed {
 		if !proceed && fresh {
 			tr.cleanupFreshSession(ctx, task, sessID)
@@ -330,7 +330,15 @@ func (tr *Trigger) submit(ctx context.Context, task Task) error {
 	})
 	if err != nil {
 		if errors.Is(err, session.ErrRunActive) {
-			// multitask=reject raced an active run; skip without error.
+			// multitask=reject raced an active run; skip without error. When the
+			// fire was an INTERRUPT that timed out (CancelAndWait's bound), the
+			// pre-empted worker is still unwinding and the claim already
+			// advanced — requeue so the next scan retries, instead of silently
+			// dropping this firing until the next cron occurrence.
+			if interrupted {
+				tr.log.Warn("schedule: interrupt timed out, worker still active; requeueing firing", "task", task.ID, "session", sessID)
+				tr.requeue(ctx, task)
+			}
 			tr.cleanupFreshSession(ctx, task, sessID)
 			return nil
 		}
@@ -427,14 +435,17 @@ func (tr *Trigger) createTaggedSession(ctx context.Context, task Task, title str
 const interruptWaitTimeout = 3 * time.Second
 
 // gateMultitask applies the task's concurrency strategy against an active run
-// on the target session. It reports whether to proceed with the fire.
-func (tr *Trigger) gateMultitask(ctx context.Context, task Task, sessID string) (bool, error) {
+// on the target session. It reports whether to proceed with the fire, and —
+// when the fire chose to interrupt — that an interrupt cancel was issued
+// (interrupted=true), so submit can requeue an interrupt that races a worker
+// which did not unwind within the wait bound.
+func (tr *Trigger) gateMultitask(ctx context.Context, task Task, sessID string) (proceed bool, interrupted bool, err error) {
 	_, active, err := tr.runtime.ActiveRun(ctx, sessID)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if !active {
-		return true, nil
+		return true, false, nil
 	}
 	switch task.Multitask {
 	case MultitaskInterrupt:
@@ -443,18 +454,19 @@ func (tr *Trigger) gateMultitask(ctx context.Context, task Task, sessID string) 
 		// executing, interleaving its frames with the new run's stream) and
 		// wait for the worker goroutine to unwind before submitting. The
 		// worker settles the interrupted run cancelled itself; one that fails
-		// to exit within the timeout is left to unwind on its own.
+		// to exit within the timeout is left to unwind on its own, and the
+		// submit below races it (ErrRunActive → requeue).
 		tr.registry.CancelAndWait(sessID, interruptWaitTimeout)
-		return true, nil
+		return true, true, nil
 	case MultitaskEnqueue:
 		// The run registry enforces single-active-run; an enqueue is realised by
 		// simply letting Submit fail with ErrRunActive and skipping — the next
 		// occurrence fires after the active run drains. Treat as skip for now.
 		tr.log.Info("schedule: enqueue skipped (busy)", "task", task.ID, "session", sessID)
-		return false, nil
+		return false, false, nil
 	default: // reject
 		tr.log.Info("schedule: fire skipped, session busy", "task", task.ID, "session", sessID)
-		return false, nil
+		return false, false, nil
 	}
 }
 
