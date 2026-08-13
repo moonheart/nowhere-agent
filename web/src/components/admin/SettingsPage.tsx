@@ -369,7 +369,7 @@ export function PlatformSettingsPage() {
     }
     if (s.key === "phone_sms_url") {
       const v = (drafts[s.key] as string | undefined) ?? String(current ?? "");
-      const channel = v === "log://" ? "log" : v === "" ? "custom" : "custom";
+      const channel = v === "log://" ? "log" : "custom";
       return (
         <div className="flex w-full gap-2">
           <NativeSelect
