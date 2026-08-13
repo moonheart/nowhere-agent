@@ -183,6 +183,38 @@ func TestUserUploadPathEscapeRejected(t *testing.T) {
 	}
 }
 
+// DeleteUserUploadScope RemoveAlls <root>/__uploads__/<userID>: a "." or ".."
+// user id would resolve to the uploads dir itself or its parent. Both must be
+// rejected so a hostile id cannot wipe the whole workspace root.
+func TestDeleteUserUploadScopeRejectsTraversal(t *testing.T) {
+	root := t.TempDir()
+	s := NewImageStore(root)
+	decoy := filepath.Join(root, "keep.txt")
+	if err := os.WriteFile(decoy, []byte("must survive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"", ".", "..", "../evil", "a/b", `..\evil`} {
+		if err := s.DeleteUserUploadScope(id); err == nil {
+			t.Errorf("DeleteUserUploadScope(%q) should be rejected", id)
+		}
+	}
+	if _, err := os.Stat(decoy); err != nil {
+		t.Fatalf("rejected ids must not remove anything outside the scope: %v", err)
+	}
+
+	// A real id still removes exactly its own scope.
+	if _, _, err := s.SaveUserUpload("user1", "a.png", makePNG(t)); err != nil {
+		t.Fatalf("SaveUserUpload: %v", err)
+	}
+	if err := s.DeleteUserUploadScope("user1"); err != nil {
+		t.Fatalf("DeleteUserUploadScope(user1): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "__uploads__", "user1")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("user1 scope should be gone, got %v", err)
+	}
+}
+
 // The materialization resolver dispatches by path form: uploads/ references
 // resolve from the user scope, session-relative references from the session dir.
 func TestResolverForDispatchesPrefix(t *testing.T) {

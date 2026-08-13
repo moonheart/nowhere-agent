@@ -357,7 +357,7 @@ func (s *ImageStore) DeleteSessionImages(sessionID string) (bool, error) {
 // an error. Called when the account row is hard-deleted, so its blobs do not
 // orphan.
 func (s *ImageStore) DeleteUserUploadScope(userID string) error {
-	if userID == "" || strings.ContainsAny(userID, `/\`) {
+	if userID == "" || userID == "." || userID == ".." || strings.ContainsAny(userID, `/\`) {
 		return fmt.Errorf("invalid user id %q", userID)
 	}
 	if err := os.RemoveAll(filepath.Join(s.root, uploadsDir, userID)); err != nil {
