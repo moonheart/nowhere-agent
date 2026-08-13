@@ -3,6 +3,7 @@ package agentdefapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"nowhere-agent/internal/agentdef"
@@ -73,8 +74,22 @@ func caller(r *http.Request) identity.User {
 
 // ---- request plumbing ----
 
+// maxBodyBytes bounds a management request body (agent definitions carry
+// prompts and system text) at 1 MiB; larger bodies are rejected with 413
+// before decoding.
+const maxBodyBytes = 1 << 20
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body")
+		return false
+	}
+	if len(body) > maxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
+		return false
+	}
+	if err := json.Unmarshal(body, v); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return false
 	}

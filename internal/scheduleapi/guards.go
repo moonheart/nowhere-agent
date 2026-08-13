@@ -3,6 +3,7 @@ package scheduleapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -113,8 +114,21 @@ func (req taskRequest) toTask(userID string) (schedule.Task, error) {
 
 // ---- plumbing ----
 
+// maxBodyBytes bounds a task-management request body (task prompts and
+// metadata) at 1 MiB; larger bodies are rejected with 413 before decoding.
+const maxBodyBytes = 1 << 20
+
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body")
+		return false
+	}
+	if len(body) > maxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload too large")
+		return false
+	}
+	if err := json.Unmarshal(body, v); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return false
 	}

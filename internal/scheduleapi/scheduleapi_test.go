@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,6 +177,23 @@ func TestCreateValidation(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: expected 400, got %d (%s)", c.name, rec.Code, rec.Body)
 		}
+	}
+}
+
+// TestCreateOversizedBody pins the 1 MiB request-body bound: an oversized
+// payload is rejected with 413 before decoding, so a task prompt cannot be
+// used to push unbounded bytes through the API.
+func TestCreateOversizedBody(t *testing.T) {
+	e := newEnv(t)
+	owner := e.user()
+
+	big := map[string]any{
+		"prompt": strings.Repeat("x", 1<<20), // exactly over the 1 MiB bound
+		"cron":   "0 9 * * *",
+	}
+	rec := e.as(owner, "POST", "/api/me/scheduled-tasks", big)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body: expected 413, got %d (%s)", rec.Code, rec.Body)
 	}
 }
 
