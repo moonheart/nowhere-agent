@@ -114,3 +114,7 @@ jobs:
         run: |
           npx tsc -b tsconfig.ui.json
           npx tsc --noEmit -p tsconfig.app.json
+      - name: Build (tsc -b + vite build)
+        run: pnpm build
+      - name: Test (vitest)
+        run: pnpm test
