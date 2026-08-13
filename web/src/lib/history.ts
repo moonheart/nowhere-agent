@@ -122,22 +122,20 @@ function mapMessage(m: HistoryMessage, sessionId: string): ThreadMessageLike {
 async function loadHistory(): Promise<{
   messages: ThreadMessageLike[];
   active: boolean;
-  after: number;
   pendingApproval?: Interaction | null;
   pendingInteractions?: Interaction[] | null;
   sessionState?: { plan?: Plan } | null;
 }> {
   const threadId = getSessionId();
-  if (!threadId) return { messages: [], active: false, after: 0 };
+  if (!threadId) return { messages: [], active: false };
   const res = await fetch(
     `/api/chat/history?threadId=${encodeURIComponent(threadId)}`,
     { headers: authHeaders() },
   );
-  if (!res.ok) return { messages: [], active: false, after: 0 };
+  if (!res.ok) return { messages: [], active: false };
   const data = (await res.json()) as {
     messages?: HistoryMessage[];
     active?: boolean;
-    after?: number;
     pendingApproval?: Interaction | null;
     pendingInteractions?: Interaction[] | null;
     sessionState?: { plan?: Plan } | null;
@@ -146,18 +144,11 @@ async function loadHistory(): Promise<{
   return {
     messages,
     active: data.active === true,
-    after: typeof data.after === "number" ? data.after : 0,
     pendingApproval: data.pendingApproval ?? null,
     pendingInteractions: data.pendingInteractions ?? null,
     sessionState: data.sessionState ?? null,
   };
 }
-
-// lastLoadedAfter is the run-event offset the most recent load() snapshot
-// already covered. resume() passes it to the server so a reconnect streams only
-// events that arrived after the snapshot — resuming from 0 would replay the
-// whole run and duplicate the assistant reply.
-let lastLoadedAfter = 0;
 
 // resumeStream fetches the run's SSE from `after` and yields accumulated
 // assistant-message snapshots, the ChatModelRunResult shape the runtime
@@ -258,8 +249,7 @@ export async function hasActiveRun(): Promise<boolean> {
 
 export const threadHistory: ThreadHistoryAdapter = {
   async load() {
-    const { messages, active, after, pendingApproval, pendingInteractions, sessionState } = await loadHistory();
-    lastLoadedAfter = after;
+    const { messages, active, pendingApproval, pendingInteractions, sessionState } = await loadHistory();
     // Re-show every parked interaction of a gated batch (the transient frames
     // dropped on refresh); the durable rows are the source of truth, echoed by
     // /history as pendingInteractions (queue order). Fall back to the singular
@@ -300,9 +290,10 @@ export const threadHistory: ThreadHistoryAdapter = {
   },
 
   resume() {
-    // For an in-flight run the server re-streams from 0, so the follow builds
-    // the full assistant message. (lastLoadedAfter only bounds a settled run.)
-    return resumeStream(lastLoadedAfter);
+    // For an in-flight run the server re-streams from 0 (the server forces
+    // after=0 for active runs, and a settled run has nothing to re-stream
+    // broker-side), so the follow builds the full assistant message.
+    return resumeStream(0);
   },
 
   // Server persists every event; nothing to write from the client.
