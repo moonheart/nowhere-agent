@@ -1345,13 +1345,21 @@ func run() error {
 				for _, n := range whitelist {
 					allow[n] = true
 				}
-				filtered := toolruntime.NewRegistry()
-				for _, t := range full.All() {
-					if allow[t.Name()] {
-						filtered.Register(t)
+			filtered := toolruntime.NewRegistry()
+			for _, t := range full.All() {
+				if allow[t.Name()] {
+					// D3: a whitelisted spawn_agent must scope children from the
+					// FILTERED registry. The spawn tool was built over the full
+					// registry; rebind it, or children would inherit every tool
+					// of the session, whitelist notwithstanding.
+					if st, ok := t.(*subagent.SpawnTool); ok {
+						filtered.Register(st.WithParent(filtered))
+						continue
 					}
+					filtered.Register(t)
 				}
-				return filtered
+			}
+			return filtered
 			}
 			return reg
 		}

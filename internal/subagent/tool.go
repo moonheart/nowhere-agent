@@ -97,6 +97,17 @@ func (t *SpawnTool) WithBudget(maxTotal, maxConcurrent int) *SpawnTool {
 	return t
 }
 
+// WithParent rebinds the parent registry that child tool pools are scoped
+// from. Used by the scheduled-task whitelist filter: a whitelisted spawn tool
+// copied into the filtered registry must scope children from the FILTERED
+// registry, or a spawn would hand children every tool of the session,
+// whitelist notwithstanding. The same instance is kept so the fan-out budget
+// (spawned/sem) stays shared across the run tree.
+func (t *SpawnTool) WithParent(parent *toolruntime.Registry) *SpawnTool {
+	t.parent = parent
+	return t
+}
+
 // Name identifies the tool.
 func (t *SpawnTool) Name() string { return ToolName }
 

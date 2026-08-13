@@ -252,6 +252,60 @@ func TestSpawnAllowListScoping(t *testing.T) {
 	}
 }
 
+// TestSpawnReboundParentConstrainsChild pins the scheduled-task whitelist
+// invariant (D3): when the whitelist filter copies the spawn tool into a
+// filtered registry, the copy must scope children from the FILTERED registry.
+// A spawn whose parent stayed the full registry would hand children every
+// tool of the session — whitelist notwithstanding.
+func TestSpawnReboundParentConstrainsChild(t *testing.T) {
+	store := agentdef.NewStore()
+	// Wildcard def: the child scopes ALL of its parent's tools.
+	store.Put(agentdef.AgentDef{Name: "gp", WhenToUse: "d", Scope: identity.SystemScope()})
+
+	secretCalled := false
+	full := toolruntime.NewRegistry()
+	full.Register(funcTool{name: "read_file"})
+	full.Register(funcTool{name: "secret", fn: func() { secretCalled = true }})
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		childProv := &scriptProvider{script: [][]provider.Event{
+			toolUseEvents("t1", "secret", `{}`),
+			textEvents("done"),
+		}}
+		return agent.New(childProv, toolruntime.NewRegistry(), childCfg()), nil
+	}
+	full.Register(NewSpawnTool(testResolver(store), full, factory, 3))
+
+	// The scheduled-task whitelist filter (cmd/server/main.go): copy the
+	// granted tools into a fresh registry, rebinding the spawn copy.
+	allow := map[string]bool{"read_file": true, ToolName: true}
+	filtered := toolruntime.NewRegistry()
+	for _, t := range full.All() {
+		if !allow[t.Name()] {
+			continue
+		}
+		if st, ok := t.(*SpawnTool); ok {
+			filtered.Register(st.WithParent(filtered))
+			continue
+		}
+		filtered.Register(t)
+	}
+
+	spawn, ok := filtered.Get(ToolName)
+	if !ok {
+		t.Fatal("whitelisted spawn_agent missing from filtered registry")
+	}
+	res, err := spawn.(*SpawnTool).Call(context.Background(), map[string]any{"prompt": "x", "subagent_type": "gp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secretCalled {
+		t.Fatal("child reached a tool outside the whitelist: spawn parent was not rebound to the filtered registry")
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error result: %+v", res)
+	}
+}
+
 func TestSkillToolNames(t *testing.T) {
 	reg := toolruntime.NewRegistry()
 	reg.Register(funcTool{name: skill.RunSkillScriptName})
