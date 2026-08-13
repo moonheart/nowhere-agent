@@ -471,9 +471,18 @@ func TestByModelGroupsAndLabels(t *testing.T) {
 	store := NewStore(db)
 	at := time.Now()
 
-	f.addRunAttr(t, at, "", "deepseek-v4-flash", ip(100), ip(10), nil, nil)
-	f.addRunAttr(t, at, "", "deepseek-v4-flash", ip(50), ip(5), nil, nil)
-	f.addRunAttr(t, at, "", "claude-opus-4", ip(7), ip(3), nil, nil)
+	// Model names unique to this test: ByModel aggregates the WHOLE table (it
+	// has no user/team dimension), so a fixed name like "deepseek-v4-flash"
+	// deterministically collides with real platform runs whose model lands in
+	// the ±1h window. A random suffix keeps the buckets self-contained — the
+	// grouping/label behavior is pinned without depending on what the shared
+	// dev database did in the last hour.
+	m1 := "usg-" + randSuffix() + "-flash"
+	m2 := "usg-" + randSuffix() + "-opus"
+
+	f.addRunAttr(t, at, "", m1, ip(100), ip(10), nil, nil)
+	f.addRunAttr(t, at, "", m1, ip(50), ip(5), nil, nil)
+	f.addRunAttr(t, at, "", m2, ip(7), ip(3), nil, nil)
 
 	rows, err := store.ByModel(context.Background(), windowAround(at), 100)
 	if err != nil {
@@ -483,10 +492,10 @@ func TestByModelGroupsAndLabels(t *testing.T) {
 	for _, r := range rows {
 		byModel[r.ID] = r.Tokens
 	}
-	if got := byModel["deepseek-v4-flash"]; got.Input != 150 || got.Runs != 2 {
-		t.Errorf("deepseek-v4-flash = %+v, want input 150 over 2 runs", got)
+	if got := byModel[m1]; got.Input != 150 || got.Runs != 2 {
+		t.Errorf("%s = %+v, want input 150 over 2 runs", m1, got)
 	}
-	if got := byModel["claude-opus-4"]; got.Input != 7 || got.Runs != 1 {
-		t.Errorf("claude-opus-4 = %+v, want input 7 over 1 run", got)
+	if got := byModel[m2]; got.Input != 7 || got.Runs != 1 {
+		t.Errorf("%s = %+v, want input 7 over 1 run", m2, got)
 	}
 }
