@@ -389,17 +389,38 @@ export function FetchModelsDialog({
   const add = async () => {
     setBusy(true);
     setError(null);
-    try {
-      for (const name of selected) {
+    // Track per-name failures instead of aborting on the first: the successes
+    // are already registered server-side, and a retry that re-adds them would
+    // 409 (name conflict). On partial failure keep ONLY the failed names
+    // selected, so "Add" retries exactly those; mark the successes as
+    // registered so the list no longer offers them.
+    const failed: string[] = [];
+    const succeeded: string[] = [];
+    let lastErr: Error | null = null;
+    for (const name of selected) {
+      try {
         await addModel(name);
+        succeeded.push(name);
+      } catch (err) {
+        failed.push(name);
+        lastErr = err as Error;
       }
+    }
+    if (failed.length > 0) {
+      const suffix = lastErr?.message ? ` — ${lastErr.message}` : "";
+      setError(
+        `Could not add ${failed.length} model${failed.length === 1 ? "" : "s"}: ${failed.join(", ")}${suffix}`,
+      );
+      setSelected(new Set(failed));
+      if (succeeded.length > 0) {
+        const ok = new Set(succeeded);
+        setModels((prev) => prev?.map((m) => (ok.has(m.name) ? { ...m, registered: true } : m)) ?? prev);
+      }
+    } else {
       onOpenChange(false);
       onDone();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
     }
+    setBusy(false);
   };
 
   // visible narrows the list to the search box; it drives rendering, the
