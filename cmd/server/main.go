@@ -1207,8 +1207,10 @@ func run() error {
 		// against operator-named business databases (default: QUERY_DB_DSNS).
 		// The tool is rebuilt PER SESSION from the runtime settings, so adding
 		// a database in the admin console applies to the next run — no
-		// restart. A malformed entry logs and disables the tool for that run
-		// only.
+		// restart. A malformed entry is logged and SKIPPED — the remaining
+		// valid entries still register, so one bad DSN must not disable every
+		// database; only a list with no valid entry at all leaves the tool
+		// unregistered (fail-closed).
 		queryDBFor := func() toolruntime.Tool {
 			list := splitComma(settingsRuntime.String(settings.KeyQueryDBDsns))
 			if len(list) == 0 {
@@ -1218,10 +1220,13 @@ func run() error {
 			for _, entry := range list {
 				name, dsn, ok := strings.Cut(entry, "=")
 				if !ok || !validDBName(name) || !validDBDSN(dsn) {
-					log.Warn("query_db DSN entry invalid; tool disabled", "entry", entry)
-					return nil
+					log.Warn("query_db DSN entry invalid; skipping", "entry", entry)
+					continue
 				}
 				dsns[name] = dsn
+			}
+			if len(dsns) == 0 {
+				return nil
 			}
 			tool := builtin.NewQueryDB(dsns, builtin.QueryDBOptions{
 				Timeout: settingsRuntime.Duration(settings.KeyQueryDBTimeout),
