@@ -13,23 +13,23 @@ import (
 
 // taskDTO is the wire form of a scheduled task.
 type taskDTO struct {
-	ID               string         `json:"id"`
-	AgentDefName     string         `json:"agent_def_name,omitempty"`
-	Prompt           string         `json:"prompt,omitempty"`
-	ToolWhitelist    []string       `json:"tool_whitelist"`
-	Cron             string         `json:"cron"`
-	Timezone         string         `json:"timezone"`
-	TargetSessionID  string         `json:"target_session_id,omitempty"`
-	OnRunCompleted   string         `json:"on_run_completed"`
-	Multitask        string         `json:"multitask_strategy"`
-	WebhookURL       string         `json:"webhook_url"`
-	EndTime          *time.Time     `json:"end_time,omitempty"`
-	Enabled          bool           `json:"enabled"`
-	NextRunAt        time.Time      `json:"next_run_at"`
-	LastRunAt        *time.Time     `json:"last_run_at,omitempty"`
-	Metadata         map[string]any `json:"metadata,omitempty"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
+	ID              string         `json:"id"`
+	AgentDefName    string         `json:"agent_def_name,omitempty"`
+	Prompt          string         `json:"prompt,omitempty"`
+	ToolWhitelist   []string       `json:"tool_whitelist"`
+	Cron            string         `json:"cron"`
+	Timezone        string         `json:"timezone"`
+	TargetSessionID string         `json:"target_session_id,omitempty"`
+	OnRunCompleted  string         `json:"on_run_completed"`
+	Multitask       string         `json:"multitask_strategy"`
+	WebhookURL      string         `json:"webhook_url"`
+	EndTime         *time.Time     `json:"end_time,omitempty"`
+	Enabled         bool           `json:"enabled"`
+	NextRunAt       time.Time      `json:"next_run_at"`
+	LastRunAt       *time.Time     `json:"last_run_at,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
 }
 
 func taskDTOOf(t schedule.Task) taskDTO {

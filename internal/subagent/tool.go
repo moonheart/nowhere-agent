@@ -47,7 +47,7 @@ type LoopFactory func(ctx context.Context, def agentdef.AgentDef, depth int) (*a
 // child's final assistant text as the tool result. It implements
 // toolruntime.Tool.
 type SpawnTool struct {
-	resolver *agentdef.Resolver  // merged built-ins + authored definitions
+	resolver *agentdef.Resolver    // merged built-ins + authored definitions
 	parent   *toolruntime.Registry // the run's registry; child pools are scoped views of it
 	factory  LoopFactory
 	scopes   []identity.ScopeRef

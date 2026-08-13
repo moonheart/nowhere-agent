@@ -63,8 +63,8 @@ type memBroker struct {
 
 // liveStream holds one session's retained frames and live subscribers.
 type liveStream struct {
-	next   int64          // next offset to assign (monotonic, survives ring eviction)
-	frames []StreamEvent  // ring buffer, oldest first, len <= capacity
+	next   int64         // next offset to assign (monotonic, survives ring eviction)
+	frames []StreamEvent // ring buffer, oldest first, len <= capacity
 	subs   map[chan StreamEvent]struct{}
 }
 

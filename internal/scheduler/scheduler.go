@@ -27,8 +27,8 @@ type Job struct {
 // loop, sibling jobs, SetInterval, or LastRun: the mutex only guards
 // bookkeeping.
 type Scheduler struct {
-	log    *slog.Logger
-	now    func() time.Time
+	log *slog.Logger
+	now func() time.Time
 
 	mu       sync.Mutex
 	jobs     map[string]Job

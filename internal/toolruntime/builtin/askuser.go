@@ -50,10 +50,10 @@ func (askUser) Schema() map[string]any {
 	question := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"question":   map[string]any{"type": "string", "description": "The full question to ask."},
-			"header":     map[string]any{"type": "string", "description": "Very short chip label (≤12 chars)."},
+			"question":    map[string]any{"type": "string", "description": "The full question to ask."},
+			"header":      map[string]any{"type": "string", "description": "Very short chip label (≤12 chars)."},
 			"multiselect": map[string]any{"type": "boolean", "description": "Allow selecting multiple options."},
-			"options":    map[string]any{"type": "array", "items": option, "minItems": 2, "maxItems": 4},
+			"options":     map[string]any{"type": "array", "items": option, "minItems": 2, "maxItems": 4},
 		},
 		"required": []string{"question", "options"},
 	}

@@ -18,13 +18,13 @@ import (
 // settingValue is the wire shape of one key: the effective value, its tab,
 // type, secrecy, and the description the console renders.
 type settingValue struct {
-	Key         string          `json:"key"`
-	Group       settings.Group  `json:"group"`
-	Kind        settings.Kind   `json:"kind"`
-	Value       json.RawMessage `json:"value"`
+	Key   string          `json:"key"`
+	Group settings.Group  `json:"group"`
+	Kind  settings.Kind   `json:"kind"`
+	Value json.RawMessage `json:"value"`
 	// Secret marks values that are never echoed back (value is always null).
-	Secret      bool            `json:"secret"`
-	Description string          `json:"description"`
+	Secret      bool   `json:"secret"`
+	Description string `json:"description"`
 }
 
 // listSettings: GET /api/admin/settings — every known key with its current

@@ -426,13 +426,13 @@ func (m *MemStore) AppendRunStep(_ context.Context, runID string, kind StepKind,
 		}
 	}
 	st := RunStep{
-		ID:          int64(len(steps) + 1),
-		RunID:       runID,
-		Seq:         len(steps) + 1,
-		StepKind:    kind,
-		Attempt:     attempt,
-		ToolCallID:  toolCallID,
-		CreatedAt:   time.Now(),
+		ID:         int64(len(steps) + 1),
+		RunID:      runID,
+		Seq:        len(steps) + 1,
+		StepKind:   kind,
+		Attempt:    attempt,
+		ToolCallID: toolCallID,
+		CreatedAt:  time.Now(),
 	}
 	if kind == StepAssistant || kind == StepTool {
 		if resultMessageID != nil {

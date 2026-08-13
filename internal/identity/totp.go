@@ -17,10 +17,10 @@ import (
 // 30-second window. A one-window +/- skew tolerance absorbs clock drift.
 
 const (
-	totpDigits   = 6
-	totpPeriod   = 30 * time.Second
+	totpDigits    = 6
+	totpPeriod    = 30 * time.Second
 	totpSecretLen = 20
-	totpWindow   = 1 // +/- one period of skew tolerance
+	totpWindow    = 1 // +/- one period of skew tolerance
 )
 
 // newTOTPSecret returns a fresh base32 secret for enrollment.

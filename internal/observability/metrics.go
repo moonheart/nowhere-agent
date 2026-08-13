@@ -126,6 +126,7 @@ func (m *Metrics) RecordTokens(provider, model, direction string, n int) {
 func (m *Metrics) RecordWebhookDelivery(outcome string) {
 	m.webhooks.WithLabelValues(outcome).Inc()
 }
+
 // Middleware instruments the wrapped handler. In the StandardStack it sits
 // INSIDE the rate limiter — rejected floods never reach it, so a throttle
 // cannot churn metric series — and outside Recovery, so the 500 a recovered

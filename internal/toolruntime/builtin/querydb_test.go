@@ -39,12 +39,12 @@ func TestQueryDBStatementGuard(t *testing.T) {
 		"INSERT INTO users (email) VALUES ('x')",
 		"CREATE TABLE x (id int)",
 		"TRUNCATE users",
-		"  -- comment\nDELETE FROM users",   // comment-then-write must still be refused
-		"/* c */ DROP TABLE users",          // block-comment-then-write refused
+		"  -- comment\nDELETE FROM users",    // comment-then-write must still be refused
+		"/* c */ DROP TABLE users",           // block-comment-then-write refused
 		"WITH x AS (SELECT 1) DELETE FROM t", // CTE wrapping a write
 		"EXPLAIN ANALYZE DELETE FROM users",  // EXPLAIN ANALYZE executes on PG
 		"EXPLAIN UPDATE users SET email='x'",
-		"SELECT * INTO newtable FROM users",  // PG SELECT INTO creates a table
+		"SELECT * INTO newtable FROM users",         // PG SELECT INTO creates a table
 		"SELECT * INTO OUTFILE '/tmp/x' FROM users", // MySQL file write
 		"SELECT * INTO DUMPFILE '/tmp/x' FROM users",
 		"SELECT LOAD_FILE('/etc/passwd')",
@@ -58,9 +58,9 @@ func TestQueryDBStatementGuard(t *testing.T) {
 	for _, stmt := range []string{
 		"SELECT 1",
 		"select id from users limit 1",
-		"  -- note\nSELECT 1",           // comment-then-read is fine
-		"/* note */ SELECT 1",           // block-comment-then-read fine
-		"(SELECT 1)",                    // parenthesized read
+		"  -- note\nSELECT 1",                  // comment-then-read is fine
+		"/* note */ SELECT 1",                  // block-comment-then-read fine
+		"(SELECT 1)",                           // parenthesized read
 		"WITH x AS (SELECT 1) SELECT * FROM x", // WITH read
 		"EXPLAIN SELECT 1",
 		"SHOW TABLES",

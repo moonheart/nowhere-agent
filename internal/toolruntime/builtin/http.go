@@ -32,14 +32,14 @@ var httpToolArgs = map[string]any{
 		"method": map[string]any{"type": "string", "enum": []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}, "description": "HTTP method (default GET)"},
 		"url":    map[string]any{"type": "string", "description": "Absolute http(s) URL whose host is on the configured allowlist"},
 		"headers": map[string]any{
-			"type":        "object",
+			"type":                 "object",
 			"additionalProperties": map[string]any{"type": "string"},
-			"description": "Optional request headers (never Authorization unless you own the target)",
+			"description":          "Optional request headers (never Authorization unless you own the target)",
 		},
 		"body":    map[string]any{"type": "string", "description": "Request body for POST/PUT/PATCH (sent as-is)"},
 		"timeout": map[string]any{"type": "integer", "description": "Timeout in seconds (default 30, max 60)"},
 	},
-	"required": []string{"url"},
+	"required":             []string{"url"},
 	"additionalProperties": false,
 }
 

@@ -360,6 +360,7 @@ type Web struct {
 	// Dir is the built frontend (web/dist). Empty disables static serving.
 	Dir string `envconfig:"WEB_DIR" default:""`
 }
+
 // Identity configures the account layer (admin-console). The first account
 // created on an empty platform is made a platform admin automatically, which
 // does nothing for a deployment whose accounts predate the role — those

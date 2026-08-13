@@ -91,7 +91,10 @@ func TestProviderRoutesRejectNonAdmins(t *testing.T) {
 	ordinary := e.user(identity.PlatformRoleUser)
 	admin := e.user(identity.PlatformRoleAdmin)
 
-	for _, rt := range []struct{ method, path string; body any }{
+	for _, rt := range []struct {
+		method, path string
+		body         any
+	}{
 		{"GET", "/api/admin/providers", nil},
 		{"POST", "/api/admin/providers", map[string]any{"name": "x-" + randSuffix(), "vendor": "openai"}},
 	} {

@@ -23,9 +23,9 @@ type ScopeRef struct {
 	TeamID string
 }
 
-func UserScope(userID string) ScopeRef   { return ScopeRef{Scope: ScopeUser, UserID: userID} }
-func TeamScope(teamID string) ScopeRef   { return ScopeRef{Scope: ScopeTeam, TeamID: teamID} }
-func SystemScope() ScopeRef              { return ScopeRef{Scope: ScopeSystem} }
+func UserScope(userID string) ScopeRef { return ScopeRef{Scope: ScopeUser, UserID: userID} }
+func TeamScope(teamID string) ScopeRef { return ScopeRef{Scope: ScopeTeam, TeamID: teamID} }
+func SystemScope() ScopeRef            { return ScopeRef{Scope: ScopeSystem} }
 
 // PlatformRole is an account's authority over the PLATFORM — users, teams, and
 // every scope. It is orthogonal to Role, which governs a single team's

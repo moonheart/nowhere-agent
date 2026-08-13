@@ -14,10 +14,10 @@ import (
 // defer to the legacy error behavior.
 func TestIsRecoverableLength(t *testing.T) {
 	cases := []struct {
-		name   string
-		usage  *provider.Usage
-		cap    int
-		want   bool
+		name  string
+		usage *provider.Usage
+		cap   int
+		want  bool
 	}{
 		{name: "output below cap is recoverable", usage: &provider.Usage{OutputTokens: 16}, cap: 128_000, want: true},
 		{name: "zero output against large cap is recoverable", usage: &provider.Usage{OutputTokens: 0}, cap: 128_000, want: true},

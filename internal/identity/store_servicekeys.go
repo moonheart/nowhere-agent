@@ -115,9 +115,9 @@ func (s *Store) RevokeServiceKey(ctx context.Context, id string) error {
 // scanServiceKey decodes the serviceKeyColumns projection.
 func scanServiceKey(row rowScanner) (ServiceKey, error) {
 	var (
-		k              ServiceKey
-		expires, last  sql.NullTime
-		revoked        sql.NullTime
+		k             ServiceKey
+		expires, last sql.NullTime
+		revoked       sql.NullTime
 	)
 	err := row.Scan(&k.ID, &k.Name, &k.UserID, &k.CreatedAt, &expires, &last, &revoked)
 	if err != nil {

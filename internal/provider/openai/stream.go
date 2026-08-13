@@ -21,7 +21,7 @@ type chunk struct {
 			// "reasoning" instead of "reasoning_content". Either name is
 			// accepted.
 			Reasoning string `json:"reasoning"`
-			ToolCalls        []struct {
+			ToolCalls []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Type     string `json:"type"`

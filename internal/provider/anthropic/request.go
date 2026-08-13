@@ -13,14 +13,14 @@ import (
 
 // apiRequest is the Anthropic Messages API request body.
 type apiRequest struct {
-	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens"`
-	System    any           `json:"system,omitempty"`
-	Messages  []apiMessage  `json:"messages"`
-	Tools     []apiTool     `json:"tools,omitempty"`
+	Model     string       `json:"model"`
+	MaxTokens int          `json:"max_tokens"`
+	System    any          `json:"system,omitempty"`
+	Messages  []apiMessage `json:"messages"`
+	Tools     []apiTool    `json:"tools,omitempty"`
 	// ToolChoice forces a specific tool when set (used for structured output).
 	ToolChoice *apiToolChoice `json:"tool_choice,omitempty"`
-	Stream    bool          `json:"stream"`
+	Stream     bool           `json:"stream"`
 
 	// Sampling controls; omitted entirely when nil (provider default).
 	Temperature   *float64 `json:"temperature,omitempty"`
@@ -44,9 +44,9 @@ type apiToolChoice struct {
 }
 
 type systemBlock struct {
-	Type      string       `json:"type"` // "text"
-	Text      string       `json:"text"`
-	CacheCtl  *cacheControl `json:"cache_control,omitempty"`
+	Type     string        `json:"type"` // "text"
+	Text     string        `json:"text"`
+	CacheCtl *cacheControl `json:"cache_control,omitempty"`
 }
 
 type cacheControl struct {

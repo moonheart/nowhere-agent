@@ -22,8 +22,8 @@ func TestAllowlistMatches(t *testing.T) {
 		{"http://api.example.com:8080/x", true}, // exact host, any port
 		{"https://api.example.com.evil.com/x", false},
 		{"https://evilapi.example.com/x", false}, // suffix, not subdomain
-		{"https://kb.corp.cn/search", true},       // subdomain of *.corp.cn
-		{"https://corp.cn/x", false},              // *.corp.cn does not match apex
+		{"https://kb.corp.cn/search", true},      // subdomain of *.corp.cn
+		{"https://corp.cn/x", false},             // *.corp.cn does not match apex
 		{"https://svc.example.com:8443/x", true},
 		{"https://svc.example.com/x", false}, // port pinned
 		{"https://10.1.2.3/x", true},         // CIDR

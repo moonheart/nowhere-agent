@@ -166,7 +166,9 @@ func TestTriggerRejectsBadSignature(t *testing.T) {
 		name   string
 		mutate func(req *http.Request)
 	}{
-		{"wrong secret", func(req *http.Request) { req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(`{"prompt":"x"}`, now, nonce, "wh_wrong")) }},
+		{"wrong secret", func(req *http.Request) {
+			req.Header.Set("X-Nowhere-Signature", "sha256="+e.sign(`{"prompt":"x"}`, now, nonce, "wh_wrong"))
+		}},
 		{"missing signature", func(req *http.Request) { req.Header.Del("X-Nowhere-Signature") }},
 		{"missing timestamp", func(req *http.Request) { req.Header.Del("X-Nowhere-Timestamp") }},
 		{"missing nonce", func(req *http.Request) { req.Header.Del("X-Nowhere-Nonce") }},

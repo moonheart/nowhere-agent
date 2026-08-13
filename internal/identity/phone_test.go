@@ -34,11 +34,11 @@ func TestNormalizePhone(t *testing.T) {
 		{"8613800138000", "13800138000"},
 		{"(138)0013-8000", "13800138000"},
 		{"", ""},
-		{"12345", ""},            // too short
-		{"23800138000", ""},      // must start with 1
-		{"138001380001", ""},     // too long
-		{"13800138000a", ""},     // letters
-		{"+8613800138000x", ""},  // junk
+		{"12345", ""},           // too short
+		{"23800138000", ""},     // must start with 1
+		{"138001380001", ""},    // too long
+		{"13800138000a", ""},    // letters
+		{"+8613800138000x", ""}, // junk
 	} {
 		if got := NormalizePhone(tc.in); got != tc.want {
 			t.Errorf("NormalizePhone(%q) = %q, want %q", tc.in, got, tc.want)

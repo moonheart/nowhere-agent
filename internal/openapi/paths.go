@@ -29,8 +29,8 @@ func paths() map[string]PathItem {
 		// ---- auth (open) ----
 		"/api/auth/signup": {
 			"post": Operation{
-				Summary:  "Create an account and receive a bearer token",
-				Tags:     []string{"auth"},
+				Summary: "Create an account and receive a bearer token",
+				Tags:    []string{"auth"},
 				RequestBody: jsonBody(map[string]any{
 					"type":     "object",
 					"required": []string{"email", "password"},
@@ -116,18 +116,18 @@ func paths() map[string]PathItem {
 		},
 		"/api/chat/history": {
 			"get": Operation{
-				Summary:     "Fetch a session's durable message history",
-				Tags:        []string{"chat"},
-				Security:    bearer,
-				Parameters:  []Parameter{{Name: "session_id", In: "query", Required: true, Schema: map[string]any{"type": "string"}}},
-				Responses:   jsonResp("messages", map[string]any{"type": "array", "items": ref("Message")}),
+				Summary:    "Fetch a session's durable message history",
+				Tags:       []string{"chat"},
+				Security:   bearer,
+				Parameters: []Parameter{{Name: "session_id", In: "query", Required: true, Schema: map[string]any{"type": "string"}}},
+				Responses:  jsonResp("messages", map[string]any{"type": "array", "items": ref("Message")}),
 			},
 		},
 		"/api/chat/sessions": {
 			"get": Operation{
-				Summary:     "List the caller's conversations (keyset pagination)",
-				Tags:        []string{"chat"},
-				Security:    bearer,
+				Summary:  "List the caller's conversations (keyset pagination)",
+				Tags:     []string{"chat"},
+				Security: bearer,
 				Parameters: []Parameter{
 					{Name: "limit", In: "query", Schema: map[string]any{"type": "integer"}},
 					{Name: "cursor", In: "query", Description: "updated_at+id cursor from the previous page", Schema: map[string]any{"type": "string"}},
@@ -153,11 +153,11 @@ func paths() map[string]PathItem {
 		},
 		"/api/chat/sessions/{id}/active": {
 			"get": Operation{
-				Summary:  "Report whether the session has a run in flight",
-				Tags:     []string{"chat"},
-				Security: bearer,
+				Summary:    "Report whether the session has a run in flight",
+				Tags:       []string{"chat"},
+				Security:   bearer,
 				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
-				Responses: jsonResp("active flag", map[string]any{"type": "object", "properties": map[string]any{"active": map[string]any{"type": "boolean"}}}),
+				Responses:  jsonResp("active flag", map[string]any{"type": "object", "properties": map[string]any{"active": map[string]any{"type": "boolean"}}}),
 			},
 		},
 		"/api/chat/sessions/{id}/state": {
@@ -181,7 +181,7 @@ func paths() map[string]PathItem {
 				Tags:     []string{"scheduled-tasks"},
 				Security: bearer,
 				Responses: jsonResp("tasks", map[string]any{
-					"type": "object",
+					"type":       "object",
 					"properties": map[string]any{"tasks": map[string]any{"type": "array", "items": ref("ScheduledTask")}},
 				}),
 			},
@@ -199,11 +199,11 @@ func paths() map[string]PathItem {
 		},
 		"/api/me/scheduled-tasks/{id}": {
 			"get": Operation{
-				Summary:  "Fetch one task",
-				Tags:     []string{"scheduled-tasks"},
-				Security: bearer,
+				Summary:    "Fetch one task",
+				Tags:       []string{"scheduled-tasks"},
+				Security:   bearer,
 				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
-				Responses: jsonResp("task", map[string]any{"type": "object", "properties": map[string]any{"task": ref("ScheduledTask")}}),
+				Responses:  jsonResp("task", map[string]any{"type": "object", "properties": map[string]any{"task": ref("ScheduledTask")}}),
 			},
 			"put": Operation{
 				Summary:     "Update a task",
@@ -214,9 +214,9 @@ func paths() map[string]PathItem {
 				Responses:   jsonResp("updated", map[string]any{"type": "object", "properties": map[string]any{"task": ref("ScheduledTask")}}),
 			},
 			"delete": Operation{
-				Summary:   "Delete a task",
-				Tags:      []string{"scheduled-tasks"},
-				Security:  bearer,
+				Summary:    "Delete a task",
+				Tags:       []string{"scheduled-tasks"},
+				Security:   bearer,
 				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
 				Responses: map[string]Response{
 					"204": {Description: "deleted"},
@@ -227,9 +227,9 @@ func paths() map[string]PathItem {
 		},
 		"/api/me/scheduled-tasks/{id}/run": {
 			"post": Operation{
-				Summary:   "Fire one task immediately",
-				Tags:      []string{"scheduled-tasks"},
-				Security:  bearer,
+				Summary:    "Fire one task immediately",
+				Tags:       []string{"scheduled-tasks"},
+				Security:   bearer,
 				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
 				Responses: jsonResp("accepted; started + session_id", map[string]any{
 					"type": "object",
@@ -244,9 +244,9 @@ func paths() map[string]PathItem {
 		// ---- agent definitions & skills ----
 		"/api/me/agentdefs": {
 			"get": Operation{
-				Summary:  "List the caller's agent definitions",
-				Tags:     []string{"agent-defs"},
-				Security: bearer,
+				Summary:   "List the caller's agent definitions",
+				Tags:      []string{"agent-defs"},
+				Security:  bearer,
 				Responses: jsonResp("definitions", map[string]any{"type": "array", "items": ref("AgentDef")}),
 			},
 			"post": Operation{
@@ -267,18 +267,18 @@ func paths() map[string]PathItem {
 				Tags:     []string{"skills"},
 				Security: bearer,
 				Responses: jsonResp("skills", map[string]any{
-					"type":     "object",
-					"required": []string{"skills"},
+					"type":       "object",
+					"required":   []string{"skills"},
 					"properties": map[string]any{"skills": map[string]any{"type": "array", "items": ref("Skill")}},
 				}),
 			},
 		},
 		"/api/me/usage": {
 			"get": Operation{
-				Summary:     "The caller's token usage",
-				Tags:        []string{"me"},
-				Security:    bearer,
-				Parameters:  []Parameter{{Name: "from", In: "query", Schema: map[string]any{"type": "string", "description": "RFC3339 range start (empty = since the beginning)"}}, {Name: "to", In: "query", Schema: map[string]any{"type": "string", "description": "RFC3339 range end (empty = now)"}}},
+				Summary:    "The caller's token usage",
+				Tags:       []string{"me"},
+				Security:   bearer,
+				Parameters: []Parameter{{Name: "from", In: "query", Schema: map[string]any{"type": "string", "description": "RFC3339 range start (empty = since the beginning)"}}, {Name: "to", In: "query", Schema: map[string]any{"type": "string", "description": "RFC3339 range end (empty = now)"}}},
 				Responses: jsonResp("total + daily buckets", map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -325,9 +325,9 @@ func paths() map[string]PathItem {
 		},
 		"/api/admin/service-keys": {
 			"get": Operation{
-				Summary:   "List service keys (programmatic credentials)",
-				Tags:      []string{"admin"},
-				Security:  bearer,
+				Summary:  "List service keys (programmatic credentials)",
+				Tags:     []string{"admin"},
+				Security: bearer,
 				Parameters: []Parameter{
 					{Name: "user_id", In: "query", Description: "filter to one owner", Schema: map[string]any{"type": "string"}},
 					{Name: "revoked", In: "query", Description: "1 to include revoked keys", Schema: map[string]any{"type": "string"}},
@@ -350,9 +350,9 @@ func paths() map[string]PathItem {
 		},
 		"/api/admin/service-keys/{id}": {
 			"delete": Operation{
-				Summary:   "Revoke a service key",
-				Tags:      []string{"admin"},
-				Security:  bearer,
+				Summary:    "Revoke a service key",
+				Tags:       []string{"admin"},
+				Security:   bearer,
 				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
 				Responses: map[string]Response{
 					"204": {Description: "revoked"},
@@ -364,9 +364,9 @@ func paths() map[string]PathItem {
 		},
 		"/api/admin/quotas": {
 			"get": Operation{
-				Summary:   "Read a monthly token budget",
-				Tags:      []string{"admin"},
-				Security:  bearer,
+				Summary:  "Read a monthly token budget",
+				Tags:     []string{"admin"},
+				Security: bearer,
 				Parameters: []Parameter{
 					{Name: "scope", In: "query", Required: true, Schema: map[string]any{"type": "string", "enum": []string{"user", "team"}}},
 					{Name: "owner_id", In: "query", Required: true, Schema: map[string]any{"type": "string"}},
@@ -383,9 +383,9 @@ func paths() map[string]PathItem {
 		},
 		"/api/admin/audit": {
 			"get": Operation{
-				Summary:   "Query the append-only audit trail",
-				Tags:      []string{"admin"},
-				Security:  bearer,
+				Summary:  "Query the append-only audit trail",
+				Tags:     []string{"admin"},
+				Security: bearer,
 				Parameters: []Parameter{
 					{Name: "action", In: "query", Schema: map[string]any{"type": "string"}},
 					{Name: "actor", In: "query", Schema: map[string]any{"type": "string"}},
@@ -424,9 +424,9 @@ func paths() map[string]PathItem {
 		},
 		"/api/me/inbound": {
 			"get": Operation{
-				Summary:  "List my inbound webhooks",
-				Tags:     []string{"inbound"},
-				Security: bearer,
+				Summary:   "List my inbound webhooks",
+				Tags:      []string{"inbound"},
+				Security:  bearer,
 				Responses: jsonResp("inbound_webhooks", map[string]any{"type": "object", "properties": map[string]any{"inbound_webhooks": map[string]any{"type": "array", "items": ref("InboundWebhook")}}}),
 			},
 			"post": Operation{
@@ -444,10 +444,10 @@ func paths() map[string]PathItem {
 		},
 		"/api/me/inbound/{id}": {
 			"patch": Operation{
-				Summary:  "Enable or disable an inbound webhook",
-				Tags:     []string{"inbound"},
-				Security: bearer,
-				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
+				Summary:     "Enable or disable an inbound webhook",
+				Tags:        []string{"inbound"},
+				Security:    bearer,
+				Parameters:  []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
 				RequestBody: jsonBody(map[string]any{"type": "object", "required": []string{"enabled"}, "properties": map[string]any{"enabled": map[string]any{"type": "boolean"}}}),
 				Responses: map[string]Response{
 					"204": {Description: "updated"},
@@ -456,9 +456,9 @@ func paths() map[string]PathItem {
 				},
 			},
 			"delete": Operation{
-				Summary:  "Delete an inbound webhook",
-				Tags:     []string{"inbound"},
-				Security: bearer,
+				Summary:    "Delete an inbound webhook",
+				Tags:       []string{"inbound"},
+				Security:   bearer,
 				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
 				Responses: map[string]Response{
 					"204": {Description: "deleted"},
@@ -469,9 +469,9 @@ func paths() map[string]PathItem {
 		},
 		"/api/me/inbound/{id}/rotate": {
 			"post": Operation{
-				Summary:  "Rotate an inbound webhook secret (old secret dies immediately)",
-				Tags:     []string{"inbound"},
-				Security: bearer,
+				Summary:    "Rotate an inbound webhook secret (old secret dies immediately)",
+				Tags:       []string{"inbound"},
+				Security:   bearer,
 				Parameters: []Parameter{{Name: "id", In: "path", Required: true, Schema: map[string]any{"type": "string"}}},
 				Responses: map[string]Response{
 					"200": {Description: "new secret (visible once)", Content: map[string]Content{"application/json": {Schema: map[string]any{"type": "object", "properties": map[string]any{"secret": map[string]any{"type": "string"}}}}}},
@@ -513,9 +513,9 @@ func schemas() map[string]any {
 		"User": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id":           map[string]any{"type": "string"},
-				"email":        map[string]any{"type": "string"},
-				"display_name": map[string]any{"type": "string"},
+				"id":            map[string]any{"type": "string"},
+				"email":         map[string]any{"type": "string"},
+				"display_name":  map[string]any{"type": "string"},
 				"platform_role": map[string]any{"type": "string", "enum": []string{"user", "admin"}},
 			},
 		},
@@ -523,11 +523,11 @@ func schemas() map[string]any {
 			"type":     "object",
 			"required": []string{"message"},
 			"properties": map[string]any{
-				"message":     map[string]any{"type": "string", "description": "the user's text turn"},
-				"session_id":  map[string]any{"type": "string", "description": "continue an existing session (empty = new)"},
-				"mode":        map[string]any{"type": "string", "description": "response_mode: chat | resume", "enum": []string{"chat", "resume"}},
+				"message":       map[string]any{"type": "string", "description": "the user's text turn"},
+				"session_id":    map[string]any{"type": "string", "description": "continue an existing session (empty = new)"},
+				"mode":          map[string]any{"type": "string", "description": "response_mode: chat | resume", "enum": []string{"chat", "resume"}},
 				"system_prompt": map[string]any{"type": "string", "description": "override the system prompt for this run"},
-				"model":       map[string]any{"type": "string", "description": "model override on the resolved provider"},
+				"model":         map[string]any{"type": "string", "description": "model override on the resolved provider"},
 				"images": map[string]any{
 					"type":        "array",
 					"description": "images attached to the current user turn, pre-uploaded to the session workspace",
@@ -590,13 +590,13 @@ func schemas() map[string]any {
 		"AgentDef": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id":             map[string]any{"type": "string"},
-				"name":           map[string]any{"type": "string"},
-				"description":    map[string]any{"type": "string"},
-				"system_prompt":  map[string]any{"type": "string"},
-				"model":          map[string]any{"type": "string"},
-				"tools":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"max_turns":      map[string]any{"type": "integer"},
+				"id":            map[string]any{"type": "string"},
+				"name":          map[string]any{"type": "string"},
+				"description":   map[string]any{"type": "string"},
+				"system_prompt": map[string]any{"type": "string"},
+				"model":         map[string]any{"type": "string"},
+				"tools":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"max_turns":     map[string]any{"type": "integer"},
 			},
 		},
 		"AgentDefRequest": map[string]any{
@@ -631,14 +631,14 @@ func schemas() map[string]any {
 		"ServiceKey": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id":          map[string]any{"type": "string"},
-				"name":        map[string]any{"type": "string"},
-				"user_id":     map[string]any{"type": "string"},
-				"created_at":  map[string]any{"type": "string"},
-				"expires_at":  map[string]any{"type": "string", "nullable": true},
+				"id":           map[string]any{"type": "string"},
+				"name":         map[string]any{"type": "string"},
+				"user_id":      map[string]any{"type": "string"},
+				"created_at":   map[string]any{"type": "string"},
+				"expires_at":   map[string]any{"type": "string", "nullable": true},
 				"last_used_at": map[string]any{"type": "string", "nullable": true},
-				"revoked_at":  map[string]any{"type": "string", "nullable": true},
-				"token":       map[string]any{"type": "string", "description": "present ONLY in the create response"},
+				"revoked_at":   map[string]any{"type": "string", "nullable": true},
+				"token":        map[string]any{"type": "string", "description": "present ONLY in the create response"},
 			},
 		},
 		"ServiceKeyRequest": map[string]any{
@@ -654,7 +654,7 @@ func schemas() map[string]any {
 			"type":     "object",
 			"required": []string{"prompt"},
 			"properties": map[string]any{
-				"prompt": map[string]any{"type": "string", "description": "the user turn that starts the run"},
+				"prompt":   map[string]any{"type": "string", "description": "the user turn that starts the run"},
 				"metadata": map[string]any{"type": "object", "description": "free-form provenance carried into the session (ticket id, source system, ...)"},
 			},
 		},
@@ -703,11 +703,11 @@ func schemas() map[string]any {
 		"AuditEntry": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id":        map[string]any{"type": "string"},
-				"actor":     map[string]any{"type": "string"},
-				"action":    map[string]any{"type": "string"},
-				"outcome":   map[string]any{"type": "string"},
-				"target":    map[string]any{"type": "string"},
+				"id":         map[string]any{"type": "string"},
+				"actor":      map[string]any{"type": "string"},
+				"action":     map[string]any{"type": "string"},
+				"outcome":    map[string]any{"type": "string"},
+				"target":     map[string]any{"type": "string"},
 				"created_at": map[string]any{"type": "string"},
 			},
 		},

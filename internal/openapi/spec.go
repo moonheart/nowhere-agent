@@ -13,11 +13,11 @@ import (
 // Spec is the OpenAPI 3.0 document. Served at GET /openapi.json (no auth:
 // it describes the API, it does not expose it).
 type Spec struct {
-	OpenAPI    string               `json:"openapi"`
-	Info       Info                 `json:"info"`
-	Servers    []Server             `json:"servers,omitempty"`
-	Paths      map[string]PathItem  `json:"paths"`
-	Components Components           `json:"components"`
+	OpenAPI    string              `json:"openapi"`
+	Info       Info                `json:"info"`
+	Servers    []Server            `json:"servers,omitempty"`
+	Paths      map[string]PathItem `json:"paths"`
+	Components Components          `json:"components"`
 }
 
 // Info is the OpenAPI info object.
@@ -69,13 +69,13 @@ type Content struct {
 
 // Response is one operation response.
 type Response struct {
-	Description string               `json:"description"`
-	Content     map[string]Content   `json:"content,omitempty"`
+	Description string             `json:"description"`
+	Content     map[string]Content `json:"content,omitempty"`
 }
 
 // Components holds shared schemas and security schemes.
 type Components struct {
-	Schemas        map[string]any           `json:"schemas,omitempty"`
+	Schemas         map[string]any            `json:"schemas,omitempty"`
 	SecuritySchemes map[string]SecurityScheme `json:"securitySchemes,omitempty"`
 }
 

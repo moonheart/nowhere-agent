@@ -30,10 +30,10 @@ const (
 
 // Memory is a unit of long-term memory, scoped for isolation.
 type Memory struct {
-	ID        string
-	Scope     identity.ScopeRef
-	Kind      Kind
-	Content   string
+	ID      string
+	Scope   identity.ScopeRef
+	Kind    Kind
+	Content string
 	// Embedding is the vector for semantic recall (nil until indexed).
 	Embedding []float32
 	// Deprecated marks a memory superseded during reorganization; it is not

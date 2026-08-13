@@ -33,7 +33,7 @@ const (
 	StateRunning State = "running"
 	// StateStopped is the deferred-stop grace period: container paused but
 	// resumable; workspace already solidified.
-	StateStopped State = "stopped"
+	StateStopped   State = "stopped"
 	StateDestroyed State = "destroyed"
 )
 

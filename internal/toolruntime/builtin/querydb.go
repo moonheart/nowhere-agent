@@ -38,7 +38,7 @@ const (
 var queryDBArgs = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"db": map[string]any{"type": "string", "description": "The configured database name (from the operator's DSN list, e.g. \"erp\" or \"crm\")."},
+		"db":  map[string]any{"type": "string", "description": "The configured database name (from the operator's DSN list, e.g. \"erp\" or \"crm\")."},
 		"sql": map[string]any{"type": "string", "description": "A read-only SQL statement: SELECT/WITH/EXPLAIN/SHOW/VALUES. DDL and DML are rejected."},
 	},
 	"required":             []string{"db", "sql"},
@@ -110,7 +110,7 @@ func NewQueryDB(dsns map[string]string, opts QueryDBOptions) toolruntime.Tool {
 	return t
 }
 
-func (t *queryDBTool) Name() string { return QueryDBToolName }
+func (t *queryDBTool) Name() string           { return QueryDBToolName }
 func (t *queryDBTool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
 func (t *queryDBTool) Schema() map[string]any { return queryDBArgs }
 func (t *queryDBTool) Timeout() time.Duration { return t.timeout }

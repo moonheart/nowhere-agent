@@ -46,8 +46,8 @@ import (
 	"nowhere-agent/internal/scheduleapi"
 	"nowhere-agent/internal/scheduler"
 	"nowhere-agent/internal/secrets"
-	"nowhere-agent/internal/settings"
 	"nowhere-agent/internal/session"
+	"nowhere-agent/internal/settings"
 	"nowhere-agent/internal/skill"
 	"nowhere-agent/internal/skillapi"
 	"nowhere-agent/internal/subagent"
@@ -169,9 +169,9 @@ func run() error {
 		settings.KeyQueryDBDsns:       mustJSON(cfg.QueryDB.DSNS),
 		settings.KeyQueryDBTimeout:    mustJSON(int(cfg.QueryDB.Timeout.Seconds())),
 		// Webhooks.
-		settings.KeyWebhookURL:          mustJSON(cfg.Webhook.URL),
-		settings.KeyWebhookTimeout:      mustJSON(int(cfg.Webhook.Timeout.Seconds())),
-		settings.KeyWebhookRetries:      mustJSON(cfg.Webhook.Retries),
+		settings.KeyWebhookURL:           mustJSON(cfg.Webhook.URL),
+		settings.KeyWebhookTimeout:       mustJSON(int(cfg.Webhook.Timeout.Seconds())),
+		settings.KeyWebhookRetries:       mustJSON(cfg.Webhook.Retries),
 		settings.KeyWebhookSSRFAllowlist: mustJSON(cfg.Webhook.SSRFAllowlist),
 		settings.KeyWebhookSigningSecret: mustJSON(cfg.Webhook.SigningSecret),
 		// LLM.
@@ -1407,11 +1407,11 @@ func run() error {
 			log.Info("webhook SSRF guard enabled with allowlist", "entries", list)
 		}
 		notifier := webhook.New(webhook.Options{
-			Timeout:        cfg.Webhook.Timeout,
-			Retries:        cfg.Webhook.Retries,
-			SSRF:           webhookGuard,
-			SigningSecret:  cfg.Webhook.SigningSecret,
-			Logger:         log,
+			Timeout:       cfg.Webhook.Timeout,
+			Retries:       cfg.Webhook.Retries,
+			SSRF:          webhookGuard,
+			SigningSecret: cfg.Webhook.SigningSecret,
+			Logger:        log,
 		})
 		if cfg.Webhook.SigningSecret != "" {
 			log.Info("run-completion webhooks signed (X-Nowhere-Signature)")

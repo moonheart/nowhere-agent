@@ -14,11 +14,11 @@ type fakeTool struct {
 	fn      func(ctx context.Context, args map[string]any) (Result, error)
 }
 
-func (f fakeTool) Name() string             { return f.name }
-func (f fakeTool) Description() string      { return "fake" }
-func (f fakeTool) Schema() map[string]any   { return map[string]any{"type": "object"} }
-func (f fakeTool) Risk() Risk               { return f.risk }
-func (f fakeTool) Timeout() time.Duration   { return f.timeout }
+func (f fakeTool) Name() string           { return f.name }
+func (f fakeTool) Description() string    { return "fake" }
+func (f fakeTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (f fakeTool) Risk() Risk             { return f.risk }
+func (f fakeTool) Timeout() time.Duration { return f.timeout }
 func (f fakeTool) Call(ctx context.Context, args map[string]any) (Result, error) {
 	return f.fn(ctx, args)
 }

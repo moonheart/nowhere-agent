@@ -42,9 +42,9 @@ const (
 
 // Task is one scheduled task definition, mapping the scheduled_task table.
 type Task struct {
-	ID       string
-	UserID   string
-	TeamID   string // empty = no team scope
+	ID     string
+	UserID string
+	TeamID string // empty = no team scope
 	// Prompt source (design D1). AgentDefName, when set, resolves system prompt
 	// and model from the agentdef store at fire time; Prompt is then the kickoff
 	// user turn. A standalone Prompt (no AgentDefName) is its own user turn with

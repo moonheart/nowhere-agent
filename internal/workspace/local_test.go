@@ -50,9 +50,9 @@ func TestSolidifyThenMaterializeRoundTrip(t *testing.T) {
 	s := newStore(t)
 	src := t.TempDir()
 	writeTree(t, src, map[string]string{
-		"a.txt":        "alpha",
-		"sub/b.txt":    "beta",
-		"sub/c/d.txt":  "deep",
+		"a.txt":       "alpha",
+		"sub/b.txt":   "beta",
+		"sub/c/d.txt": "deep",
 	})
 
 	ref, err := s.Solidify("sess1", src)

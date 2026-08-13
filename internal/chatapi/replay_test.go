@@ -193,8 +193,8 @@ func TestResumeReplaysRun(t *testing.T) {
 	select {
 	case out := <-resumed:
 		for _, want := range []string{
-			`"status":"running"`, // durable lifecycle replay marks the run started
-			`"textDelta":"Doudou "`,  // content delta from the live broker
+			`"status":"running"`,    // durable lifecycle replay marks the run started
+			`"textDelta":"Doudou "`, // content delta from the live broker
 			"data: [DONE]",
 		} {
 			if !strings.Contains(out, want) {

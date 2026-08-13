@@ -26,10 +26,10 @@ type contextBuilder struct {
 	// base resolves the base prompt per request — a func so the operator can
 	// switch the system-prompt language (LLM_SYSTEM_LANG / the admin settings
 	// page) without restarting: each request reads the current value.
-	base func() string
-	scopes   ScopeResolver
-	memory   memory.Port
-	skills   *skill.Engine
+	base   func() string
+	scopes ScopeResolver
+	memory memory.Port
+	skills *skill.Engine
 	// recallLimit caps how many memories are injected per request.
 	recallLimit int
 }

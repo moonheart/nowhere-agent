@@ -65,10 +65,10 @@ func TestLookupProfileUnknown(t *testing.T) {
 // deployment path for 国内企业 via OpenAI-compatible gateways.
 func TestLookupProfileDomesticModels(t *testing.T) {
 	cases := []struct {
-		model      string
-		window     int
-		reasoning  bool
-		sampling   bool
+		model     string
+		window    int
+		reasoning bool
+		sampling  bool
 	}{
 		{"deepseek-v3.1", 131072, true, true},
 		{"deepseek-r1", 131072, true, false},

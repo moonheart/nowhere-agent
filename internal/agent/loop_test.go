@@ -785,12 +785,12 @@ func TestLoopEmptyTextBlockFailsRun(t *testing.T) {
 
 func TestDropEmptyBlocks(t *testing.T) {
 	blocks := []provider.Block{
-		{Type: provider.BlockText, Text: ""},                                    // hollow: drop
-		{Type: provider.BlockThinking},                                          // hollow: drop
-		{Type: provider.BlockThinking, ThinkingSignature: "sig"},                // signed: keep (round-trip)
-		{Type: provider.BlockText, CachePoint: true},                            // cache boundary: keep
-		{Type: provider.BlockText, Text: "hi"},                                  // content: keep
-		{Type: provider.BlockToolUse, ToolUseID: "t1", ToolName: "echo"},        // tool call: keep
+		{Type: provider.BlockText, Text: ""},                             // hollow: drop
+		{Type: provider.BlockThinking},                                   // hollow: drop
+		{Type: provider.BlockThinking, ThinkingSignature: "sig"},         // signed: keep (round-trip)
+		{Type: provider.BlockText, CachePoint: true},                     // cache boundary: keep
+		{Type: provider.BlockText, Text: "hi"},                           // content: keep
+		{Type: provider.BlockToolUse, ToolUseID: "t1", ToolName: "echo"}, // tool call: keep
 	}
 	kept := dropEmptyBlocks(blocks)
 	if len(kept) != 4 {

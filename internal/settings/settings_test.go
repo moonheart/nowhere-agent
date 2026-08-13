@@ -113,8 +113,8 @@ func TestRuntimeBoolFloatDuration(t *testing.T) {
 	store := NewStore(testDB(t))
 	ctx := context.Background()
 	rt := NewRuntime(store, map[string]json.RawMessage{
-		"dreaming_enabled":       raw(t, true),
-		"llm_temperature":        raw(t, 0.7),
+		"dreaming_enabled":        raw(t, true),
+		"llm_temperature":         raw(t, 0.7),
 		"llm_stream_idle_timeout": raw(t, 120),
 	}, slog.Default())
 	defer func() {

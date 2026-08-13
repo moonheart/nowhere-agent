@@ -35,9 +35,9 @@ type Quota struct {
 
 // Service wires the metadata store and the blob store into one orchestration.
 type Service struct {
-	store  Store
-	blobs  *workspace.ImageStore
-	quota  func() Quota
+	store Store
+	blobs *workspace.ImageStore
+	quota func() Quota
 }
 
 // NewService builds the upload service over a record store and the workspace

@@ -46,9 +46,9 @@ func (t *moveFileTool) Name() string { return "move_file" }
 func (t *moveFileTool) Description() string {
 	return "Move or rename a file or directory in the session workspace. Works on both files and directories; the destination's parent is created as needed."
 }
-func (t *moveFileTool) Schema() map[string]any     { return srcDstSchema("move") }
-func (t *moveFileTool) Risk() toolruntime.Risk     { return toolruntime.RiskSandboxWrite }
-func (t *moveFileTool) Timeout() time.Duration     { return 15 * time.Second }
+func (t *moveFileTool) Schema() map[string]any { return srcDstSchema("move") }
+func (t *moveFileTool) Risk() toolruntime.Risk { return toolruntime.RiskSandboxWrite }
+func (t *moveFileTool) Timeout() time.Duration { return 15 * time.Second }
 
 func (t *moveFileTool) Call(ctx context.Context, args map[string]any) (toolruntime.Result, error) {
 	src, err := argString(args, "src")
@@ -74,9 +74,9 @@ func (t *copyFileTool) Name() string { return "copy_file" }
 func (t *copyFileTool) Description() string {
 	return "Copy a file or directory in the session workspace. Directories are copied recursively; the destination's parent is created as needed."
 }
-func (t *copyFileTool) Schema() map[string]any     { return srcDstSchema("copy") }
-func (t *copyFileTool) Risk() toolruntime.Risk     { return toolruntime.RiskSandboxWrite }
-func (t *copyFileTool) Timeout() time.Duration     { return 30 * time.Second }
+func (t *copyFileTool) Schema() map[string]any { return srcDstSchema("copy") }
+func (t *copyFileTool) Risk() toolruntime.Risk { return toolruntime.RiskSandboxWrite }
+func (t *copyFileTool) Timeout() time.Duration { return 30 * time.Second }
 
 func (t *copyFileTool) Call(ctx context.Context, args map[string]any) (toolruntime.Result, error) {
 	src, err := argString(args, "src")

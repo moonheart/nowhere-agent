@@ -32,7 +32,9 @@ type Option func(*Adapter)
 // ("https://api.openai.com/v1", "https://proxy.example.com/v1") or the full
 // legacy endpoint (".../v1/chat/completions"); both are normalized to the base
 // so chat and model-list calls share one root.
-func WithEndpoint(url string) Option { return func(a *Adapter) { a.endpoint = provider.NormalizeBase(url) } }
+func WithEndpoint(url string) Option {
+	return func(a *Adapter) { a.endpoint = provider.NormalizeBase(url) }
+}
 
 // WithHTTPClient overrides the HTTP client.
 func WithHTTPClient(c *http.Client) Option { return func(a *Adapter) { a.httpClient = c } }

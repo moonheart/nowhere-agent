@@ -90,10 +90,10 @@ func TestCheckURLPublicTargets(t *testing.T) {
 func TestCheckURLDNSPolicy(t *testing.T) {
 	g := testGuard(t, nil, nil)
 	g.resolver = stubResolver{hosts: map[string][]net.IPAddr{
-		"public.example":     {{IP: net.ParseIP("93.184.216.34")}},
-		"rebinding.example":  {{IP: net.ParseIP("169.254.169.254")}},
-		"private.example":    {{IP: net.ParseIP("10.1.2.3")}},
-		"mixed.example":      {{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP("10.0.0.1")}},
+		"public.example":       {{IP: net.ParseIP("93.184.216.34")}},
+		"rebinding.example":    {{IP: net.ParseIP("169.254.169.254")}},
+		"private.example":      {{IP: net.ParseIP("10.1.2.3")}},
+		"mixed.example":        {{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP("10.0.0.1")}},
 		"unresolvable.example": {},
 	}}
 	ctx := context.Background()
@@ -104,7 +104,7 @@ func TestCheckURLDNSPolicy(t *testing.T) {
 		{"http://public.example/h", true},
 		{"http://rebinding.example/h", false},
 		{"http://private.example/h", false},
-		{"http://mixed.example/h", false}, // any private address refuses the target
+		{"http://mixed.example/h", false},        // any private address refuses the target
 		{"http://unresolvable.example/h", false}, // fail-closed
 	} {
 		err := g.CheckURL(ctx, tc.url)
@@ -128,12 +128,12 @@ func TestAllowlistOpensPrivateTargets(t *testing.T) {
 		url  string
 		want bool
 	}{
-		{"http://10.1.2.3/h", true},        // allowlisted CIDR
-		{"http://172.16.0.5/h", true},      // allowlisted CIDR
+		{"http://10.1.2.3/h", true},            // allowlisted CIDR
+		{"http://172.16.0.5/h", true},          // allowlisted CIDR
 		{"http://im.example.internal/h", true}, // allowlisted hostname
-		{"http://192.168.1.1/h", false},    // outside the CIDRs
-		{"http://other.example/h", false},  // private address, host not allowlisted
-		{"http://127.0.0.1/h", false},      // loopback is never allowed by CIDR
+		{"http://192.168.1.1/h", false},        // outside the CIDRs
+		{"http://other.example/h", false},      // private address, host not allowlisted
+		{"http://127.0.0.1/h", false},          // loopback is never allowed by CIDR
 	} {
 		err := g.CheckURL(ctx, tc.url)
 		if tc.want && err != nil {

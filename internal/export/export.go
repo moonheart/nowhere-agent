@@ -45,23 +45,23 @@ func New(db *sql.DB, msgs session.MessageStore, mem memory.Port, up upload.Uploa
 
 // sessionRow is one exported session with its messages.
 type sessionRow struct {
-	ID        string              `json:"id"`
-	Title     string              `json:"title"`
-	Status    string              `json:"status"`
-	CreatedAt time.Time           `json:"created_at"`
-	UpdatedAt time.Time           `json:"updated_at"`
-	Messages  []messageRow        `json:"messages"`
+	ID        string       `json:"id"`
+	Title     string       `json:"title"`
+	Status    string       `json:"status"`
+	CreatedAt time.Time    `json:"created_at"`
+	UpdatedAt time.Time    `json:"updated_at"`
+	Messages  []messageRow `json:"messages"`
 }
 
 // messageRow is the wire form of one conversation message (role, blocks, time).
 // Content blocks carry the full original shape the UI renders from.
 type messageRow struct {
-	ID        int64             `json:"id"`
-	RunID     string            `json:"run_id,omitempty"`
-	Seq       int               `json:"seq"`
-	Role      string            `json:"role"`
-	Content   []provider.Block  `json:"content"`
-	CreatedAt time.Time         `json:"created_at"`
+	ID        int64            `json:"id"`
+	RunID     string           `json:"run_id,omitempty"`
+	Seq       int              `json:"seq"`
+	Role      string           `json:"role"`
+	Content   []provider.Block `json:"content"`
+	CreatedAt time.Time        `json:"created_at"`
 }
 
 // memoryRow is one exported memory (no embedding vector — it is a retrieval
@@ -78,19 +78,19 @@ type memoryRow struct {
 
 // taskRow is one exported scheduled task (mirrors the console DTO shape).
 type taskRow struct {
-	ID               string    `json:"id"`
-	AgentDefName     string    `json:"agent_def_name,omitempty"`
-	Prompt           string    `json:"prompt,omitempty"`
-	Cron             string    `json:"cron"`
-	Timezone         string    `json:"timezone"`
-	TargetSessionID  string    `json:"target_session_id,omitempty"`
-	OnRunCompleted   string    `json:"on_run_completed"`
-	Multitask        string    `json:"multitask_strategy"`
-	WebhookURL       string    `json:"webhook_url,omitempty"`
-	Enabled          bool      `json:"enabled"`
-	NextRunAt        time.Time `json:"next_run_at"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	AgentDefName    string    `json:"agent_def_name,omitempty"`
+	Prompt          string    `json:"prompt,omitempty"`
+	Cron            string    `json:"cron"`
+	Timezone        string    `json:"timezone"`
+	TargetSessionID string    `json:"target_session_id,omitempty"`
+	OnRunCompleted  string    `json:"on_run_completed"`
+	Multitask       string    `json:"multitask_strategy"`
+	WebhookURL      string    `json:"webhook_url,omitempty"`
+	Enabled         bool      `json:"enabled"`
+	NextRunAt       time.Time `json:"next_run_at"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // sessionsForUser loads every session of the user (active AND ended — an

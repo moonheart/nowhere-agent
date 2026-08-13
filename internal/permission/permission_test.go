@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"nowhere-agent/internal/toolruntime"
 	"context"
+	"nowhere-agent/internal/toolruntime"
 )
 
 type stubTool struct{ risk toolruntime.Risk }

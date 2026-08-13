@@ -71,8 +71,8 @@ func (h *Handler) listServiceKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 type createServiceKeyRequest struct {
-	Name    string `json:"name"`
-	UserID  string `json:"user_id"`
+	Name   string `json:"name"`
+	UserID string `json:"user_id"`
 	// TTLDays bounds the key's lifetime; 0 or omitted means never expires.
 	// A non-expiring key is the point of programmatic access — the external
 	// system must not need a 30-day re-issue cycle — so expiry is opt-in.

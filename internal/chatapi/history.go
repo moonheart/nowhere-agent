@@ -38,7 +38,7 @@ type historyUsageData struct {
 }
 
 type historyPart struct {
-	Type string `json:"type"` // "text" | "reasoning" | "tool-call" | "image" | "data"
+	Type string `json:"type"`           // "text" | "reasoning" | "tool-call" | "image" | "data"
 	Text string `json:"text,omitempty"` // text/reasoning payload
 
 	// data fields: agent-driven UI declared by a tool result. Shape mirrors the

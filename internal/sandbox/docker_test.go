@@ -93,6 +93,7 @@ func hasString(list []string, want string) bool {
 	}
 	return false
 }
+
 // Skipped when no Docker daemon is reachable.
 func TestDockerPortIntegration(t *testing.T) {
 	p, err := NewDockerPort()

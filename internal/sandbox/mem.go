@@ -20,9 +20,9 @@ type MemPort struct {
 }
 
 type memSandbox struct {
-	handle  Handle
-	opts    Options
-	files   map[string][]byte
+	handle    Handle
+	opts      Options
+	files     map[string][]byte
 	destroyed bool
 }
 

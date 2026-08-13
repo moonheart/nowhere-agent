@@ -253,16 +253,16 @@ type Group string
 
 // Admin-console tabs.
 const (
-	GroupTools       Group = "tools"
-	GroupWebhooks    Group = "webhooks"
-	GroupLLM         Group = "llm"
-	GroupSandbox     Group = "sandbox"
-	GroupPermissions Group = "permissions"
-	GroupRedaction   Group = "redaction"
-	GroupSubagents   Group = "subagents"
-	GroupBackground  Group = "background"
-	GroupHTTP        Group = "http"
-	GroupAuth        Group = "auth"
+	GroupTools        Group = "tools"
+	GroupWebhooks     Group = "webhooks"
+	GroupLLM          Group = "llm"
+	GroupSandbox      Group = "sandbox"
+	GroupPermissions  Group = "permissions"
+	GroupRedaction    Group = "redaction"
+	GroupSubagents    Group = "subagents"
+	GroupBackground   Group = "background"
+	GroupHTTP         Group = "http"
+	GroupAuth         Group = "auth"
 	GroupIntegrations Group = "integrations"
 )
 
