@@ -6,6 +6,7 @@
 // BlockImage to the user turn. Module-level (outside assistant-ui) so the
 // composer in thread.tsx and the runtime body in App.tsx share one list.
 
+import { useEffect, useState } from "react";
 import { useSyncExternalStore } from "react";
 import { getToken } from "@/lib/auth";
 
@@ -72,24 +73,67 @@ export function resetImages() {
   emit();
 }
 
-// authQuery appends the bearer token as a query param. An <img> tag cannot set
-// an Authorization header, and the server's RequireAuth accepts the query
-// fallback; the access log records the path only, never the query.
-function authQuery(): string {
-  const t = getToken();
-  return t ? `?token=${encodeURIComponent(t)}` : "";
+// imageFileUrl resolves an image reference to the endpoint the browser loads
+// it from. A "uploads/<id>.webp" reference is a user-level upload (change
+// user-image-uploads) served from /api/chat/uploads/<id>.webp, scoped to the
+// signed-in user; anything else is a session-relative workspace image served
+// from GET .../sessions/{id}/files/{path}. Both forms come from their upload
+// endpoints and are safe to interpolate (a uuid + extension).
+//
+// The URL deliberately carries NO token. An <img> tag cannot set an
+// Authorization header, so renderers resolve the bytes through an
+// authenticated fetch (useAuthenticatedImage) instead: a bearer token in the
+// query string would leak into proxy access logs and browser history.
+export function imageFileUrl(sessionId: string | null, path: string): string {
+  if (path.startsWith("uploads/")) {
+    return `/api/chat/uploads/${encodeURIComponent(path.slice("uploads/".length))}`;
+  }
+  return `/api/chat/sessions/${encodeURIComponent(sessionId ?? "")}/files/${path}`;
 }
 
-// imageFileUrl resolves an image reference to the authenticated endpoint the
-// browser loads it from. A "uploads/<id>.webp" reference is a user-level
-// upload (change user-image-uploads) served from /api/chat/uploads/<id>.webp,
-// scoped to the signed-in user; anything else is a session-relative workspace
-// image served from GET .../sessions/{id}/files/{path}. Both forms come from
-// their upload endpoints and are safe to interpolate (a uuid + extension).
-export function imageFileUrl(sessionId: string | null, path: string): string {
-  const auth = authQuery();
-  if (path.startsWith("uploads/")) {
-    return `/api/chat/uploads/${encodeURIComponent(path.slice("uploads/".length))}${auth}`;
-  }
-  return `/api/chat/sessions/${encodeURIComponent(sessionId ?? "")}/files/${path}${auth}`;
+// useAuthenticatedImage fetches a server image URL with the bearer token — an
+// <img> tag cannot set an Authorization header — and returns a blob URL to
+// render. The URL itself stays token-free (see imageFileUrl): the token never
+// rides the query string into proxy access logs or browser history. Returns
+// undefined while the bytes are loading or on failure. Blob URLs are revoked
+// when the src changes or the component unmounts.
+export function useAuthenticatedImage(src: string): string | undefined {
+  const [blob, setBlob] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    let revoked = false;
+    let url: string | undefined;
+    setBlob(undefined);
+    const token = getToken();
+    if (!src || !token) return;
+
+    const ctrl = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch(src, {
+          headers: { authorization: `Bearer ${token}` },
+          signal: ctrl.signal,
+        });
+        if (!res.ok) return;
+        const bytes = await res.blob();
+        if (revoked) return;
+        url = URL.createObjectURL(bytes);
+        if (revoked) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        setBlob(url);
+      } catch {
+        // Aborted by cleanup or network failure: render nothing.
+      }
+    })();
+
+    return () => {
+      revoked = true;
+      ctrl.abort();
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [src]);
+
+  return blob;
 }

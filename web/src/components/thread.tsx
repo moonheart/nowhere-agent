@@ -15,7 +15,7 @@ import { Reasoning } from "@/components/reasoning";
 import { StopButton } from "@/components/stop-button";
 import { ToolCall } from "@/components/tool-call";
 import { MarkdownText } from "@/components/markdown-text";
-import { MessageImage, ImageThumb } from "@/components/message-image";
+import { MessageImage, ImageThumb, AuthenticatedImg } from "@/components/message-image";
 import { DataUI, GenerativeUIFromMetadata } from "@/components/generative-ui";
 import { UsageFooter } from "@/components/usage-footer";
 import { PlanPanel } from "@/components/plan-panel";
@@ -384,7 +384,10 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
             {images.map((p) => (
               <Attachment key={p.path} size="sm">
                 <AttachmentMedia variant="image">
-                  <img src={imageFileUrl(sessionId, p.path)} alt={p.name} />
+                  <AuthenticatedImg
+                    src={imageFileUrl(sessionId, p.path)}
+                    alt={p.name}
+                  />
                 </AttachmentMedia>
                 <AttachmentContent>
                   <AttachmentTitle>{p.name}</AttachmentTitle>

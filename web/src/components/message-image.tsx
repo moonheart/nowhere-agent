@@ -2,6 +2,18 @@ import { useEffect, useState, type FC } from "react";
 import { createPortal } from "react-dom";
 import { ZoomIn } from "lucide-react";
 import type { ImageMessagePartComponent } from "@assistant-ui/react";
+import { useAuthenticatedImage } from "@/lib/image-attachment";
+
+// AuthenticatedImg is a plain <img> whose src is resolved through the
+// authenticated fetch — for image tags outside message parts (the composer's
+// attachment chip), which have no fetch hook of their own.
+export const AuthenticatedImg: FC<{
+  src: string;
+  alt?: string;
+  className?: string;
+}> = ({ src, alt, className }) => (
+  <img src={useAuthenticatedImage(src)} alt={alt} className={className} />
+);
 
 // MessageImage renders a message's image part as a small square thumbnail;
 // clicking it opens a full-size lightbox over the chat. The thumbnail keeps
@@ -11,6 +23,7 @@ import type { ImageMessagePartComponent } from "@assistant-ui/react";
 // so the lightbox has no focus-trap/title ceremony.)
 export const MessageImage: ImageMessagePartComponent = ({ image, filename }) => {
   const [open, setOpen] = useState(false);
+  const src = useAuthenticatedImage(image);
 
   useEffect(() => {
     if (!open) return;
@@ -38,7 +51,7 @@ export const MessageImage: ImageMessagePartComponent = ({ image, filename }) => 
         className="group relative mt-1 shrink-0 cursor-zoom-in rounded-lg border border-border p-0.5 transition-shadow hover:ring-2 hover:ring-ring focus-visible:ring-2 focus-visible:ring-ring"
       >
         <img
-          src={image}
+          src={src}
           alt={alt}
           className="size-16 rounded-md object-cover"
         />
@@ -56,7 +69,7 @@ export const MessageImage: ImageMessagePartComponent = ({ image, filename }) => 
             onClick={() => setOpen(false)}
           >
             <img
-              src={image}
+              src={src}
               alt={alt}
               className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain duration-100 animate-in zoom-in-95"
             />
