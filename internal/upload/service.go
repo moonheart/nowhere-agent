@@ -2,6 +2,7 @@ package upload
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,23 +24,48 @@ type Uploader interface {
 	Delete(ctx context.Context, userID, id string) error
 }
 
+// Quota is one user's upload budget, read live at each upload (nil reader or
+// zero caps mean unlimited). The count cap bounds the metadata rows, the byte
+// cap bounds the blob store; either being hit rejects the upload with
+// ErrQuotaExceeded.
+type Quota struct {
+	MaxFiles int   // per-user upload records; <= 0 = unlimited
+	MaxBytes int64 // per-user total stored bytes; <= 0 = unlimited
+}
+
 // Service wires the metadata store and the blob store into one orchestration.
 type Service struct {
-	store Store
-	blobs *workspace.ImageStore
+	store  Store
+	blobs  *workspace.ImageStore
+	quota  func() Quota
 }
 
 // NewService builds the upload service over a record store and the workspace
-// blob store.
-func NewService(store Store, blobs *workspace.ImageStore) *Service {
-	return &Service{store: store, blobs: blobs}
+// blob store. quota, when non-nil, is read on every Upload to enforce the
+// per-user cap (so an admin-console retune applies without a restart).
+func NewService(store Store, blobs *workspace.ImageStore, quota func() Quota) *Service {
+	return &Service{store: store, blobs: blobs, quota: quota}
 }
 
 var _ Uploader = (*Service)(nil)
 
+// ErrQuotaExceeded reports that the caller's upload quota is exhausted. The
+// upload endpoint maps it to 413.
+var ErrQuotaExceeded = errors.New("upload: per-user quota exceeded")
+
 // Upload validates the image bytes via the blob store (which WebP-normalizes),
-// then records the metadata row under the same id the blob path carries.
+// then records the metadata row under the same id the blob path carries. The
+// per-user quota is enforced BEFORE any blob is written, so an over-quota
+// attempt costs nothing.
 func (s *Service) Upload(ctx context.Context, userID, name string, raw []byte) (Upload, error) {
+	if s.quota != nil {
+		q := s.quota()
+		if q.MaxFiles > 0 || q.MaxBytes > 0 {
+			if err := s.checkQuota(ctx, userID, q, int64(len(raw))); err != nil {
+				return Upload{}, err
+			}
+		}
+	}
 	path, size, err := s.blobs.SaveUserUpload(userID, name, raw)
 	if err != nil {
 		return Upload{}, err
@@ -54,6 +80,31 @@ func (s *Service) Upload(ctx context.Context, userID, name string, raw []byte) (
 		CreatedAt: time.Now().UTC(),
 	}
 	return s.store.Create(ctx, u)
+}
+
+// checkQuota rejects the upload when the user already holds the max file count
+// or when the current total plus the incoming raw bytes would exceed the byte
+// cap. The totals come from the metadata store — the authoritative record of
+// what the user owns (orphaned blobs count nothing, which is the correct
+// incentive: quota is about owned records).
+func (s *Service) checkQuota(ctx context.Context, userID string, q Quota, incoming int64) error {
+	uploads, err := s.store.ListByUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if q.MaxFiles > 0 && len(uploads) >= q.MaxFiles {
+		return ErrQuotaExceeded
+	}
+	if q.MaxBytes > 0 {
+		var total int64
+		for _, u := range uploads {
+			total += u.Size
+		}
+		if total+incoming > q.MaxBytes {
+			return ErrQuotaExceeded
+		}
+	}
+	return nil
 }
 
 // List returns the caller's uploads, newest first.

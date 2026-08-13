@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"nowhere-agent/internal/identity"
+	"nowhere-agent/internal/upload"
 	"nowhere-agent/internal/workspace"
 )
 
@@ -97,6 +98,10 @@ func (h *Handler) serveUserImageUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, workspace.ErrUnsupportedImage) {
 			http.Error(w, `{"error":"unsupported or malformed image"}`, http.StatusUnsupportedMediaType)
+			return
+		}
+		if errors.Is(err, upload.ErrQuotaExceeded) {
+			http.Error(w, `{"error":"upload quota exceeded"}`, http.StatusRequestEntityTooLarge)
 			return
 		}
 		http.Error(w, `{"error":"image save failed"}`, http.StatusInternalServerError)

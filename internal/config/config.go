@@ -58,6 +58,8 @@ type Config struct {
 	// tool output are replaced before the result reaches the model context or
 	// the durable record. See internal/redact for the detector catalog.
 	Redact Redact
+	// Upload configures the per-user image-upload quota (user-image-uploads).
+	Upload Upload
 	// Webhook configures outbound run-completion notifications (enterprise
 	// integration): when a run reaches a terminal state, the platform POSTs a
 	// JSON payload to a webhook URL. The per-task webhook_url (scheduled-task
@@ -135,6 +137,19 @@ type Permission struct {
 	SandboxWrite  string `envconfig:"PERMISSION_SANDBOX_WRITE" default:"allow"`
 	Network       string `envconfig:"PERMISSION_NETWORK" default:"allow"`
 	ExternalWrite string `envconfig:"PERMISSION_EXTERNAL_WRITE" default:"ask"`
+}
+
+// Upload configures the per-user image-upload quota (user-image-uploads):
+// session-independent uploads are metered so one user cannot fill the blob
+// store unboundedly. The quota is checked BEFORE a new blob is written; a
+// user at the cap gets 413. <= 0 disables the respective cap (unlimited).
+// Both are overridable live from the admin console (upload_max_files_per_user,
+// upload_max_bytes_per_user).
+type Upload struct {
+	// MaxFilesPerUser caps the number of upload records one user may hold.
+	MaxFilesPerUser int `envconfig:"UPLOAD_MAX_FILES_PER_USER" default:"200"`
+	// MaxBytesPerUser caps the total stored upload bytes per user.
+	MaxBytesPerUser int64 `envconfig:"UPLOAD_MAX_BYTES_PER_USER" default:"209715200"` // 200 MiB
 }
 
 // MCP configures the MCP client integrations. The modern form is MCP_SERVERS:

@@ -337,6 +337,8 @@ func Catalog() []KeyInfo {
 		// HTTP layer (gateway).
 		{Key: KeyRateLimitRPS, Group: GroupHTTP, Kind: KindFloat, Description: "Per-IP HTTP rate limit, requests per second (overrides HTTP_RATE_LIMIT_RPS). 0 = disabled. Retuned live within a few seconds."},
 		{Key: KeyRateLimitBurst, Group: GroupHTTP, Kind: KindInt, Description: "Per-IP HTTP rate limit burst size (overrides HTTP_RATE_LIMIT_BURST). 0 = disabled. Retuned live within a few seconds."},
+		{Key: KeyUploadMaxFilesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max user-level image uploads one user may hold (overrides UPLOAD_MAX_FILES_PER_USER). 0 = unlimited. Applied to the next upload."},
+		{Key: KeyUploadMaxBytesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max total stored upload bytes per user in bytes (overrides UPLOAD_MAX_BYTES_PER_USER). 0 = unlimited. Applied to the next upload."},
 
 		// Auth / SSO.
 		{Key: KeyPhoneSMSURL, Group: GroupAuth, Kind: KindString, Description: "SMS-OTP gateway for phone login (overrides PHONE_SMS_URL): an http(s) URL that receives {\"phone\",\"code\"}, or log:// to print codes to the server log (dev only). Empty disables phone login on the login page. Applies to the next code request."},
@@ -466,6 +468,13 @@ const (
 	// disabled; overrides HTTP_RATE_LIMIT_*).
 	KeyRateLimitRPS   = "rate_limit_rps"
 	KeyRateLimitBurst = "rate_limit_burst"
+	// KeyUploadMaxFilesPerUser caps one user's upload records (<= 0 = no cap;
+	// overrides UPLOAD_MAX_FILES_PER_USER). Applied to the next upload.
+	KeyUploadMaxFilesPerUser = "upload_max_files_per_user"
+	// KeyUploadMaxBytesPerUser caps one user's total stored upload bytes
+	// (<= 0 = no cap; overrides UPLOAD_MAX_BYTES_PER_USER). Applied to the
+	// next upload.
+	KeyUploadMaxBytesPerUser = "upload_max_bytes_per_user"
 
 	// Auth / SSO.
 	// KeyPhoneSMSURL is the SMS-OTP gateway for phone login (overrides

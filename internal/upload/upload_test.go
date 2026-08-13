@@ -66,8 +66,17 @@ func svc(t *testing.T) (*Service, *sql.DB, *workspace.ImageStore) {
 	t.Helper()
 	db := pgTestDB(t)
 	blobs := workspace.NewImageStore(t.TempDir())
-	s := NewService(NewPGStore(db), blobs)
+	s := NewService(NewPGStore(db), blobs, nil)
 	return s, db, blobs
+}
+
+// svcQuota wires a service with a fixed per-user quota.
+func svcQuota(t *testing.T, q Quota) (*Service, *sql.DB) {
+	t.Helper()
+	db := pgTestDB(t)
+	blobs := workspace.NewImageStore(t.TempDir())
+	s := NewService(NewPGStore(db), blobs, func() Quota { return q })
+	return s, db
 }
 
 // createUser inserts a throwaway account and cleans it up (cascading to its
@@ -212,6 +221,101 @@ func TestDeleteMissingIsNotFound(t *testing.T) {
 	userID := createUser(t, db)
 	if err := s.Delete(context.Background(), userID, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("missing delete err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestQuotaRejectsAtFileCap(t *testing.T) {
+	s, db := svcQuota(t, Quota{MaxFiles: 1, MaxBytes: 1 << 20})
+	userID := createUser(t, db)
+	ctx := context.Background()
+
+	if _, err := s.Upload(ctx, userID, "a.png", makePNG(t)); err != nil {
+		t.Fatalf("first upload under the cap: %v", err)
+	}
+	if _, err := s.Upload(ctx, userID, "b.png", makePNG(t)); !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("second upload err = %v, want ErrQuotaExceeded", err)
+	}
+	// The rejected upload must not have created a record or a blob.
+	list, _ := s.List(ctx, userID)
+	if len(list) != 1 {
+		t.Errorf("list after rejected upload = %+v, want only the first record", list)
+	}
+}
+
+func TestQuotaRejectsAtByteCap(t *testing.T) {
+	// Cap below any plausible WebP encoding of an 8x8 PNG: the raw payload
+	// alone (a few hundred bytes) crosses the cap, so the upload is refused
+	// before any blob write.
+	s, db := svcQuota(t, Quota{MaxFiles: 100, MaxBytes: 10})
+	userID := createUser(t, db)
+	ctx := context.Background()
+
+	if _, err := s.Upload(ctx, userID, "a.png", makePNG(t)); !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("upload beyond byte cap err = %v, want ErrQuotaExceeded", err)
+	}
+	list, _ := s.List(ctx, userID)
+	if len(list) != 0 {
+		t.Errorf("list after rejected upload = %+v, want empty", list)
+	}
+}
+
+func TestQuotaAllowsUpToCaps(t *testing.T) {
+	// Byte cap large enough for two encodings but not three would be brittle
+	// (encoded sizes vary); instead verify count + byte caps admit everything
+	// clearly inside them.
+	s, db := svcQuota(t, Quota{MaxFiles: 2, MaxBytes: 1 << 20})
+	userID := createUser(t, db)
+	ctx := context.Background()
+
+	for _, name := range []string{"a.png", "b.png"} {
+		if _, err := s.Upload(ctx, userID, name, makePNG(t)); err != nil {
+			t.Fatalf("upload %s under caps: %v", name, err)
+		}
+	}
+	list, _ := s.List(ctx, userID)
+	if len(list) != 2 {
+		t.Errorf("list = %+v, want both uploads", list)
+	}
+}
+
+func TestQuotaIsPerUser(t *testing.T) {
+	s, db := svcQuota(t, Quota{MaxFiles: 1, MaxBytes: 1 << 20})
+	a, b := createUser(t, db), createUser(t, db)
+	ctx := context.Background()
+
+	if _, err := s.Upload(ctx, a, "a.png", makePNG(t)); err != nil {
+		t.Fatalf("A first upload: %v", err)
+	}
+	// A is now at the cap; B must still be able to use their own budget.
+	if _, err := s.Upload(ctx, b, "b.png", makePNG(t)); err != nil {
+		t.Fatalf("B's own quota is independent: %v", err)
+	}
+	if _, err := s.Upload(ctx, a, "a2.png", makePNG(t)); !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("A at the cap err = %v, want ErrQuotaExceeded", err)
+	}
+	if _, err := s.Upload(ctx, b, "b2.png", makePNG(t)); !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("B at its own cap err = %v, want ErrQuotaExceeded", err)
+	}
+	listA, _ := s.List(ctx, a)
+	listB, _ := s.List(ctx, b)
+	if len(listA) != 1 || len(listB) != 1 {
+		t.Errorf("each user must hold exactly one upload, A=%d B=%d", len(listA), len(listB))
+	}
+}
+
+func TestQuotaZeroCapsAreUnlimited(t *testing.T) {
+	s, db := svcQuota(t, Quota{})
+	userID := createUser(t, db)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Upload(ctx, userID, "a.png", makePNG(t)); err != nil {
+			t.Fatalf("upload %d with zero caps: %v", i, err)
+		}
+	}
+	list, _ := s.List(ctx, userID)
+	if len(list) != 3 {
+		t.Errorf("list = %+v, want all three uploads", list)
 	}
 }
 

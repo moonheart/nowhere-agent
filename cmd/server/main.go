@@ -184,6 +184,10 @@ func run() error {
 		// HTTP layer.
 		settings.KeyRateLimitRPS:   mustJSON(cfg.HTTP.RateLimitRPS),
 		settings.KeyRateLimitBurst: mustJSON(cfg.HTTP.RateLimitBurst),
+		// User image uploads (user-image-uploads quota; overrides
+		// UPLOAD_MAX_FILES_PER_USER / UPLOAD_MAX_BYTES_PER_USER live).
+		settings.KeyUploadMaxFilesPerUser: mustJSON(cfg.Upload.MaxFilesPerUser),
+		settings.KeyUploadMaxBytesPerUser: mustJSON(cfg.Upload.MaxBytesPerUser),
 		// Auth / SSO.
 		settings.KeyPhoneSMSURL:     mustJSON(cfg.Phone.SMSURL),
 		settings.KeyPhoneSMSTimeout: mustJSON(int(cfg.Phone.Timeout.Seconds())),
@@ -398,7 +402,14 @@ func run() error {
 	// dir the routes answer 503.
 	var uploadSvc *upload.Service
 	if imageStore != nil {
-		uploadSvc = upload.NewService(upload.NewPGStore(pool), imageStore)
+		// Per-user upload quota, read live from the runtime settings so an
+		// admin-console retune applies without a restart.
+		uploadSvc = upload.NewService(upload.NewPGStore(pool), imageStore, func() upload.Quota {
+			return upload.Quota{
+				MaxFiles: settingsRuntime.Int(settings.KeyUploadMaxFilesPerUser),
+				MaxBytes: int64(settingsRuntime.Int(settings.KeyUploadMaxBytesPerUser)),
+			}
+		})
 	}
 
 	// Sandbox for built-in tools (file-tools): a per-session sandbox Manager
