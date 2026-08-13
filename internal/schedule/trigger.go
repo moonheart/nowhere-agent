@@ -422,6 +422,10 @@ func (tr *Trigger) createTaggedSession(ctx context.Context, task Task, title str
 	return id, true, nil
 }
 
+// interruptWaitTimeout bounds how long the interrupt branch waits for the
+// pre-empted run's worker to unwind before submitting the new run.
+const interruptWaitTimeout = 3 * time.Second
+
 // gateMultitask applies the task's concurrency strategy against an active run
 // on the target session. It reports whether to proceed with the fire.
 func (tr *Trigger) gateMultitask(ctx context.Context, task Task, sessID string) (bool, error) {
@@ -434,9 +438,13 @@ func (tr *Trigger) gateMultitask(ctx context.Context, task Task, sessID string) 
 	}
 	switch task.Multitask {
 	case MultitaskInterrupt:
-		if _, err := tr.runtime.CancelRun(ctx, sessID); err != nil {
-			return false, err
-		}
+		// A REAL interrupt: cancel the worker's run context (the registry's
+		// own path — the runtime's lock alone would leave the old worker
+		// executing, interleaving its frames with the new run's stream) and
+		// wait for the worker goroutine to unwind before submitting. The
+		// worker settles the interrupted run cancelled itself; one that fails
+		// to exit within the timeout is left to unwind on its own.
+		tr.registry.CancelAndWait(sessID, interruptWaitTimeout)
 		return true, nil
 	case MultitaskEnqueue:
 		// The run registry enforces single-active-run; an enqueue is realised by

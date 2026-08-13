@@ -256,6 +256,86 @@ func TestTriggerAgentDefPromptSource(t *testing.T) {
 
 // TestTriggerRejectBusySession: under multitask=reject, a fire against a
 // session with an active run is skipped and its fresh session cleaned up.
+// TestTriggerInterruptCancelsActiveRun pins that multitask=interrupt REALLY
+// stops the active run's worker before the new run starts — not just the
+// runtime lock (which left worker A executing, burning tokens and
+// interleaving its frames with run B's stream). The interrupted run must
+// settle RunCancelled and the interrupting run must run to completion.
+func TestTriggerInterruptCancelsActiveRun(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	// A target session with a run blocked on a gate so it stays active.
+	sess, err := rt.CreateSession(context.Background(), userID, "interrupt target")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID) })
+	gate := make(chan struct{})
+	defer close(gate) // release the blocked run at test end
+	msg := provider.TextMessage(provider.RoleUser, "hold")
+	runA, err := rg.Submit(context.Background(), sess.ID, session.RunWork{
+		Loop:        agent.New(&stubProvider{gate: gate}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}),
+		UserMessage: &msg,
+	})
+	if err != nil {
+		t.Fatalf("submit blocking run: %v", err)
+	}
+
+	task := validTask(userID)
+	task.TargetSessionID = sess.ID
+	task.Multitask = MultitaskInterrupt
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), task)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	spy := &loopSpy{}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+
+	now := time.Now()
+	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
+	claimed, err := store.Claim(context.Background(), created.ID, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := tr.submit(context.Background(), claimed); err != nil {
+		t.Fatalf("submit under interrupt: %v", err)
+	}
+
+	// Both runs must settle: A cancelled (its worker was interrupted) and the
+	// new run B done. Poll the durable statuses — B runs on its own goroutine.
+	sessStore := session.NewPGStore(db)
+	deadline := time.Now().Add(10 * time.Second)
+	var aStatus, bStatus session.RunStatus
+	for {
+		runs, err := sessStore.RunsForSession(context.Background(), sess.ID)
+		if err != nil {
+			t.Fatalf("runs: %v", err)
+		}
+		if len(runs) == 2 {
+			for _, r := range runs {
+				if r.ID == runA.ID {
+					aStatus = r.Status
+				} else {
+					bStatus = r.Status
+				}
+			}
+			if aStatus == session.RunCancelled && bStatus == session.RunDone {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runs never settled: a=%s b=%s runs=%d", aStatus, bStatus, len(runs))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestTriggerRejectBusySession pins the reject branch: a busy target under
+// multitask=reject skips the fire without building a loop.
 func TestTriggerRejectBusySession(t *testing.T) {
 	db := pgTestDB(t)
 	rt, rg, userID := newRuntime(t, db)

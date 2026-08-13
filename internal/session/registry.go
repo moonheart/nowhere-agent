@@ -178,6 +178,13 @@ func (rg *RunRegistry) Submit(ctx context.Context, sessionID string, work RunWor
 	rg.workers[sessionID] = w
 	rg.mu.Unlock()
 
+	// Mirror the worker's cancel func into the runtime's run state so the
+	// transport-independent paths converge on the same interrupt: CancelRun
+	// (used by tests and kept as the runtime-level API) now stops the worker
+	// exactly like registry.Cancel does. The runState was created by StartRun
+	// above, so registering here is always safe; CompleteRun clears it.
+	rg.rt.RegisterCancel(sessionID, cancel)
+
 	// Mark the run started so attached/replaying clients learn it began.
 	rg.append(runCtx, sessionID, run.ID, agent.KindRunning, nil)
 
