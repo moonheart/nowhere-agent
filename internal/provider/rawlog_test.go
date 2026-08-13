@@ -3,6 +3,7 @@ package provider
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,40 @@ func TestRawRecorderWritesPair(t *testing.T) {
 	}
 	if string(resp) != "data: a\n\ndata: b\n\n" {
 		t.Errorf("resp body = %q", resp)
+	}
+}
+
+// TestRawRecorderPairFileModes pins that BOTH sides of a recorded pair are
+// created 0600: the .resp holds the full model output and must not be
+// world/group readable (the .req side was already 0600). Mode bits are not
+// enforced on Windows, so the assertion runs on POSIX only.
+func TestRawRecorderPairFileModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not enforced on Windows")
+	}
+	dir := t.TempDir()
+	r := NewRawRecorder(dir)
+
+	sink := r.Exchange("anthropic", []byte(`{"model":"x"}`))
+	if _, err := sink.Write([]byte("data: a\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := filepath.Glob(filepath.Join(dir, "anthropic", "*.req"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("expected 1 .req file, got %v (%v)", files, err)
+	}
+	for _, p := range []string{files[0], strings.TrimSuffix(files[0], ".req") + ".resp"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s mode = %#o, want 0600", p, perm)
+		}
 	}
 }
 

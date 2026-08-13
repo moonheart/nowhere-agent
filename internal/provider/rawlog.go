@@ -76,7 +76,9 @@ func (r *RawRecorder) Exchange(provider string, reqBody []byte) io.WriteCloser {
 	if err := writeRawLogFile(base+".req", reqBody); err != nil {
 		return nopWriteCloser{}
 	}
-	f, err := os.Create(base + ".resp")
+	// 0600 like the .req side: the .resp holds the full model output and must
+	// not be world/group readable on a shared host.
+	f, err := os.OpenFile(base+".resp", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nopWriteCloser{}
 	}
