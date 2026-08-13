@@ -20,21 +20,42 @@ func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-// TestWriteStreamHeadersClearsWriteDeadline verifies a streaming response clears
-// its per-connection write deadline, so the server WriteTimeout can't truncate a
-// long SSE stream mid-run.
-func TestWriteStreamHeadersClearsWriteDeadline(t *testing.T) {
+// TestWriteStreamHeadersArmsRollingDeadline verifies a streaming response arms
+// a rolling write deadline (not zeroed): the server WriteTimeout can't truncate
+// a long SSE stream mid-run, while a stalled frame write still ends the stream.
+func TestWriteStreamHeadersArmsRollingDeadline(t *testing.T) {
 	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	if !writeStreamHeaders(rec) {
 		t.Fatal("writeStreamHeaders returned false for a flushable writer")
 	}
 	if !rec.deadlineSet {
-		t.Error("expected the write deadline to be cleared for a streaming response")
+		t.Error("expected a write deadline to be armed for a streaming response")
 	}
-	if !rec.deadline.IsZero() {
-		t.Errorf("write deadline = %v, want zero (no deadline)", rec.deadline)
+	left := time.Until(rec.deadline)
+	if left <= 0 || left > streamWriteTimeout+time.Second {
+		t.Errorf("write deadline = %v (in %v), want within %v in the future", rec.deadline, left, streamWriteTimeout)
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
 		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+}
+
+// TestEmitterWriteRefreshesRollingDeadline verifies every frame write re-arms
+// the rolling deadline, so a live stream never stalls out while a half-open
+// client's single stalled write still ends the stream.
+func TestEmitterWriteRefreshesRollingDeadline(t *testing.T) {
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	e := newSSEEmitter(rec, rec, "m", "t", "r")
+	// A frame write must have re-armed the deadline (a fresh one, in the future).
+	e.write(chunk{"type": "text", "id": "t", "delta": "x"})
+	afterFirst := rec.deadline
+	if !rec.deadlineSet || time.Until(afterFirst) <= 0 {
+		t.Fatalf("first write did not arm a rolling deadline (deadline=%v)", rec.deadline)
+	}
+	// Writes through writeRaw (the write path's choke point) refresh it too.
+	time.Sleep(5 * time.Millisecond)
+	e.writeRaw("data: x\n\n")
+	if !rec.deadline.After(afterFirst) {
+		t.Errorf("deadline after second write = %v, want refreshed past %v", rec.deadline, afterFirst)
 	}
 }

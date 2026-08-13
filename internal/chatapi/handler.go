@@ -290,6 +290,28 @@ type sseEmitter struct {
 	// continuing (the loop emits that step-finish before the terminal error).
 	lastStepReason    string
 	lastStepContinued bool
+	// refreshDeadline re-arms the rolling per-write deadline before each frame
+	// write (see writeStreamHeaders): a stalled write is a dead client and ends
+	// the stream instead of wedging the attach loop. Nil in tests / emitters
+	// built without a response controller.
+	refreshDeadline func()
+}
+
+// streamWriteTimeout is the rolling per-write deadline for SSE frames: long
+// enough that a live frame write never hits it, short enough that a half-open
+// client's blocked write ends the stream instead of hanging it (and, with a
+// Redis broker, feeding the slow-consumer busy loop) forever.
+const streamWriteTimeout = 30 * time.Second
+
+// newSSEEmitter builds the production emitter over w, wiring the rolling write
+// deadline refresh that writeStreamHeaders armed. Tests build sseEmitter
+// literals directly (no deadline refresh, which is a no-op for their recorders).
+func newSSEEmitter(w http.ResponseWriter, flusher http.Flusher, msgID, textID, thinkID string) *sseEmitter {
+	e := &sseEmitter{w: w, flusher: flusher, msgID: msgID, textID: textID, thinkID: thinkID}
+	e.refreshDeadline = func() {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
+	}
+	return e
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
@@ -554,7 +576,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 			return
 		}
 		flusher := w.(http.Flusher)
-		emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
+		emitter := newSSEEmitter(w, flusher, uuid.NewString(), "text-1", "reasoning-1")
 		emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
 		emitter.finish()
 		return
@@ -621,7 +643,7 @@ func (h *Handler) serveChatDirect(w http.ResponseWriter, r *http.Request, loop *
 		return
 	}
 	flusher := w.(http.Flusher)
-	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
+	emitter := newSSEEmitter(w, flusher, uuid.NewString(), "text-1", "reasoning-1")
 	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
 
 	runCtx, cancel := context.WithCancel(r.Context())
@@ -735,12 +757,17 @@ func writeStreamHeaders(w http.ResponseWriter) bool {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return false
 	}
-	// Clear the per-connection write deadline for this streaming response: the
-	// server's WriteTimeout would otherwise abort a long-running SSE stream (an
-	// agent run can last far longer than a normal response) mid-run. Non-streaming
-	// endpoints keep the timeout. Best-effort — a server without deadline support
-	// is unaffected.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	// Rolling write deadline for this streaming response: the server's
+	// WriteTimeout would otherwise abort a long-running SSE stream (an agent
+	// run can last far longer than a normal response) mid-run. Instead of
+	// clearing the deadline entirely — which lets a half-open client block a
+	// frame write forever, wedging the attach loop and (with a Redis broker)
+	// feeding a slow-consumer busy loop — arm a rolling deadline that every
+	// frame write refreshes: a stalled write is a dead client and must end the
+	// stream, while a live stream never hits it. Best-effort — a server
+	// without deadline support is unaffected. Non-streaming endpoints keep the
+	// server's WriteTimeout.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 	return true
 }
 
@@ -751,7 +778,7 @@ func writeSSEError(w http.ResponseWriter, msg string) {
 		return
 	}
 	flusher := w.(http.Flusher)
-	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
+	emitter := newSSEEmitter(w, flusher, uuid.NewString(), "text-1", "reasoning-1")
 	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
 	emitter.Emit(context.Background(), agent.KindError, msg)
 	emitter.finish()
@@ -769,7 +796,7 @@ func writeSSEError(w http.ResponseWriter, msg string) {
 // the submitter's data-session frame).
 func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID string, run session.Run, after int64, pre []chunk) {
 	flusher := w.(http.Flusher)
-	emitter := &sseEmitter{w: w, flusher: flusher, msgID: uuid.NewString(), textID: "text-1", thinkID: "reasoning-1"}
+	emitter := newSSEEmitter(w, flusher, uuid.NewString(), "text-1", "reasoning-1")
 	emitter.write(chunk{"type": "start", "messageId": emitter.msgID})
 	for _, c := range pre {
 		emitter.write(c)
@@ -1274,6 +1301,9 @@ func (e *sseEmitter) write(c chunk) {
 func (e *sseEmitter) writeRaw(s string) {
 	if e.writeErr != nil {
 		return
+	}
+	if e.refreshDeadline != nil {
+		e.refreshDeadline()
 	}
 	if _, err := e.w.Write([]byte(s)); err != nil {
 		e.writeErr = err

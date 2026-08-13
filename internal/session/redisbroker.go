@@ -159,6 +159,8 @@ func (b *redisBroker) pollLoop(ctx context.Context, sessionID string, ch chan<- 
 			continue
 		}
 		backoff = time.Second
+		delivered := 0
+		dropped := 0
 		for _, stream := range res {
 			for _, m := range stream.Messages {
 				ev := messageToStreamEvent(m)
@@ -168,9 +170,24 @@ func (b *redisBroker) pollLoop(ctx context.Context, sessionID string, ch chan<- 
 					// XREAD is strictly-greater, so a later cycle starting from
 					// this ID re-reads only entries published after it.
 					last = m.ID
+					delivered++
 				default: // drop for slow consumers; they recover via Read and
 					// the next cycle's re-read (last is not advanced)
+					dropped++
 				}
+			}
+		}
+		// A slow consumer's full channel can drop an ENTIRE batch: XREAD then
+		// re-returns the same entries immediately (BLOCK only waits when the
+		// read position is current), which would spin this loop hammering Redis
+		// with zero progress. Pause briefly so the consumer can drain before
+		// the next cycle. Partial drops are not worth pausing for — the
+		// position advanced and the next cycle re-reads only the remainder.
+		if dropped > 0 && delivered == 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(50 * time.Millisecond):
 			}
 		}
 	}

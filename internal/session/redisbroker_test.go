@@ -135,6 +135,43 @@ func TestRedisBrokerSlowConsumerRecoversDroppedFrames(t *testing.T) {
 	}
 }
 
+// TestRedisBrokerSlowConsumerNoBusyLoop pins the full-drop backoff: when a
+// slow consumer's channel drops an ENTIRE batch, the poller must pause instead
+// of re-reading the same entries in a tight loop. The XREAD count of the
+// broker's poll cycle is small, so this drives enough entries to force a
+// whole-batch drop and asserts the poller stops hammering (XREAD call volume
+// stays bounded once the backoff kicks in).
+func TestRedisBrokerSlowConsumerNoBusyLoop(t *testing.T) {
+	b, mr := newTestRedisBroker(t)
+	ctx := context.Background()
+	ch, unsub := b.Subscribe("s1", 2)
+	defer unsub()
+
+	// Let the poller resolve the stream tail and enter its blocking read.
+	time.Sleep(50 * time.Millisecond)
+	// Far more entries than the channel buffer: every poll cycle drops its
+	// whole batch (nobody drains), so without the backoff the poller would
+	// spin at full speed.
+	for i := 0; i < 500; i++ {
+		if _, err := b.Publish(ctx, "s1", StreamEvent{RunID: "r1", Kind: "text", Payload: []byte{byte('0' + i%10)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Measure XREAD volume over a window: with the 50ms backoff a busy loop
+	// would issue far more reads than one per ~50ms.
+	before := mr.CommandCount()
+	time.Sleep(400 * time.Millisecond)
+	after := mr.CommandCount()
+	reads := after - before
+	// Budget: 400ms / 50ms = 8 cycles, plus slop for the poller's initial
+	// burst before the backoff engages.
+	if reads > 200 {
+		t.Errorf("XREADs in 400ms = %d, want bounded by the full-drop backoff (busy loop)", reads)
+	}
+	_ = ch
+}
+
 func TestRedisBrokerSettleAppliesTTL(t *testing.T) {
 	b, mr := newTestRedisBroker(t)
 	ctx := context.Background()
