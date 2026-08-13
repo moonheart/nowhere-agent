@@ -301,6 +301,9 @@ func run() error {
 		oidcHandler.Register(mux)
 		mux.Handle("GET /auth/oidc/enabled", oidc.EnabledProbe())
 		log.Info("oidc sso enabled", "issuer", cfg.OIDC.Issuer, "redirect", cfg.OIDC.RedirectURL)
+		if !cfg.HTTP.CookieSecure {
+			log.Warn("oidc state cookie not Secure: HTTP_COOKIE_SECURE=false ships it over plain HTTP — intended for local/dev only", "issuer", cfg.OIDC.Issuer)
+		}
 	}
 
 	// Phone + SMS-OTP authentication (domestic enterprise account convention):
