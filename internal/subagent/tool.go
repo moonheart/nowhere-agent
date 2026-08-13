@@ -241,12 +241,25 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 	}
 
 	// Bound concurrent child runs to limit goroutine/CPU/memory pressure under
-	// wide fan-out; wait for a slot or bail out if the run is cancelled.
-	select {
-	case t.sem <- struct{}{}:
-		defer func() { <-t.sem }()
-	case <-ctx.Done():
-		return errf("cancelled while waiting for a subagent slot"), nil
+	// wide fan-out. A ROOT-level spawn waits for a slot (its own run's work is
+	// the only thing delayed). A NESTED spawn must not: the root's fan-out can
+	// already hold every slot, and a child waiting here would stall the whole
+	// run tree until the 5-minute tool timeout. Nested spawns bail out
+	// immediately so the parent model can self-correct.
+	if depth == 0 {
+		select {
+		case t.sem <- struct{}{}:
+			defer func() { <-t.sem }()
+		case <-ctx.Done():
+			return errf("cancelled while waiting for a subagent slot"), nil
+		}
+	} else {
+		select {
+		case t.sem <- struct{}{}:
+			defer func() { <-t.sem }()
+		default:
+			return errf("subagent concurrency saturated — retry later or reduce parallel spawns"), nil
+		}
 	}
 
 	msgs, runErr := child.Run(childCtx, history, emitter)
