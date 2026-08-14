@@ -2025,9 +2025,11 @@ func (noProviderAdapter) Stream(context.Context, provider.Request) (<-chan provi
 //
 // The fallback deliberately does NOT apply to /api/: those routes are
 // registered with more specific patterns, which Go 1.22+ ServeMux matches in
-// preference to "GET /". A request that reaches here asking for a missing asset
-// (a stale .js hash, say) gets index.html rather than a 404, which is the
-// standard SPA trade-off — the alternative is enumerating asset extensions.
+// preference to "GET /". A request that reaches here asking for a MISSING
+// file — a stale hashed asset after a deploy (a path with a file extension)
+// — gets an explicit 404, not the shell: the browser would otherwise execute
+// the HTML as a module script and render a silent blank screen. Extension-less
+// paths (client routes like /chat/xxx) still get the shell.
 //
 // The shell (index.html) is served with Cache-Control: no-cache so browsers
 // revalidate it on every navigation: after a deploy, a heuristically cached
@@ -2061,8 +2063,18 @@ func spaHandler(dir string) http.Handler {
 			files.ServeHTTP(w, r)
 			return
 		}
-		// The shell — for "/" and every fallback (client routes, stale asset
-		// hashes). Must be revalidated, never heuristically cached.
+		// A path that names a FILE (has a file extension) is an asset
+		// reference: a stale hashed .js/.css after a deploy, or a typo. Answer
+		// 404 rather than the shell — the browser would execute the HTML as a
+		// module script, a silent blank screen with zero server-side signal.
+		// Extension-less paths (client routes like /admin/users, directories)
+		// still get the shell.
+		if filepath.Ext(clean) != "" {
+			http.NotFound(w, r)
+			return
+		}
+		// The shell — for "/" and every extension-less fallback (client
+		// routes). Must be revalidated, never heuristically cached.
 		w.Header().Set("Cache-Control", "no-cache")
 		http.ServeFile(w, r, index)
 	})

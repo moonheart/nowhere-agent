@@ -188,6 +188,36 @@ func TestSPAHandlerDoesNotListDirectories(t *testing.T) {
 	}
 }
 
+// A MISSING file (a stale hashed asset after a deploy — the path has a file
+// extension) must answer 404, not the shell: the browser would execute the
+// returned HTML as a module script and render a silent blank screen. Client
+// routes (extension-less) keep the shell fallback.
+func TestSPAHandler404sMissingFiles(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "index.html"), "shell")
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "assets", "app-hash123.js"), "console.log(1)")
+
+	for _, p := range []string{
+		"/assets/app-stalehash.js", // stale hashed asset after a deploy
+		"/assets/missing.css",
+		"/favicon.ico",
+		"/assets/app-hash123.js.map",
+	} {
+		rec := serve(t, spaHandler(dir), p)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s = %d, want 404 (a missing file must not be served the shell); body=%q", p, rec.Code, rec.Body.String())
+		}
+	}
+	// The existing hashed asset still serves normally.
+	rec := serve(t, spaHandler(dir), "/assets/app-hash123.js")
+	if rec.Code != http.StatusOK || rec.Body.String() != "console.log(1)" {
+		t.Errorf("existing asset = %d %q, want 200 with the file", rec.Code, rec.Body.String())
+	}
+}
+
 // The fallback must not shadow the API: those patterns are more specific, and
 // Go's ServeMux prefers them. Registering both and asking for an API path
 // proves the precedence rather than assuming it.
