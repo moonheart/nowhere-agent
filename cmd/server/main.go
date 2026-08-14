@@ -1338,16 +1338,16 @@ func run() error {
 			if qdb := queryDBFor(); qdb != nil {
 				reg.Register(qdb)
 			}
-			// load_skill and the memory tools all scope to the session owner's
-			// accessible scopes; resolve the session and scopes ONCE here and
-			// share across the blocks (they used to run the same GetSession +
-			// AccessibleScopes pair each). A failed resolution disables BOTH
-			// blocks' tools — unified, fail-closed semantics: before, the
-			// skill block kept trying with a system-only fallback scope set
-			// and the memory block registered recall (and, on a session
-			// lookup failure, skipped write/edit/forget) on scopes that were
-			// never verified against the caller. Now a scope-resolution
-			// failure registers neither block's tools.
+			// load_skill, the memory tools, and view_image all scope to the
+			// session owner's accessible scopes; resolve the session and scopes
+			// ONCE here and share across the blocks (they used to run the same
+			// GetSession + AccessibleScopes pair each). A failed resolution
+			// disables ALL the blocks' tools — unified, fail-closed semantics:
+			// before, the skill block kept trying with a system-only fallback
+			// scope set and the memory block registered recall (and, on a
+			// session lookup failure, skipped write/edit/forget) on scopes
+			// that were never verified against the caller. Now a scope-
+			// resolution failure registers none of the blocks' tools.
 			sess, sessErr := sessionRuntime.GetSession(ctx, sessionID)
 			scopes := []identity.ScopeRef{identity.SystemScope()}
 			if sessErr == nil {
@@ -1357,14 +1357,19 @@ func run() error {
 					sessErr = err
 				}
 			}
+			// L0 skill index resolved ONCE: the load_skill registration gate
+			// below and the run_skill_script script-detection loop (sandbox
+			// branch) used to each call LoadL0 with the same (ctx, scopes).
+			var skillL0 []skill.L0
+			if sessErr == nil {
+				skillL0, _ = skillEngine.LoadL0(ctx, scopes)
+			}
 			// Read-only load_skill (capability-gap K3a): the agent loads a skill's
 			// instructions / resource files. Registered whenever any skill is
 			// present (independent of the sandbox); scopes mirror the context
 			// builder (caller user + teams + system). It executes nothing.
-			if sessErr == nil {
-				if l0, err := skillEngine.LoadL0(ctx, scopes); err == nil && len(l0) > 0 {
-					reg.Register(skill.NewLoadTool(skillEngine, scopes))
-				}
+			if sessErr == nil && len(skillL0) > 0 {
+				reg.Register(skill.NewLoadTool(skillEngine, scopes))
 			}
 			// recall_memory (type-split active-query side, capability K /
 			// context-mgmt): the model fetches summary/insight and other memories
@@ -1406,12 +1411,10 @@ func run() error {
 						// skills are edited. Execution stays C17-safe: argv +
 						// interpreter whitelist, no sh -c concatenation. Registered
 						// only when some visible skill actually has scripts.
-						if l0, err := skillEngine.LoadL0(ctx, scopes); err == nil {
-							for _, meta := range l0 {
-								if len(meta.Scripts) > 0 {
-									reg.Register(skill.NewRunSkillScript(skillEngine, scopes, sandboxPort, h))
-									break
-								}
+						for _, meta := range skillL0 {
+							if len(meta.Scripts) > 0 {
+								reg.Register(skill.NewRunSkillScript(skillEngine, scopes, sandboxPort, h))
+								break
 							}
 						}
 					}
@@ -1431,13 +1434,11 @@ func run() error {
 			// owner's resolved provider has a vision model AND an image store
 			// exists; RiskReadOnly. Resolution follows the session owner (the run
 			// worker context carries the caller), so team assignments apply.
-			if imageStore != nil {
-				if sess, err := sessionRuntime.GetSession(ctx, sessionID); err == nil {
-					if t, err := provResolver.Resolve(ctx, sess.UserID); err == nil {
-						if vm, ok := provResolver.VisionModel(ctx, t); ok {
-							if visionAdapter := providerreg.BuildAdapter(t, recorder, idleTimeoutFor()); visionAdapter != nil {
-								reg.Register(builtin.NewViewImage(visionAdapter, vm, imageStore.ResolverFor(sessionID, sess.UserID)))
-							}
+			if imageStore != nil && sessErr == nil {
+				if t, err := provResolver.Resolve(ctx, sess.UserID); err == nil {
+					if vm, ok := provResolver.VisionModel(ctx, t); ok {
+						if visionAdapter := providerreg.BuildAdapter(t, recorder, idleTimeoutFor()); visionAdapter != nil {
+							reg.Register(builtin.NewViewImage(visionAdapter, vm, imageStore.ResolverFor(sessionID, sess.UserID)))
 						}
 					}
 				}
