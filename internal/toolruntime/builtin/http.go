@@ -39,7 +39,7 @@ var httpToolArgs = map[string]any{
 			"description":          "Optional request headers (never Authorization unless you own the target)",
 		},
 		"body":    map[string]any{"type": "string", "description": "Request body for POST/PUT/PATCH (sent as-is)"},
-		"timeout": map[string]any{"type": "integer", "description": "Timeout in seconds (default 30, max 60)"},
+		"timeout": map[string]any{"type": "integer", "description": "Timeout in seconds; only ever shortens the call — the effective ceiling is the configured tool timeout (HTTP_TOOL_TIMEOUT, default 30s), a larger value is clamped, it cannot extend the call"},
 	},
 	"required":             []string{"url"},
 	"additionalProperties": false,
@@ -136,6 +136,9 @@ func (t *httpRequestTool) Call(ctx context.Context, args map[string]any) (toolru
 	}
 
 	timeout := t.timeout
+	// The model's timeout only ever SHORTENS the call: values above the
+	// configured tool timeout (HTTP_TOOL_TIMEOUT, the schema's documented
+	// ceiling) are clamped down, never honored as an extension.
 	if sec, ok := args["timeout"].(float64); ok && sec > 0 {
 		if d := time.Duration(sec) * time.Second; d < timeout {
 			timeout = d
