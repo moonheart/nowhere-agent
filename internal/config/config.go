@@ -20,6 +20,9 @@ type Config struct {
 	Web  Web
 	// Workspace configures per-session image storage (persist-raw-messages).
 	Workspace Workspace
+	// Conversation configures the durable conversation retention policy
+	// (ended-session hard delete; see Conversation).
+	Conversation Conversation
 	// Stream configures the live content broker (redis-stream-live).
 	Stream Stream
 	// Sandbox configures the per-session sandbox backend for built-in tools.
@@ -456,6 +459,19 @@ type Workspace struct {
 	// images are unreachable once the session is ended, so this closes the
 	// leak without touching active conversations.
 	RetentionDays int `envconfig:"WORKSPACE_RETENTION_DAYS" default:"30"`
+}
+
+// Conversation configures the durable conversation retention policy: how long
+// an ENDED session's conversation rows (session + cascaded runs, messages,
+// run events, approvals) are kept before an hourly sweep hard-deletes them.
+// The runtime setting conversation_retention_days overrides this live.
+type Conversation struct {
+	// RetentionDays is how many days an ENDED session's conversation is kept
+	// before the hourly sweep deletes it (cascading over messages/run_events/
+	// usage — the same hard delete the admin session purge performs). <= 0
+	// disables the sweep entirely (the default): conversations are retained
+	// forever unless the operator opts in, matching the pre-feature behavior.
+	RetentionDays int `envconfig:"CONVERSATION_RETENTION_DAYS" default:"0"`
 }
 
 // HTTP configures the gateway server.

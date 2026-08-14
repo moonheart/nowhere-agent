@@ -246,6 +246,8 @@ func run() error {
 		settings.KeyRateLimitBurst: mustJSON(cfg.HTTP.RateLimitBurst),
 		// Workspace image retention (overrides WORKSPACE_RETENTION_DAYS live).
 		settings.KeyWorkspaceRetentionDays: mustJSON(cfg.Workspace.RetentionDays),
+		// Conversation retention (overrides CONVERSATION_RETENTION_DAYS live).
+		settings.KeyConversationRetentionDays: mustJSON(cfg.Conversation.RetentionDays),
 		// User image uploads (user-image-uploads quota; overrides
 		// UPLOAD_MAX_FILES_PER_USER / UPLOAD_MAX_BYTES_PER_USER live).
 		settings.KeyUploadMaxFilesPerUser: mustJSON(cfg.Upload.MaxFilesPerUser),
@@ -597,6 +599,49 @@ func run() error {
 			return nil
 		})
 	}
+
+	// Conversation retention (P2-8 no-data-hard-delete): without a policy the
+	// message table grows without bound — images get a retention window but the
+	// conversation body never did. An hourly pass hard-deletes sessions ended
+	// more than CONVERSATION_RETENTION_DAYS ago (<= 0 disables), cascading over
+	// runs/messages/run_events/approvals exactly like the admin session purge.
+	// Only ENDED sessions past the window are eligible — active conversations
+	// and the grace period are never touched. The retention window is
+	// runtime-tunable (conversation_retention_days) via the 5s settings sync
+	// below, mirroring the image/raw-log sweeps: the loop runs regardless and
+	// skips passes while the window is <= 0, so enabling retention at runtime
+	// works even when the boot value disabled it.
+	//
+	// The deleted session's image dir is reclaimed inline (cleanup hook), the
+	// way the admin purge does: once the session row is gone the image
+	// retention sweep can never list it, so its dir would otherwise orphan.
+	var conversationRetention atomic.Int64
+	conversationRetention.Store(int64(cfg.Conversation.RetentionDays))
+	hourlySweep(ctx, log, "conversation retention", func() error {
+		days := conversationRetention.Load()
+		if days <= 0 {
+			return nil
+		}
+		cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+		removed, err := session.SweepEndedConversations(ctx, log, sessionStore, cutoff, 50, func(sessionID string) {
+			if imageStore == nil {
+				return
+			}
+			if _, err := imageStore.DeleteSessionImages(sessionID); err != nil {
+				log.Warn("conversation retention sweep: session image cleanup failed", "session", sessionID, "err", err)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		if removed > 0 {
+			log.Info("conversation retention sweep removed sessions", "count", removed)
+		}
+		return nil
+	})
+	settingsSync.Add(func() {
+		conversationRetention.Store(int64(settingsRuntime.Int(settings.KeyConversationRetentionDays)))
+	})
 
 	// Sandbox for built-in tools (file-tools): a per-session sandbox Manager
 	// over the configured backend. The tool binder (below) ensures the session's
