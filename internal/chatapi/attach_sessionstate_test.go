@@ -19,7 +19,8 @@ import (
 // plan panel depends on.
 func TestAttachStreamsSessionStateFrame(t *testing.T) {
 	store := session.NewMemStore()
-	rt := session.NewRuntime(store)
+	cb := newCountingBroker(session.NewMemBroker(0))
+	rt := session.NewRuntime(store).WithBroker(cb)
 	p := newGatedProvider("hello")
 	h := NewHandler(gatedLoop(p), "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
@@ -40,12 +41,15 @@ func TestAttachStreamsSessionStateFrame(t *testing.T) {
 	}()
 
 	// Let the attach subscribe, then publish a session_state frame the way
-	// Runtime.SetSessionStateKV does, then release the run's content.
-	time.Sleep(50 * time.Millisecond)
+	// Runtime.SetSessionStateKV does, then release the run's content. The
+	// publish is synchronous (the broker fans the frame into the subscriber's
+	// channel before returning), so once the subscription is registered there
+	// is nothing further to wait for before releasing the gate. Subscribers
+	// include the submitter, so two means the resumer has attached.
+	waitFor(t, func() bool { return cb.subscribers(sessID) >= 2 }, "attach never subscribed to the broker")
 	if err := rt.SetSessionStateKV(context.Background(), sessID, "plan", []byte(`{"items":[{"content":"a","status":"in_progress"}]}`)); err != nil {
 		t.Fatalf("SetSessionStateKV: %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
 	close(p.gate)
 
 	select {
@@ -67,7 +71,8 @@ func TestAttachStreamsSessionStateFrame(t *testing.T) {
 // live across runs instead of silently dropping the out-of-band write.
 func TestAttachStreamsSessionScopedStateFrame(t *testing.T) {
 	store := session.NewMemStore()
-	rt := session.NewRuntime(store)
+	cb := newCountingBroker(session.NewMemBroker(0))
+	rt := session.NewRuntime(store).WithBroker(cb)
 	p := newGatedProvider("hello")
 	h := NewHandler(gatedLoop(p), "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
@@ -102,17 +107,10 @@ func TestAttachStreamsSessionScopedStateFrame(t *testing.T) {
 	// run 2's Submit and resolve against the settled run 1, whose terminal
 	// attach path serves no session_state frame. Wait until run 2 is actually
 	// the session's active (in-flight) run before attaching.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	waitFor(t, func() bool {
 		run, active, err := rt.ActiveRun(context.Background(), sessID)
-		if err == nil && active && !run.Status.Terminal() {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("run 2 never became the session's active run")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+		return err == nil && active && !run.Status.Terminal()
+	}, "run 2 never became the session's active run")
 
 	attached := make(chan string, 1)
 	go func() {
@@ -122,7 +120,8 @@ func TestAttachStreamsSessionScopedStateFrame(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		attached <- rec.Body.String()
 	}()
-	time.Sleep(50 * time.Millisecond)
+	// Subscribers include the submitter, so two means the resumer has attached.
+	waitFor(t, func() bool { return cb.subscribers(sessID) >= 2 }, "attach never subscribed to the broker")
 	close(p.gate)
 
 	select {

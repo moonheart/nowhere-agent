@@ -53,18 +53,8 @@ func startParkedChat(t *testing.T, mux *http.ServeMux, h *Handler, user identity
 		mux.ServeHTTP(rec, req)
 	}()
 	// Give the handler a beat to resolve the session and start the run.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(sessionIDs(h)) > 0 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	ids := sessionIDs(h)
-	if len(ids) == 0 {
-		t.Fatal("chat run did not create a session")
-	}
-	sessID = ids[0]
+	waitFor(t, func() bool { return len(sessionIDs(h)) > 0 }, "chat run did not create a session")
+	sessID = sessionIDs(h)[0]
 	// Under decoupled run ownership the parked run no longer dies with the request
 	// (its context is independent of any connection), so the test must cancel it to
 	// unblock the streaming handler. wait cancels the run, then waits for the

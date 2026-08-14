@@ -167,7 +167,8 @@ func TestHistoryRebuildsConversation(t *testing.T) {
 // run's content deltas (live + broker-retained) and a clean termination.
 func TestResumeReplaysRun(t *testing.T) {
 	store := session.NewMemStore()
-	rt := session.NewRuntime(store)
+	cb := newCountingBroker(session.NewMemBroker(0))
+	rt := session.NewRuntime(store).WithBroker(cb)
 	p := newGatedProvider("Doudou ", "is your cat")
 	h := NewHandler(gatedLoop(p), "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
@@ -187,8 +188,9 @@ func TestResumeReplaysRun(t *testing.T) {
 		resumed <- rec.Body.String()
 	}()
 
-	time.Sleep(50 * time.Millisecond) // let the attach subscribe
-	close(p.gate)                     // release the run's content
+	// Subscribers include the submitter, so two means the resumer has attached.
+	waitFor(t, func() bool { return cb.subscribers(sessID) >= 2 }, "attach never subscribed to the broker")
+	close(p.gate) // release the run's content
 
 	select {
 	case out := <-resumed:

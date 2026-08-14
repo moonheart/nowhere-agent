@@ -98,15 +98,12 @@ func startRunAsync(t *testing.T, mux *http.ServeMux, p *gatedProvider, user iden
 	}
 
 	// Wait until the session exists in the runtime.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if ids := sessionIDsForUser(t, mux, user.ID); len(ids) > 0 {
-			return ids[0], func() { <-done }
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("chat run did not create a session")
-	return "", nil
+	var ids []string
+	waitFor(t, func() bool {
+		ids = sessionIDsForUser(t, mux, user.ID)
+		return len(ids) > 0
+	}, "chat run did not create a session")
+	return ids[0], func() { <-done }
 }
 
 // sessionIDsForUser lists a user's sessions via the sessions endpoint.
@@ -140,7 +137,8 @@ func sessionIDsForUser(t *testing.T, mux *http.ServeMux, userID string) []string
 // individual delta landing on the live channel.
 func TestMultiClientAttachSameStream(t *testing.T) {
 	store := session.NewMemStore()
-	rt := session.NewRuntime(store)
+	cb := newCountingBroker(session.NewMemBroker(0))
+	rt := session.NewRuntime(store).WithBroker(cb)
 	p := newGatedProvider("alpha ", "beta ", "gamma")
 	h := NewHandler(gatedLoop(p), "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
@@ -163,7 +161,9 @@ func TestMultiClientAttachSameStream(t *testing.T) {
 	}()
 
 	// Let the attach subscribe, then release the run's content to both clients.
-	time.Sleep(50 * time.Millisecond)
+	// The count includes the submitter's own live subscription, so two
+	// subscribers means the resumer has registered too.
+	waitFor(t, func() bool { return cb.subscribers(sessID) >= 2 }, "attach never subscribed to the broker")
 	close(p.gate)
 
 	select {
@@ -207,7 +207,8 @@ func TestMultiClientAttachSameStream(t *testing.T) {
 // would split it into a snapshot bubble plus a continuation bubble.
 func TestResumeActiveRunIgnoresAfterOffset(t *testing.T) {
 	store := session.NewMemStore()
-	rt := session.NewRuntime(store)
+	cb := newCountingBroker(session.NewMemBroker(0))
+	rt := session.NewRuntime(store).WithBroker(cb)
 	p := newGatedProvider("alpha ", "beta")
 	h := NewHandler(gatedLoop(p), "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
@@ -228,7 +229,8 @@ func TestResumeActiveRunIgnoresAfterOffset(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		attached <- rec.Body.String()
 	}()
-	time.Sleep(50 * time.Millisecond) // let the attach subscribe
+	// Subscribers include the submitter, so two means the resumer has attached.
+	waitFor(t, func() bool { return cb.subscribers(sessID) >= 2 }, "attach never subscribed to the broker")
 	close(p.gate)
 
 	var body string
@@ -285,7 +287,8 @@ func TestConcurrentRunStartConflict(t *testing.T) {
 // the submitter's.
 func TestCancelBroadcastToAttachedClients(t *testing.T) {
 	store := session.NewMemStore()
-	rt := session.NewRuntime(store)
+	cb := newCountingBroker(session.NewMemBroker(0))
+	rt := session.NewRuntime(store).WithBroker(cb)
 	p := newGatedProvider("never released")
 	h := NewHandler(gatedLoop(p), "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
@@ -308,7 +311,8 @@ func TestCancelBroadcastToAttachedClients(t *testing.T) {
 			out <- rec.Body.String()
 		}(bodies[i])
 	}
-	time.Sleep(50 * time.Millisecond) // let watchers subscribe
+	// Subscribers include the submitter, so three means both watchers attached.
+	waitFor(t, func() bool { return cb.subscribers(sessID) >= 3 }, "watchers never subscribed to the broker")
 
 	// Cancel the run; the gate stays shut — cancellation, not completion, must
 	// terminate every attached stream with a cancelled frame.

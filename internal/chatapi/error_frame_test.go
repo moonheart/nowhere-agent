@@ -116,7 +116,8 @@ func TestSubmitterSeesErrorFrameOnFailedRun(t *testing.T) {
 // is gated so the run is in-flight while the watcher attaches; releasing the
 // gate makes the run fail, and the error must fan out to the attacher.
 func TestMidRunAttacherSeesErrorFrame(t *testing.T) {
-	rt := session.NewRuntime(session.NewMemStore())
+	cb := newCountingBroker(session.NewMemBroker(0))
+	rt := session.NewRuntime(session.NewMemStore()).WithBroker(cb)
 	p := newFailingGatedProvider("boom")
 	h := NewHandler(gatedLoopFailing(p), "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
@@ -134,8 +135,9 @@ func TestMidRunAttacherSeesErrorFrame(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		attached <- rec.Body.String()
 	}()
-	time.Sleep(50 * time.Millisecond) // let the watcher subscribe
-	close(p.gate)                     // release → the run fails
+	// Subscribers include the submitter, so two means the attacher has attached.
+	waitFor(t, func() bool { return cb.subscribers(sessID) >= 2 }, "attacher never subscribed to the broker")
+	close(p.gate) // release → the run fails
 
 	select {
 	case body := <-attached:

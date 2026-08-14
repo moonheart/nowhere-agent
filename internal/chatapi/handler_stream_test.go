@@ -47,13 +47,17 @@ func TestEmitterWriteRefreshesRollingDeadline(t *testing.T) {
 	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
 	e := newSSEEmitter(rec, rec, "m", "t", "r")
 	// A frame write must have re-armed the deadline (a fresh one, in the future).
+	firstWrite := time.Now()
 	e.write(chunk{"type": "text", "id": "t", "delta": "x"})
 	afterFirst := rec.deadline
 	if !rec.deadlineSet || time.Until(afterFirst) <= 0 {
 		t.Fatalf("first write did not arm a rolling deadline (deadline=%v)", rec.deadline)
 	}
 	// Writes through writeRaw (the write path's choke point) refresh it too.
-	time.Sleep(5 * time.Millisecond)
+	// Wait for the clock to advance past the first write's instant: the second
+	// deadline is firstWrite+timeout+ε, which only STRICTLY exceeds the first
+	// once time has moved on (a same-instant write would merely equal it).
+	waitFor(t, func() bool { return time.Now().After(firstWrite) }, "clock did not advance past the first write")
 	e.writeRaw("data: x\n\n")
 	if !rec.deadline.After(afterFirst) {
 		t.Errorf("deadline after second write = %v, want refreshed past %v", rec.deadline, afterFirst)
