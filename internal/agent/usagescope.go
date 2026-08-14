@@ -55,3 +55,7 @@ func (s *UsageScope) Total() provider.Usage {
 	defer s.mu.Unlock()
 	return s.child
 }
+
+// IsRoot reports whether this scope marks its run as the root of the run
+// tree — the only level whose terminal usage report folds descendants in.
+func (s *UsageScope) IsRoot() bool { return s.root }

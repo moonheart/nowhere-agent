@@ -54,6 +54,12 @@ const (
 	// but no message ever persisted, so the ledger row is the only durable
 	// record. No ResultMessageID (nothing was provisioned into a message).
 	UsageOverflow UsageCause = "overflow"
+	// UsageRun is the root run's terminal report of descendant (subagent)
+	// usage: child loops emit into black-box emitters, so their tokens never
+	// reach this run's ledger through message rows; the root's KindUsage
+	// records the subtree complement here so the recomputed aggregate covers
+	// the whole run tree. No ResultMessageID (nothing to bind to).
+	UsageRun UsageCause = "run"
 )
 
 // UsageRecord is one durable per-request usage row. Written at settle time,

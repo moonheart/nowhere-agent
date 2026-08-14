@@ -1022,6 +1022,24 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 	// The run's aggregate usage is recorded on the runs row, recomputed from
 	// the usage ledger (SumUsage); the event still flows to the durable log.
 	if kind == agent.KindUsage {
+		// Descendant (subagent) usage never reaches the ledger: child loops
+		// emit into black-box emitters, so no message rows exist under this
+		// run for them. The root's terminal KindUsage payload already folds
+		// the descendants' total in (UsageMW), so record that subtree
+		// complement here as a UsageRun row. The payload itself is NOT
+		// written — it also contains this run's own usage, which the ledger
+		// already carries via the assistant/tool/overflow rows, so writing it
+		// would double count. Only the ROOT run does this (mirroring
+		// UsageMW's scoped fold), so nested levels are never counted twice.
+		if sc := agent.UsageScopeFrom(ctx); sc != nil && sc.IsRoot() {
+			if u := sc.Total(); u != (provider.Usage{}) {
+				if err := e.rg.rt.store.AppendUsageRecord(context.Background(), UsageRecord{
+					RunID: e.runID, Cause: UsageRun, Usage: u,
+				}); err != nil {
+					slog.Warn("record descendant usage ledger", "run", e.runID, "err", err)
+				}
+			}
+		}
 		e.persistRunUsage(payload)
 	}
 	// The terminal cancelled frame must be KNOWN-landed: the run worker

@@ -367,6 +367,109 @@ func TestUsageLedgerRecordsDiscardedOverflowResponse(t *testing.T) {
 	}
 }
 
+// scopeAddTool folds a fixed usage amount into the run tree's usage scope —
+// exactly what subagent's usageCapture does with a child loop's KindUsage —
+// so ledger tests can exercise the descendant path without a full subagent.
+type scopeAddTool struct{ usage provider.Usage }
+
+func (scopeAddTool) Name() string           { return "echo" }
+func (scopeAddTool) Description() string    { return "echo" }
+func (scopeAddTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (scopeAddTool) Risk() toolruntime.Risk { return toolruntime.RiskReadOnly }
+func (scopeAddTool) Timeout() time.Duration { return 0 }
+func (t scopeAddTool) Call(ctx context.Context, _ map[string]any) (toolruntime.Result, error) {
+	if sc := agent.UsageScopeFrom(ctx); sc != nil {
+		sc.Add(t.usage)
+	}
+	return toolruntime.Result{Content: "ok"}, nil
+}
+
+// TestUsageLedgerIncludesDescendantUsage pins the subagent accounting fix: a
+// child loop's tokens never reach this run's ledger through message rows
+// (children emit into black-box emitters), so the root run's terminal
+// KindUsage must record the descendant complement as a UsageRun row —
+// SumUsage (and the runs-row aggregate recomputed from it) then covers the
+// whole run tree.
+func TestUsageLedgerIncludesDescendantUsage(t *testing.T) {
+	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
+	ms := NewMemMessageStore()
+	rg := NewRunRegistry(rt).WithMessageStore(ms)
+	sess, err := rt.CreateSession(context.Background(), "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reg := toolruntime.NewRegistry()
+	reg.Register(scopeAddTool{usage: provider.Usage{InputTokens: 40, OutputTokens: 10}})
+	loop := agent.New(&usageToolScriptProvider{}, reg, agent.Config{Model: "m", MaxTokens: 100})
+
+	userMsg := provider.TextMessage(provider.RoleUser, "hi")
+	run, err := rg.Submit(context.Background(), sess.ID, RunWork{Loop: loop, UserMessage: &userMsg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := waitSettle(t, rt, sess.ID); got != RunDone {
+		t.Fatalf("status = %v want done", got)
+	}
+
+	store := rt.store.(*MemStore)
+	var runRow *UsageRecord
+	for i := range store.usageRecords[run.ID] {
+		if r := &store.usageRecords[run.ID][i]; r.Cause == UsageRun {
+			runRow = r
+		}
+	}
+	if runRow == nil {
+		t.Fatalf("no UsageRun ledger row for the descendant usage: %+v", store.usageRecords[run.ID])
+	}
+	if runRow.Usage.InputTokens != 40 || runRow.Usage.OutputTokens != 10 {
+		t.Errorf("UsageRun row usage = %+v, want the descendant complement 40/10", runRow.Usage)
+	}
+	if runRow.ResultMessageID != nil {
+		t.Error("UsageRun row must not claim a message id")
+	}
+
+	// SumUsage = own (10/3 + 7/2) + descendant complement (40/10), so the
+	// recomputed runs-row aggregate matches the live data-usage frame.
+	sum, err := store.SumUsage(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.InputTokens != 57 || sum.OutputTokens != 15 {
+		t.Errorf("ledger sum = %+v, want input=57 output=15 (own + descendant)", sum)
+	}
+}
+
+// TestUsageLedgerSkipsNonRootDescendantRow pins the root-only guard: a
+// registry emitter reached under a NON-root scope (a nested loop inheriting
+// an ancestor's) must not write a UsageRun row — only the root run's ledger
+// carries the subtree complement, so deeper levels are never counted twice.
+func TestUsageLedgerSkipsNonRootDescendantRow(t *testing.T) {
+	store := NewMemStore()
+	rt := NewRuntime(store).WithBus(NewMemBus())
+	rg := NewRunRegistry(rt)
+	ctx := context.Background()
+	sess, err := rt.CreateSession(ctx, "u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.CreateRun(ctx, sess.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A non-root scope: root=false, the shape a nested loop inherits.
+	ctx = agent.WithUsageScope(ctx, &agent.UsageScope{})
+	agent.UsageScopeFrom(ctx).Add(provider.Usage{InputTokens: 40, OutputTokens: 10})
+
+	emit := &registryEmitter{rg: rg, sessionID: sess.ID, runID: run.ID, pending: &stepIntentQueue{}}
+	if err := emit.Emit(ctx, agent.KindUsage, provider.Usage{InputTokens: 20, OutputTokens: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if recs := store.usageRecords[run.ID]; len(recs) != 0 {
+		t.Fatalf("non-root KindUsage wrote ledger rows: %+v", recs)
+	}
+}
+
 // TestAppendRunStepAttemptCounters verifies durable per-(run, kind) attempt
 // counters: they increment within one run and kind, and restart across runs.
 func TestAppendRunStepAttemptCounters(t *testing.T) {
