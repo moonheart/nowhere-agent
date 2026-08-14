@@ -25,6 +25,7 @@ import {
   PageHeader,
   useAsync,
 } from "@/components/admin/common";
+import { t } from "@/lib/i18n";
 import {
   FetchModelsDialog,
   ModelFormDialog,
@@ -56,32 +57,30 @@ export function PlatformProvidersPage() {
   return (
     <>
       <PageHeader
-        title="Providers"
-        description="System LLM providers the platform makes available. Every team without an assignment of its own falls back to the platform default."
+        title={t("providersPage.title")}
+        description={t("providersPage.description")}
         actions={
           <ProviderFormDialog
             trigger={
               <Button size="sm">
                 <Plus />
-                Add provider
+                {t("providersPage.addProvider")}
               </Button>
             }
-            title="Add a provider"
-            description="System providers are visible to every team. Keys are encrypted at rest when a master key is configured."
-            submitLabel="Add provider"
+            title={t("providersPage.addTitle")}
+            description={t("providersPage.addDescription")}
+            submitLabel={t("providersPage.addProvider")}
             onSave={(b) => createSystemProvider(b)}
             onDone={state.reload}
           />
         }
       />
       {error && <ErrorNotice message={error} />}
-      <AsyncSection state={state} loadingLabel="Loading providers">
+      <AsyncSection state={state} loadingLabel={t("providersPage.loading")}>
         {(data) =>
           data.providers.length === 0 ? (
             <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-              No system providers configured. Add one to enable chat and
-              scheduled tasks, then set a default model and mark it the platform
-              default.
+              {t("providersPage.empty")}
             </p>
           ) : (
             <div className="space-y-4">
@@ -111,10 +110,10 @@ export function PlatformProvidersPage() {
         <ProviderFormDialog
           open
           onOpenChange={(open) => !open && setEditing(null)}
-          title="Edit provider"
-          description="Changes apply to the next model call."
+          title={t("providersPage.editTitle")}
+          description={t("providersPage.editDescription")}
           initial={editing}
-          submitLabel="Save"
+          submitLabel={t("providersPage.save")}
           onSave={(b) => updateSystemProvider(editing.id, b)}
           onDone={state.reload}
         />
@@ -132,8 +131,8 @@ export function PlatformProvidersPage() {
         <ModelFormDialog
           open
           onOpenChange={(open) => !open && setAddingModelTo(null)}
-          title={`Add a model to ${addingModelTo.name}`}
-          description="A vision-capable model backs the view_image tool for providers whose main model cannot see images."
+          title={t("providersPage.addModelTo", { name: addingModelTo.name })}
+          description={t("providersPage.modelAddDescription")}
           onSave={(b) => createSystemModel(addingModelTo.id, b)}
           onDone={state.reload}
         />
@@ -142,8 +141,8 @@ export function PlatformProvidersPage() {
         <ModelFormDialog
           open
           onOpenChange={(open) => !open && setEditingModel(null)}
-          title="Edit model"
-          description="Changes apply to the next model call."
+          title={t("providersPage.editModelTitle")}
+          description={t("providersPage.editDescription")}
           initial={editingModel.model}
           onSave={(b) =>
             updateSystemModel(editingModel.provider.id, editingModel.model.id, b)

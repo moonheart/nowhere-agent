@@ -36,6 +36,7 @@ import {
 import { ErrorNotice } from "@/components/admin/common";
 import { ConfirmButton } from "@/components/admin/confirm";
 import { cn } from "@/lib/utils";
+import { t } from "@/lib/i18n";
 import type {
   FetchedModel,
   Provider,
@@ -121,17 +122,17 @@ export function ProviderFormDialog({
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="prov-name">Name</Label>
+              <Label htmlFor="prov-name">{t("providersPage.name")}</Label>
               <Input
                 id="prov-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Primary Anthropic"
+                placeholder={t("providersPage.namePlaceholder")}
                 autoFocus
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="prov-vendor">Vendor</Label>
+              <Label htmlFor="prov-vendor">{t("providersPage.vendor")}</Label>
               <NativeSelect
                 id="prov-vendor"
                 value={vendor}
@@ -145,7 +146,7 @@ export function ProviderFormDialog({
               </NativeSelect>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="prov-base">Base URL</Label>
+              <Label htmlFor="prov-base">{t("providersPage.baseUrl")}</Label>
               <Input
                 id="prov-base"
                 value={baseUrl}
@@ -153,32 +154,30 @@ export function ProviderFormDialog({
                 placeholder="https://api.openai.com/v1"
               />
               <p className="text-xs text-muted-foreground">
-                The API root ending in <code>/v1</code> (or the vendor default
-                when left empty) — the chat and model-list paths are appended
-                automatically. A legacy full endpoint is accepted too.
+                {t("providersPage.baseUrlHint1")} <code>/v1</code>{" "}
+                {t("providersPage.baseUrlHint2")}
               </p>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="prov-key">API key</Label>
+              <Label htmlFor="prov-key">{t("providersPage.apiKey")}</Label>
               <Input
                 id="prov-key"
                 type="password"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
                 placeholder={
-                  initial ? "Leave empty to keep the stored key" : "sk-…"
+                  initial ? t("providersPage.apiKeyPlaceholderEdit") : "sk-…"
                 }
                 autoComplete="off"
               />
               {initial && (
                 <p className="text-xs text-muted-foreground">
-                  Keys are write-only — the stored key shows only its last four
-                  characters.
+                  {t("providersPage.apiKeyHint")}
                 </p>
               )}
             </div>
             <div className="flex items-center justify-between">
-              <Label htmlFor="prov-enabled">Enabled</Label>
+              <Label htmlFor="prov-enabled">{t("providersPage.enabled")}</Label>
               <Switch
                 id="prov-enabled"
                 checked={enabled}
@@ -192,7 +191,7 @@ export function ProviderFormDialog({
               type="submit"
               disabled={busy || name.trim() === ""}
             >
-              {busy ? "Saving…" : submitLabel}
+              {busy ? t("providersPage.saving") : submitLabel}
             </Button>
           </DialogFooter>
         </form>
@@ -271,48 +270,48 @@ export function ModelFormDialog({
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="model-name">Model ID</Label>
+              <Label htmlFor="model-name">{t("providersPage.modelId")}</Label>
               <Input
                 id="model-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. gpt-4o-mini"
+                placeholder={t("providersPage.modelIdPlaceholder")}
                 autoFocus
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="model-display">Display name</Label>
+              <Label htmlFor="model-display">{t("providersPage.displayName")}</Label>
               <Input
                 id="model-display"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="Optional, shown instead of the model ID"
+                placeholder={t("providersPage.displayNamePlaceholder")}
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="model-window">Context window</Label>
+              <Label htmlFor="model-window">{t("providersPage.contextWindow")}</Label>
               <Input
                 id="model-window"
                 type="number"
                 min={0}
                 value={windowText}
                 onChange={(e) => setWindowText(e.target.value)}
-                placeholder="Empty = derive from the capability table"
+                placeholder={t("providersPage.contextWindowPlaceholder")}
               />
             </div>
             <div className="flex items-center justify-between">
-              <Label htmlFor="model-vision">Vision-capable</Label>
+              <Label htmlFor="model-vision">{t("providersPage.visionCapable")}</Label>
               <Switch id="model-vision" checked={vision} onCheckedChange={setVision} />
             </div>
             <div className="flex items-center justify-between">
-              <Label htmlFor="model-enabled">Enabled</Label>
+              <Label htmlFor="model-enabled">{t("providersPage.enabled")}</Label>
               <Switch id="model-enabled" checked={enabled} onCheckedChange={setEnabled} />
             </div>
           </div>
           {error && <ErrorNotice message={error} />}
           <DialogFooter>
             <Button type="submit" disabled={busy || name.trim() === ""}>
-              {busy ? "Saving…" : "Save"}
+              {busy ? t("providersPage.saving") : t("providersPage.save")}
             </Button>
           </DialogFooter>
         </form>
@@ -409,7 +408,7 @@ export function FetchModelsDialog({
     if (failed.length > 0) {
       const suffix = lastErr?.message ? ` — ${lastErr.message}` : "";
       setError(
-        `Could not add ${failed.length} model${failed.length === 1 ? "" : "s"}: ${failed.join(", ")}${suffix}`,
+        `${failed.length === 1 ? t("providersPage.addFailedOne") : t("providersPage.addFailedMany", { count: failed.length })}: ${failed.join(", ")}${suffix}`,
       );
       setSelected(new Set(failed));
       if (succeeded.length > 0) {
@@ -437,11 +436,8 @@ export function FetchModelsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Fetch models</DialogTitle>
-          <DialogDescription>
-            The models this provider's API reports. Fetching is only a preview —
-            pick the ones to add; already-registered models are disabled.
-          </DialogDescription>
+          <DialogTitle>{t("providersPage.fetchTitle")}</DialogTitle>
+          <DialogDescription>{t("providersPage.fetchDescription")}</DialogDescription>
         </DialogHeader>
         {!loading && !error && models && models.length > 0 && (
           <div className="relative">
@@ -449,7 +445,7 @@ export function FetchModelsDialog({
             <Input
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="Search models…"
+              placeholder={t("providersPage.searchModels")}
               className="pl-8"
               disabled={busy}
             />
@@ -458,8 +454,10 @@ export function FetchModelsDialog({
         {!loading && !error && unregisteredVisible.length > 0 && (
           <div className="flex items-center justify-between border-b border-border pb-1.5">
             <span className="text-xs text-muted-foreground">
-              {selectedCount} of {unregisteredVisible.length} new model
-              {unregisteredVisible.length === 1 ? "" : "s"} selected.
+              {t("providersPage.selectedCount", {
+                selected: selectedCount,
+                total: unregisteredVisible.length,
+              })}
             </span>
             <div className="flex items-center gap-1">
               <Button
@@ -468,7 +466,7 @@ export function FetchModelsDialog({
                 onClick={selectAll}
                 disabled={busy || selectedCount === unregisteredVisible.length}
               >
-                Select all
+                {t("providersPage.selectAll")}
               </Button>
               <Button
                 variant="ghost"
@@ -476,7 +474,7 @@ export function FetchModelsDialog({
                 onClick={selectNone}
                 disabled={busy || selectedCount === 0}
               >
-                Clear
+                {t("providersPage.clear")}
               </Button>
             </div>
           </div>
@@ -485,18 +483,18 @@ export function FetchModelsDialog({
           {loading && (
             <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
               <Loader2 className="size-4 animate-spin" />
-              Fetching from the provider…
+              {t("providersPage.fetching")}
             </div>
           )}
           {!loading && error && <ErrorNotice message={error} />}
           {!loading && !error && models && models.length === 0 && (
             <p className="py-4 text-sm text-muted-foreground">
-              The provider reported no models.
+              {t("providersPage.noModels")}
             </p>
           )}
           {!loading && !error && query !== "" && visible.length === 0 && (
             <p className="py-4 text-sm text-muted-foreground">
-              No models match "{filter}".
+              {t("providersPage.noMatch", { filter })}
             </p>
           )}
           {!loading &&
@@ -517,7 +515,7 @@ export function FetchModelsDialog({
                 <span className="truncate font-mono text-xs">{m.name}</span>
                 {m.registered && (
                   <Badge variant="secondary" className="ml-auto shrink-0">
-                    added
+                    {t("providersPage.added")}
                   </Badge>
                 )}
               </label>
@@ -529,10 +527,10 @@ export function FetchModelsDialog({
             onClick={() => onOpenChange(false)}
             disabled={busy}
           >
-            Cancel
+            {t("providersPage.cancel")}
           </Button>
           <Button onClick={add} disabled={busy || selectedCount === 0}>
-            {busy ? "Adding…" : `Add selected (${selectedCount})`}
+            {busy ? t("providersPage.adding") : t("providersPage.addSelected", { count: selectedCount })}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -580,21 +578,23 @@ export function ProviderCard({
               {provider.vendor}
             </Badge>
             {provider.scope === "team" && (
-              <Badge variant="secondary">team</Badge>
+              <Badge variant="secondary">{t("providersPage.teamBadge")}</Badge>
             )}
             {provider.is_default && (
               <Badge variant="secondary">
                 <Star className="mr-1 size-3" />
-                platform default
+                {t("providersPage.platformDefaultBadge")}
               </Badge>
             )}
             {assignment && (
               <Badge variant="secondary">
                 <Check className="mr-1 size-3" />
-                assigned
+                {t("providersPage.assignedBadge")}
               </Badge>
             )}
-            {!provider.enabled && <Badge variant="destructive">disabled</Badge>}
+            {!provider.enabled && (
+              <Badge variant="destructive">{t("providersPage.disabledBadge")}</Badge>
+            )}
           </div>
           {provider.base_url && (
             <div className="truncate text-xs text-muted-foreground">
@@ -607,7 +607,7 @@ export function ProviderCard({
             <Button
               variant="ghost"
               size="sm"
-              title="Fetch this provider's model list and add the ones you pick"
+              title={t("providersPage.fetchModelsTitle")}
               onClick={() => onFetchModels(provider)}
             >
               <CloudDownload />
@@ -617,7 +617,7 @@ export function ProviderCard({
             <Button
               variant="ghost"
               size="sm"
-              title="Make the platform default"
+              title={t("providersPage.platformDefaultTitle")}
               onClick={() => onSetDefault(provider)}
             >
               <Star />
@@ -627,7 +627,7 @@ export function ProviderCard({
             <Button
               variant="ghost"
               size="sm"
-              title="Edit provider"
+              title={t("providersPage.editProviderTitle")}
               onClick={() => onEdit(provider)}
             >
               <Pencil />
@@ -635,12 +635,12 @@ export function ProviderCard({
           )}
           {canWrite && onDelete && (
             <ConfirmButton
-              title={`Delete ${provider.name}?`}
-              description="Its models go with it. A provider a team assigns to cannot be deleted until that assignment is cleared."
-              confirmLabel="Delete"
+              title={t("providersPage.deleteProviderTitle", { name: provider.name })}
+              description={t("providersPage.deleteProviderDescription")}
+              confirmLabel={t("providersPage.delete")}
               onConfirm={() => onDelete(provider)}
               trigger={
-                <Button variant="ghost" size="sm" aria-label="Delete provider">
+                <Button variant="ghost" size="sm" aria-label={t("providersPage.deleteProviderAria")}>
                   <Trash2 />
                 </Button>
               }
@@ -652,11 +652,11 @@ export function ProviderCard({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Model</TableHead>
-            <TableHead className="w-28">Context</TableHead>
-            <TableHead className="w-24">Vision</TableHead>
-            <TableHead className="w-28">Default</TableHead>
-            <TableHead className="w-24">Enabled</TableHead>
+            <TableHead>{t("providersPage.colModel")}</TableHead>
+            <TableHead className="w-28">{t("providersPage.colContext")}</TableHead>
+            <TableHead className="w-24">{t("providersPage.colVision")}</TableHead>
+            <TableHead className="w-28">{t("providersPage.colDefault")}</TableHead>
+            <TableHead className="w-24">{t("providersPage.enabled")}</TableHead>
             <TableHead className="w-24" />
           </TableRow>
         </TableHeader>
@@ -675,26 +675,26 @@ export function ProviderCard({
               </TableCell>
               <TableCell>
                 {m.context_window != null ? (
-                  <span className="font-mono text-xs" title="Context window (tokens)">
+                  <span className="font-mono text-xs" title={t("providersPage.contextWindowTitle")}>
                     {m.context_window.toLocaleString()}
                   </span>
                 ) : (
-                  <span className="text-muted-foreground" title="Derived from the capability table">
-                    auto
+                  <span className="text-muted-foreground" title={t("providersPage.derivedTitle")}>
+                    {t("providersPage.auto")}
                   </span>
                 )}
               </TableCell>
               <TableCell>
-                {m.vision ? <Badge variant="secondary">vision</Badge> : <span className="text-muted-foreground">—</span>}
+                {m.vision ? <Badge variant="secondary">{t("providersPage.visionBadge")}</Badge> : <span className="text-muted-foreground">—</span>}
               </TableCell>
               <TableCell>
                 {m.is_default ? (
-                  <Badge variant="secondary">default</Badge>
+                  <Badge variant="secondary">{t("providersPage.defaultBadge")}</Badge>
                 ) : canWrite && onSetDefaultModel ? (
                   <Button
                     variant="ghost"
                     size="sm"
-                    title="Make this the provider's default model"
+                    title={t("providersPage.makeDefaultModelTitle")}
                     onClick={() => onSetDefaultModel(provider, m)}
                   >
                     <Star />
@@ -705,9 +705,9 @@ export function ProviderCard({
               </TableCell>
               <TableCell>
                 {m.enabled ? (
-                  <Badge variant="outline">on</Badge>
+                  <Badge variant="outline">{t("providersPage.onBadge")}</Badge>
                 ) : (
-                  <Badge variant="destructive">off</Badge>
+                  <Badge variant="destructive">{t("providersPage.offBadge")}</Badge>
                 )}
               </TableCell>
               <TableCell className="text-right">
@@ -717,8 +717,8 @@ export function ProviderCard({
                       <Button
                         variant="ghost"
                         size="sm"
-                        aria-label="Edit model"
-                        title="Edit model"
+                        aria-label={t("providersPage.editModelAria")}
+                        title={t("providersPage.editModelTitle")}
                         onClick={() => onUpdateModel(provider, m)}
                       >
                         <Pencil />
@@ -728,7 +728,7 @@ export function ProviderCard({
                       <Button
                         variant="ghost"
                         size="sm"
-                        aria-label="Delete model"
+                        aria-label={t("providersPage.deleteModelAria")}
                         onClick={() => onDeleteModel(provider, m)}
                       >
                         <Trash2 />
@@ -745,7 +745,7 @@ export function ProviderCard({
                 colSpan={6}
                 className="py-4 text-center text-sm text-muted-foreground"
               >
-                No models yet — add one so the provider can serve a run.
+                {t("providersPage.noModelsYet")}
               </TableCell>
             </TableRow>
           ) : null}
@@ -760,7 +760,7 @@ export function ProviderCard({
             onClick={() => onAddModel(provider)}
           >
             <Plus />
-            Add model
+            {t("providersPage.addModel")}
           </Button>
         </div>
       )}

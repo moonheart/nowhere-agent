@@ -71,29 +71,30 @@ import {
   useAsync,
 } from "@/components/admin/common";
 import { ConfirmButton } from "@/components/admin/confirm";
+import { t, type I18nKey } from "@/lib/i18n";
 
 // The whitelist picker offers the built-in tool names. It is static because
 // there is no endpoint that enumerates the registry; an unknown name typed by
 // the backend is simply not bound at fire time. Kept in sync with the tools
 // cmd/server wires into buildToolRegistry.
-const KNOWN_TOOLS: { name: string; hint: string }[] = [
-  { name: "read_file", hint: "read files in the workspace" },
-  { name: "list_dir", hint: "list directories" },
-  { name: "grep", hint: "search file contents" },
-  { name: "glob", hint: "find files by pattern" },
-  { name: "write_file", hint: "create / overwrite files" },
-  { name: "edit_file", hint: "edit files in place" },
-  { name: "move_file", hint: "move / rename files" },
-  { name: "copy_file", hint: "copy files" },
-  { name: "delete_file", hint: "delete files" },
-  { name: "make_dir", hint: "create directories" },
-  { name: "run_command", hint: "run shell commands" },
-  { name: "recall_memory", hint: "search long-term memory" },
-  { name: "load_skill", hint: "load skill instructions" },
-  { name: "run_skill_script", hint: "run a skill's scripts" },
-  { name: "spawn_agent", hint: "launch subagents" },
-  { name: "plan_write", hint: "maintain a task plan" },
-  { name: "ask_user", hint: "ask the user (never answered when unattended)" },
+const KNOWN_TOOLS: { name: string; hintKey: I18nKey }[] = [
+  { name: "read_file", hintKey: "scheduledTasksPage.tool.readFile" },
+  { name: "list_dir", hintKey: "scheduledTasksPage.tool.listDir" },
+  { name: "grep", hintKey: "scheduledTasksPage.tool.grep" },
+  { name: "glob", hintKey: "scheduledTasksPage.tool.glob" },
+  { name: "write_file", hintKey: "scheduledTasksPage.tool.writeFile" },
+  { name: "edit_file", hintKey: "scheduledTasksPage.tool.editFile" },
+  { name: "move_file", hintKey: "scheduledTasksPage.tool.moveFile" },
+  { name: "copy_file", hintKey: "scheduledTasksPage.tool.copyFile" },
+  { name: "delete_file", hintKey: "scheduledTasksPage.tool.deleteFile" },
+  { name: "make_dir", hintKey: "scheduledTasksPage.tool.makeDir" },
+  { name: "run_command", hintKey: "scheduledTasksPage.tool.runCommand" },
+  { name: "recall_memory", hintKey: "scheduledTasksPage.tool.recallMemory" },
+  { name: "load_skill", hintKey: "scheduledTasksPage.tool.loadSkill" },
+  { name: "run_skill_script", hintKey: "scheduledTasksPage.tool.runSkillScript" },
+  { name: "spawn_agent", hintKey: "scheduledTasksPage.tool.spawnAgent" },
+  { name: "plan_write", hintKey: "scheduledTasksPage.tool.planWrite" },
+  { name: "ask_user", hintKey: "scheduledTasksPage.tool.askUser" },
 ];
 
 export function ScheduledTasksPage() {
@@ -144,52 +145,56 @@ export function ScheduledTasksPage() {
   return (
     <>
       <PageHeader
-        title="Scheduled tasks"
-        description="Recurring agent runs that fire on a cron schedule, unattended. Each run binds only the tools on its whitelist — there is no one to approve a risky call at 4am."
+        title={t("scheduledTasksPage.title")}
+        description={t("scheduledTasksPage.description")}
         actions={<TaskFormDialog onSaved={state.reload} />}
       />
       {error && <ErrorNotice message={error} />}
-      <AsyncSection state={state} loadingLabel="Loading tasks">
+      <AsyncSection state={state} loadingLabel={t("scheduledTasksPage.loading")}>
         {(data) =>
           // The API serializes an empty result set as [] (never null), but guard
           // anyway — a null here would otherwise throw on .length and blank the page.
           (data.tasks ?? []).length === 0 ? (
             <p className="rounded-lg border border-dashed border-border px-4 py-10 text-center text-sm text-muted-foreground">
-              No scheduled tasks yet. Create one to run a prompt on a schedule.
+              {t("scheduledTasksPage.empty")}
             </p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Task</TableHead>
-                  <TableHead className="w-40">Schedule</TableHead>
-                  <TableHead className="w-40">Next run</TableHead>
-                  <TableHead className="w-24">Tools</TableHead>
-                  <TableHead className="w-28">Enabled</TableHead>
+                  <TableHead>{t("scheduledTasksPage.colTask")}</TableHead>
+                  <TableHead className="w-40">{t("scheduledTasksPage.colSchedule")}</TableHead>
+                  <TableHead className="w-40">{t("scheduledTasksPage.colNextRun")}</TableHead>
+                  <TableHead className="w-24">{t("scheduledTasksPage.colTools")}</TableHead>
+                  <TableHead className="w-28">{t("scheduledTasksPage.colEnabled")}</TableHead>
                   <TableHead className="w-32" />
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(data.tasks ?? []).map((t) => (
-                  <TableRow key={t.id} className={t.enabled ? undefined : "opacity-60"}>
+                {(data.tasks ?? []).map((task) => (
+                  <TableRow key={task.id} className={task.enabled ? undefined : "opacity-60"}>
                     <TableCell className="max-w-md whitespace-normal">
-                      <TaskLabel task={t} />
+                      <TaskLabel task={task} />
                     </TableCell>
                     <TableCell>
-                      <div className="text-sm font-medium tabular-nums">{t.cron}</div>
-                      <div className="text-xs text-muted-foreground">{t.timezone}</div>
+                      <div className="text-sm font-medium tabular-nums">{task.cron}</div>
+                      <div className="text-xs text-muted-foreground">{task.timezone}</div>
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
-                      {t.enabled ? formatDateTime(t.next_run_at) : "—"}
+                      {task.enabled ? formatDateTime(task.next_run_at) : "—"}
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline">{(t.tool_whitelist ?? []).length}</Badge>
+                      <Badge variant="outline">{(task.tool_whitelist ?? []).length}</Badge>
                     </TableCell>
                     <TableCell>
                       <Switch
-                        aria-label={t.enabled ? "Disable task" : "Enable task"}
-                        checked={t.enabled}
-                        onCheckedChange={(v) => void toggle(t, v)}
+                        aria-label={
+                          task.enabled
+                            ? t("scheduledTasksPage.disableAria")
+                            : t("scheduledTasksPage.enableAria")
+                        }
+                        checked={task.enabled}
+                        onCheckedChange={(v) => void toggle(task, v)}
                       />
                     </TableCell>
                     <TableCell className="text-right">
@@ -197,22 +202,22 @@ export function ScheduledTasksPage() {
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          aria-label="Run now"
-                          title="Run now (does not change the schedule)"
-                          disabled={running.has(t.id)}
-                          onClick={() => void runNow(t)}
+                          aria-label={t("scheduledTasksPage.runNowAria")}
+                          title={t("scheduledTasksPage.runNowTitle")}
+                          disabled={running.has(task.id)}
+                          onClick={() => void runNow(task)}
                         >
-                          {running.has(t.id) ? <Loader2 className="animate-spin" /> : <Play />}
+                          {running.has(task.id) ? <Loader2 className="animate-spin" /> : <Play />}
                         </Button>
-                        <TaskSessionsDialog task={t} />
-                        <TaskFormDialog task={t} onSaved={state.reload} />
+                        <TaskSessionsDialog task={task} />
+                        <TaskFormDialog task={task} onSaved={state.reload} />
                         <ConfirmButton
-                          title="Delete this task?"
-                          description="The schedule is removed and the task stops firing. Sessions it already produced are kept."
-                          confirmLabel="Delete"
-                          onConfirm={() => remove(t)}
+                          title={t("scheduledTasksPage.deleteTitle")}
+                          description={t("scheduledTasksPage.deleteDescription")}
+                          confirmLabel={t("scheduledTasksPage.delete")}
+                          onConfirm={() => remove(task)}
                           trigger={
-                            <Button variant="ghost" size="icon-sm" aria-label="Delete task">
+                            <Button variant="ghost" size="icon-sm" aria-label={t("scheduledTasksPage.deleteAria")}>
                               <Trash2 />
                             </Button>
                           }
@@ -246,7 +251,7 @@ function TaskLabel({ task }: { task: ScheduledTask }) {
         )}
       </div>
       {task.target_session_id && (
-        <div className="text-xs text-muted-foreground">appends to a fixed session</div>
+        <div className="text-xs text-muted-foreground">{t("scheduledTasksPage.appendsFixed")}</div>
       )}
     </div>
   );
@@ -354,13 +359,13 @@ function TaskFormDialog({
       <DialogTrigger
         render={
           task ? (
-            <Button variant="ghost" size="icon-sm" aria-label="Edit task">
+            <Button variant="ghost" size="icon-sm" aria-label={t("scheduledTasksPage.editAria")}>
               <Pencil />
             </Button>
           ) : (
             <Button size="sm">
               <Plus />
-              New task
+              {t("scheduledTasksPage.newTask")}
             </Button>
           )
         }
@@ -368,16 +373,16 @@ function TaskFormDialog({
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <form onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>{task ? "Edit task" : "New scheduled task"}</DialogTitle>
-            <DialogDescription>
-              The run fires unattended, so grant only the tools it needs.
-            </DialogDescription>
+            <DialogTitle>
+              {task ? t("scheduledTasksPage.editTitle") : t("scheduledTasksPage.newTitle")}
+            </DialogTitle>
+            <DialogDescription>{t("scheduledTasksPage.formDescription")}</DialogDescription>
           </DialogHeader>
 
           <div className="space-y-5 py-4">
             {/* Prompt source */}
             <div className="space-y-2">
-              <Label>What runs</Label>
+              <Label>{t("scheduledTasksPage.whatRuns")}</Label>
               <div className="flex gap-2">
                 <Button
                   type="button"
@@ -385,7 +390,7 @@ function TaskFormDialog({
                   size="sm"
                   onClick={() => set("source", "prompt")}
                 >
-                  Free-text prompt
+                  {t("scheduledTasksPage.freeText")}
                 </Button>
                 <Button
                   type="button"
@@ -393,14 +398,14 @@ function TaskFormDialog({
                   size="sm"
                   onClick={() => set("source", "agentdef")}
                 >
-                  Agent definition
+                  {t("scheduledTasksPage.agentDef")}
                 </Button>
               </div>
               {form.source === "agentdef" && (
                 <Input
                   value={form.agentDefName}
                   onChange={(e) => set("agentDefName", e.target.value)}
-                  placeholder="agent type name (e.g. general-purpose)"
+                  placeholder={t("scheduledTasksPage.agentDefPlaceholder")}
                   className="mt-2"
                 />
               )}
@@ -409,8 +414,8 @@ function TaskFormDialog({
                 onChange={(e) => set("prompt", e.target.value)}
                 placeholder={
                   form.source === "agentdef"
-                    ? "Opening instruction (optional — defaults to a standard kickoff)"
-                    : "Every morning, summarize the new support tickets in the workspace…"
+                    ? t("scheduledTasksPage.promptPlaceholderAgent")
+                    : t("scheduledTasksPage.promptPlaceholderFree")
                 }
                 rows={3}
                 className="mt-2"
@@ -420,7 +425,7 @@ function TaskFormDialog({
             {/* Schedule */}
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="task-cron">Cron (min hour dom mon dow)</Label>
+                <Label htmlFor="task-cron">{t("scheduledTasksPage.cronLabel")}</Label>
                 <Input
                   id="task-cron"
                   value={form.cron}
@@ -430,7 +435,7 @@ function TaskFormDialog({
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="task-tz">Timezone (IANA)</Label>
+                <Label htmlFor="task-tz">{t("scheduledTasksPage.tzLabel")}</Label>
                 <Input
                   id="task-tz"
                   value={form.timezone}
@@ -443,23 +448,25 @@ function TaskFormDialog({
             {/* Whitelist */}
             <div className="space-y-2">
               <Label>
-                Tool whitelist{" "}
+                {t("scheduledTasksPage.whitelistLabel")}{" "}
                 <span className="font-normal text-muted-foreground">
-                  ({form.whitelist.length} granted)
+                  {t("scheduledTasksPage.grantedCount", { count: form.whitelist.length })}
                 </span>
               </Label>
               <div className="grid gap-1.5 rounded-lg border border-border p-3 sm:grid-cols-2">
-                {KNOWN_TOOLS.map((t) => (
+                {KNOWN_TOOLS.map((tool) => (
                   <label
-                    key={t.name}
+                    key={tool.name}
                     className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 text-sm hover:bg-muted/60"
                   >
                     <Checkbox
-                      checked={form.whitelist.includes(t.name)}
-                      onCheckedChange={(v) => toggleTool(t.name, v === true)}
+                      checked={form.whitelist.includes(tool.name)}
+                      onCheckedChange={(v) => toggleTool(tool.name, v === true)}
                     />
-                    <span className="font-mono text-xs">{t.name}</span>
-                    <span className="truncate text-xs text-muted-foreground">{t.hint}</span>
+                    <span className="font-mono text-xs">{tool.name}</span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {t(tool.hintKey)}
+                    </span>
                   </label>
                 ))}
               </div>
@@ -468,16 +475,16 @@ function TaskFormDialog({
             {/* Advanced */}
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label htmlFor="task-target">Target session (optional)</Label>
+                <Label htmlFor="task-target">{t("scheduledTasksPage.targetSession")}</Label>
                 <Input
                   id="task-target"
                   value={form.targetSessionId}
                   onChange={(e) => set("targetSessionId", e.target.value)}
-                  placeholder="blank = a fresh session each run"
+                  placeholder={t("scheduledTasksPage.targetSessionPlaceholder")}
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="task-end">Stop after (optional)</Label>
+                <Label htmlFor="task-end">{t("scheduledTasksPage.stopAfter")}</Label>
                 <Input
                   id="task-end"
                   type="datetime-local"
@@ -486,7 +493,7 @@ function TaskFormDialog({
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>If the session is busy</Label>
+                <Label>{t("scheduledTasksPage.ifBusy")}</Label>
                 <Select
                   value={form.multitask}
                   onValueChange={(v) => set("multitask", (v ?? "reject") as MultitaskStrategy)}
@@ -495,14 +502,14 @@ function TaskFormDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="reject">Skip this run</SelectItem>
-                    <SelectItem value="interrupt">Cancel the active run</SelectItem>
-                    <SelectItem value="enqueue">Wait for the next slot</SelectItem>
+                    <SelectItem value="reject">{t("scheduledTasksPage.multitaskReject")}</SelectItem>
+                    <SelectItem value="interrupt">{t("scheduledTasksPage.multitaskInterrupt")}</SelectItem>
+                    <SelectItem value="enqueue">{t("scheduledTasksPage.multitaskEnqueue")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-1.5">
-                <Label>When a fresh-session run ends</Label>
+                <Label>{t("scheduledTasksPage.whenFreshEnds")}</Label>
                 <Select
                   value={form.onRunCompleted}
                   onValueChange={(v) => set("onRunCompleted", (v ?? "keep") as OnRunCompleted)}
@@ -511,8 +518,8 @@ function TaskFormDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="keep">Keep the session</SelectItem>
-                    <SelectItem value="delete">Delete the session</SelectItem>
+                    <SelectItem value="keep">{t("scheduledTasksPage.keepSession")}</SelectItem>
+                    <SelectItem value="delete">{t("scheduledTasksPage.deleteSession")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -522,7 +529,11 @@ function TaskFormDialog({
           {error && <ErrorNotice message={error} />}
           <DialogFooter>
             <Button type="submit" disabled={busy || !valid}>
-              {busy ? "Saving…" : task ? "Save changes" : "Create task"}
+              {busy
+                ? t("scheduledTasksPage.saving")
+                : task
+                  ? t("scheduledTasksPage.saveChanges")
+                  : t("scheduledTasksPage.createTask")}
             </Button>
           </DialogFooter>
         </form>
@@ -558,7 +569,12 @@ function TaskSessionsDialog({ task }: { task: ScheduledTask }) {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button variant="ghost" size="icon-sm" aria-label="View produced sessions" title="Produced sessions">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={t("scheduledTasksPage.producedSessionsAria")}
+            title={t("scheduledTasksPage.producedSessionsTitle")}
+          >
             <Rows3 />
           </Button>
         }
@@ -567,36 +583,38 @@ function TaskSessionsDialog({ task }: { task: ScheduledTask }) {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <CalendarClock className="size-4" />
-            Produced sessions
+            {t("scheduledTasksPage.producedSessionsTitle")}
           </DialogTitle>
-          <DialogDescription>
-            Sessions this task created. Open one in a new tab to read the run.
-          </DialogDescription>
+          <DialogDescription>{t("scheduledTasksPage.producedDesc")}</DialogDescription>
         </DialogHeader>
         {error && <ErrorNotice message={error} />}
         {open && (
-          <AsyncSection state={state} loadingLabel="Loading sessions">
+          <AsyncSection state={state} loadingLabel={t("scheduledTasksPage.loadingSessions")}>
             {(data) =>
               // Guard against a null sessions array (a task that has not fired).
               (data.sessions ?? []).length === 0 ? (
                 <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-                  No sessions yet — the task has not fired (or it appends to a fixed session).
+                  {t("scheduledTasksPage.noSessions")}
                 </p>
               ) : (
                 <>
                   <div className="flex items-center justify-between gap-3 pb-1">
                     <p className="text-sm text-muted-foreground">
-                      {(data.sessions ?? []).length} session{(data.sessions ?? []).length === 1 ? "" : "s"}
+                      {(data.sessions ?? []).length === 1
+                        ? t("scheduledTasksPage.sessionCount1")
+                        : t("scheduledTasksPage.sessionCountN", {
+                            count: (data.sessions ?? []).length,
+                          })}
                     </p>
                     <ConfirmButton
-                      title="Clear all produced sessions?"
-                      description="Every session this task created is removed from your sidebar. Their contents stay on the server for audit, but they no longer appear here or in chat."
-                      confirmLabel="Clear all"
+                      title={t("scheduledTasksPage.clearAllTitle")}
+                      description={t("scheduledTasksPage.clearAllDescription")}
+                      confirmLabel={t("scheduledTasksPage.clearAll")}
                       onConfirm={clearAll}
                       trigger={
                         <Button variant="outline" size="sm">
                           <Trash2 />
-                          Clear all
+                          {t("scheduledTasksPage.clearAll")}
                         </Button>
                       }
                     />
@@ -612,7 +630,7 @@ function TaskSessionsDialog({ task }: { task: ScheduledTask }) {
                         >
                           <span className="flex min-w-0 items-center gap-2">
                             <span className="truncate text-sm font-medium">
-                              {s.title?.trim() || "Untitled session"}
+                              {s.title?.trim() || t("scheduledTasksPage.untitledSession")}
                             </span>
                             <ExternalLink className="size-3.5 shrink-0 text-muted-foreground" />
                           </span>
