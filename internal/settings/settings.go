@@ -310,6 +310,7 @@ func Catalog() []KeyInfo {
 		{Key: KeyLLMContextWindow, Group: GroupLLM, Kind: KindInt, Description: "Model context window in tokens for in-loop compression (overrides LLM_CONTEXT_WINDOW). 0 = derive from the model's capability profile."},
 		{Key: KeyLLMTemperature, Group: GroupLLM, Kind: KindFloat, Description: "Sampling temperature for chat runs (overrides LLM_TEMPERATURE). Negative = provider default."},
 		{Key: KeyLLMThinkingBudget, Group: GroupLLM, Kind: KindInt, Description: "Extended-reasoning token budget (overrides LLM_THINKING_BUDGET). 0 disables."},
+		{Key: KeyAgentMaxIterations, Group: GroupLLM, Kind: KindInt, Description: "Loop iteration cap for chat runs (overrides LLM_MAX_ITERATIONS). 0 = built-in default (25). Applies to the next run."},
 		{Key: KeyLLMStreamIdleTimeout, Group: GroupLLM, Kind: KindInt, Description: "Stream stall guard in seconds: fail a generation that sends no bytes for this long (overrides LLM_STREAM_IDLE_TIMEOUT). 0 disables the guard."},
 		{Key: KeyLLMRawLogDir, Group: GroupLLM, Kind: KindString, Description: "Directory recording raw LLM request/response pairs for inspection (overrides LLM_RAW_LOG_DIR; auth headers never recorded). Empty disables. Applies from the next run."},
 		{Key: KeyLLMRawLogRetentionDays, Group: GroupLLM, Kind: KindInt, Description: "Days raw LLM request/response logs are kept before the hourly sweep deletes them (overrides LLM_RAW_LOG_RETENTION_DAYS). 0 disables the sweep. Applies within an hour."},
@@ -437,6 +438,9 @@ const (
 	// KeyLLMThinkingBudget is the extended-reasoning token budget
 	// (overrides LLM_THINKING_BUDGET); 0 disables.
 	KeyLLMThinkingBudget = "llm_thinking_budget"
+	// KeyAgentMaxIterations is the chat run's loop iteration cap
+	// (overrides LLM_MAX_ITERATIONS); 0 falls back to the built-in 25.
+	KeyAgentMaxIterations = "agent_max_iterations"
 	// KeyLLMStreamIdleTimeout is the stream stall guard in seconds
 	// (overrides LLM_STREAM_IDLE_TIMEOUT); 0 disables.
 	KeyLLMStreamIdleTimeout = "llm_stream_idle_timeout"

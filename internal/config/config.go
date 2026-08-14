@@ -358,6 +358,10 @@ type LLM struct {
 	// (Anthropic `thinking`). 0 disables. Enlarged past MaxTokens when the
 	// reply budget would otherwise leave no room.
 	ThinkingBudget int `envconfig:"LLM_THINKING_BUDGET" default:"0"`
+	// MaxIterations caps the think→tool→think loop iterations of a chat run
+	// (the loop's guard against infinite loops). 0 falls back to the built-in
+	// default (25).
+	MaxIterations int `envconfig:"LLM_MAX_ITERATIONS" default:"25"`
 	// StreamIdleTimeout is the stall detector for streaming generations: if
 	// no SSE bytes arrive for this long, the stream fails fast with a stall
 	// error instead of hanging until the run is cancelled. <=0 disables.

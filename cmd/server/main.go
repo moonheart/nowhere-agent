@@ -187,6 +187,7 @@ func run() error {
 		settings.KeyLLMContextWindow:       mustJSON(cfg.LLM.ContextWindow),
 		settings.KeyLLMTemperature:         mustJSON(cfg.LLM.Temperature),
 		settings.KeyLLMThinkingBudget:      mustJSON(cfg.LLM.ThinkingBudget),
+		settings.KeyAgentMaxIterations:     mustJSON(cfg.LLM.MaxIterations),
 		settings.KeyLLMStreamIdleTimeout:   mustJSON(int(cfg.LLM.StreamIdleTimeout.Seconds())),
 		settings.KeyLLMRawLogDir:           mustJSON(cfg.LLM.RawLogDir),
 		settings.KeyLLMRawLogRetentionDays: mustJSON(cfg.LLM.RawLogRetentionDays),
@@ -1077,6 +1078,15 @@ func run() error {
 		thinkingBudgetFor := func() int {
 			return settingsRuntime.Int(settings.KeyLLMThinkingBudget)
 		}
+		// maxIterationsFor caps the loop's think→tool→think iterations. 0 (or an
+		// unset runtime value) falls back to the built-in default of 25, so a
+		// fresh deployment behaves exactly like the former hardcode.
+		maxIterationsFor := func() int {
+			if n := settingsRuntime.Int(settings.KeyAgentMaxIterations); n > 0 {
+				return n
+			}
+			return 25
+		}
 		// Agent definitions resolve through the layered store (persist-agent-defs):
 		// durable PG-backed authored definitions overlaid on the code built-ins,
 		// so user/team/system definitions take effect without a restart and a
@@ -1132,7 +1142,7 @@ func run() error {
 				Model:           m,
 				System:          system,
 				MaxTokens:       replyBudgetFor(windowFor(t)),
-				MaxIterations:   25,
+				MaxIterations:   maxIterationsFor(),
 				CacheablePrefix: true,
 				Temperature:     temperatureFor(),
 				ThinkingBudget:  thinkingBudgetFor(),
@@ -1159,7 +1169,7 @@ func run() error {
 			if u, ok := identity.UserFromContext(ctx); ok {
 				userID = u.ID
 			}
-			maxIter := 25
+			maxIter := maxIterationsFor()
 			if def.MaxTurns > 0 {
 				maxIter = def.MaxTurns
 			}
