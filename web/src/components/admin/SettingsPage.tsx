@@ -29,6 +29,7 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { t, type I18nKey } from "@/lib/i18n";
 import { AsyncSection, ErrorNotice, PageHeader, useAsync } from "@/components/admin/common";
 import { TagInput } from "@/components/admin/settings/TagInput";
 import {
@@ -73,19 +74,36 @@ type Draft =
   | DsnRow[]
   | McpServerRow[];
 
-const GROUPS: { id: string; label: string }[] = [
-  { id: "tools", label: "Tools" },
-  { id: "webhooks", label: "Webhooks" },
-  { id: "llm", label: "LLM / model" },
-  { id: "sandbox", label: "Sandbox" },
-  { id: "permissions", label: "Permissions" },
-  { id: "redaction", label: "Redaction" },
-  { id: "subagents", label: "Subagents" },
-  { id: "background", label: "Background tasks" },
-  { id: "http", label: "HTTP / gateway" },
-  { id: "auth", label: "Auth / SSO" },
-  { id: "integrations", label: "Integrations" },
-];
+// Group ids + their localized tab labels. The labels go through t() at render
+// time (not module scope), so a language switch is picked up on the next
+// render like every other localized surface.
+const GROUP_IDS = [
+  "tools",
+  "webhooks",
+  "llm",
+  "sandbox",
+  "permissions",
+  "redaction",
+  "subagents",
+  "background",
+  "http",
+  "auth",
+  "integrations",
+] as const;
+
+const GROUP_LABELS: Record<(typeof GROUP_IDS)[number], I18nKey> = {
+  tools: "settingsPage.group.tools",
+  webhooks: "settingsPage.group.webhooks",
+  llm: "settingsPage.group.llm",
+  sandbox: "settingsPage.group.sandbox",
+  permissions: "settingsPage.group.permissions",
+  redaction: "settingsPage.group.redaction",
+  subagents: "settingsPage.group.subagents",
+  background: "settingsPage.group.background",
+  http: "settingsPage.group.http",
+  auth: "settingsPage.group.auth",
+  integrations: "settingsPage.group.integrations",
+};
 
 // Keys whose value is a comma-separated list.
 const LIST_KEYS = new Set([
@@ -155,9 +173,9 @@ const splitList = (s: string | number | boolean | null): string[] =>
 
 function displayValue(s: SettingEntry): string {
   if (s.secret) {
-    return s.value === null ? "(not set)" : "(set — hidden)";
+    return s.value === null ? t("settingsPage.notSet") : t("settingsPage.secretSet");
   }
-  if (s.value === null) return "(not set)";
+  if (s.value === null) return t("settingsPage.notSet");
   if (typeof s.value === "boolean") return s.value ? "true" : "false";
   return String(s.value);
 }
@@ -291,7 +309,7 @@ export function PlatformSettingsPage() {
               onClick={() => setDraft(s.key, [])}
               title="Empty the table so Save restores the environment default (QUERY_DB_DSNS)"
             >
-              Clear override
+              {t("settingsPage.clearOverride")}
             </Button>
             <p className="text-xs text-muted-foreground">
               DSNs may carry database passwords — the current value is never
@@ -313,7 +331,7 @@ export function PlatformSettingsPage() {
               onClick={() => setMcpDraft([])}
               title="Empty the table so Save restores the environment default (MCP_SERVERS)"
             >
-              Clear override
+              {t("settingsPage.clearOverride")}
             </Button>
             <p className="text-xs text-muted-foreground">
               Current value is never loaded back (secret). An untouched editor
@@ -471,11 +489,11 @@ export function PlatformSettingsPage() {
   return (
     <>
       <PageHeader
-        title="Platform settings"
-        description="Runtime configuration — changes apply immediately, no restart. Saving an empty value restores the environment default."
+        title={t("settingsPage.title")}
+        description={t("settingsPage.description")}
       />
       {error && <ErrorNotice message={error} />}
-      <AsyncSection state={state} loadingLabel="Loading settings">
+      <AsyncSection state={state} loadingLabel={t("settingsPage.loading")}>
         {() => {
           const permValues = Object.fromEntries(
             PERMISSION_ROWS.map((r) => [
@@ -486,25 +504,23 @@ export function PlatformSettingsPage() {
           return (
             <Tabs defaultValue="tools">
               <TabsList variant="line">
-                {GROUPS.map((g) => (
-                  <TabsTrigger key={g.id} value={g.id}>
-                    {g.label}
+                {GROUP_IDS.map((id) => (
+                  <TabsTrigger key={id} value={id}>
+                    {t(GROUP_LABELS[id])}
                   </TabsTrigger>
                 ))}
               </TabsList>
-              {GROUPS.map((g) => (
-                <TabsContent key={g.id} value={g.id}>
+              {GROUP_IDS.map((id) => (
+                <TabsContent key={id} value={id}>
                   <div className="grid gap-4">
-                    {g.id === "permissions" ? (
+                    {id === "permissions" ? (
                       <Card>
                         <CardHeader>
                           <CardTitle className="text-sm">
-                            Execution-permission policy
+                            {t("settingsPage.permissionTitle")}
                           </CardTitle>
                           <CardDescription>
-                            One matrix for every tool risk class — click a
-                            verdict to apply it immediately. "ask" suspends the
-                            run for approval (headless runs treat it as deny).
+                            {t("settingsPage.permissionDescription")}
                           </CardDescription>
                         </CardHeader>
                         <CardContent>
@@ -515,7 +531,7 @@ export function PlatformSettingsPage() {
                         </CardContent>
                       </Card>
                     ) : (
-                      byGroup(g.id).map((s) => (
+                      byGroup(id).map((s) => (
                         <Card key={s.key}>
                           <CardHeader>
                             <CardTitle className="font-mono text-sm">
@@ -527,7 +543,7 @@ export function PlatformSettingsPage() {
                             <div className="flex items-end gap-3">
                               <div className="flex-1 space-y-1.5">
                                 <Label htmlFor={`setting-${s.key}`}>
-                                  Current value:{" "}
+                                  {t("settingsPage.currentValue")}{" "}
                                   <span className="font-mono text-muted-foreground">
                                     {displayValue(s)}
                                   </span>
@@ -538,17 +554,17 @@ export function PlatformSettingsPage() {
                                 disabled={busy === s.key}
                                 onClick={() => save(s)}
                               >
-                                {busy === s.key ? "Saving…" : <><Save /> Save</>}
+                                {busy === s.key ? t("settingsPage.saving") : <><Save /> {t("settingsPage.save")}</>}
                               </Button>
                             </div>
                             {saved === s.key && (
                               <p className="text-sm text-muted-foreground">
-                                Applied — no restart needed.
+                                {t("settingsPage.applied")}
                               </p>
                             )}
                             {notice === s.key && (
                               <p className="text-sm text-muted-foreground">
-                                Nothing to change.
+                                {t("settingsPage.nothingToChange")}
                               </p>
                             )}
                           </CardContent>

@@ -101,7 +101,66 @@ export type I18nKey =
   | "admin.settings"
   | "admin.backToChat"
   | "lang.switchToZh"
-  | "lang.switchToEn";
+  | "lang.switchToEn"
+  | "settingsPage.title"
+  | "settingsPage.description"
+  | "settingsPage.group.tools"
+  | "settingsPage.group.webhooks"
+  | "settingsPage.group.llm"
+  | "settingsPage.group.sandbox"
+  | "settingsPage.group.permissions"
+  | "settingsPage.group.redaction"
+  | "settingsPage.group.subagents"
+  | "settingsPage.group.background"
+  | "settingsPage.group.http"
+  | "settingsPage.group.auth"
+  | "settingsPage.group.integrations"
+  | "settingsPage.clearOverride"
+  | "settingsPage.permissionTitle"
+  | "settingsPage.permissionDescription"
+  | "settingsPage.currentValue"
+  | "settingsPage.save"
+  | "settingsPage.saving"
+  | "settingsPage.applied"
+  | "settingsPage.nothingToChange"
+  | "settingsPage.loading"
+  | "settingsPage.notSet"
+  | "settingsPage.secretSet"
+  | "usersPage.title"
+  | "usersPage.description"
+  | "usersPage.searchPlaceholder"
+  | "usersPage.search"
+  | "usersPage.loading"
+  | "usersPage.colAccount"
+  | "usersPage.colRole"
+  | "usersPage.colEnabled"
+  | "usersPage.colJoined"
+  | "usersPage.noAccounts"
+  | "usersPage.range"
+  | "usersPage.previous"
+  | "usersPage.next"
+  | "usersPage.you"
+  | "usersPage.roleUser"
+  | "usersPage.roleAdmin"
+  | "usersPage.roleAria"
+  | "usersPage.enableAria"
+  | "usersPage.deleteAccount"
+  | "usersPage.deleteTitle"
+  | "usersPage.deleteDescription"
+  | "usersPage.resetTitle"
+  | "usersPage.resetDescription"
+  | "usersPage.newPassword"
+  | "usersPage.minLength"
+  | "usersPage.reset"
+  | "usersPage.newAccount"
+  | "usersPage.createTitle"
+  | "usersPage.createDescription"
+  | "usersPage.email"
+  | "usersPage.displayName"
+  | "usersPage.namePlaceholder"
+  | "usersPage.initialPassword"
+  | "usersPage.creating"
+  | "usersPage.create";
 
 const zh: Record<I18nKey, string> = {
   "login.title": "登录",
@@ -193,6 +252,65 @@ const zh: Record<I18nKey, string> = {
   "admin.backToChat": "返回聊天",
   "lang.switchToZh": "切换为中文",
   "lang.switchToEn": "Switch to English",
+  "settingsPage.title": "平台设置",
+  "settingsPage.description": "运行时配置 — 更改立即生效,无需重启。保存空值会恢复环境默认值。",
+  "settingsPage.group.tools": "工具",
+  "settingsPage.group.webhooks": "Webhooks",
+  "settingsPage.group.llm": "LLM / 模型",
+  "settingsPage.group.sandbox": "沙箱",
+  "settingsPage.group.permissions": "权限",
+  "settingsPage.group.redaction": "脱敏",
+  "settingsPage.group.subagents": "子代理",
+  "settingsPage.group.background": "后台任务",
+  "settingsPage.group.http": "HTTP / 网关",
+  "settingsPage.group.auth": "认证 / SSO",
+  "settingsPage.group.integrations": "集成",
+  "settingsPage.clearOverride": "清除覆盖值",
+  "settingsPage.permissionTitle": "执行权限策略",
+  "settingsPage.permissionDescription": "为每个工具风险级别配置一个矩阵 — 点击判定立即生效。「ask」会挂起运行等待审批(无头运行视作拒绝)。",
+  "settingsPage.currentValue": "当前值:",
+  "settingsPage.save": "保存",
+  "settingsPage.saving": "保存中…",
+  "settingsPage.applied": "已生效 — 无需重启。",
+  "settingsPage.nothingToChange": "没有需要更改的内容。",
+  "settingsPage.loading": "正在加载设置",
+  "settingsPage.notSet": "(未设置)",
+  "settingsPage.secretSet": "(已设置 — 已隐藏)",
+  "usersPage.title": "用户",
+  "usersPage.description": "平台上的所有账号。禁用账号会立即吊销其令牌;删除账号会移除其会话与成员关系。",
+  "usersPage.searchPlaceholder": "按邮箱或显示名称搜索",
+  "usersPage.search": "搜索",
+  "usersPage.loading": "正在加载账号",
+  "usersPage.colAccount": "账号",
+  "usersPage.colRole": "平台角色",
+  "usersPage.colEnabled": "启用",
+  "usersPage.colJoined": "加入时间",
+  "usersPage.noAccounts": "没有匹配的账号。",
+  "usersPage.range": "{from}–{to} / 共 {total}",
+  "usersPage.previous": "上一页",
+  "usersPage.next": "下一页",
+  "usersPage.you": "你",
+  "usersPage.roleUser": "用户",
+  "usersPage.roleAdmin": "管理员",
+  "usersPage.roleAria": "{email} 的平台角色",
+  "usersPage.enableAria": "启用 {email}",
+  "usersPage.deleteAccount": "删除账号",
+  "usersPage.deleteTitle": "删除 {email}?",
+  "usersPage.deleteDescription": "该账号及其会话、对话和成员关系将被永久删除。禁用则保留数据并阻止登录。",
+  "usersPage.resetTitle": "重置密码",
+  "usersPage.resetDescription": "为 {email} 设置新密码,并注销其所有设备。请通过可信渠道告知新密码。",
+  "usersPage.newPassword": "新密码",
+  "usersPage.minLength": "至少 8 个字符。",
+  "usersPage.reset": "重置",
+  "usersPage.newAccount": "新建账号",
+  "usersPage.createTitle": "创建账号",
+  "usersPage.createDescription": "没有邀请邮件 — 请自行设置初始密码并转告对方。持有者可在个人资料中修改密码。",
+  "usersPage.email": "邮箱",
+  "usersPage.displayName": "显示名称",
+  "usersPage.namePlaceholder": "默认为邮箱地址",
+  "usersPage.initialPassword": "初始密码",
+  "usersPage.creating": "创建中…",
+  "usersPage.create": "创建",
 };
 
 const en: Record<I18nKey, string> = {
@@ -285,6 +403,65 @@ const en: Record<I18nKey, string> = {
   "admin.backToChat": "Back to chat",
   "lang.switchToZh": "切换到中文",
   "lang.switchToEn": "Switch to English",
+  "settingsPage.title": "Platform settings",
+  "settingsPage.description": "Runtime configuration — changes apply immediately, no restart. Saving an empty value restores the environment default.",
+  "settingsPage.group.tools": "Tools",
+  "settingsPage.group.webhooks": "Webhooks",
+  "settingsPage.group.llm": "LLM / model",
+  "settingsPage.group.sandbox": "Sandbox",
+  "settingsPage.group.permissions": "Permissions",
+  "settingsPage.group.redaction": "Redaction",
+  "settingsPage.group.subagents": "Subagents",
+  "settingsPage.group.background": "Background tasks",
+  "settingsPage.group.http": "HTTP / gateway",
+  "settingsPage.group.auth": "Auth / SSO",
+  "settingsPage.group.integrations": "Integrations",
+  "settingsPage.clearOverride": "Clear override",
+  "settingsPage.permissionTitle": "Execution-permission policy",
+  "settingsPage.permissionDescription": "One matrix for every tool risk class — click a verdict to apply it immediately. \"ask\" suspends the run for approval (headless runs treat it as deny).",
+  "settingsPage.currentValue": "Current value:",
+  "settingsPage.save": "Save",
+  "settingsPage.saving": "Saving…",
+  "settingsPage.applied": "Applied — no restart needed.",
+  "settingsPage.nothingToChange": "Nothing to change.",
+  "settingsPage.loading": "Loading settings",
+  "settingsPage.notSet": "(not set)",
+  "settingsPage.secretSet": "(set — hidden)",
+  "usersPage.title": "Users",
+  "usersPage.description": "Every account on the platform. Disabling an account revokes its tokens immediately; deleting one removes its sessions and memberships.",
+  "usersPage.searchPlaceholder": "Search by email or display name",
+  "usersPage.search": "Search",
+  "usersPage.loading": "Loading accounts",
+  "usersPage.colAccount": "Account",
+  "usersPage.colRole": "Platform role",
+  "usersPage.colEnabled": "Enabled",
+  "usersPage.colJoined": "Joined",
+  "usersPage.noAccounts": "No accounts match.",
+  "usersPage.range": "{from}–{to} of {total}",
+  "usersPage.previous": "Previous",
+  "usersPage.next": "Next",
+  "usersPage.you": "You",
+  "usersPage.roleUser": "User",
+  "usersPage.roleAdmin": "Administrator",
+  "usersPage.roleAria": "Platform role for {email}",
+  "usersPage.enableAria": "Enable {email}",
+  "usersPage.deleteAccount": "Delete account",
+  "usersPage.deleteTitle": "Delete {email}?",
+  "usersPage.deleteDescription": "The account, its sessions, conversations, and memberships are removed permanently. Disabling instead keeps the data and blocks sign-in.",
+  "usersPage.resetTitle": "Reset password",
+  "usersPage.resetDescription": "Sets a new password for {email} and signs out every device they have. Tell them the new password over a channel you trust.",
+  "usersPage.newPassword": "New password",
+  "usersPage.minLength": "At least 8 characters.",
+  "usersPage.reset": "Reset",
+  "usersPage.newAccount": "New account",
+  "usersPage.createTitle": "Create an account",
+  "usersPage.createDescription": "There is no invitation email — set an initial password and pass it on yourself. The holder can change it from their profile.",
+  "usersPage.email": "Email",
+  "usersPage.displayName": "Display name",
+  "usersPage.namePlaceholder": "Defaults to the email address",
+  "usersPage.initialPassword": "Initial password",
+  "usersPage.creating": "Creating…",
+  "usersPage.create": "Create",
 };
 
 // lang resolves the UI language once: a stored choice (nowhere.lang) wins,

@@ -46,6 +46,7 @@ import {
   type User,
 } from "@/lib/admin";
 import { useConsoleMe } from "@/components/admin/AdminLayout";
+import { t } from "@/lib/i18n";
 import {
   AsyncSection,
   ErrorNotice,
@@ -97,8 +98,8 @@ export function PlatformUsersPage() {
   return (
     <>
       <PageHeader
-        title="Users"
-        description="Every account on the platform. Disabling an account revokes its tokens immediately; deleting one removes its sessions and memberships."
+        title={t("usersPage.title")}
+        description={t("usersPage.description")}
         actions={<CreateUserDialog onCreated={state.reload} />}
       />
 
@@ -106,26 +107,26 @@ export function PlatformUsersPage() {
         <Input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search by email or display name"
+          placeholder={t("usersPage.searchPlaceholder")}
           className="max-w-sm"
         />
         <Button type="submit" variant="outline" size="sm">
           <Search />
-          Search
+          {t("usersPage.search")}
         </Button>
       </form>
 
       {error && <ErrorNotice message={error} />}
-      <AsyncSection state={state} loadingLabel="Loading accounts">
+      <AsyncSection state={state} loadingLabel={t("usersPage.loading")}>
         {(data) => (
           <div className="space-y-4">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Account</TableHead>
-                  <TableHead className="w-40">Platform role</TableHead>
-                  <TableHead className="w-28">Enabled</TableHead>
-                  <TableHead className="w-28">Joined</TableHead>
+                  <TableHead>{t("usersPage.colAccount")}</TableHead>
+                  <TableHead className="w-40">{t("usersPage.colRole")}</TableHead>
+                  <TableHead className="w-28">{t("usersPage.colEnabled")}</TableHead>
+                  <TableHead className="w-28">{t("usersPage.colJoined")}</TableHead>
                   <TableHead className="w-32" />
                 </TableRow>
               </TableHeader>
@@ -144,8 +145,12 @@ export function PlatformUsersPage() {
             <div className="flex items-center justify-between text-sm text-muted-foreground">
               <span>
                 {data.total === 0
-                  ? "No accounts match."
-                  : `${offset + 1}–${Math.min(offset + PAGE_SIZE, data.total)} of ${data.total}`}
+                  ? t("usersPage.noAccounts")
+                  : t("usersPage.range", {
+                      from: offset + 1,
+                      to: Math.min(offset + PAGE_SIZE, data.total),
+                      total: data.total,
+                    })}
               </span>
               <div className="flex gap-2">
                 <Button
@@ -154,7 +159,7 @@ export function PlatformUsersPage() {
                   disabled={offset === 0}
                   onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
                 >
-                  Previous
+                  {t("usersPage.previous")}
                 </Button>
                 <Button
                   variant="outline"
@@ -162,7 +167,7 @@ export function PlatformUsersPage() {
                   disabled={offset + PAGE_SIZE >= data.total}
                   onClick={() => setOffset(offset + PAGE_SIZE)}
                 >
-                  Next
+                  {t("usersPage.next")}
                 </Button>
               </div>
             </div>
@@ -189,7 +194,7 @@ function UserRow({
           {user.display_name || user.email}
           {isSelf && (
             <Badge variant="secondary" className="ml-2">
-              You
+              {t("usersPage.you")}
             </Badge>
           )}
         </div>
@@ -213,10 +218,10 @@ function UserRow({
                 }),
               )
             }
-            aria-label={`Platform role for ${user.email}`}
+            aria-label={t("usersPage.roleAria", { email: user.email })}
           >
-            <NativeSelectOption value="user">User</NativeSelectOption>
-            <NativeSelectOption value="admin">Administrator</NativeSelectOption>
+            <NativeSelectOption value="user">{t("usersPage.roleUser")}</NativeSelectOption>
+            <NativeSelectOption value="admin">{t("usersPage.roleAdmin")}</NativeSelectOption>
           </NativeSelect>
         )}
       </TableCell>
@@ -227,7 +232,7 @@ function UserRow({
           onCheckedChange={(checked: boolean) =>
             onAct(() => patchUser(user.id, { disabled: !checked }))
           }
-          aria-label={`Enable ${user.email}`}
+          aria-label={t("usersPage.enableAria", { email: user.email })}
         />
       </TableCell>
       <TableCell className="text-sm text-muted-foreground">
@@ -238,12 +243,12 @@ function UserRow({
           <ResetPasswordDialog user={user} onAct={onAct} />
           {!isSelf && (
             <ConfirmButton
-              title={`Delete ${user.email}?`}
-              description="The account, its sessions, conversations, and memberships are removed permanently. Disabling instead keeps the data and blocks sign-in."
-              confirmLabel="Delete account"
+              title={t("usersPage.deleteTitle", { email: user.email })}
+              description={t("usersPage.deleteDescription")}
+              confirmLabel={t("usersPage.deleteAccount")}
               onConfirm={() => onAct(() => deleteUser(user.id))}
               trigger={
-                <Button variant="ghost" size="icon-sm" aria-label="Delete account">
+                <Button variant="ghost" size="icon-sm" aria-label={t("usersPage.deleteAccount")}>
                   <Trash2 />
                 </Button>
               }
@@ -269,7 +274,7 @@ function ResetPasswordDialog({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button variant="ghost" size="icon-sm" aria-label="Reset password">
+          <Button variant="ghost" size="icon-sm" aria-label={t("usersPage.resetTitle")}>
             <KeyRound />
           </Button>
         }
@@ -284,14 +289,13 @@ function ResetPasswordDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>Reset password</DialogTitle>
+            <DialogTitle>{t("usersPage.resetTitle")}</DialogTitle>
             <DialogDescription>
-              Sets a new password for {user.email} and signs out every device
-              they have. Tell them the new password over a channel you trust.
+              {t("usersPage.resetDescription", { email: user.email })}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-1.5 py-4">
-            <Label htmlFor="reset-pw">New password</Label>
+            <Label htmlFor="reset-pw">{t("usersPage.newPassword")}</Label>
             <Input
               id="reset-pw"
               value={password}
@@ -299,11 +303,11 @@ function ResetPasswordDialog({
               autoComplete="off"
               autoFocus
             />
-            <p className="text-xs text-muted-foreground">At least 8 characters.</p>
+            <p className="text-xs text-muted-foreground">{t("usersPage.minLength")}</p>
           </div>
           <DialogFooter>
             <Button type="submit" disabled={password.length < 8}>
-              Reset
+              {t("usersPage.reset")}
             </Button>
           </DialogFooter>
         </form>
@@ -348,22 +352,19 @@ function CreateUserDialog({ onCreated }: { onCreated: () => void }) {
         render={
           <Button size="sm">
             <Plus />
-            New account
+            {t("usersPage.newAccount")}
           </Button>
         }
       />
       <DialogContent>
         <form onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>Create an account</DialogTitle>
-            <DialogDescription>
-              There is no invitation email — set an initial password and pass it
-              on yourself. The holder can change it from their profile.
-            </DialogDescription>
+            <DialogTitle>{t("usersPage.createTitle")}</DialogTitle>
+            <DialogDescription>{t("usersPage.createDescription")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="new-email">Email</Label>
+              <Label htmlFor="new-email">{t("usersPage.email")}</Label>
               <Input
                 id="new-email"
                 type="email"
@@ -373,29 +374,29 @@ function CreateUserDialog({ onCreated }: { onCreated: () => void }) {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="new-name">Display name</Label>
+              <Label htmlFor="new-name">{t("usersPage.displayName")}</Label>
               <Input
                 id="new-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="Defaults to the email address"
+                placeholder={t("usersPage.namePlaceholder")}
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="new-password">Initial password</Label>
+              <Label htmlFor="new-password">{t("usersPage.initialPassword")}</Label>
               <Input
                 id="new-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="off"
               />
-              <p className="text-xs text-muted-foreground">At least 8 characters.</p>
+              <p className="text-xs text-muted-foreground">{t("usersPage.minLength")}</p>
             </div>
           </div>
           {error && <ErrorNotice message={error} />}
           <DialogFooter>
             <Button type="submit" disabled={busy || !email.trim() || password.length < 8}>
-              {busy ? "Creating…" : "Create"}
+              {busy ? t("usersPage.creating") : t("usersPage.create")}
             </Button>
           </DialogFooter>
         </form>
