@@ -246,7 +246,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		if h.throttle != nil {
 			h.throttle.Fail(req.Email, audit.ClientIP(r))
 		}
-		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).Detail(map[string]any{"reason": "account_disabled"}))
+		h.record(audit.Failure(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).Detail(map[string]any{"email": req.Email, "reason": "account_disabled"}))
 		writeError(w, http.StatusForbidden, "account is disabled")
 		return
 	}
