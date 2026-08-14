@@ -180,6 +180,136 @@ func totpHandler(t *testing.T, accounts *stubAccounts) *Handler {
 	return h
 }
 
+// pkceProvider builds a Provider with the flow's PKCE enabled.
+func pkceProvider(t *testing.T, f *fakeIdP) *Provider {
+	t.Helper()
+	p, err := NewProvider(context.Background(), Config{
+		Issuer:      f.issuer(),
+		ClientID:    "test-client",
+		RedirectURL: "http://localhost:8080/auth/oidc/callback",
+		PKCE:        true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	return p
+}
+
+func TestLoginPKCEAttachesChallengeAndVerifierCookie(t *testing.T) {
+	f := newFakeIdP(t)
+	h := NewHandler(pkceProvider(t, f), &stubAccounts{}, func(context.Context, identity.User) (string, error) { return "tok", nil })
+
+	// Drive ONE login and collect the redirect location plus both cookies the
+	// way a browser would receive them.
+	rec := httptest.NewRecorder()
+	h.login(rec, httptest.NewRequest(http.MethodGet, "/auth/oidc/login", nil))
+	res := rec.Result()
+	loc := res.Header.Get("Location")
+	var stateCookie, pkceCookie *http.Cookie
+	for _, c := range res.Cookies() {
+		switch c.Name {
+		case stateCookieName:
+			stateCookie = c
+		case pkceCookieName:
+			pkceCookie = c
+		}
+	}
+	if stateCookie == nil {
+		t.Fatal("login must set the state cookie")
+	}
+	if !strings.Contains(loc, "code_challenge=") || !strings.Contains(loc, "code_challenge_method=S256") {
+		t.Fatalf("PKCE login redirect must carry the S256 challenge, got %q", loc)
+	}
+	if pkceCookie == nil {
+		t.Fatal("PKCE login must set a verifier cookie")
+	}
+	if !pkceCookie.HttpOnly {
+		t.Fatal("verifier cookie must be HttpOnly")
+	}
+	if pkceCookie.MaxAge != stateCookie.MaxAge {
+		t.Fatalf("verifier cookie MaxAge %d must match the state cookie's %d", pkceCookie.MaxAge, stateCookie.MaxAge)
+	}
+	// The redirect's challenge must be the S256 derivation of the cookie's
+	// verifier — the exchange the callback performs can only match if the
+	// two halves of the flow are bound to each other.
+	if !strings.Contains(loc, "code_challenge="+verifierChallenge(pkceCookie.Value)) {
+		t.Fatalf("redirect challenge must derive from the verifier cookie, got %q", loc)
+	}
+}
+
+func TestLoginDefaultHasNoPKCE(t *testing.T) {
+	f := newFakeIdP(t)
+	h := NewHandler(newProviderFor(t, f), &stubAccounts{}, func(context.Context, identity.User) (string, error) { return "tok", nil })
+	loc, _ := startLogin(t, h)
+	if strings.Contains(loc, "code_challenge") || strings.Contains(loc, "code_challenge_method") {
+		t.Fatalf("default login must carry no PKCE params, got %q", loc)
+	}
+}
+
+func TestCallbackPKCEMissingVerifierCookieRefused(t *testing.T) {
+	f := newFakeIdP(t)
+	f.lastSub = "carol"
+	h := NewHandler(pkceProvider(t, f), &stubAccounts{user: identity.User{ID: "u-1"}}, func(context.Context, identity.User) (string, error) { return "tok", nil })
+
+	// Drive a real login (mints the state cookie), then call back WITHOUT the
+	// verifier cookie — the state alone must not be enough on a PKCE flow.
+	_, cookie := startLogin(t, h)
+	req := httptest.NewRequest(http.MethodGet, "/auth/oidc/callback?state="+cookie.Value+"&code=good", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.callback(rec, req)
+	loc := rec.Result().Header.Get("Location")
+	if !strings.Contains(loc, "#sso_error=") {
+		t.Fatalf("missing verifier cookie must be refused, got %q", loc)
+	}
+	if strings.Contains(loc, "#token=") {
+		t.Fatal("missing verifier cookie must never issue a token")
+	}
+}
+
+func TestCallbackPKCESuccessWithVerifierCookie(t *testing.T) {
+	f := newFakeIdP(t)
+	f.lastSub = "carol"
+	accounts := &stubAccounts{user: identity.User{ID: "u-1", Email: "carol@corp.test"}}
+	h := NewHandler(pkceProvider(t, f), accounts, func(context.Context, identity.User) (string, error) { return "tok", nil })
+
+	// Drive the login and collect BOTH cookies the way the browser would.
+	rec := httptest.NewRecorder()
+	h.login(rec, httptest.NewRequest(http.MethodGet, "/auth/oidc/login", nil))
+	var stateCookie, pkceCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		switch c.Name {
+		case stateCookieName:
+			stateCookie = c
+		case pkceCookieName:
+			pkceCookie = c
+		}
+	}
+	if stateCookie == nil || pkceCookie == nil {
+		t.Fatal("login must set both cookies on a PKCE flow")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/oidc/callback?state="+stateCookie.Value+"&code=good", nil)
+	req.AddCookie(stateCookie)
+	req.AddCookie(pkceCookie)
+	rec2 := httptest.NewRecorder()
+	h.callback(rec2, req)
+	loc := rec2.Result().Header.Get("Location")
+	if !strings.Contains(loc, "#token=") {
+		t.Fatalf("PKCE callback with both cookies must succeed, got %q", loc)
+	}
+	if accounts.gotSubject != "carol" {
+		t.Fatalf("provisioned from wrong claims: %+v", accounts)
+	}
+	// The verifier cookie is single-use like the state cookie: cleared after
+	// the callback.
+	for _, c := range rec2.Result().Cookies() {
+		if c.Name == pkceCookieName && c.MaxAge >= 0 && c.Value != "" {
+			t.Fatal("verifier cookie must be cleared after the callback")
+		}
+	}
+}
+
 func TestCallbackTotpUsesRelativeRedirectURI(t *testing.T) {
 	accounts := &stubAccounts{user: identity.User{ID: "u-3", Email: "eve@corp.test"}}
 	h := totpHandler(t, accounts)

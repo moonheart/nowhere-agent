@@ -17,6 +17,12 @@ import (
 // blocking cross-site POSTs.
 const stateCookieName = "nowhere_oidc_state"
 
+// pkceCookieName carries the RFC 7636 code_verifier from the login redirect to
+// the callback, with the same attributes and lifetime as the state cookie (a
+// PKCE flow is useless without its verifier, so they must expire together).
+// Only set when the provider has PKCE enabled; the default flow has no cookie.
+const pkceCookieName = "nowhere_oidc_pkce"
+
 // AccountProvisioner resolves or creates the platform account for a verified
 // external identity and reports whether it may sign in. *identity.Store's
 // ProvisionExternalUser satisfies the resolution half; the disabled check is
@@ -102,15 +108,16 @@ func EnabledProbe() http.HandlerFunc {
 	}
 }
 
-// login starts the flow: mint a state, stash it in a cookie, and redirect the
-// browser to the IdP's authorization endpoint.
+// login starts the flow: mint a state (and, with PKCE enabled, a code
+// verifier), stash them in HttpOnly cookies, and redirect the browser to the
+// IdP's authorization endpoint.
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	state, err := NewState()
 	if err != nil {
 		http.Error(w, "sso unavailable", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
+	cookie := &http.Cookie{
 		Name:     stateCookieName,
 		Value:    state,
 		Path:     "/auth/oidc",
@@ -119,7 +126,29 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int((10 * time.Minute).Seconds()),
 		Expires:  h.now().Add(10 * time.Minute),
-	})
+	}
+	http.SetCookie(w, cookie)
+	var verifier string
+	if h.provider.PKCEEnabled() {
+		// PKCE (OIDC_PKCE): mint the verifier and bind it to this flow with the
+		// same attributes/lifetime as the state cookie. The callback requires
+		// both cookies, so a stolen code without the verifier (or vice versa)
+		// cannot be redeemed — the IdP ties the exchange to the challenge we
+		// sent with the authorization request.
+		verifier, err = NewVerifier()
+		if err != nil {
+			http.Error(w, "sso unavailable", http.StatusInternalServerError)
+			return
+		}
+		vc := *cookie
+		vc.Name = pkceCookieName
+		vc.Value = verifier
+		http.SetCookie(w, &vc)
+	}
+	if verifier != "" {
+		http.Redirect(w, r, h.provider.AuthURLPKCE(state, verifier), http.StatusFound)
+		return
+	}
 	http.Redirect(w, r, h.provider.AuthURL(state), http.StatusFound)
 }
 
@@ -148,13 +177,32 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	// Single-use: clear the state cookie so it cannot be replayed.
 	http.SetCookie(w, &http.Cookie{Name: stateCookieName, Value: "", Path: "/auth/oidc", MaxAge: -1})
 
+	// PKCE flows require the verifier cookie too: it is set together with the
+	// state cookie and expires with it, so a missing/empty value is the same
+	// forged-or-stale callback as a state mismatch.
+	var verifier string
+	if h.provider.PKCEEnabled() {
+		pc, err := r.Cookie(pkceCookieName)
+		if err != nil || pc.Value == "" {
+			h.redirectError(w, r, "invalid or expired sso state")
+			return
+		}
+		verifier = pc.Value
+	}
+	http.SetCookie(w, &http.Cookie{Name: pkceCookieName, Value: "", Path: "/auth/oidc", MaxAge: -1})
+
 	code := q.Get("code")
 	if code == "" {
 		h.redirectError(w, r, "missing authorization code")
 		return
 	}
 
-	claims, err := h.provider.Exchange(r.Context(), code)
+	var claims Claims
+	if verifier != "" {
+		claims, err = h.provider.ExchangePKCE(r.Context(), code, verifier)
+	} else {
+		claims, err = h.provider.Exchange(r.Context(), code)
+	}
 	if err != nil {
 		h.redirectError(w, r, "sso exchange failed")
 		return

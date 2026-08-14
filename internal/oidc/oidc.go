@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -74,6 +75,9 @@ type Provider struct {
 	authEndpoint string
 	tokenURL     string
 	jwksURI      string
+	// pkce makes the flow attach an RFC 7636 S256 challenge to the
+	// authorization request and a code_verifier to the exchange.
+	pkce bool
 
 	httpClient *http.Client
 
@@ -89,6 +93,9 @@ type Config struct {
 	ClientSecret string
 	RedirectURL  string
 	Scopes       []string
+	// PKCE enables RFC 7636 proof-of-key exchange on the flow (S256). Off by
+	// default for IdP compatibility; see config.OIDC.PKCE.
+	PKCE bool
 }
 
 // NewProvider discovers the IdP from its issuer and builds a Provider. It makes
@@ -130,6 +137,7 @@ func NewProvider(ctx context.Context, cfg Config, httpClient *http.Client) (*Pro
 		authEndpoint: disco.AuthorizationEndpoint,
 		tokenURL:     disco.TokenEndpoint,
 		jwksURI:      disco.JWKSURI,
+		pkce:         cfg.PKCE,
 		httpClient:   httpClient,
 		keys:         make(map[string]*rsa.PublicKey),
 		oauth2: oauth2.Config{
@@ -155,17 +163,40 @@ func (p *Provider) AuthURL(state string) string {
 	return p.oauth2.AuthCodeURL(state)
 }
 
+// AuthURLPKCE builds the authorization URL for a PKCE flow: it adds the RFC
+// 7636 S256 challenge derived from verifier (code_challenge +
+// code_challenge_method). Only the handler's PKCE-enabled login path calls it.
+func (p *Provider) AuthURLPKCE(state, verifier string) string {
+	return p.oauth2.AuthCodeURL(state,
+		oauth2.SetAuthURLParam("code_challenge", verifierChallenge(verifier)),
+		oauth2.SetAuthURLParam("code_challenge_method", "S256"))
+}
+
+// PKCEEnabled reports whether this provider's flow carries PKCE.
+func (p *Provider) PKCEEnabled() bool { return p.pkce }
+
 // Exchange trades an authorization code for tokens and verifies the id_token,
 // returning the asserted identity. This is the security core: the code is
 // redeemed server-side (never exposed to the browser beyond the redirect), and
 // the id_token's signature, issuer, audience, and expiry are all validated
 // before any claim is trusted.
 func (p *Provider) Exchange(ctx context.Context, code string) (Claims, error) {
+	return p.exchange(ctx, code)
+}
+
+// ExchangePKCE is Exchange for a PKCE flow: it additionally sends the
+// code_verifier the authorization request's challenge was derived from. The
+// IdP proves the code was redeemed by the same party that started the flow.
+func (p *Provider) ExchangePKCE(ctx context.Context, code, verifier string) (Claims, error) {
+	return p.exchange(ctx, code, oauth2.SetAuthURLParam("code_verifier", verifier))
+}
+
+func (p *Provider) exchange(ctx context.Context, code string, opts ...oauth2.AuthCodeOption) (Claims, error) {
 	// The oauth2 package would otherwise use http.DefaultClient with no
 	// timeout; route the token-endpoint call through the same bounded client
 	// as discovery/JWKS so a hung IdP cannot block the login handler forever.
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, p.httpClient)
-	tok, err := p.oauth2.Exchange(ctx, code)
+	tok, err := p.oauth2.Exchange(ctx, code, opts...)
 	if err != nil {
 		return Claims{}, fmt.Errorf("oidc: exchange code: %w", err)
 	}
@@ -174,6 +205,25 @@ func (p *Provider) Exchange(ctx context.Context, code string) (Claims, error) {
 		return Claims{}, errors.New("oidc: no id_token in token response")
 	}
 	return p.verifyIDToken(ctx, raw)
+}
+
+// NewVerifier returns a fresh RFC 7636 PKCE verifier: 32 random bytes,
+// base64url-encoded without padding — the spec's 43-char form (between 43 and
+// 128 chars). The handler stores it in an HttpOnly cookie alongside the state
+// so the callback can present it at the exchange.
+func NewVerifier() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("oidc: rand verifier: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// verifierChallenge derives the RFC 7636 S256 code_challenge for a verifier:
+// base64url(sha256(verifier)) without padding.
+func verifierChallenge(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // verifyIDToken validates the id_token's RS256 signature against the IdP's JWKS

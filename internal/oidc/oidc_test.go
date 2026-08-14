@@ -255,3 +255,70 @@ func TestAuthURLCarriesStateAndClient(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthURLDefaultHasNoPKCE(t *testing.T) {
+	f := newFakeIdP(t)
+	p := newProviderFor(t, f)
+	u := p.AuthURL("state-123")
+	if strings.Contains(u, "code_challenge") || strings.Contains(u, "code_verifier") {
+		t.Fatalf("default auth url must carry no PKCE params, got %q", u)
+	}
+	if p.PKCEEnabled() {
+		t.Fatal("default provider must not report PKCE enabled")
+	}
+}
+
+func TestAuthURLPKCECarriesS256Challenge(t *testing.T) {
+	f := newFakeIdP(t)
+	p, err := NewProvider(context.Background(), Config{
+		Issuer:      f.issuer(),
+		ClientID:    "test-client",
+		RedirectURL: "http://localhost:8080/auth/oidc/callback",
+		PKCE:        true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if !p.PKCEEnabled() {
+		t.Fatal("PKCE-enabled provider must report PKCE enabled")
+	}
+	verifier, err := NewVerifier()
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	if len(verifier) < 43 || len(verifier) > 128 {
+		t.Fatalf("verifier length = %d, want RFC 7636 43..128", len(verifier))
+	}
+	u := p.AuthURLPKCE("state-123", verifier)
+	if !strings.Contains(u, "code_challenge="+verifierChallenge(verifier)) {
+		t.Fatalf("auth url must carry the S256 challenge of the verifier, got %q", u)
+	}
+	if !strings.Contains(u, "code_challenge_method=S256") {
+		t.Fatalf("auth url must declare code_challenge_method=S256, got %q", u)
+	}
+}
+
+func TestExchangePKCEYieldsVerifiedClaims(t *testing.T) {
+	f := newFakeIdP(t)
+	f.lastSub = "alice"
+	p, err := NewProvider(context.Background(), Config{
+		Issuer:      f.issuer(),
+		ClientID:    "test-client",
+		RedirectURL: "http://localhost:8080/auth/oidc/callback",
+		PKCE:        true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	verifier, err := NewVerifier()
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	claims, err := p.ExchangePKCE(context.Background(), "any-code", verifier)
+	if err != nil {
+		t.Fatalf("ExchangePKCE: %v", err)
+	}
+	if claims.Subject != "alice" || claims.Issuer != f.issuer() {
+		t.Fatalf("claims = %+v", claims)
+	}
+}

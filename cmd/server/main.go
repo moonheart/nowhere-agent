@@ -308,6 +308,7 @@ func run() error {
 			ClientSecret: cfg.OIDC.ClientSecret,
 			RedirectURL:  cfg.OIDC.RedirectURL,
 			Scopes:       strings.Split(cfg.OIDC.Scopes, " "),
+			PKCE:         cfg.OIDC.PKCE,
 		}, nil)
 		if err != nil {
 			return fmt.Errorf("oidc sso: %w", err)
@@ -337,7 +338,7 @@ func run() error {
 			WithAudit(auditLogger)
 		oidcHandler.Register(mux)
 		mux.Handle("GET /auth/oidc/enabled", oidc.EnabledProbe())
-		log.Info("oidc sso enabled", "issuer", cfg.OIDC.Issuer, "redirect", cfg.OIDC.RedirectURL)
+		log.Info("oidc sso enabled", "issuer", cfg.OIDC.Issuer, "redirect", cfg.OIDC.RedirectURL, "pkce", cfg.OIDC.PKCE)
 		// Always surface the state-cookie policy: the default (Secure) is
 		// silently catastrophic on a plain-HTTP deployment — the browser
 		// never sends the cookie and SSO fails with zero requests hitting

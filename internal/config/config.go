@@ -422,6 +422,14 @@ type OIDC struct {
 	// Scopes requested of the IdP. Defaults to the minimal OIDC profile set;
 	// 企业微信/钉钉 sometimes need an extra scope to return the work email.
 	Scopes string `envconfig:"OIDC_SCOPES" default:"openid profile email"`
+	// PKCE enables RFC 7636 proof-of-key exchange on the authorization-code
+	// flow (code_challenge / code_verifier, S256). Off by default: the flow is
+	// already protected by the client secret and the state cookie, and some
+	// Chinese enterprise IdPs (钉钉 / 企业微信 variants) do not support PKCE, so
+	// forcing it would break SSO for them. Turn it on for IdPs that advertise
+	// PKCE support — it strengthens the code exchange against interception and
+	// is ignored by IdPs that do not advertise the method.
+	PKCE bool `envconfig:"OIDC_PKCE" default:"false"`
 }
 
 // Enabled reports whether SSO is configured. Only Issuer gates it: endpoints
