@@ -2140,6 +2140,28 @@ func rateLimitKey(r *http.Request, proxies *trustedproxy.Set) string {
 	return quota.ClientIPKey(r, proxies)
 }
 
+// openEndpointRPS/openEndpointBurst is the per-IP floor on the
+// UNAUTHENTICATED open endpoints that have no other built-in backstop: signup
+// (a flood burns bcrypt cost and can fill the user table), the phone
+// request-code (SMS gateway spend), and the OIDC callback. 10 rps per IP is
+// far above any human flow but stops a single source from hammering. It is
+// deliberately separate from the global limiter: a deployment that disables
+// HTTP_RATE_LIMIT_RPS/BURST (or has not set them) still has a bounded edge.
+const (
+	openEndpointRPS   = 10
+	openEndpointBurst = 20
+)
+
+// openEndpointKey is the floor limiter's bucket key: the client IP for the
+// unauthenticated open endpoints, "" (opt-out) for everything else.
+func openEndpointKey(r *http.Request, proxies *trustedproxy.Set) string {
+	switch r.URL.Path {
+	case "/api/auth/signup", "/api/auth/phone/request-code", "/auth/oidc/callback":
+		return quota.ClientIPKey(r, proxies)
+	}
+	return ""
+}
+
 func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metrics *observability.Metrics, settingsRuntime *settings.Runtime, settingsSync *settings.Watcher, mux *http.ServeMux) http.Handler {
 	proxies := trustedproxy.New(cfg.HTTP.TrustedProxyCIDRs)
 	limiter := quota.NewRateLimiter(cfg.HTTP.RateLimitRPS, cfg.HTTP.RateLimitBurst,
@@ -2162,7 +2184,21 @@ func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metri
 			settingsRuntime.Int(settings.KeyRateLimitBurst),
 		)
 	})
-	return observability.StandardStack(mux, log, metrics, limiter.Middleware)
+	if settingsRuntime.Float64(settings.KeyRateLimitRPS) <= 0 || settingsRuntime.Int(settings.KeyRateLimitBurst) <= 0 {
+		log.Warn("no global per-client rate limit in effect (HTTP_RATE_LIMIT_RPS/BURST unset; enable from the admin console): open auth endpoints keep their per-IP floor, everything else is unlimited",
+			"open_endpoint_rps", openEndpointRPS)
+	}
+	// Per-IP floor for the unauthenticated open endpoints (see the consts).
+	// Keyed on the path — only those routes consume a bucket; everything else
+	// opts out. Sits OUTSIDE the global limiter so the floor holds even when
+	// the global limiter is disabled (the boot warning above).
+	openLimiter := quota.NewRateLimiter(openEndpointRPS, openEndpointBurst, func(r *http.Request) string {
+		return openEndpointKey(r, proxies)
+	})
+	rateLimits := func(h http.Handler) http.Handler {
+		return observability.Chain(h, openLimiter.Middleware, limiter.Middleware)
+	}
+	return observability.StandardStack(mux, log, metrics, rateLimits)
 }
 
 // buildEncryptor constructs the secret encryptor from config, or nil when no

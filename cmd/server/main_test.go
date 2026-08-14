@@ -69,6 +69,45 @@ func TestRateLimitKey(t *testing.T) {
 	}
 }
 
+// TestOpenEndpointKey pins the open-endpoint floor limiter's scope: exactly
+// the unauthenticated open endpoints (signup, phone request-code, OIDC
+// callback) are keyed by client IP; every other path opts out of the floor.
+func TestOpenEndpointKey(t *testing.T) {
+	proxies := trustedproxy.New(nil)
+
+	for _, p := range []string{
+		"/api/auth/signup",
+		"/api/auth/phone/request-code",
+		"/auth/oidc/callback",
+	} {
+		req := httptest.NewRequest("POST", p, nil)
+		ip := req.RemoteAddr
+		if host, _, err := net.SplitHostPort(req.RemoteAddr); err == nil {
+			ip = host
+		}
+		if got := openEndpointKey(req, proxies); got != ip {
+			t.Errorf("openEndpointKey(%s) = %q, want client IP %q", p, got, ip)
+		}
+	}
+
+	// Everything else — including the other open auth routes and the callback
+	// with a query string — must not consume a floor bucket.
+	for _, p := range []string{
+		"/api/auth/login",
+		"/api/auth/phone/verify",
+		"/api/auth/totp/verify",
+		"/auth/oidc/login",
+		"/api/chat",
+		"/healthz",
+		"/metrics",
+	} {
+		req := httptest.NewRequest("GET", p, nil)
+		if got := openEndpointKey(req, proxies); got != "" {
+			t.Errorf("openEndpointKey(%s) = %q, want \"\" (opt-out)", p, got)
+		}
+	}
+}
+
 func TestSPAHandlerServesRealFiles(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "index.html"), "<!doctype html><title>shell</title>")
