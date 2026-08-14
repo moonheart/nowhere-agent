@@ -1876,6 +1876,18 @@ func run() error {
 	// group's middleware set, with a single wrap instead of one per route.
 	protected.Mount(mux, "/api/")
 
+	// OpenAPI contract enforcement (openapi-route-contract): the patterns the
+	// protected tier ACTUALLY registered are checked against the contract
+	// before the server accepts traffic. registeredRoutes is the authoritative
+	// input for the spec test, but that test cannot see this assembly (it
+	// lives here, in run()), so the same list is enforced at boot: a route
+	// added in code without syncing openapi/routes.go + paths.go fails startup
+	// instead of silently drifting. Open mux routes (identity/phone/oidc/meta)
+	// are exempted inside the check — they are not recorded by the group.
+	if err := openapi.VerifyAuthedRoutes(protected.Patterns()); err != nil {
+		return err
+	}
+
 	// Serve the built frontend if present. The console is a client-side route,
 	// so a deep link like /admin/users has no file behind it — spaHandler falls
 	// back to index.html. API routes carry more specific patterns, which Go's

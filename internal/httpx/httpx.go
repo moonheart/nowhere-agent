@@ -130,6 +130,11 @@ func ErrorFrom(w http.ResponseWriter, err error) {
 type Router struct {
 	mux *http.ServeMux
 	mws []Middleware
+	// patterns records every registered pattern, in registration order. It is
+	// the seam that makes the real route set enumerable: Go's ServeMux has no
+	// public pattern-listing API, so the assembly point (cmd/server) compares
+	// this list against the OpenAPI contract at boot.
+	patterns []string
 }
 
 // NewRouter builds an empty route group. mws are applied (first = outermost) to
@@ -141,12 +146,22 @@ func NewRouter(mws ...Middleware) *Router {
 
 // Handle registers one pattern on the group.
 func (r *Router) Handle(pattern string, h http.Handler) {
+	r.patterns = append(r.patterns, pattern)
 	r.mux.Handle(pattern, h)
 }
 
 // HandleFunc registers one pattern on the group.
 func (r *Router) HandleFunc(pattern string, h http.HandlerFunc) {
+	r.patterns = append(r.patterns, pattern)
 	r.mux.HandleFunc(pattern, h)
+}
+
+// Patterns returns the patterns registered on the group, in registration
+// order. The returned slice is a copy; mutating it does not affect the router.
+func (r *Router) Patterns() []string {
+	out := make([]string, len(r.patterns))
+	copy(out, r.patterns)
+	return out
 }
 
 // Mount registers the group's chained mux onto outer at prefix (typically

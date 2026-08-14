@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+// TestRouterRecordsPatterns pins the recording seam: every pattern registered
+// on the group is enumerated by Patterns(), in registration order, and the
+// returned slice is a copy (mutating it must not corrupt the router).
+func TestRouterRecordsPatterns(t *testing.T) {
+	g := NewRouter()
+	g.HandleFunc("GET /api/a", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	g.Handle("POST /api/b", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+
+	got := g.Patterns()
+	if len(got) != 2 || got[0] != "GET /api/a" || got[1] != "POST /api/b" {
+		t.Fatalf("Patterns() = %v, want [GET /api/a POST /api/b]", got)
+	}
+	got[0] = "MUTATED /x"
+	if g.Patterns()[0] != "GET /api/a" {
+		t.Error("mutating the returned slice corrupted the router")
+	}
+}
+
 // TestRouterMountAppliesMiddlewareOnce pins the Router contract that is the
 // whole point of the type: the middleware set wraps the group exactly once at
 // Mount, and every route in the group goes through it.

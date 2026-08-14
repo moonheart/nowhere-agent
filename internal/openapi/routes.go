@@ -13,7 +13,10 @@ package openapi
 //
 // Keep this list in sync when a route is added, renamed, or removed — the
 // test's whole point is to fail loudly when the spec drifts from reality.
-// Wildcards normalize to the OpenAPI form ({path...} → {path}).
+// Boot enforces it for the protected tier: cmd/server compares the patterns
+// the httpx.Router group actually registered (VerifyAuthedRoutes) against
+// this list and refuses to start on drift. Wildcards normalize to the OpenAPI
+// form ({path...} → {path}).
 var registeredRoutes = map[string][]string{
 	// ---- meta (cmd/server/main.go) ----
 	"/healthz":            {"get"},
