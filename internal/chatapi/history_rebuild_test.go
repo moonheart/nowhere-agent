@@ -2,6 +2,7 @@ package chatapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -134,6 +135,99 @@ func TestForgedClientHistoryIgnored(t *testing.T) {
 	// The real first turn must still be there.
 	if len(got) != 3 || got[0].Content[0].Text != "real-q1" {
 		t.Errorf("store history not used: %+v", got)
+	}
+}
+
+// TestRebuildRunHistoryTruncatesWithMarker pins the bounded rebuild: a
+// conversation longer than rebuildHistoryLimit loads only its newest tail for
+// the run, with a truncation marker message prepended so the model knows older
+// turns exist but were not loaded.
+func TestRebuildRunHistoryTruncatesWithMarker(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	ms := session.NewMemMessageStore()
+	rp := &recordingProvider{}
+	loop := func(ctx context.Context, system, model string) *agent.Loop {
+		return agent.New(rp, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
+	}
+	h := NewHandler(loop, "sys").WithRuntime(rt).WithMessageStore(ms)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: "u1"}
+
+	sess, err := store.CreateSession(context.Background(), user.ID, "long")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	// Seed a conversation longer than the rebuild bound.
+	for i := 0; i < rebuildHistoryLimit+3; i++ {
+		if _, err := ms.AppendMessage(context.Background(), session.StoredMessage{
+			SessionID: sess.ID,
+			RunID:     "r0",
+			Role:      provider.RoleUser,
+			Content:   []provider.Block{{Type: provider.BlockText, Text: fmt.Sprintf("seed-%d", i)}},
+		}); err != nil {
+			t.Fatalf("append seed %d: %v", i, err)
+		}
+	}
+
+	postChat(t, mux, `{"threadId":"`+sess.ID+`","messages":[{"role":"user","content":"q2"}]}`, user)
+
+	got := rp.last()
+	// Tail bound + the truncation marker + the new user turn.
+	if len(got) != rebuildHistoryLimit+2 {
+		t.Fatalf("history len = %d, want %d", len(got), rebuildHistoryLimit+2)
+	}
+	if !strings.Contains(got[0].Content[0].Text, "truncated") {
+		t.Errorf("first message must be the truncation marker, got %+v", got[0])
+	}
+	// The tail starts at the newest in-window seed and ends with the new turn.
+	if got[1].Content[0].Text != "seed-3" {
+		t.Errorf("tail head = %q, want seed-3 (the newest in-window message)", got[1].Content[0].Text)
+	}
+	if last := got[len(got)-1]; last.Role != provider.RoleUser || last.Content[0].Text != "q2" {
+		t.Errorf("last message = %+v, want the new user turn q2", last)
+	}
+}
+
+// TestRebuildRunHistoryBelowBoundHasNoMarker verifies a conversation shorter
+// than the bound rebuilds whole, exactly as before the bounded read.
+func TestRebuildRunHistoryBelowBoundHasNoMarker(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	ms := session.NewMemMessageStore()
+	rp := &recordingProvider{}
+	loop := func(ctx context.Context, system, model string) *agent.Loop {
+		return agent.New(rp, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
+	}
+	h := NewHandler(loop, "sys").WithRuntime(rt).WithMessageStore(ms)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	user := identity.User{ID: "u1"}
+
+	sess, err := store.CreateSession(context.Background(), user.ID, "short")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := ms.AppendMessage(context.Background(), session.StoredMessage{
+			SessionID: sess.ID,
+			RunID:     "r0",
+			Role:      provider.RoleUser,
+			Content:   []provider.Block{{Type: provider.BlockText, Text: fmt.Sprintf("m%d", i)}},
+		}); err != nil {
+			t.Fatalf("append seed %d: %v", i, err)
+		}
+	}
+
+	postChat(t, mux, `{"threadId":"`+sess.ID+`","messages":[{"role":"user","content":"q2"}]}`, user)
+
+	got := rp.last()
+	if len(got) != 3 {
+		t.Fatalf("history len = %d, want 3", len(got))
+	}
+	if strings.Contains(got[0].Content[0].Text, "truncated") {
+		t.Errorf("short conversation must not carry a truncation marker: %+v", got[0])
 	}
 }
 

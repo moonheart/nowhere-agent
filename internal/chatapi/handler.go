@@ -546,10 +546,12 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// tool_result) — instead of trusting the client-sent messages, which are
 	// text-only and forgeable. The new user turn is appended so the loop sees the
 	// complete conversation. For a fresh session (or no store) the client history
-	// is all there is, so fall back to it.
+	// is all there is, so fall back to it. The rebuild is BOUNDED (see
+	// rebuildRunHistory): a very long conversation loads only its newest tail,
+	// with a truncation marker so the model knows older turns exist but are not
+	// loaded — in-loop compression then keeps the view within the window.
 	if h.msgStore != nil && req.ThreadID != "" && s.ID == req.ThreadID {
-		if stored, err := h.msgStore.MessagesFor(r.Context(), sessID); err == nil && len(stored) > 0 {
-			history = storedMessagesToProvider(stored)
+		if history = h.rebuildRunHistory(r.Context(), sessID); len(history) > 0 {
 			if userMsg != nil {
 				history = append(history, *userMsg)
 			}
@@ -584,6 +586,50 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 
 	// Attach to the run from the start; the worker is already executing.
 	h.attach(w, r, sessID, run, 0, pre)
+}
+
+// rebuildHistoryLimit bounds the run-history rebuild: a conversation longer
+// than this loads only its newest tail for the loop's starting view. The
+// limit is deliberately generous (2000 messages — far beyond what fits any
+// model's context window after in-loop compression), so it only ever bites on
+// pathological sessions; its purpose is bounding the per-turn DB read and
+// JSON decode, not the model's view.
+const rebuildHistoryLimit = 2000
+
+// rebuildRunHistory loads the session's durable messages as the run's starting
+// provider history, bounded to the newest rebuildHistoryLimit messages. When
+// the conversation exceeds the bound, a truncation marker message is prepended
+// so the model knows older turns exist but were not loaded — the loop's
+// per-send EnsurePairing then repairs whatever the cut severs at the boundary
+// (a dangling tool_use gets a synthesized error result, an orphan tool_result
+// is dropped), and in-loop compression keeps the view within the context
+// window. Returns nil when the store is unavailable or the session has no
+// durable messages — the caller keeps the client-sent history in that case.
+func (h *Handler) rebuildRunHistory(ctx context.Context, sessID string) []provider.Message {
+	if h.msgStore == nil {
+		return nil
+	}
+	stored, err := h.msgStore.MessagesTail(ctx, sessID, 0, rebuildHistoryLimit+1)
+	if err != nil {
+		// A read hiccup must not fail the run: fall back to the client history,
+		// exactly as before the bounded rebuild.
+		return nil
+	}
+	truncated := len(stored) > rebuildHistoryLimit
+	if truncated {
+		stored = stored[len(stored)-rebuildHistoryLimit:]
+	}
+	if len(stored) == 0 {
+		return nil
+	}
+	history := storedMessagesToProvider(stored)
+	if truncated {
+		history = append([]provider.Message{
+			provider.TextMessage(provider.RoleUser,
+				"[Earlier conversation truncated — the beginning of this conversation was not loaded for this run.]"),
+		}, history...)
+	}
+	return history
 }
 
 // serveChatResume handles POST /api/chat with an `approval` verdict: it applies

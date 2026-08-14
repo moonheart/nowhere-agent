@@ -81,17 +81,21 @@ func (s *PGMessageStore) AppendMessage(ctx context.Context, msg StoredMessage) (
 }
 
 // MessagesFor returns a session's messages ordered by seq (full conversation).
-// The read is deliberately UNBOUNDED — every caller needs the whole record:
-// the chat resume path rebuilds the loop's provider history from it (with
-// in-loop compression applying afterwards, near the context window), FoldBatch
-// must resolve tool_use/tool_result pairs across the entire conversation for
-// correctness, and export dumps everything. Bounding it would silently drop
-// older turns from any of those paths. The one display-only consumer
-// (GET /api/chat/history) also reads it fully: the web client's history.load()
-// has no truncation semantics, so a bounded page would render an incomplete
-// conversation as complete — the frontend contract wins over memory here. A
-// bounded variant would be a new interface method (following LastAssistantText)
-// plus a client-side truncation signal; revisit when the frontend grows one.
+// This is the UNBOUNDED read; the callers that still need the whole record are
+// the pairing-sensitive ones:
+//   - FoldBatch (registry.go) must resolve tool_use/tool_result pairs across
+//     the entire conversation for correctness, so a bounded read could never
+//     be a drop-in there;
+//   - export streams the whole history (it pages via MessagesPage anyway, so
+//     it does not even use this method).
+//
+// The hot and display paths no longer read it fully: the chat resume rebuild
+// is bounded to the newest messages with a truncation marker (chatapi's
+// rebuildRunHistory, via MessagesTail), and GET /api/chat/history pages the
+// tail the client renders (web history.ts requests limit=100 and shows a
+// truncation hint). Bounding MessagesFor itself would silently drop older
+// turns from FoldBatch; the bounded variants are MessagesPage (forward) and
+// MessagesTail (backward).
 func (s *PGMessageStore) MessagesFor(ctx context.Context, sessionID string) ([]StoredMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, session_id, run_id, seq, role, content, created_at,
