@@ -133,12 +133,14 @@ func (l *localBlobStore) Delete(userID, id string) error {
 	return nil
 }
 
-// maxImagePixels caps the decoded pixel count (160 MP ≈ 12649²): a tiny
+// maxImagePixels caps the decoded pixel count (40 MP ≈ 6325²): a tiny
 // payload can carry an enormous pixel grid (decompression bomb) and a full
 // Decode allocates a buffer proportional to width×height inside the request
-// goroutine. The cap is checked from the image header alone, before any
+// goroutine — RGBA is 4 bytes/pixel, so 40 MP peaks at ≈160 MiB (the old
+// 160 MP cap allowed ≈640 MiB, a 64:1 amplification over the 10 MiB raw
+// upload bound). The cap is checked from the image header alone, before any
 // full decode.
-const maxImagePixels = 160_000_000
+const maxImagePixels = 40_000_000
 
 // ErrImagePixelLimit reports an image whose header-declared pixel count
 // exceeds maxImagePixels. The upload endpoints map it to 413.
