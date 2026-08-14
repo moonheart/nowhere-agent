@@ -19,6 +19,9 @@ func (s stubTool) Call(context.Context, map[string]any) (toolruntime.Result, err
 	return toolruntime.Result{}, nil
 }
 
+// DefaultPolicy mirrors the config defaults (PERMISSION_*): read-only,
+// sandbox-write and network are allowed (the wired web-search tool runs over
+// network); only external-write asks.
 func TestDefaultPolicyPermissiveInsideSandbox(t *testing.T) {
 	c := NewChecker(DefaultPolicy())
 	if v := c.Check(stubTool{toolruntime.RiskReadOnly}); v != Allow {
@@ -27,13 +30,13 @@ func TestDefaultPolicyPermissiveInsideSandbox(t *testing.T) {
 	if v := c.Check(stubTool{toolruntime.RiskSandboxWrite}); v != Allow {
 		t.Errorf("sandbox_write -> %v want allow", v)
 	}
+	if v := c.Check(stubTool{toolruntime.RiskNetwork}); v != Allow {
+		t.Errorf("network -> %v want allow (matches PERMISSION_NETWORK default)", v)
+	}
 }
 
-func TestDefaultPolicyGatesEscapingActions(t *testing.T) {
+func TestDefaultPolicyGatesExternalWrite(t *testing.T) {
 	c := NewChecker(DefaultPolicy())
-	if v := c.Check(stubTool{toolruntime.RiskNetwork}); v != Ask {
-		t.Errorf("network -> %v want ask", v)
-	}
 	if v := c.Check(stubTool{toolruntime.RiskExternalWrite}); v != Ask {
 		t.Errorf("external_write -> %v want ask", v)
 	}

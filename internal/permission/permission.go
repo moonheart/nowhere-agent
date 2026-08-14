@@ -42,12 +42,16 @@ type Policy struct {
 	ExternalWrite Decision
 }
 
-// DefaultPolicy is permissive inside the sandbox and asks for escaping actions.
+// DefaultPolicy mirrors the platform's env defaults (PERMISSION_* /
+// platform_settings boot values in internal/config: read-only, sandbox-write
+// and network allow — the wired web-search tool runs over network — and
+// external-write asks first). It is what the gate uses when no runtime
+// settings override is in effect.
 func DefaultPolicy() Policy {
 	return Policy{
 		ReadOnly:      DecisionAllow,
 		SandboxWrite:  DecisionAllow,
-		Network:       DecisionAsk,
+		Network:       DecisionAllow,
 		ExternalWrite: DecisionAsk,
 	}
 }
