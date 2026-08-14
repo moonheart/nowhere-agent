@@ -27,6 +27,7 @@ func (f *fakeSandbox) Create(context.Context, string, sandbox.Options) (sandbox.
 	return sandbox.Handle{}, nil
 }
 func (f *fakeSandbox) Destroy(context.Context, sandbox.Handle) error { return nil }
+func (f *fakeSandbox) RecreateNeedsDestroy() bool                     { return false }
 
 func (f *fakeSandbox) Exec(_ context.Context, _ sandbox.Handle, cmd []string) (sandbox.ExecResult, error) {
 	f.execArg = append([]string(nil), cmd...)
