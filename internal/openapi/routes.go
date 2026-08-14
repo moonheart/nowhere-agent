@@ -27,16 +27,16 @@ var registeredRoutes = map[string][]string{
 	"/auth/oidc/callback": {"get"},
 
 	// ---- identity (internal/identity/http.go, phonehttp.go) ----
-	"/api/auth/signup":                  {"post"},
-	"/api/auth/login":                   {"post"},
-	"/api/auth/logout":                  {"post"},
-	"/api/auth/totp/verify":             {"post"},
-	"/api/auth/phone/request-code":      {"post"},
-	"/api/auth/phone/verify":            {"post"},
-	"/api/auth/phone/reset-password":    {"post"},
-	"/api/auth/phone/enabled":           {"get"},
-	"/api/me":                           {"get", "patch", "delete"},
-	"/api/me/phone/bind":                {"post"},
+	"/api/auth/signup":               {"post"},
+	"/api/auth/login":                {"post"},
+	"/api/auth/logout":               {"post"},
+	"/api/auth/totp/verify":          {"post"},
+	"/api/auth/phone/request-code":   {"post"},
+	"/api/auth/phone/verify":         {"post"},
+	"/api/auth/phone/reset-password": {"post"},
+	"/api/auth/phone/enabled":        {"get"},
+	"/api/me":                        {"get", "patch", "delete"},
+	"/api/me/phone/bind":             {"post"},
 
 	// ---- chatapi (internal/chatapi/handler.go Register + RegisterAuthed) ----
 	"/api/chat":                            {"post"},
