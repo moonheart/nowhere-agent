@@ -970,6 +970,16 @@ func run() error {
 				dreamRunner = dreaming.NewRunner(worker, ctx)
 				dreamRunner.SetLogger(log)
 
+				// Cross-instance serialization: every instance runs its own
+				// scheduler, and two passes on different instances would both
+				// read a session's dreamed_seq before either advances it — the
+				// in-memory single-flight lock cannot see the other instance.
+				// pg_try_advisory_lock on a fixed key makes the scheduled pass
+				// and the console's manual trigger mutually exclusive across
+				// the whole deployment; a pass that cannot take the lock skips
+				// this round and the next tick picks up its work.
+				dreamRunner.SetLock(dreaming.NewPGAdvisoryLock(pool))
+
 				// syncDreamKnobs applies the runtime-settable budget/caps/purge
 				// to the worker before each pass (scheduled AND manual — the
 				// console's trigger runs through the same runner).

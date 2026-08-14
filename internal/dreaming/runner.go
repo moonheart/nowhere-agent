@@ -3,6 +3,7 @@ package dreaming
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -42,6 +43,12 @@ type RunState struct {
 // writes — the store gains a duplicate set of memories from one episode. The
 // watermark makes a pass idempotent against ITSELF, not against a second pass
 // racing it.
+//
+// When SetLock has wired a cross-instance lock (PGAdvisoryLock), the runner
+// also takes it before every pass — scheduled AND manual — so a multi-instance
+// deployment serializes consolidation the same way a single process does. A
+// pass that cannot take it is skipped, not queued: the next tick (or a later
+// button press) picks up whatever it would have.
 type Runner struct {
 	worker  *Worker
 	base    context.Context
@@ -52,6 +59,9 @@ type Runner struct {
 	// so runtime-settable knobs (budget, caps, purge window) apply to whatever
 	// path starts the pass.
 	knobSync func()
+	// lock, when set, is the cross-instance mutual exclusion held for the
+	// whole pass (nil = in-memory single-flight only, e.g. tests).
+	lock Lock
 
 	mu      sync.Mutex
 	wg      sync.WaitGroup
@@ -103,6 +113,13 @@ func (r *Runner) SetKnobSync(f func()) {
 	r.knobSync = f
 }
 
+// SetLock wires the cross-instance lock every pass contends on. Without it the
+// runner serializes only within one process; with it, a multi-instance
+// deployment consolidates exactly once per watermark.
+func (r *Runner) SetLock(l Lock) {
+	r.lock = l
+}
+
 // syncKnobs runs the knob-sync hook (nil-safe).
 func (r *Runner) syncKnobs() {
 	if r.knobSync != nil {
@@ -119,6 +136,11 @@ func (r *Runner) TriggerForUser(userID string) error {
 		return errors.New("dreaming: no user to consolidate for")
 	}
 	if !r.begin(userID) {
+		return ErrBusy
+	}
+	if ok, err := r.claimCrossInstance(); err != nil {
+		return fmt.Errorf("dreaming: cross-instance lock: %w", err)
+	} else if !ok {
 		return ErrBusy
 	}
 	go func() {
@@ -139,6 +161,13 @@ func (r *Runner) TriggerForUser(userID string) error {
 func (r *Runner) RunScheduled(ctx context.Context) error {
 	if !r.begin("") {
 		r.log.Info("dreaming: scheduled pass skipped, another pass is in flight")
+		return nil
+	}
+	if ok, err := r.claimCrossInstance(); err != nil {
+		r.log.Warn("dreaming: scheduled pass skipped, cross-instance lock failed", "err", err)
+		return nil
+	} else if !ok {
+		r.log.Info("dreaming: scheduled pass skipped, another instance is consolidating")
 		return nil
 	}
 	start := r.now()
@@ -177,11 +206,50 @@ func (r *Runner) begin(owner string) bool {
 	return true
 }
 
-// finish records the outcome and releases the lock.
+// claimCrossInstance takes the cross-instance lock and undoes begin when it
+// cannot. ok=false means the pass must not run: either another instance holds
+// the lock (a skip, not an error) or taking it failed (err is set).
+func (r *Runner) claimCrossInstance() (ok bool, err error) {
+	if r.lock == nil {
+		return true, nil
+	}
+	// Bound the acquisition: a hung pool must not stall a manual trigger or
+	// the scheduler's tick. The pass itself is bounded by r.timeout.
+	ctx, cancel := context.WithTimeout(r.base, 15*time.Second)
+	defer cancel()
+	got, err := r.lock.TryAcquire(ctx)
+	if err != nil || !got {
+		r.abort()
+	}
+	return got, err
+}
+
+// abort releases the in-memory single-flight claim without recording an
+// outcome. It balances begin for passes that never actually ran (the
+// cross-instance lock turned out to be held).
+func (r *Runner) abort() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.running = false
+	r.owner = ""
+	r.wg.Done()
+}
+
+// finish records the outcome and releases the locks — the cross-instance one
+// first, so a caller waiting on Wait() can immediately start the next pass
+// without racing the release.
 func (r *Runner) finish(owner string, start time.Time, res Result, err error) {
 	rec := RunRecord{StartedAt: start, FinishedAt: r.now(), Result: res}
 	if err != nil {
 		rec.Err = err.Error()
+	}
+
+	if r.lock != nil {
+		if relErr := r.lock.Release(); relErr != nil {
+			// Not fatal: closing the connection releases the advisory lock
+			// regardless, so the pass cannot starve future ones.
+			r.log.Warn("dreaming: cross-instance lock release failed", "err", relErr)
+		}
 	}
 
 	r.mu.Lock()
