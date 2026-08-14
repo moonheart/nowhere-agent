@@ -154,19 +154,33 @@ func (s *Store) CreateToken(ctx context.Context, userID, tokenHash string, expir
 	return nil
 }
 
-// UserIDByTokenHash resolves a valid (unexpired) token to its user id.
-func (s *Store) UserIDByTokenHash(ctx context.Context, tokenHash string, now time.Time) (string, error) {
+// UserIDByTokenHash resolves a valid (unexpired) token to its user id and the
+// token's expiry (the sliding-renewal check reads the remaining validity).
+func (s *Store) UserIDByTokenHash(ctx context.Context, tokenHash string, now time.Time) (string, time.Time, error) {
 	var userID string
+	var expiresAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT user_id FROM auth_tokens WHERE token_hash = $1 AND expires_at > $2`,
-		tokenHash, now).Scan(&userID)
+		SELECT user_id, expires_at FROM auth_tokens WHERE token_hash = $1 AND expires_at > $2`,
+		tokenHash, now).Scan(&userID, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrInvalidToken
+		return "", time.Time{}, ErrInvalidToken
 	}
 	if err != nil {
-		return "", fmt.Errorf("resolve token: %w", err)
+		return "", time.Time{}, fmt.Errorf("resolve token: %w", err)
 	}
-	return userID, nil
+	return userID, expiresAt, nil
+}
+
+// ExtendToken slides a token's expiry forward (sliding session renewal). The
+// WHERE guard means it can only ever extend, never shorten: a concurrent
+// request racing a renewal cannot clamp a freshly extended expiry.
+func (s *Store) ExtendToken(ctx context.Context, tokenHash string, expiresAt time.Time) error {
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE auth_tokens SET expires_at = $1 WHERE token_hash = $2 AND expires_at < $1`,
+		expiresAt, tokenHash); err != nil {
+		return fmt.Errorf("extend token: %w", err)
+	}
+	return nil
 }
 
 // DeleteToken removes a token (logout).

@@ -11,12 +11,23 @@ import {
 } from "@/lib/models";
 
 // The store keeps module state across tests; reset it before each one so the
-// one-shot load runs again. localStorage must exist (auth.getToken reads it
-// before any fetch), like the other lib tests stub it.
+// one-shot load runs again. Both storages must exist (auth.getToken reads
+// sessionStorage with a localStorage fallback migration), like the other lib
+// tests stub them.
+function memStorage(seed: Record<string, string> = {}): Storage {
+  const m = new Map(Object.entries(seed));
+  return {
+    getItem: (k) => m.get(k) ?? null,
+    setItem: (k, v) => void m.set(k, v),
+    removeItem: (k) => void m.delete(k),
+  } as Storage;
+}
+
 beforeEach(() => {
   vi.unstubAllGlobals();
   resetModelStore();
-  vi.stubGlobal("localStorage", { getItem: () => "tok" });
+  vi.stubGlobal("localStorage", memStorage());
+  vi.stubGlobal("sessionStorage", memStorage({ "nowhere.token": "tok" }));
 });
 
 describe("ensureModels", () => {

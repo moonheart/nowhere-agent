@@ -1,17 +1,30 @@
 // Minimal token-based auth against the nowhere-agent identity endpoints.
-// The token is stored in localStorage and sent as a Bearer header on /api/chat.
+// The token lives in sessionStorage — a per-tab store that dies with the
+// browser window, so a stolen token's exposure window is a single session
+// instead of weeks on disk. Tokens left in localStorage by older builds are
+// migrated on first read (one-shot) and dropped from their old home.
 
 const KEY = "nowhere.token";
 
 export function getToken(): string | null {
-  return localStorage.getItem(KEY);
+  const token = sessionStorage.getItem(KEY);
+  if (token !== null) return token;
+  // One-shot migration from localStorage (pre-sessionStorage deployments):
+  // take the legacy token and drop it from its old home.
+  const legacy = localStorage.getItem(KEY);
+  if (legacy !== null) {
+    sessionStorage.setItem(KEY, legacy);
+    localStorage.removeItem(KEY);
+  }
+  return legacy;
 }
 
 export function setToken(token: string): void {
-  localStorage.setItem(KEY, token);
+  sessionStorage.setItem(KEY, token);
 }
 
 export function clearToken(): void {
+  sessionStorage.removeItem(KEY);
   localStorage.removeItem(KEY);
 }
 
@@ -71,7 +84,7 @@ async function auth(
   // signup returns only the user; login returns the token. For signup we
   // immediately log in to obtain a token.
   if (data.token) {
-    localStorage.setItem(KEY, data.token);
+    setToken(data.token);
     return;
   }
   const login = await post("/api/auth/login", {
@@ -80,7 +93,7 @@ async function auth(
   });
   if (!login.ok) throw new Error("login after signup failed");
   const lj = (await login.json()) as { token: string };
-  localStorage.setItem(KEY, lj.token);
+  setToken(lj.token);
 }
 
 // login verifies credentials. On success it stores the bearer token; when the
@@ -100,7 +113,7 @@ export async function login(
     totp_token?: string;
   };
   if (data.token) {
-    localStorage.setItem(KEY, data.token);
+    setToken(data.token);
     return { token: data.token };
   }
   if (data.totp_required && data.totp_token) {
@@ -125,7 +138,7 @@ export async function completeTotpLogin(
   }
   const data = (await res.json()) as { token?: string };
   if (!data.token) throw new Error("verification failed: no token returned");
-  localStorage.setItem(KEY, data.token);
+  setToken(data.token);
 }
 
 export function signup(email: string, password: string): Promise<void> {
@@ -152,7 +165,7 @@ export async function verifyPhoneCode(phone: string, code: string): Promise<void
   }
   const data = (await res.json()) as { token?: string };
   if (!data.token) throw new Error("no token returned");
-  localStorage.setItem(KEY, data.token);
+  setToken(data.token);
 }
 
 // phoneAuthAvailable probes the server for the phone/OTP routes (404 when not

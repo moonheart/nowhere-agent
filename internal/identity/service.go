@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -15,6 +16,12 @@ import (
 const (
 	// tokenTTL is how long an issued auth token remains valid.
 	tokenTTL = 30 * 24 * time.Hour
+	// tokenSlidingRenewThreshold is the remaining-validity floor below which a
+	// successful authentication extends the token for a fresh full tokenTTL
+	// (sliding sessions). Renewal fires at most once per (tokenTTL - threshold)
+	// of active use — a low-frequency single UPDATE — and an abandoned token
+	// still lapses 30 days after its last renewal.
+	tokenSlidingRenewThreshold = 7 * 24 * time.Hour
 	// serviceKeyPrefix marks programmatic credentials (admin-issued, long-lived,
 	// revocable). The prefix makes lookup cheap and logs/UI unambiguous.
 	serviceKeyPrefix = "sk_"
@@ -136,11 +143,27 @@ func (s *Service) Authenticate(ctx context.Context, token string) (User, error) 
 	if strings.HasPrefix(token, serviceKeyPrefix) {
 		return s.authenticateServiceKey(ctx, token)
 	}
-	userID, err := s.store.UserIDByTokenHash(ctx, hashToken(token), s.now())
+	userID, expiresAt, err := s.store.UserIDByTokenHash(ctx, hashToken(token), s.now())
 	if err != nil {
 		return User{}, err
 	}
-	return s.userIfEnabled(ctx, userID)
+	u, err := s.userIfEnabled(ctx, userID)
+	if err != nil {
+		return User{}, err
+	}
+	// Sliding renewal: a token whose remaining validity has dropped below the
+	// threshold is extended for a fresh full TTL, so an active account is never
+	// forced out by the absolute 30-day cap while an abandoned token still
+	// lapses 30 days after its last renewal. Runs only for enabled accounts
+	// (a disabled account's token is rejected and must not be extended), and a
+	// failure leaves the token valid until its current expiry — renewal is a
+	// convenience, not a gate.
+	if remaining := expiresAt.Sub(s.now()); remaining < tokenSlidingRenewThreshold {
+		if err := s.store.ExtendToken(ctx, hashToken(token), s.now().Add(tokenTTL)); err != nil {
+			slog.Warn("extend auth token expiry", "err", err)
+		}
+	}
+	return u, nil
 }
 
 // authenticateServiceKey resolves a service key (sk_...) to its owner account.

@@ -110,7 +110,7 @@ func (s *Service) BeginTOTPChallenge(ctx context.Context, u User) (TOTPChallenge
 // and returns the platform bearer token. The challenge token is consumed
 // either way (success or wrong code), so a code can never be replayed.
 func (s *Service) CompleteTOTPChallenge(ctx context.Context, challengeToken, code string) (token string, u User, err error) {
-	userID, err := s.store.UserIDByTokenHash(ctx, hashToken(challengeToken), s.now())
+	userID, _, err := s.store.UserIDByTokenHash(ctx, hashToken(challengeToken), s.now())
 	if err != nil {
 		return "", User{}, ErrInvalidTOTP
 	}

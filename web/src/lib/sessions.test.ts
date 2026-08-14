@@ -6,8 +6,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deleteSession, listSessions } from "@/lib/sessions";
 
+// auth.getToken reads sessionStorage (with a localStorage fallback migration),
+// so both storages must exist in the DOM-free node test environment.
+function memStorage(seed: Record<string, string> = {}): Storage {
+  const m = new Map(Object.entries(seed));
+  return {
+    getItem: (k) => m.get(k) ?? null,
+    setItem: (k, v) => void m.set(k, v),
+    removeItem: (k) => void m.delete(k),
+  } as Storage;
+}
+
 function tokenStore(token: string | null) {
-  vi.stubGlobal("localStorage", { getItem: () => token });
+  vi.stubGlobal("localStorage", memStorage());
+  vi.stubGlobal(
+    "sessionStorage",
+    memStorage(token === null ? {} : { "nowhere.token": token }),
+  );
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

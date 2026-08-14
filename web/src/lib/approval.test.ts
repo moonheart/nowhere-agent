@@ -1,6 +1,6 @@
 // Approval-bus unit tests, DOM-free: the epoch guard, the pending map
 // lifecycle, and the client_tool auto-run round-trip (which only touches
-// localStorage + fetch, both stubbed). The failed-map and pending-queue reads
+// storage + fetch, both stubbed). The failed-map and pending-queue reads
 // are React-hook only (useApprovalFailure / usePendingInteractions) and are
 // left to component-level testing.
 
@@ -13,6 +13,17 @@ import {
   resetApprovals,
   type Interaction,
 } from "@/lib/approval";
+
+// auth.getToken reads sessionStorage (with a localStorage fallback migration),
+// so both storages must exist in the DOM-free node test environment.
+function memStorage(seed: Record<string, string> = {}): Storage {
+  const m = new Map(Object.entries(seed));
+  return {
+    getItem: (k) => m.get(k) ?? null,
+    setItem: (k, v) => void m.set(k, v),
+    removeItem: (k) => void m.delete(k),
+  } as Storage;
+}
 
 function interaction(over: Partial<Interaction> = {}): Interaction {
   return {
@@ -70,7 +81,8 @@ describe("pending lifecycle", () => {
 
 describe("client_tool auto-run", () => {
   it("executes the capability and clears the prompt on success", async () => {
-    vi.stubGlobal("localStorage", { getItem: () => "tok" });
+    vi.stubGlobal("localStorage", memStorage());
+    vi.stubGlobal("sessionStorage", memStorage({ "nowhere.token": "tok" }));
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, status: 200, body: new Response(new Uint8Array(1)).body }),
@@ -82,7 +94,8 @@ describe("client_tool auto-run", () => {
   });
 
   it("keeps the prompt when no token can send the verdict", async () => {
-    vi.stubGlobal("localStorage", { getItem: () => null });
+    vi.stubGlobal("localStorage", memStorage());
+    vi.stubGlobal("sessionStorage", memStorage());
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({ ok: true, status: 200, body: null }),
