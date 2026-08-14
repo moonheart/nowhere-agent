@@ -122,6 +122,14 @@ func (p *LocalPort) Destroy(_ context.Context, h Handle) error {
 	return nil
 }
 
+// RecreateNeedsDestroy reports false: Create is idempotent over the existing
+// workspace directory (it keeps the files — the workspace is the durable
+// state), so Ensure must NOT destroy a stopped sandbox before recreating it.
+// Destroy removes <root>/<sessionID>, which also holds the ImageStore's
+// per-session image dir and the agent's written files; wiping it on every
+// resume would lose the conversation's images and workspace.
+func (p *LocalPort) RecreateNeedsDestroy() bool { return false }
+
 // workspaceDir returns the session's workspace root for a handle.
 func (p *LocalPort) workspaceDir(h Handle) (string, error) {
 	if p.root == "" {

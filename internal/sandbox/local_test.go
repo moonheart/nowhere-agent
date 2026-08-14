@@ -340,3 +340,61 @@ func TestLocalPortManagerLifecycle(t *testing.T) {
 		t.Errorf("destroyed = %v", destroyed)
 	}
 }
+
+// countingDestroyPort wraps a LocalPort and counts Destroy calls, so a test
+// can assert the Manager never destroys a local workspace on resume.
+type countingDestroyPort struct {
+	*LocalPort
+	destroys int
+}
+
+func (p *countingDestroyPort) Destroy(ctx context.Context, h Handle) error {
+	p.destroys++
+	return p.LocalPort.Destroy(ctx, h)
+}
+
+// TestLocalManagerResumeKeepsWorkspaceFiles is the regression test for the
+// local-backend data loss: Ensure used to destroy the stopped handle before
+// recreating, which for the local backend removed <root>/<sessionID> — the
+// directory that also holds the ImageStore's per-session image files and the
+// agent's durable workspace — on EVERY resume inside the deferred-stop grace
+// period. The local backend must resume by reusing the directory, never by
+// destroying it.
+func TestLocalManagerResumeKeepsWorkspaceFiles(t *testing.T) {
+	root := t.TempDir()
+	port := &countingDestroyPort{LocalPort: NewLocalPort(root)}
+	mgr := NewManager(port)
+	ctx := context.Background()
+
+	h1, err := mgr.Ensure(ctx, "s1", Options{})
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := port.WriteFile(ctx, h1, "notes/keep.txt", strings.NewReader("durable")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	mgr.MarkSessionEnded("s1", time.Hour)
+
+	h2, err := mgr.Ensure(ctx, "s1", Options{})
+	if err != nil {
+		t.Fatalf("ensure after deferred stop: %v", err)
+	}
+	if h1.ID != h2.ID {
+		t.Errorf("resume got a new handle %q, want the same %q (directory reused)", h2.ID, h1.ID)
+	}
+	if port.destroys != 0 {
+		t.Errorf("resume destroyed the local workspace %d time(s); want 0", port.destroys)
+	}
+
+	// The durable file must still be readable through the resumed handle.
+	rc, err := port.ReadFile(ctx, h2, "notes/keep.txt")
+	if err != nil {
+		t.Fatalf("workspace file lost on resume: %v", err)
+	}
+	defer rc.Close()
+	b, _ := io.ReadAll(rc)
+	if string(b) != "durable" {
+		t.Errorf("resumed file content = %q, want %q", b, "durable")
+	}
+}

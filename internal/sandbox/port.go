@@ -108,6 +108,16 @@ type Port interface {
 	// Destroy tears down a sandbox and releases its resources.
 	Destroy(ctx context.Context, h Handle) error
 
+	// RecreateNeedsDestroy reports whether Ensure must destroy a stopped
+	// sandbox before recreating it on session resume. Backends whose resource
+	// is fixed-name (a Docker container named after the session) return true —
+	// the stale container would collide with the fresh Create. Backends whose
+	// Create is idempotent over durable state return false: the local backend's
+	// workspace directory IS the session's durable files (and, under the shared
+	// root, the ImageStore's per-session image dir), so destroying it on resume
+	// would wipe the conversation's images and workspace.
+	RecreateNeedsDestroy() bool
+
 	// Exec runs a command inside the sandbox.
 	Exec(ctx context.Context, h Handle, cmd []string) (ExecResult, error)
 

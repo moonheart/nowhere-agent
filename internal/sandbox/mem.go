@@ -54,6 +54,13 @@ func (p *MemPort) Destroy(_ context.Context, h Handle) error {
 	return nil
 }
 
+// RecreateNeedsDestroy reports true: each Create allocates a fresh sandbox, so
+// a stale stopped sandbox would otherwise leak in the map forever (the
+// Manager's sweep only sees the entry that replaced it). Destroying it on
+// resume also keeps the "fresh sandbox per resume" semantics the Manager tests
+// pin.
+func (p *MemPort) RecreateNeedsDestroy() bool { return true }
+
 // Exec records nothing and returns a canned successful result.
 func (p *MemPort) Exec(_ context.Context, h Handle, cmd []string) (ExecResult, error) {
 	start := time.Now()

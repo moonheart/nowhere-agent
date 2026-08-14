@@ -56,11 +56,15 @@ func (m *Manager) Ensure(ctx context.Context, sessionID string, opts Options) (H
 
 	// A session resuming inside the deferred-stop grace period still holds a
 	// stopped handle whose underlying resource — e.g. a fixed-name Docker
-	// container — would collide with the fresh Create. Best-effort destroy it
-	// first, so the recreate path works and the sweep never has to catch up:
-	// a failed destroy leaves the old resource in place, and Create surfaces
-	// its own conflict error rather than silently degrading the run.
-	if ok {
+	// container — would collide with the fresh Create. Backends that need it
+	// (RecreateNeedsDestroy) get a best-effort destroy first, so the recreate
+	// path works and the sweep never has to catch up: a failed destroy leaves
+	// the old resource in place, and Create surfaces its own conflict error
+	// rather than silently degrading the run. Backends with an idempotent
+	// Create (the local workspace — the directory IS the session's durable
+	// files and images) must NOT be destroyed: the stopped handle is simply
+	// replaced by the fresh one over the same directory.
+	if ok && m.port.RecreateNeedsDestroy() {
 		_ = m.port.Destroy(ctx, e.handle)
 	}
 

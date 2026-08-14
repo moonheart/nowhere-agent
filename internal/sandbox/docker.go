@@ -161,6 +161,10 @@ func (p *DockerPort) Destroy(ctx context.Context, h Handle) error {
 	return nil
 }
 
+// RecreateNeedsDestroy reports true: the container is named after the session
+// (see Create), so a stale stopped container collides with the fresh Create.
+func (p *DockerPort) RecreateNeedsDestroy() bool { return true }
+
 // ShellArgv wraps a POSIX script for the container shell (Sheller capability).
 // The container is Linux, so `sh -c` runs the script regardless of host OS.
 func (p *DockerPort) ShellArgv(script string) ([]string, error) {
