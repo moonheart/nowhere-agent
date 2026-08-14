@@ -2183,6 +2183,12 @@ func spaHandler(dir string) http.Handler {
 // users behind one NAT no longer share a bucket, and a spoofed Authorization
 // header cannot hijack a bucket. A missing/malformed bearer falls back to the
 // IP key, so anonymous flood smoothing is unchanged.
+//
+// Like every limiter in the platform (the open-endpoint per-IP floor here, and
+// the login/TOTP/signup/OTP throttles in internal/identity), the bucket map is
+// in-memory PER INSTANCE: N gateways multiply each client's allowance by N.
+// Multi-instance deployments should front the auth surface with a shared
+// reverse-proxy limiter or pin auth to one instance (documented in AGENTS.md).
 func rateLimitKey(r *http.Request, proxies *trustedproxy.Set) string {
 	// Never throttle probes: a flooded API must not blind the operator.
 	if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
