@@ -383,6 +383,12 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// so the submitter and every attacher are symmetric consumers (D3).
 	s, err := h.resolveSession(r, req)
 	if err != nil {
+		if errors.Is(err, errSessionNotFound) {
+			// Existence and ownership stay indistinguishable (both "not found"),
+			// matching authorizeSession and the delete path.
+			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+			return
+		}
 		writeSSEError(w, err.Error())
 		return
 	}
@@ -751,19 +757,27 @@ func (h *Handler) systemPromptForText(r *http.Request, text string) string {
 	return h.ctxBuilder.SystemPrompt(r.Context(), user, text)
 }
 
+// errSessionNotFound marks a request that EXPLICITLY named a threadId which
+// does not exist or is not visible to the caller. It answers 404 instead of
+// silently starting a fresh session: a shared or forged link must not land in
+// a blank new conversation.
+var errSessionNotFound = errors.New("session not found")
+
 // resolveSession maps the request to a session: it resumes the session named
-// by threadId when it exists and belongs to the caller, otherwise creates a
-// new one for the caller.
+// by threadId when it exists and belongs to the caller; a request WITHOUT a
+// threadId creates a new one for the caller; a request whose threadId does
+// not exist (or is someone else's) fails with errSessionNotFound.
 func (h *Handler) resolveSession(r *http.Request, req dataStreamRequest) (session.Session, error) {
 	userID := ""
 	if u, ok := identity.UserFromContext(r.Context()); ok {
 		userID = u.ID
 	}
 	if req.ThreadID != "" {
-		if s, err := h.runtime.GetSession(r.Context(), req.ThreadID); err == nil && sessionVisibleTo(s, userID) {
+		s, err := h.runtime.GetSession(r.Context(), req.ThreadID)
+		if err == nil && sessionVisibleTo(s, userID) {
 			return s, nil
 		}
-		// Unknown or foreign thread id: fall through and create a fresh session.
+		return session.Session{}, errSessionNotFound
 	}
 	return h.runtime.CreateSession(r.Context(), userID, lastUserText(req))
 }

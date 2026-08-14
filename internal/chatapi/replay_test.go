@@ -308,9 +308,10 @@ func TestResumeForbiddenForForeignSession(t *testing.T) {
 	}
 }
 
-// TestChatDoesNotResumeForeignSession verifies a threadId pointing at another
-// user's session is not resumed; a fresh session is created instead (#5).
-func TestChatDoesNotResumeForeignSession(t *testing.T) {
+// TestChatRejectsForeignSessionThreadId verifies a threadId pointing at
+// another user's session is refused with 404 (indistinguishable from a missing
+// session) rather than silently starting a fresh session (#5).
+func TestChatRejectsForeignSessionThreadId(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
 	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
@@ -327,17 +328,38 @@ func TestChatDoesNotResumeForeignSession(t *testing.T) {
 	intruder := identity.User{ID: "user-b"}
 	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"threadId":"`+sessA+`","messages":[{"role":"user","content":"hijack"}]}`))
 	req = req.WithContext(identity.NewContextWithUser(req.Context(), intruder))
-	mux.ServeHTTP(httptest.NewRecorder(), req)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
 
-	if len(store.Sessions()) != 2 {
-		t.Fatalf("expected a fresh session for the foreign threadId, got %d sessions", len(store.Sessions()))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign threadId status = %d want 404; body=%s", rec.Code, rec.Body.String())
 	}
-	for _, s := range store.Sessions() {
-		if s.ID == sessA {
-			if runs := store.RunsFor(sessA); len(runs) != 1 {
-				t.Errorf("foreign session A gained a run: %d", len(runs))
-			}
-		}
+	if len(store.Sessions()) != 1 {
+		t.Errorf("foreign threadId created a fresh session: got %d sessions, want 1", len(store.Sessions()))
+	}
+	if runs := store.RunsFor(sessA); len(runs) != 1 {
+		t.Errorf("foreign session A gained a run: %d", len(runs))
+	}
+}
+
+// TestChatRejectsUnknownThreadId pins the same 404 for a threadId that matches
+// no session at all (a stale shared link), instead of creating a new session.
+func TestChatRejectsUnknownThreadId(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"threadId":"00000000-0000-0000-0000-000000000000","messages":[{"role":"user","content":"hijack"}]}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown threadId status = %d want 404; body=%s", rec.Code, rec.Body.String())
+	}
+	if n := len(store.Sessions()); n != 0 {
+		t.Errorf("unknown threadId created a fresh session: got %d sessions, want 0", n)
 	}
 }
 

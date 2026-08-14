@@ -35,7 +35,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { getToken, logout, consumeSSORedirect } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
-import { threadHistory, attachStream, hasActiveRun, followBody } from "@/lib/history";
+import { threadHistory, attachStream, hasActiveRun, followBody, reportMissingSession } from "@/lib/history";
 import { resetActivity, reportSubagentActivity, activityEpoch, type SubagentSignal } from "@/lib/activity";
 import { reportInteraction, resetApprovals, registerDecisionFollower, hasPendingInteractions, approvalEpoch, type Interaction } from "@/lib/approval";
 import { clearNotice, reportNotice } from "@/lib/notice";
@@ -76,11 +76,26 @@ function Chat({
   // so the chips — and the batch — survive a retry. Success keeps them cleared
   // (the images rode the accepted turn).
   let sendImages: PendingImage[] = [];
+  // Set when a send is refused with 404: the backend refused the explicitly
+  // named thread (missing/foreign), reportMissingSession was already fired and
+  // the turn's onError must not add a second, generic notice.
+  let sessionMissing = false;
   const runtime = useDataStreamRuntime({
     api: "/api/chat",
     headers: async (): Promise<Record<string, string>> => {
       const token = getToken();
       return token ? { authorization: `Bearer ${token}` } : {};
+    },
+    onResponse: (res) => {
+      // The send carried an explicit threadId; a 404 means that session does
+      // not exist or belongs to someone else, so the backend refuses to
+      // silently create a fresh session under the stale id. Clear it (the
+      // session:missing listener resets the conversation) instead of letting
+      // the failed turn linger in a blank thread.
+      if (res.status === 404) {
+        sessionMissing = true;
+        reportMissingSession();
+      }
     },
     body: async () => {
       const threadId = getSessionId();
@@ -143,6 +158,13 @@ function Chat({
     },
     adapters: { history: threadHistory },
     onError: (e) => {
+      // The session-missing case was already handled in onResponse (a 404 on
+      // an explicitly named thread); the run then fails with the same status
+      // and must not add a second, misleading notice on top.
+      if (sessionMissing) {
+        sessionMissing = false;
+        return;
+      }
       // A failed send consumed the staged batch from the body closure (the
       // chips were cleared when the request body was built); put them back so
       // retrying the turn still carries the images — a rejected send must not
@@ -332,6 +354,26 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
   );
   // Bumped whenever a session is created/switched so the sidebar refetches.
   const [listVersion, setListVersion] = useState(0);
+
+  // The backend refused an explicitly named thread (404 "session not found" /
+  // 403 "forbidden" — see reportMissingSession in lib/history): the stored id
+  // is stale (a shared link whose session was deleted, or someone else's
+  // session). Clear it from localStorage and the URL, drop the notice banner
+  // and remount a fresh thread, so the receiver lands in a new conversation
+  // instead of a blank one that would then overwrite the stored id on the
+  // first message.
+  useEffect(() => {
+    const onMissing = () => {
+      clearSessionId();
+      setActiveSessionId(null);
+      reportNotice(
+        "This conversation doesn't exist or you don't have access to it.",
+      );
+      setConversationKey((k) => k + 1);
+    };
+    window.addEventListener("session:missing", onMissing);
+    return () => window.removeEventListener("session:missing", onMissing);
+  }, []);
 
   // Open the conversation the URL points at. `replace` keeps session hops out of
   // the history stack, so Back leaves the chat rather than cycling prior

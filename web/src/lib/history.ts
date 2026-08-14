@@ -273,6 +273,22 @@ export async function hasActiveRun(): Promise<boolean> {
   }
 }
 
+// reportMissingSession tells the app that the backend refused an explicitly
+// named thread (404 "session not found" / 403 "forbidden" on the history or
+// chat paths). ChatApp listens and clears the stale local thread id, resets to
+// a fresh conversation and shows a notice — a dead share link must not sit in
+// a blank session that then overwrites the stored id.
+export function reportMissingSession(): void {
+  window.dispatchEvent(new Event("session:missing"));
+}
+
+// isMissingSessionError reports whether an ApiError is the backend refusing an
+// explicitly named session: 404 (does not exist) and 403 (belongs to someone
+// else) both mean the caller can never open it, so both clear the local id.
+export function isMissingSessionError(err: unknown): err is ApiError {
+  return err instanceof ApiError && (err.status === 404 || err.status === 403);
+}
+
 export const threadHistory: ThreadHistoryAdapter = {
   async load() {
     let loaded: Awaited<ReturnType<typeof loadHistory>>;
@@ -281,7 +297,13 @@ export const threadHistory: ThreadHistoryAdapter = {
     } catch (err) {
       // A failed history fetch (401, 500, network) must not read as "this
       // session has no history" — surface it and leave the thread empty
-      // rather than pretending the conversation is blank.
+      // rather than pretending the conversation is blank. An explicitly
+      // named session the backend refuses (404/403) is a STALE reference:
+      // reportMissingSession clears it and shows the notice in ChatApp.
+      if (isMissingSessionError(err)) {
+        reportMissingSession();
+        return ExportedMessageRepository.fromArray([]);
+      }
       console.error("history load failed", err);
       reportNotice(
         err instanceof ApiError
