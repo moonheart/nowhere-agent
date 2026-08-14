@@ -222,17 +222,20 @@ function Chat({
   // stale stream) rather than duplicating — the resume stream replaces the
   // same new message's content each time.
   //
-  // The poll cadence backs off as the session stays idle (2s → 5s → 30s) and
+  // The poll cadence backs off as the session stays idle (2s → 5s → 60s) and
   // snaps back to the fast tier on any activity (a run detected, or a local run
   // finishing): an idle tab must not hammer the backend every 2 seconds
-  // forever, but must notice a new remote run promptly.
+  // forever, but must notice a new remote run promptly. The 60s cap keeps a
+  // permanently idle tab at one /active poll per minute — each poll is two
+  // DB reads on the backend (authorizeSession + the durable ActiveRun
+  // fallback), so the cap bounds that per-tab idle traffic.
   useEffect(() => {
     let cancelled = false;
     let attaching = false;
     let idleStreak = 0;
     let timer: number | undefined;
     const intervalFor = (streak: number) =>
-      streak < 2 ? 2000 : streak < 6 ? 5000 : 30000;
+      streak < 2 ? 2000 : streak < 6 ? 5000 : 60000;
     const schedule = () => {
       timer = window.setTimeout(tick, intervalFor(idleStreak));
     };
