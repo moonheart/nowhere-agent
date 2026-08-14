@@ -506,6 +506,80 @@ func TestTriggerRejectBusySession(t *testing.T) {
 	}
 }
 
+// TestTriggerEnqueueBusySessionQueues pins the enqueue branch: a busy target
+// under multitask=enqueue skips the fire (no loop build) but restores the
+// claimed slot at a bounded backoff — the firing is queued for a later scan,
+// not burned until the next cron occurrence. An unclaimed manual FireNow is a
+// quiet skip that leaves the schedule untouched.
+func TestTriggerEnqueueBusySessionQueues(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	// A target session with an active run (blocked on a gate so it stays active).
+	sess, err := rt.CreateSession(context.Background(), userID, "busy enqueue target")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, sess.ID) })
+	gate := make(chan struct{})
+	defer close(gate) // release the blocked run at test end
+	msg := provider.TextMessage(provider.RoleUser, "hold")
+	if _, err := rg.Submit(context.Background(), sess.ID, session.RunWork{
+		Loop:        agent.New(&stubProvider{gate: gate}, toolruntime.NewRegistry(), agent.Config{Model: "m", MaxTokens: 100}),
+		UserMessage: &msg,
+	}); err != nil {
+		t.Fatalf("submit blocking run: %v", err)
+	}
+
+	task := validTask(userID)
+	task.TargetSessionID = sess.ID
+	task.Multitask = MultitaskEnqueue
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), task)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	spy := &loopSpy{}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+
+	now := time.Now()
+	db.Exec(`UPDATE scheduled_task SET next_run_at = $1 WHERE id = $2`, now.Add(-time.Minute), created.ID)
+	claimed, err := store.Claim(context.Background(), created.ID, now)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if err := tr.submit(context.Background(), claimed, true); err != nil {
+		t.Fatalf("submit should skip cleanly, got %v", err)
+	}
+	if atomic.LoadInt32(&spy.count) != 0 {
+		t.Fatalf("busy session under enqueue must not build a loop, got %d", spy.count)
+	}
+	// The claimed slot is restored at a bounded backoff, NOT advanced to the
+	// next cron occurrence: next_run_at must sit in (now, now+enqueueBackoff].
+	after, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("get after queue: %v", err)
+	}
+	ceil := now.Add(enqueueBackoff + time.Minute)
+	if !after.NextRunAt.After(now) || after.NextRunAt.After(ceil) {
+		t.Fatalf("enqueue task next_run_at = %v, want in (%v, %v]", after.NextRunAt, now, ceil)
+	}
+
+	// A manual FireNow against the still-busy session is a quiet skip: it must
+	// not rewrite next_run_at (the cadence's slot is left as-is, requeue would
+	// fire the task early).
+	before, _ := store.Get(context.Background(), created.ID)
+	if err := tr.FireNow(context.Background(), before); err != nil {
+		t.Fatalf("firenow while busy: %v", err)
+	}
+	afterNow, _ := store.Get(context.Background(), created.ID)
+	if !afterNow.NextRunAt.Equal(before.NextRunAt) {
+		t.Fatalf("manual enqueue fire moved next_run_at: %v -> %v", before.NextRunAt, afterNow.NextRunAt)
+	}
+}
+
 // TestTriggerSkipsPendingInteraction: a fire against a session with an
 // undecided interaction is skipped (capability suspend-batch-snapshot) — a
 // scheduled run must not bury a human's pending approval under newer turns.

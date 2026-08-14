@@ -71,6 +71,12 @@ type Store interface {
 	// disabled/expired task. ErrNotFound is also returned when the task no
 	// longer exists (deleted between claim and requeue — a fine no-op).
 	RequeueDue(ctx context.Context, t Task, now time.Time) error
+	// RequeueDueAt is RequeueDue with an explicit retry instant: the next
+	// scan set is the task becomes due again at `at` instead of immediately.
+	// Used for a busy-session requeue whose retry must be paced by a backoff
+	// floor (a busy enqueue firing must not hot-loop the scan), while keeping
+	// the same claimed-state guards as RequeueDue.
+	RequeueDueAt(ctx context.Context, t Task, at time.Time) error
 	// ListSessions returns the ids of active sessions a task produced, newest
 	// first. Ended (cleared) sessions are hidden, matching the sidebar's rule.
 	ListSessions(ctx context.Context, taskID string) ([]string, error)
@@ -264,10 +270,18 @@ func (s *PGStore) Claim(ctx context.Context, id string, now time.Time) (Task, er
 // task disabled/expired in that window. A zero-row update means the claim
 // state no longer holds; ErrNotFound is fine there.
 func (s *PGStore) RequeueDue(ctx context.Context, t Task, now time.Time) error {
+	return s.RequeueDueAt(ctx, t, now)
+}
+
+// RequeueDueAt is the shared requeue implementation: like RequeueDue it only
+// rewrites next_run_at while the claimed state still holds, but the retry
+// lands at `at` rather than immediately — the backoff-pacing form used when a
+// busy-session requeue must not refire on the very next scan.
+func (s *PGStore) RequeueDueAt(ctx context.Context, t Task, at time.Time) error {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE scheduled_task SET next_run_at = $2, updated_at = now()
 		 WHERE id = $1 AND enabled AND next_run_at = $3
-		   AND (end_time IS NULL OR end_time > $2)`, t.ID, now, t.NextRunAt)
+		   AND (end_time IS NULL OR end_time > $2)`, t.ID, at, t.NextRunAt)
 	if err != nil {
 		if identity.IsMalformedID(err) {
 			return ErrNotFound
@@ -621,15 +635,22 @@ func (m *MemStore) Claim(ctx context.Context, id string, now time.Time) (Task, e
 // task must still be enabled and unexpired, so an edit between claim and
 // requeue makes it a no-op (ErrNotFound) rather than a clobber.
 func (m *MemStore) RequeueDue(ctx context.Context, t Task, now time.Time) error {
+	return m.RequeueDueAt(ctx, t, now)
+}
+
+// RequeueDueAt is RequeueDue with an explicit retry instant `at` (MemStore
+// mirror of the PG backoff-pacing form): same claimed-state guards, but the
+// retry lands at `at` instead of immediately.
+func (m *MemStore) RequeueDueAt(ctx context.Context, t Task, at time.Time) error {
 	cur, ok := m.tasks[t.ID]
 	if !ok || !cur.Enabled || !cur.NextRunAt.Equal(t.NextRunAt) {
 		return ErrNotFound
 	}
-	if cur.EndTime != nil && !cur.EndTime.After(now) {
+	if cur.EndTime != nil && !cur.EndTime.After(at) {
 		return ErrNotFound
 	}
-	cur.NextRunAt = now
-	cur.UpdatedAt = now
+	cur.NextRunAt = at
+	cur.UpdatedAt = at
 	m.tasks[t.ID] = cur
 	return nil
 }

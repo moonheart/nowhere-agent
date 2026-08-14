@@ -267,8 +267,10 @@ func (tr *Trigger) fireOnce(ctx context.Context, task Task) error {
 // independent of the cadence. It goes through the same submit path a due fire
 // does (with claimed=false, so a transient skip is never requeued — requeueing
 // an unclaimed task would rewrite next_run_at=now and make the next scan fire
-// the task early). A busy target under reject/enqueue is a quiet skip, same as
-// a sweep; interrupt cancels the active run first.
+// the task early). A busy target under reject — or a manual enqueue — is a
+// quiet skip; a SCHEDULED enqueue firing requeues with a backoff floor so the
+// next scan retries it once the session drains (the claim already advanced the
+// slot, so it must be restored). An interrupt cancels the active run first.
 func (tr *Trigger) FireNow(ctx context.Context, task Task) error {
 	fireCtx, cancel := context.WithTimeout(ctx, tr.fireTimeout)
 	defer cancel()
@@ -333,8 +335,10 @@ func (tr *Trigger) submit(ctx context.Context, task Task, claimed bool) error {
 	}
 
 	// Concurrency strategy: what to do about an already-active run on the
-	// target session (design: multitask).
-	proceed, interrupted, err := tr.gateMultitask(ctx, task, sessID)
+	// target session (design: multitask). A busy enqueue target requeues the
+	// firing with a backoff floor (claimed only); reject and a manual FireNow
+	// are quiet skips.
+	proceed, interrupted, err := tr.gateMultitask(ctx, task, sessID, claimed)
 	if err != nil || !proceed {
 		if !proceed && fresh {
 			tr.cleanupFreshSession(ctx, task, sessID)
@@ -491,12 +495,21 @@ func (tr *Trigger) createTaggedSession(ctx context.Context, task Task, title str
 // pre-empted run's worker to unwind before submitting the new run.
 const interruptWaitTimeout = 3 * time.Second
 
+// enqueueBackoff is the fixed retry floor for a firing queued behind an active
+// run (multitask=enqueue). An immediate requeue (next_run_at = now) would make
+// a busy session's task refire on every 30s scan — claiming the slot and
+// churning a fresh session each time. Pacing the retry at now+10min keeps the
+// firing alive (it is queued, not dropped) without the hot loop.
+const enqueueBackoff = 10 * time.Minute
+
 // gateMultitask applies the task's concurrency strategy against an active run
 // on the target session. It reports whether to proceed with the fire, and —
 // when the fire chose to interrupt — that an interrupt cancel was issued
 // (interrupted=true), so submit can requeue an interrupt that races a worker
-// which did not unwind within the wait bound.
-func (tr *Trigger) gateMultitask(ctx context.Context, task Task, sessID string) (proceed bool, interrupted bool, err error) {
+// which did not unwind within the wait bound. claimed=false (a manual FireNow)
+// must never requeue: its schedule was never touched, so rewriting next_run_at
+// would fire the task early.
+func (tr *Trigger) gateMultitask(ctx context.Context, task Task, sessID string, claimed bool) (proceed bool, interrupted bool, err error) {
 	_, active, err := tr.runtime.ActiveRun(ctx, sessID)
 	if err != nil {
 		return false, false, err
@@ -517,9 +530,15 @@ func (tr *Trigger) gateMultitask(ctx context.Context, task Task, sessID string) 
 		return true, true, nil
 	case MultitaskEnqueue:
 		// The run registry enforces single-active-run; an enqueue is realised by
-		// simply letting Submit fail with ErrRunActive and skipping — the next
-		// occurrence fires after the active run drains. Treat as skip for now.
-		tr.log.Info("schedule: enqueue skipped (busy)", "task", task.ID, "session", sessID)
+		// requeueing the firing with a bounded backoff so a later scan starts it
+		// once the active run drains — the firing is queued, not dropped. The
+		// claimed slot the fire consumed is restored at now+enqueueBackoff (never
+		// now: a busy session must not hot-loop the scan); a manual FireNow
+		// (claimed=false) is a quiet skip, matching reject.
+		tr.log.Info("schedule: enqueue queued (busy)", "task", task.ID, "session", sessID)
+		if claimed {
+			tr.requeueAt(ctx, task, tr.now().Add(enqueueBackoff))
+		}
 		return false, false, nil
 	default: // reject
 		tr.log.Info("schedule: fire skipped, session busy", "task", task.ID, "session", sessID)
@@ -551,7 +570,14 @@ func (tr *Trigger) cleanupFreshSession(ctx context.Context, task Task, sessID st
 // Best-effort: a requeue failure is logged, never allowed to mask the skip
 // (the sweep already logged its reason).
 func (tr *Trigger) requeue(ctx context.Context, task Task) {
-	if err := tr.store.RequeueDue(ctx, task, tr.now()); err != nil {
+	tr.requeueAt(ctx, task, tr.now())
+}
+
+// requeueAt is requeue with an explicit retry instant — the backoff-pacing
+// form used when the retry must not land on the very next scan (busy enqueue
+// target). Same best-effort, logged-on-failure contract as requeue.
+func (tr *Trigger) requeueAt(ctx context.Context, task Task, at time.Time) {
+	if err := tr.store.RequeueDueAt(ctx, task, at); err != nil {
 		tr.log.Warn("schedule: requeue skipped task failed", "task", task.ID, "err", err)
 	}
 }
