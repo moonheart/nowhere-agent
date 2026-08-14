@@ -119,6 +119,13 @@ func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 // headless in the background. It returns 404 when the session doesn't exist or
 // belongs to someone else (indistinguishable to avoid leaking existence), 204
 // on success.
+//
+// ?purge=true turns the delete into a hard delete: the session's durable rows
+// are removed for real (the conversation and its runs/messages — the same
+// cascade the admin session purge and the conversation-retention sweep use),
+// plus its workspace image dir. The client-facing UI keeps the soft delete and
+// says so explicitly in its confirmation copy; purge is the escape hatch when
+// "delete" must mean "gone".
 func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
 		httpx.Error(w, http.StatusServiceUnavailable, "sessions unavailable")
@@ -132,6 +139,11 @@ func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
 		httpx.Error(w, http.StatusBadRequest, "id required")
+		return
+	}
+
+	if r.URL.Query().Get("purge") == "true" {
+		h.purgeDeleteSession(w, r, id, user)
 		return
 	}
 
@@ -156,6 +168,43 @@ func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if !deleted {
 		httpx.Error(w, http.StatusNotFound, "session not found")
 		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// purgeRunStopTimeout bounds how long the purge path waits for a cancelled
+// run's worker to unwind before the session's rows are hard-deleted (the same
+// budget the admin purge uses). A worker that does not exit in time is left to
+// unwind against the cascade — its leftover writes fail harmlessly (those rows
+// are going anyway).
+const purgeRunStopTimeout = 3 * time.Second
+
+// purgeDeleteSession is the hard-delete branch of serveDeleteSession
+// (?purge=true). Ownership is verified FIRST — the store's hard delete is
+// keyed by id alone, so this check is the only thing standing between a caller
+// and another user's conversation — and a foreign session reads as 404, exactly
+// like the soft-delete path. An in-flight run is cancelled and awaited before
+// the rows go, so the worker's final writes land first (the admin purge's
+// pattern); the workspace image dir is removed best-effort after, since the
+// retention sweep lists sessions from the DB and can never see a deleted one.
+func (h *Handler) purgeDeleteSession(w http.ResponseWriter, r *http.Request, id string, user identity.User) {
+	s, err := h.runtime.GetSession(r.Context(), id)
+	if err != nil || !sessionVisibleTo(s, user.ID) {
+		httpx.Error(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if h.registry != nil {
+		h.registry.CancelAndWait(id, purgeRunStopTimeout)
+	}
+	if err := h.runtime.PurgeSession(r.Context(), id); err != nil {
+		slog.Warn("purge session", "session", id, "err", err)
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	if h.images != nil {
+		if _, err := h.images.DeleteSessionImages(id); err != nil {
+			slog.Warn("purge session images", "session", id, "err", err)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

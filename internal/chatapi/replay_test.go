@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/toolruntime"
+	"nowhere-agent/internal/workspace"
 )
 
 // thinkingStub streams a reasoning block then a text answer.
@@ -461,5 +464,122 @@ func TestDeleteSession(t *testing.T) {
 	remaining, _ := store.ListSessionsByUser(req2.Context(), "alice", "", 0, nil)
 	if len(remaining.Sessions) != 0 {
 		t.Errorf("deleted session still listed: %+v", remaining.Sessions)
+	}
+}
+
+// TestDeleteSessionSoftKeepsRow: the DEFAULT delete is a soft delete — the
+// session leaves the list but its durable row stays (ended), so the content
+// can still be swept by the retention policy later.
+func TestDeleteSessionSoftKeepsRow(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	alice := identity.User{ID: "alice"}
+
+	sess, err := rt.CreateSession(context.Background(), alice.ID, "alice chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/api/chat/sessions/"+sess.ID, nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), alice))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d want 204", rec.Code)
+	}
+
+	// The row survives, ended — soft delete, not gone.
+	remaining, _ := store.ListSessionsByUser(context.Background(), "alice", "", 0, nil)
+	if len(remaining.Sessions) != 0 {
+		t.Errorf("soft-deleted session still listed: %+v", remaining.Sessions)
+	}
+	for _, s := range store.Sessions() {
+		if s.ID == sess.ID {
+			if s.Status != session.SessionEnded {
+				t.Errorf("soft-deleted session status = %q want ended", s.Status)
+			}
+			return
+		}
+	}
+	t.Error("soft-deleted session row is gone entirely; the default delete must keep it")
+}
+
+// TestDeleteSessionPurgeHardDeletes: ?purge=true turns the delete into a hard
+// delete — the session's durable rows AND its workspace image dir are removed
+// for real, closing the "delete=gone" expectation the default soft delete
+// cannot honour.
+func TestDeleteSessionPurgeHardDeletes(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	is := workspace.NewImageStore(t.TempDir())
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt).WithImageStore(is)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	alice := identity.User{ID: "alice"}
+
+	sess, err := rt.CreateSession(context.Background(), alice.ID, "alice chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := is.Save(sess.ID, "pic.png", testPNG(t)); err != nil {
+		t.Fatal(err)
+	}
+	imgDir := filepath.Join(is.Root(), sess.ID)
+
+	req := httptest.NewRequest("DELETE", "/api/chat/sessions/"+sess.ID+"?purge=true", nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), alice))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("purge status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The row is GONE (not merely ended) and the image dir with it.
+	for _, s := range store.Sessions() {
+		if s.ID == sess.ID {
+			t.Fatal("purged session row still present")
+		}
+	}
+	if _, err := os.Stat(imgDir); !os.IsNotExist(err) {
+		t.Errorf("purged session image dir still present: %v", err)
+	}
+}
+
+// TestDeleteSessionPurgeOwnership: purging someone else's session is 404 (the
+// hard delete is keyed by id alone, so ownership is the only gate) and their
+// session stays intact.
+func TestDeleteSessionPurgeOwnership(t *testing.T) {
+	store := session.NewMemStore()
+	rt := session.NewRuntime(store)
+	h := NewHandler(newThinkingLoop, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+	alice := identity.User{ID: "alice"}
+	bob := identity.User{ID: "bob"}
+
+	bobSess, err := rt.CreateSession(context.Background(), bob.ID, "bob chat")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/api/chat/sessions/"+bobSess.ID+"?purge=true", nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), alice))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign purge status = %d want 404", rec.Code)
+	}
+
+	found := false
+	for _, s := range store.Sessions() {
+		if s.ID == bobSess.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("bob's session was purged by alice")
 	}
 }

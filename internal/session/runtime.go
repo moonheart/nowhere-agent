@@ -548,6 +548,16 @@ func (rt *Runtime) DeleteSessionForUser(ctx context.Context, id, userID string) 
 	return rt.store.DeleteSessionForUser(ctx, id, userID)
 }
 
+// PurgeSession HARD-deletes a session's durable rows (the session and, via
+// FK cascade, its runs, messages, events, approvals, and suspended batches) —
+// the user-facing equivalent of the admin purge. DeleteSession is keyed by id
+// alone, so the caller must have verified ownership first (the chat DELETE
+// path checks GetSession + visibility before calling). Returns
+// ErrSessionNotFound when the session is already gone.
+func (rt *Runtime) PurgeSession(ctx context.Context, id string) error {
+	return rt.store.DeleteSession(ctx, id)
+}
+
 // RegisterCancel attaches the cancel func that interrupts the active run's
 // work to the session's run state, so CancelRun can stop it. The handler calls
 // this right after deriving a cancellable context for the run. No-op if no run
