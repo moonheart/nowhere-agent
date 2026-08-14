@@ -1,32 +1,9 @@
-import { useEffect, useState } from "react";
+import { lazy, useEffect, useState } from "react";
 import { Link, Route, Routes, useSearchParams } from "react-router-dom";
 import { AssistantRuntimeProvider, useThread } from "@assistant-ui/react";
 import { useDataStreamRuntime } from "@assistant-ui/react-data-stream";
 import { LogOut, Settings } from "lucide-react";
 import { AdminLayout } from "@/components/admin/AdminLayout";
-import { ProfilePage } from "@/components/admin/ProfilePage";
-import { MyMemoriesPage, MyUsagePage } from "@/components/admin/SelfPages";
-import { TeamsPage } from "@/components/admin/TeamsPage";
-import { TeamDetailPage } from "@/components/admin/TeamDetailPage";
-import {
-  PlatformMemoriesPage,
-  PlatformTeamsPage,
-  PlatformUsagePage,
-  PlatformUsersPage,
-} from "@/components/admin/PlatformPages";
-import {
-  MySkillsPage,
-  PlatformSkillsPage,
-} from "@/components/admin/SkillsPages";
-import {
-  MyAgentDefsPage,
-  PlatformAgentDefsPage,
-} from "@/components/admin/AgentDefsPages";
-import { PlatformAuditPage } from "@/components/admin/AuditPage";
-import { PlatformSettingsPage } from "@/components/admin/SettingsPage";
-import { PlatformProvidersPage } from "@/components/admin/PlatformProvidersPage";
-import { PlatformQuotasPage } from "@/components/admin/QuotasPage";
-import { ScheduledTasksPage } from "@/components/admin/ScheduledTasksPage";
 import { Thread } from "@/components/thread";
 import { LoginForm } from "@/components/login";
 import { SessionList } from "@/components/SessionList";
@@ -52,6 +29,28 @@ import {
 } from "@/lib/permission";
 import { cancelSession } from "@/lib/sessions";
 import { t, useLang, setLang } from "@/lib/i18n";
+
+// The admin console pages load on demand (React.lazy): the chat first paint
+// must not download the whole console (Vite chunk >500kB warning). Each page
+// is its own chunk; AdminLayout wraps its Outlet in the Suspense fallback.
+const ProfilePage = lazy(() => import("@/components/admin/ProfilePage").then((m) => ({ default: m.ProfilePage })));
+const MyMemoriesPage = lazy(() => import("@/components/admin/SelfPages").then((m) => ({ default: m.MyMemoriesPage })));
+const MyUsagePage = lazy(() => import("@/components/admin/SelfPages").then((m) => ({ default: m.MyUsagePage })));
+const TeamsPage = lazy(() => import("@/components/admin/TeamsPage").then((m) => ({ default: m.TeamsPage })));
+const TeamDetailPage = lazy(() => import("@/components/admin/TeamDetailPage").then((m) => ({ default: m.TeamDetailPage })));
+const PlatformMemoriesPage = lazy(() => import("@/components/admin/PlatformPages").then((m) => ({ default: m.PlatformMemoriesPage })));
+const PlatformTeamsPage = lazy(() => import("@/components/admin/PlatformPages").then((m) => ({ default: m.PlatformTeamsPage })));
+const PlatformUsagePage = lazy(() => import("@/components/admin/PlatformPages").then((m) => ({ default: m.PlatformUsagePage })));
+const PlatformUsersPage = lazy(() => import("@/components/admin/PlatformPages").then((m) => ({ default: m.PlatformUsersPage })));
+const MySkillsPage = lazy(() => import("@/components/admin/SkillsPages").then((m) => ({ default: m.MySkillsPage })));
+const PlatformSkillsPage = lazy(() => import("@/components/admin/SkillsPages").then((m) => ({ default: m.PlatformSkillsPage })));
+const MyAgentDefsPage = lazy(() => import("@/components/admin/AgentDefsPages").then((m) => ({ default: m.MyAgentDefsPage })));
+const PlatformAgentDefsPage = lazy(() => import("@/components/admin/AgentDefsPages").then((m) => ({ default: m.PlatformAgentDefsPage })));
+const PlatformAuditPage = lazy(() => import("@/components/admin/AuditPage").then((m) => ({ default: m.PlatformAuditPage })));
+const PlatformSettingsPage = lazy(() => import("@/components/admin/SettingsPage").then((m) => ({ default: m.PlatformSettingsPage })));
+const PlatformProvidersPage = lazy(() => import("@/components/admin/PlatformProvidersPage").then((m) => ({ default: m.PlatformProvidersPage })));
+const PlatformQuotasPage = lazy(() => import("@/components/admin/QuotasPage").then((m) => ({ default: m.PlatformQuotasPage })));
+const ScheduledTasksPage = lazy(() => import("@/components/admin/ScheduledTasksPage").then((m) => ({ default: m.ScheduledTasksPage })));
 
 // Chat holds one conversation: remounting it (via React key) resets the runtime
 // and re-runs history.load() for the now-current sessionId.

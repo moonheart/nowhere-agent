@@ -29,7 +29,7 @@ import { t } from "@/lib/i18n";
 import { ErrorNotice } from "@/components/admin/common";
 import { cn } from "@/lib/utils";
 import type { Me } from "@/lib/admin";
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, Suspense, useContext, type ReactNode } from "react";
 
 // MeContext hands the loaded profile to pages so each one does not refetch it.
 // It is only provided below a successful load, so consumers never see null.
@@ -244,7 +244,18 @@ export function AdminLayout() {
               isSkillEditorRoute(location.pathname) ? "max-w-none" : "max-w-5xl",
             )}
           >
-            <Outlet />
+            {/* The console pages are React.lazy chunks (App.tsx); show the
+                shell's reading column while a page chunk loads. */}
+            <Suspense
+              fallback={
+                <div className="text-sm text-muted-foreground">
+                  <Loader2 className="mr-2 inline size-4 animate-spin" />
+                  Loading…
+                </div>
+              }
+            >
+              <Outlet />
+            </Suspense>
           </div>
         </main>
       </div>
