@@ -281,6 +281,11 @@ type Sandbox struct {
 	// use the docker backend, where run_command is always available and
 	// contained. Ignored by the docker (always on) and off backends.
 	LocalExec bool `envconfig:"SANDBOX_LOCAL_EXEC" default:"false"`
+	// RunCommandTimeout bounds one run_command tool call. It is the boot
+	// default for the runtime setting run_command_timeout (which the admin
+	// console can override live), mirroring HTTP_TOOL_TIMEOUT; the built-in
+	// tool's own default is the same 120s when neither is set.
+	RunCommandTimeout time.Duration `envconfig:"RUN_COMMAND_TIMEOUT" default:"120s"`
 	// Shell overrides the bash executable used by the local backend's
 	// run_command. Empty auto-detects (bash on PATH; Git Bash on Windows). Set it
 	// to your Git Bash bash.exe if auto-detection fails.

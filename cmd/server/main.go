@@ -198,7 +198,7 @@ func run() error {
 		settings.KeyHTTPToolMaxConcurrent: mustJSON(cfg.HTTPTool.MaxConcurrent),
 		settings.KeyQueryDBDsns:           mustJSON(cfg.QueryDB.DSNS),
 		settings.KeyQueryDBTimeout:        mustJSON(int(cfg.QueryDB.Timeout.Seconds())),
-		settings.KeyRunCommandTimeout:     mustJSON(120), // the tool's legacy hardcoded ceiling
+		settings.KeyRunCommandTimeout:     mustJSON(int(cfg.Sandbox.RunCommandTimeout.Seconds())),
 		// Webhooks.
 		settings.KeyWebhookURL:           mustJSON(cfg.Webhook.URL),
 		settings.KeyWebhookTimeout:       mustJSON(int(cfg.Webhook.Timeout.Seconds())),
