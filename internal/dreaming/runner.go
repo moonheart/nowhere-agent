@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -144,6 +145,16 @@ func (r *Runner) TriggerForUser(userID string) error {
 		return ErrBusy
 	}
 	go func() {
+		// A panicking pass must not crash the process — and must still release
+		// the single-flight + cross-instance locks, or every later trigger
+		// would fail with ErrBusy and Wait() would block shutdown forever.
+		// Declared after the cancel defer so it runs first (LIFO).
+		defer func() {
+			if p := recover(); p != nil {
+				r.log.Error("dreaming: manual pass panicked", "panic", p, "stack", string(debug.Stack()))
+				r.finish(userID, r.now(), Result{}, fmt.Errorf("dreaming: pass panicked: %v", p))
+			}
+		}()
 		ctx, cancel := context.WithTimeout(r.base, r.timeout)
 		defer cancel()
 		start := r.now()

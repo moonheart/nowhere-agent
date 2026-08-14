@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -176,14 +177,25 @@ func (s *Scheduler) dispatch(ctx context.Context, due []Job) {
 // is only touched for the bookkeeping; the job itself runs outside it.
 func (s *Scheduler) run(ctx context.Context, j Job) {
 	defer s.wg.Done()
+	// A panicking job must not crash the process (recovered here, declared
+	// last so it runs first on LIFO) and must not wedge the scheduler: the
+	// in-flight mark is cleared by a defer, so the panic path still frees the
+	// job for the next tick.
+	defer func() {
+		s.mu.Lock()
+		delete(s.inflight, j.Name)
+		s.mu.Unlock()
+	}()
+	defer func() {
+		if p := recover(); p != nil {
+			s.log.Error("scheduled job panicked", "job", j.Name, "panic", p, "stack", string(debug.Stack()))
+		}
+	}()
 	if err := j.Run(ctx); err != nil {
 		s.log.Error("scheduled job failed", "job", j.Name, "error", err)
 	} else {
 		s.log.Debug("scheduled job ran", "job", j.Name)
 	}
-	s.mu.Lock()
-	delete(s.inflight, j.Name)
-	s.mu.Unlock()
 }
 
 // LastRun reports when a job last ran (for tests/inspection).

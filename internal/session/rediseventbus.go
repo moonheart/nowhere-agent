@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -78,37 +79,49 @@ func (b *redisEventBus) Subscribe(sessionID string, buffer int) (<-chan Event, f
 
 	go func() {
 		backoff := time.Second
-		for {
+		// One step of the forward loop; false terminates the goroutine.
+		// Recover per step: a transient panic must not kill the forwarder for
+		// the life of the subscription — the loop is built to survive transient
+		// errors and reconnect, and the same resilience must hold for panics.
+		step := func() bool {
+			defer func() {
+				if p := recover(); p != nil {
+					slog.Error("redis event bus forwarder panicked", "panic", p, "stack", string(debug.Stack()))
+				}
+			}()
 			mu.Lock()
 			ps := current
 			mu.Unlock()
 			msg, err := ps.ReceiveMessage(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
-					return // cancelled
+					return false // cancelled
 				}
 				// Transient error: the subscription is dead; rebuild it and
 				// back off before the next attempt.
 				reconnect()
 				select {
 				case <-ctx.Done():
-					return
+					return false
 				case <-time.After(backoff):
 				}
 				if backoff < 30*time.Second {
 					backoff *= 2
 				}
-				continue
+				return true
 			}
 			backoff = time.Second
 			var e Event
 			if err := json.Unmarshal([]byte(msg.Payload), &e); err != nil {
-				continue
+				return true
 			}
 			select {
 			case ch <- e:
 			default: // drop for slow consumers; they recover via Replay
 			}
+			return true
+		}
+		for step() {
 		}
 	}()
 	return ch, func() {

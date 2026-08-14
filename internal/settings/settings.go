@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -140,9 +141,18 @@ func (rt *Runtime) StartRefreshLoop(ctx context.Context, interval time.Duration)
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if err := rt.Load(ctx); err != nil {
-					rt.log.Warn("platform settings refresh failed; keeping the previous snapshot", "err", err)
-				}
+				// Recover per tick so a panic in Load cannot kill the refresh
+				// loop: multi-instance convergence must survive one bad read.
+				func() {
+					defer func() {
+						if p := recover(); p != nil {
+							rt.log.Error("platform settings refresh panicked", "panic", p, "stack", string(debug.Stack()))
+						}
+					}()
+					if err := rt.Load(ctx); err != nil {
+						rt.log.Warn("platform settings refresh failed; keeping the previous snapshot", "err", err)
+					}
+				}()
 			}
 		}
 	}()

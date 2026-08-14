@@ -87,6 +87,38 @@ func TestRunDueOnlyAfterInterval(t *testing.T) {
 	}
 }
 
+// A job that panics must not crash the process: the panic is recovered in run
+// and the in-flight mark is cleared by a defer, so the job stays dispatchable
+// on the next tick.
+func TestJobPanicDoesNotCrashScheduler(t *testing.T) {
+	var runs atomic.Int32
+	s := mustNew(t, Job{Name: "boom", Interval: time.Hour, Run: func(context.Context) error {
+		runs.Add(1)
+		panic("job blew up")
+	}})
+	s.catchUp(context.Background())
+	waitFor(t, func() bool { return runs.Load() == 1 })
+	// The in-flight mark must be cleared despite the panic, or the job would
+	// never run again.
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return !s.inflight["boom"]
+	})
+	// Re-dispatch: backdate lastRun so the job is due again, and confirm it
+	// actually runs (and is cleared again).
+	s.mu.Lock()
+	s.lastRun["boom"] = s.now().Add(-2 * time.Hour)
+	s.mu.Unlock()
+	s.catchUp(context.Background())
+	waitFor(t, func() bool { return runs.Load() == 2 })
+	waitFor(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return !s.inflight["boom"]
+	})
+}
+
 func TestJobErrorDoesNotCrashScheduler(t *testing.T) {
 	var ran atomic.Int32
 	s := mustNew(t, Job{Name: "bad", Interval: time.Second, Run: func(context.Context) error {

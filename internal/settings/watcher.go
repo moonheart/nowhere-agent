@@ -2,6 +2,8 @@ package settings
 
 import (
 	"context"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -50,12 +52,22 @@ func (w *Watcher) StartSync(ctx context.Context, interval time.Duration) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				w.mu.RLock()
-				fns := append([]func(){}, w.fns...)
-				w.mu.RUnlock()
-				for _, fn := range fns {
-					fn()
-				}
+				// Recover per tick, not per goroutine: a panicking callback
+				// must not kill the watcher loop, or settings convergence
+				// would stop permanently until restart.
+				func() {
+					defer func() {
+						if p := recover(); p != nil {
+							slog.Error("settings sync callback panicked", "panic", p, "stack", string(debug.Stack()))
+						}
+					}()
+					w.mu.RLock()
+					fns := append([]func(){}, w.fns...)
+					w.mu.RUnlock()
+					for _, fn := range fns {
+						fn()
+					}
+				}()
 			}
 		}
 	}()
