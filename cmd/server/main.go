@@ -176,6 +176,7 @@ func run() error {
 		settings.KeyHTTPToolMaxConcurrent: mustJSON(cfg.HTTPTool.MaxConcurrent),
 		settings.KeyQueryDBDsns:           mustJSON(cfg.QueryDB.DSNS),
 		settings.KeyQueryDBTimeout:        mustJSON(int(cfg.QueryDB.Timeout.Seconds())),
+		settings.KeyRunCommandTimeout:     mustJSON(120), // the tool's legacy hardcoded ceiling
 		// Webhooks.
 		settings.KeyWebhookURL:           mustJSON(cfg.Webhook.URL),
 		settings.KeyWebhookTimeout:       mustJSON(int(cfg.Webhook.Timeout.Seconds())),
@@ -1384,7 +1385,10 @@ func run() error {
 						reg.Register(t)
 					}
 					if execEnabledFor() {
-						reg.Register(builtin.NewRunCommand(sandboxPort, h))
+						// run_command's per-call ceiling is re-read from the
+						// runtime settings per session, so the admin console can
+						// retune it without a restart (default 120s).
+						reg.Register(builtin.NewRunCommand(sandboxPort, h, settingsRuntime.Duration(settings.KeyRunCommandTimeout)))
 						// Skill L2 script execution (capability-gap K3b): ONE fixed
 						// run_skill_script tool runs any visible skill's script by
 						// name, resolved lazily against the caller's scopes. A single

@@ -297,6 +297,7 @@ func Catalog() []KeyInfo {
 		{Key: KeyHTTPToolMaxConcurrent, Group: GroupTools, Kind: KindInt, Description: "Max tool executions one run may have in flight at once, across the whole tool registry (overrides HTTP_TOOL_MAX_CONCURRENT). 0 = unlimited. Applies to the next run."},
 		{Key: KeyQueryDBDsns, Group: GroupTools, Kind: KindString, Secret: true, Description: "Comma-separated name=dsn business databases for query_db (same syntax as QUERY_DB_DSNS), e.g. erp=postgres://ro:secret@pg.internal:5432/erp. Empty disables the tool. DSNs may carry database passwords — the value is never echoed back. Applies to the next run."},
 		{Key: KeyQueryDBTimeout, Group: GroupTools, Kind: KindInt, Description: "query_db per-call timeout in seconds (overrides QUERY_DB_TIMEOUT)."},
+		{Key: KeyRunCommandTimeout, Group: GroupTools, Kind: KindInt, Description: "run_command per-call timeout in seconds (default 120). Applies to the next run."},
 
 		// Webhooks tab.
 		{Key: KeyWebhookURL, Group: GroupWebhooks, Kind: KindString, Description: "Global run-completion notification target (overrides WEBHOOK_URL; task-level and inbound-webhook URLs still win per run). Applies to the next notification."},
@@ -407,6 +408,9 @@ const (
 	// KeyQueryDBTimeout is the query_db per-call timeout in seconds
 	// (overrides QUERY_DB_TIMEOUT).
 	KeyQueryDBTimeout = "query_db_timeout"
+	// KeyRunCommandTimeout is the run_command per-call timeout in seconds
+	// (the tool's ceiling was previously a hardcoded 120s).
+	KeyRunCommandTimeout = "run_command_timeout"
 
 	// Webhooks tab.
 	// KeyWebhookURL is the global run-completion notification target

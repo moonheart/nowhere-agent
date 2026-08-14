@@ -10,23 +10,32 @@ import (
 	"nowhere-agent/internal/toolruntime"
 )
 
+// runCommandDefaultTimeout bounds one run_command call when the caller sets
+// none (the legacy hardcoded ceiling).
+const runCommandDefaultTimeout = 120 * time.Second
+
 // NewRunCommand returns the run_command tool bound to a session sandbox. It runs
 // a POSIX/bash script inside the sandbox via the Port's Sheller + Exec, capturing
 // stdout, stderr, and the exit code. The command contract is uniform bash across
 // backends (container sh on docker, Git Bash on Windows local, bash/sh on unix
-// local), so the model writes one shell dialect everywhere.
+// local), so the model writes one shell dialect everywhere. timeout bounds one
+// call; <= 0 falls back to runCommandDefaultTimeout.
 //
 // Risk is SandboxWrite: on the docker backend the command is confined to the
 // container; on the local backend it runs on the host with the workspace as its
 // working directory, so local exec is a trusted single-tenant mode (gated by
 // SANDBOX_LOCAL_EXEC) and multi-tenant deployments should use the docker backend.
-func NewRunCommand(sb sandbox.Port, h sandbox.Handle) toolruntime.Tool {
-	return &runCommandTool{sb: sb, h: h}
+func NewRunCommand(sb sandbox.Port, h sandbox.Handle, timeout time.Duration) toolruntime.Tool {
+	if timeout <= 0 {
+		timeout = runCommandDefaultTimeout
+	}
+	return &runCommandTool{sb: sb, h: h, timeout: timeout}
 }
 
 type runCommandTool struct {
-	sb sandbox.Port
-	h  sandbox.Handle
+	sb      sandbox.Port
+	h       sandbox.Handle
+	timeout time.Duration
 }
 
 func (t *runCommandTool) Name() string { return "run_command" }
@@ -43,7 +52,7 @@ func (t *runCommandTool) Schema() map[string]any {
 	}
 }
 func (t *runCommandTool) Risk() toolruntime.Risk { return toolruntime.RiskSandboxWrite }
-func (t *runCommandTool) Timeout() time.Duration { return 120 * time.Second }
+func (t *runCommandTool) Timeout() time.Duration { return t.timeout }
 
 func (t *runCommandTool) Call(ctx context.Context, args map[string]any) (toolruntime.Result, error) {
 	command, err := argString(args, "command")

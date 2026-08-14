@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/sandbox"
 )
@@ -30,7 +31,7 @@ func (f *fakeExecPort) Exec(_ context.Context, _ sandbox.Handle, argv []string) 
 
 func TestRunCommandSuccess(t *testing.T) {
 	fp := &fakeExecPort{result: sandbox.ExecResult{Stdout: "hello\n", ExitCode: 0}}
-	res, err := NewRunCommand(fp, sandbox.Handle{}).Call(context.Background(), map[string]any{"command": "echo hello"})
+	res, err := NewRunCommand(fp, sandbox.Handle{}, 0).Call(context.Background(), map[string]any{"command": "echo hello"})
 	if err != nil || res.IsError {
 		t.Fatalf("unexpected: %+v", res)
 	}
@@ -44,7 +45,7 @@ func TestRunCommandSuccess(t *testing.T) {
 
 func TestRunCommandNonZeroExitNotError(t *testing.T) {
 	fp := &fakeExecPort{result: sandbox.ExecResult{Stderr: "boom\n", ExitCode: 2}}
-	res, _ := NewRunCommand(fp, sandbox.Handle{}).Call(context.Background(), map[string]any{"command": "false"})
+	res, _ := NewRunCommand(fp, sandbox.Handle{}, 0).Call(context.Background(), map[string]any{"command": "false"})
 	if res.IsError {
 		t.Error("a non-zero exit must NOT be reported as a tool error")
 	}
@@ -55,7 +56,7 @@ func TestRunCommandNonZeroExitNotError(t *testing.T) {
 
 func TestRunCommandInfraErrorIsError(t *testing.T) {
 	fp := &fakeExecPort{execErr: fmt.Errorf("daemon down")}
-	res, _ := NewRunCommand(fp, sandbox.Handle{}).Call(context.Background(), map[string]any{"command": "x"})
+	res, _ := NewRunCommand(fp, sandbox.Handle{}, 0).Call(context.Background(), map[string]any{"command": "x"})
 	if !res.IsError || !strings.Contains(res.Content, "daemon down") {
 		t.Errorf("want infra error, got %+v", res)
 	}
@@ -65,7 +66,7 @@ func TestRunCommandUnsupportedBackend(t *testing.T) {
 	// noWalkPort (defined in search_test.go) embeds the Port interface only, so it
 	// implements neither Walker nor Sheller — exercising the graceful path.
 	sb := noWalkPort{sandbox.NewMemPort()}
-	res, _ := NewRunCommand(sb, sandbox.Handle{}).Call(context.Background(), map[string]any{"command": "x"})
+	res, _ := NewRunCommand(sb, sandbox.Handle{}, 0).Call(context.Background(), map[string]any{"command": "x"})
 	if !res.IsError || !strings.Contains(res.Content, "not supported") {
 		t.Errorf("want not-supported, got %+v", res)
 	}
@@ -73,9 +74,23 @@ func TestRunCommandUnsupportedBackend(t *testing.T) {
 
 func TestRunCommandMissingArg(t *testing.T) {
 	fp := &fakeExecPort{}
-	res, _ := NewRunCommand(fp, sandbox.Handle{}).Call(context.Background(), map[string]any{})
+	res, _ := NewRunCommand(fp, sandbox.Handle{}, 0).Call(context.Background(), map[string]any{})
 	if !res.IsError || !strings.Contains(res.Content, "command") {
 		t.Errorf("want missing-command error, got %+v", res)
+	}
+}
+
+// TestRunCommandTimeoutInjection pins the injected per-call ceiling: an
+// explicit timeout is honored, and <= 0 falls back to the legacy 120s default.
+func TestRunCommandTimeoutInjection(t *testing.T) {
+	if got := NewRunCommand(&fakeExecPort{}, sandbox.Handle{}, 0); got.Timeout() != 120*time.Second {
+		t.Errorf("default timeout = %v, want 120s", got.Timeout())
+	}
+	if got := NewRunCommand(&fakeExecPort{}, sandbox.Handle{}, 45*time.Second); got.Timeout() != 45*time.Second {
+		t.Errorf("injected timeout = %v, want 45s", got.Timeout())
+	}
+	if got := NewRunCommand(&fakeExecPort{}, sandbox.Handle{}, -1); got.Timeout() != 120*time.Second {
+		t.Errorf("negative timeout = %v, want the 120s default", got.Timeout())
 	}
 }
 
@@ -124,7 +139,7 @@ func TestRunCommandSpillsAndRetrievesOversizedOutput(t *testing.T) {
 	big := strings.Repeat("x", spillCap+5000)
 	bp := &bigExecPort{MemPort: sb, out: big}
 
-	res, err := NewRunCommand(bp, h).Call(ctx, map[string]any{"command": "emit"})
+	res, err := NewRunCommand(bp, h, 0).Call(ctx, map[string]any{"command": "emit"})
 	if err != nil || res.IsError {
 		t.Fatalf("unexpected: %+v err=%v", res, err)
 	}
