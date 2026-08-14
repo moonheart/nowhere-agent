@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"path"
 	"strconv"
 	"strings"
@@ -381,6 +382,12 @@ func dockerNetworkMode(np NetworkPolicy) (container.NetworkMode, error) {
 		// egress — rather than "bridge", which would silently grant full egress
 		// and defeat the policy. A denied request is safe; an unexpectedly-open
 		// one is a security hole.
+		//
+		// Say the degradation out loud: "policy granted, network off" is exactly
+		// how operators learn a sandbox is broken the hard way — mid-incident,
+		// with the allowlist as the suspect.
+		slog.Warn("sandbox: allowlist network policy is not implemented; degraded to full network denial",
+			"mode", np.Mode, "allowed_hosts", len(np.AllowedHosts))
 		return "none", nil
 	default:
 		return "", fmt.Errorf("unknown network mode %q", np.Mode)
