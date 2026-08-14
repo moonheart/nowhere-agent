@@ -119,6 +119,25 @@ func (s *PGMessageStore) MessagesAfter(ctx context.Context, sessionID string, af
 	return scanMessages(rows)
 }
 
+// MessagesPage returns up to limit messages with id > afterID, ordered by seq
+// (see MessageStore.MessagesPage). The keyset cursor is the message id: ids
+// ascend with seq (append-only, assigned by nextval in seq order), so paging by
+// id advances through the conversation in the same order MessagesFor renders.
+func (s *PGMessageStore) MessagesPage(ctx context.Context, sessionID string, afterID int64, limit int) ([]StoredMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, run_id, seq, role, content, created_at,
+			usage_input, usage_output, usage_cache_read, usage_cache_write, metadata
+		FROM messages
+		WHERE session_id = $1 AND id > $2
+		ORDER BY seq
+		LIMIT $3`, sessionID, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("messages page: %w", err)
+	}
+	defer rows.Close()
+	return scanMessages(rows)
+}
+
 // SetMessageMetadata replaces one message's metadata JSON. The row is keyed by
 // id; a missing row is not an error (the update raced a delete), matching the
 // best-effort contract.

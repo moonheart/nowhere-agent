@@ -63,6 +63,23 @@ func (m *MemMessageStore) MessagesAfter(_ context.Context, sessionID string, aft
 	return out, nil
 }
 
+// MessagesPage returns up to limit messages with id > afterID, in seq order
+// (see MessageStore.MessagesPage).
+func (m *MemMessageStore) MessagesPage(_ context.Context, sessionID string, afterID int64, limit int) ([]StoredMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []StoredMessage
+	for _, msg := range m.bySess[sessionID] {
+		if msg.ID > afterID {
+			out = append(out, msg)
+			if len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 // SetMessageMetadata replaces one message's metadata JSON, located by id. A
 // missing id is not an error (best-effort contract); the slice is copied so
 // the stored row is updated in place.

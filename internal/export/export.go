@@ -43,14 +43,15 @@ func New(db *sql.DB, msgs session.MessageStore, mem memory.Port, up upload.Uploa
 	return &Service{db: db, msgs: msgs, mem: mem, uploads: up, tasks: tasks}
 }
 
-// sessionRow is one exported session with its messages.
-type sessionRow struct {
-	ID        string       `json:"id"`
-	Title     string       `json:"title"`
-	Status    string       `json:"status"`
-	CreatedAt time.Time    `json:"created_at"`
-	UpdatedAt time.Time    `json:"updated_at"`
-	Messages  []messageRow `json:"messages"`
+// sessionMeta is one exported session WITHOUT its messages — the message array
+// is streamed separately, page by page, so a session's full history never
+// materializes in memory.
+type sessionMeta struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // messageRow is the wire form of one conversation message (role, blocks, time).
@@ -93,11 +94,14 @@ type taskRow struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
-// sessionsForUser loads every session of the user (active AND ended — an
-// export is a complete copy, not a sidebar). A nil db (tests) yields no rows.
-func (s *Service) sessionsForUser(ctx context.Context, userID string) ([]sessionRow, error) {
+// sessionsForUser loads the METADATA of every session of the user (active AND
+// ended — an export is a complete copy, not a sidebar). Messages are not part
+// of it: they are streamed per session via writeSession, so the memory
+// footprint is one session's page, not the user's whole history. A nil db
+// (tests) yields no rows.
+func (s *Service) sessionsForUser(ctx context.Context, userID string) ([]sessionMeta, error) {
 	if s.db == nil {
-		return []sessionRow{}, nil
+		return []sessionMeta{}, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, title, status, created_at, updated_at FROM sessions
@@ -106,9 +110,9 @@ func (s *Service) sessionsForUser(ctx context.Context, userID string) ([]session
 		return nil, fmt.Errorf("export sessions: %w", err)
 	}
 	defer rows.Close()
-	out := []sessionRow{}
+	out := []sessionMeta{}
 	for rows.Next() {
-		var sr sessionRow
+		var sr sessionMeta
 		if err := rows.Scan(&sr.ID, &sr.Title, &sr.Status, &sr.CreatedAt, &sr.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -117,33 +121,94 @@ func (s *Service) sessionsForUser(ctx context.Context, userID string) ([]session
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if s.msgs != nil {
-		for i := range out {
-			msgs, err := s.msgs.MessagesFor(ctx, out[i].ID)
-			if err != nil {
-				return nil, err
-			}
-			for _, m := range msgs {
-				out[i].Messages = append(out[i].Messages, messageRow{
-					ID:        m.ID,
-					RunID:     m.RunID,
-					Seq:       m.Seq,
-					Role:      string(m.Role),
-					Content:   m.Content,
-					CreatedAt: m.CreatedAt,
-				})
-			}
-		}
-	}
 	return out, nil
 }
 
+// messagePageSize bounds the working set of one keyset page of a session's
+// messages. Export dumps a user's whole conversation record; paging keeps the
+// stream's memory proportional to a page rather than to the record.
+const messagePageSize = 500
+
+// writeSession emits one session object: its metadata header fields, then its
+// messages streamed in keyset pages (MessagesPage: id > last, ordered by seq).
+// The JSON shape is unchanged from the old whole-session encoding — a session
+// without messages renders "messages":null exactly as before.
+func (s *Service) writeSession(ctx context.Context, w io.Writer, enc *json.Encoder, sr sessionMeta) error {
+	head, err := json.Marshal(sr)
+	if err != nil {
+		return err
+	}
+	// The marshaled object ends with "}", and the message array is spliced in
+	// BEFORE that brace — drop it here and write it after the last page.
+	if _, err := w.Write(head[:len(head)-1]); err != nil {
+		return err
+	}
+	if s.msgs == nil {
+		_, err = io.WriteString(w, `,"messages":null}`)
+		return err
+	}
+
+	page, err := s.msgs.MessagesPage(ctx, sr.ID, 0, messagePageSize)
+	if err != nil {
+		return fmt.Errorf("export messages: %w", err)
+	}
+	if len(page) == 0 {
+		if _, err := io.WriteString(w, `,"messages":null}`); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := io.WriteString(w, `,"messages":[`); err != nil {
+		return err
+	}
+	// Rows need EXPLICIT separators: Go 1.26's strict json parser rejects
+	// whitespace-only element separation (RFC 8259 requires the comma).
+	first := true
+	writeRow := func(m session.StoredMessage) error {
+		if !first {
+			if _, err := io.WriteString(w, ","); err != nil {
+				return err
+			}
+		}
+		first = false
+		return enc.Encode(messageRow{
+			ID:        m.ID,
+			RunID:     m.RunID,
+			Seq:       m.Seq,
+			Role:      string(m.Role),
+			Content:   m.Content,
+			CreatedAt: m.CreatedAt,
+		})
+	}
+	for {
+		for _, m := range page {
+			if err := writeRow(m); err != nil {
+				return err
+			}
+		}
+		// A short page is the last one; a full page may have a successor (the
+		// next query returns empty when it does not).
+		if len(page) < messagePageSize {
+			break
+		}
+		page, err = s.msgs.MessagesPage(ctx, sr.ID, page[len(page)-1].ID, messagePageSize)
+		if err != nil {
+			return fmt.Errorf("export messages: %w", err)
+		}
+		if len(page) == 0 {
+			break
+		}
+	}
+	_, err = io.WriteString(w, `]}`)
+	return err
+}
+
 // Write writes the export document for userID to w as JSON. The document is
-// ENCODED incrementally (sessions are flushed to w one at a time), but the
-// data itself is not streamed: sessionsForUser first loads every session and
-// every message of the user into memory, so a very large conversation
-// history is held in memory for the duration of the export. The identity
-// rows are provided by the caller (the authenticated request context already
+// ENCODED incrementally: sessions are flushed one at a time, and each session's
+// messages are streamed in keyset pages (MessagesPage), so memory holds one
+// page of one session rather than the user's entire conversation history —
+// the same streaming posture as the SSE and history paths. The identity rows
+// are provided by the caller (the authenticated request context already
 // holds them; the export is a copy, not a re-query).
 func (s *Service) Write(ctx context.Context, w io.Writer, u identity.User) error {
 	enc := json.NewEncoder(w)
@@ -176,7 +241,7 @@ func (s *Service) Write(ctx context.Context, w io.Writer, u identity.User) error
 				return err
 			}
 		}
-		if err := enc.Encode(sr); err != nil {
+		if err := s.writeSession(ctx, w, enc, sr); err != nil {
 			return err
 		}
 	}

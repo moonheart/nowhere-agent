@@ -53,6 +53,14 @@ type MessageStore interface {
 	// the messages it has not yet consolidated (incremental model).
 	MessagesAfter(ctx context.Context, sessionID string, afterID int64) ([]StoredMessage, error)
 
+	// MessagesPage returns up to limit messages with id > afterID, ordered by
+	// seq — the keyset-paged form of MessagesFor for streaming consumers. The
+	// cursor is the message id (ids ascend with seq, so paging by id preserves
+	// seq order). Export dumps a user's whole conversation history; a page
+	// bounds the working set instead of holding every message in memory at
+	// once, mirroring how the SSE/history paths stream rather than load.
+	MessagesPage(ctx context.Context, sessionID string, afterID int64, limit int) ([]StoredMessage, error)
+
 	// LastAssistantText returns the trimmed text of the most recent assistant
 	// message whose content carries text, scanning back at most limit assistant
 	// messages (newest first). It is the cheap bounded form of MessagesFor for
