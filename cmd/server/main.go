@@ -75,12 +75,22 @@ func main() {
 // hourlySweep runs fn every hour on its own goroutine until ctx ends — the
 // shared skeleton of the credential / raw-log / pending-interaction / image
 // retention / inbound-nonce sweepers, which are all the same ticker+select
-// with different work. A failed pass is logged under name ("<name> sweep
+// with different work. The first pass runs immediately on startup (the
+// ticker's first tick only fires after a full hour, so a just-booted instance
+// would otherwise keep dead rows and stale image dirs around one hour longer
+// than configured); each later pass is logged under name ("<name> sweep
 // failed") and retried next tick; a slow pass simply delays the next tick
 // (the ticker drops missed ticks). fn must be best-effort and cheap; it
-// logs its own success detail (per-sweep wording and counts).
+// logs its own success detail (per-sweep wording and counts). fn may use ctx,
+// which is alive for the startup pass.
 func hourlySweep(ctx context.Context, log *slog.Logger, name string, fn func() error) {
 	go func() {
+		runSweep := func() {
+			if err := fn(); err != nil {
+				log.Warn(name+" sweep failed", "err", err)
+			}
+		}
+		runSweep()
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
@@ -88,9 +98,7 @@ func hourlySweep(ctx context.Context, log *slog.Logger, name string, fn func() e
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := fn(); err != nil {
-					log.Warn(name+" sweep failed", "err", err)
-				}
+				runSweep()
 			}
 		}
 	}()

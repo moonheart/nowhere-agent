@@ -5,12 +5,15 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -389,5 +392,36 @@ func TestClampPermissionDecision(t *testing.T) {
 		if got := clampPermissionDecision(v, "k"); got != permission.DecisionDeny {
 			t.Errorf("clamp(%q) = %q, want deny (fail-closed)", v, got)
 		}
+	}
+}
+
+// TestHourlySweepRunsFirstPassImmediately pins the startup semantics: the
+// first sweep pass runs without waiting for the hourly tick, so a just-booted
+// instance prunes dead credentials / expired pendings / stale image dirs right
+// away instead of an hour after boot.
+func TestHourlySweepRunsFirstPassImmediately(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var mu sync.Mutex
+	passes := 0
+	hourlySweep(ctx, logger, "test sweep", func() error {
+		mu.Lock()
+		passes++
+		mu.Unlock()
+		return nil
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := passes
+		mu.Unlock()
+		if n >= 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first sweep pass never ran without the hourly tick")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
