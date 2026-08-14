@@ -143,11 +143,14 @@ type Permission struct {
 	ExternalWrite string `envconfig:"PERMISSION_EXTERNAL_WRITE" default:"ask"`
 }
 
-// Upload configures the per-user image-upload quota (user-image-uploads):
-// session-independent uploads are metered so one user cannot fill the blob
-// store unboundedly. The quota is checked BEFORE a new blob is written; a
-// user at the cap gets 413. <= 0 disables the respective cap (unlimited).
-// Both are overridable live from the admin console (upload_max_files_per_user,
+// Upload configures the image-upload quota knobs (user-image-uploads):
+// session-independent uploads are metered per USER (the uploads table is the
+// ledger) so one user cannot fill the blob store unboundedly, and a chat
+// session's own image uploads are metered per SESSION (counted from the
+// session's stored WebP files) — the same knob, applied at two scopes. The
+// quota is checked BEFORE a new blob is written; a user/session at the cap
+// gets 413. <= 0 disables the respective cap (unlimited). Both are overridable
+// live from the admin console (upload_max_files_per_user,
 // upload_max_bytes_per_user).
 type Upload struct {
 	// MaxFilesPerUser caps the number of upload records one user may hold.

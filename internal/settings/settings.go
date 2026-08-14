@@ -351,8 +351,8 @@ func Catalog() []KeyInfo {
 		// HTTP layer (gateway).
 		{Key: KeyRateLimitRPS, Group: GroupHTTP, Kind: KindFloat, Description: "Per-IP HTTP rate limit, requests per second (overrides HTTP_RATE_LIMIT_RPS). 0 = disabled. Retuned live within a few seconds."},
 		{Key: KeyRateLimitBurst, Group: GroupHTTP, Kind: KindInt, Description: "Per-IP HTTP rate limit burst size (overrides HTTP_RATE_LIMIT_BURST). 0 = disabled. Retuned live within a few seconds."},
-		{Key: KeyUploadMaxFilesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max user-level image uploads one user may hold (overrides UPLOAD_MAX_FILES_PER_USER). 0 = unlimited. Applied to the next upload."},
-		{Key: KeyUploadMaxBytesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max total stored upload bytes per user in bytes (overrides UPLOAD_MAX_BYTES_PER_USER). 0 = unlimited. Applied to the next upload."},
+		{Key: KeyUploadMaxFilesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max image uploads one user may hold (overrides UPLOAD_MAX_FILES_PER_USER). 0 = unlimited. Applied per USER to user-level uploads (upload tab / first message) and per SESSION to a chat session's own images. Applied to the next upload."},
+		{Key: KeyUploadMaxBytesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max total stored upload bytes per user in bytes (overrides UPLOAD_MAX_BYTES_PER_USER). 0 = unlimited. Applied per USER to user-level uploads and per SESSION to a chat session's own images. Applied to the next upload."},
 		{Key: KeyWorkspaceRetentionDays, Group: GroupBackground, Kind: KindInt, Description: "Days an ENDED session's image directory is kept before the hourly sweep deletes it (overrides WORKSPACE_RETENTION_DAYS). 0 disables the sweep. Applies within an hour."},
 		{Key: KeyConversationRetentionDays, Group: GroupBackground, Kind: KindInt, Description: "Days an ENDED session's conversation is kept before the hourly sweep hard-deletes it and its messages (overrides CONVERSATION_RETENTION_DAYS). 0 disables the sweep. Applies within an hour."},
 
