@@ -71,7 +71,7 @@ func TestHistoryPagination(t *testing.T) {
 	}
 
 	// Second page: everything before the first page's head.
-	msgs, hasMore = get("&limit=2&before="+fmt.Sprint(ids[3]))
+	msgs, hasMore = get("&limit=2&before=" + fmt.Sprint(ids[3]))
 	if len(msgs) != 2 || msgs[0].Content[0].Text != "m1" || msgs[1].Content[0].Text != "m2" {
 		t.Fatalf("second page = %+v", msgs)
 	}
@@ -80,7 +80,7 @@ func TestHistoryPagination(t *testing.T) {
 	}
 
 	// Final page drains.
-	msgs, hasMore = get("&limit=2&before="+fmt.Sprint(ids[1]))
+	msgs, hasMore = get("&limit=2&before=" + fmt.Sprint(ids[1]))
 	if len(msgs) != 1 || msgs[0].Content[0].Text != "m0" {
 		t.Fatalf("final page = %+v", msgs)
 	}
