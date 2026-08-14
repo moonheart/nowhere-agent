@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 
 	"nowhere-agent/internal/provider"
 )
@@ -179,6 +180,34 @@ func (s *PGMessageStore) LastAssistantMessage(ctx context.Context, sessionID, ru
 		}
 	}
 	return &m, nil
+}
+
+// MessagesTail returns up to limit messages with id < beforeID, ordered by
+// seq ascending (see MessageStore.MessagesTail): the newest messages older
+// than the cursor, for the history tail page. Bounded read — the cost is
+// proportional to limit, never the conversation length.
+func (s *PGMessageStore) MessagesTail(ctx context.Context, sessionID string, beforeID int64, limit int) ([]StoredMessage, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, run_id, seq, role, content, created_at,
+			usage_input, usage_output, usage_cache_read, usage_cache_write, metadata
+		FROM messages
+		WHERE session_id = $1 AND ($2 <= 0 OR id < $2)
+		ORDER BY seq DESC
+		LIMIT $3`, sessionID, beforeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("messages tail: %w", err)
+	}
+	defer rows.Close()
+	stored, err := scanMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	// scanMessages yields newest-first; flip to seq order for the caller.
+	slices.Reverse(stored)
+	return stored, nil
 }
 
 // SetMessageMetadata replaces one message's metadata JSON. The row is keyed by

@@ -22,6 +22,7 @@ import {
 } from "assistant-stream";
 import { asAsyncIterableStream } from "assistant-stream/utils";
 import type { ReadonlyJSONObject } from "assistant-stream/utils";
+import { useSyncExternalStore } from "react";
 import { getSessionId } from "@/lib/thread";
 import { getToken } from "@/lib/auth";
 import { ApiError, handleUnauthorized } from "@/lib/api";
@@ -30,6 +31,12 @@ import { reportInteraction, approvalEpoch, type Interaction } from "@/lib/approv
 import { reportNotice } from "@/lib/notice";
 import { reportPlan, type Plan } from "@/lib/plan";
 import { reportPermissionMode, permissionModeFromSessionState } from "@/lib/permission";
+
+// HISTORY_PAGE bounds the history load: the newest messages of a long
+// conversation, not the whole record. The server echoes hasMore when older
+// turns exist, so the UI can show a truncation hint instead of silently
+// presenting a partial conversation as complete.
+const HISTORY_PAGE = 100;
 
 type HistoryPart =
   | { type: "text" | "reasoning"; text: string }
@@ -127,11 +134,12 @@ async function loadHistory(): Promise<{
   pendingApproval?: Interaction | null;
   pendingInteractions?: Interaction[] | null;
   sessionState?: { plan?: Plan } | null;
+  hasMore?: boolean;
 }> {
   const threadId = getSessionId();
   if (!threadId) return { messages: [], active: false };
   const res = await fetch(
-    `/api/chat/history?threadId=${encodeURIComponent(threadId)}`,
+    `/api/chat/history?threadId=${encodeURIComponent(threadId)}&limit=${HISTORY_PAGE}`,
     { headers: authHeaders() },
   );
   handleUnauthorized(res);
@@ -156,6 +164,7 @@ async function loadHistory(): Promise<{
     pendingApproval?: Interaction | null;
     pendingInteractions?: Interaction[] | null;
     sessionState?: { plan?: Plan } | null;
+    hasMore?: boolean;
   };
   const messages = (data.messages ?? []).map((m) => mapMessage(m, threadId));
   return {
@@ -164,6 +173,7 @@ async function loadHistory(): Promise<{
     pendingApproval: data.pendingApproval ?? null,
     pendingInteractions: data.pendingInteractions ?? null,
     sessionState: data.sessionState ?? null,
+    hasMore: data.hasMore === true,
   };
 }
 
@@ -282,6 +292,38 @@ export function reportMissingSession(): void {
   window.dispatchEvent(new Event("session:missing"));
 }
 
+// ---- truncation hint ----
+// The last history load returned a bounded tail page (server hasMore): the
+// conversation is longer than the loaded window. The flag is set on every
+// load (cleared when the current conversation fits), so a fresh mount or
+// session switch reflects the truth.
+
+let truncated = false;
+const truncListeners = new Set<() => void>();
+
+function truncSubscribe(fn: () => void) {
+  truncListeners.add(fn);
+  return () => truncListeners.delete(fn);
+}
+
+function truncSnapshot(): boolean {
+  return truncated;
+}
+
+// reportHistoryTruncated records whether the current conversation's history
+// load was cut off at the page bound.
+export function reportHistoryTruncated(v: boolean): void {
+  if (truncated === v) return;
+  truncated = v;
+  for (const l of truncListeners) l();
+}
+
+// useHistoryTruncated subscribes to the truncation flag (renders the
+// "only the most recent messages are shown" hint).
+export function useHistoryTruncated(): boolean {
+  return useSyncExternalStore(truncSubscribe, truncSnapshot);
+}
+
 // isMissingSessionError reports whether an ApiError is the backend refusing an
 // explicitly named session: 404 (does not exist) and 403 (belongs to someone
 // else) both mean the caller can never open it, so both clear the local id.
@@ -312,7 +354,10 @@ export const threadHistory: ThreadHistoryAdapter = {
       );
       return ExportedMessageRepository.fromArray([]);
     }
-    const { messages, active, pendingApproval, pendingInteractions, sessionState } = loaded;
+    const { messages, active, pendingApproval, pendingInteractions, sessionState, hasMore } = loaded;
+    // A bounded load (hasMore) shows the truncation hint instead of silently
+    // presenting a partial conversation as complete.
+    reportHistoryTruncated(hasMore === true);
     // Re-show every parked interaction of a gated batch (the transient frames
     // dropped on refresh); the durable rows are the source of truth, echoed by
     // /history as pendingInteractions (queue order). Fall back to the singular

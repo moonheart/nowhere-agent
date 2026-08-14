@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,21 @@ func (m *memMessageStore) MessagesPage(ctx context.Context, sessionID string, af
 			}
 		}
 	}
+	return out, nil
+}
+func (m *memMessageStore) MessagesTail(ctx context.Context, sessionID string, beforeID int64, limit int) ([]session.StoredMessage, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	src := m.sessions[sessionID]
+	out := make([]session.StoredMessage, 0, min(limit, len(src)))
+	for i := len(src) - 1; i >= 0 && len(out) < limit; i-- {
+		if beforeID > 0 && src[i].ID >= beforeID {
+			continue
+		}
+		out = append(out, src[i])
+	}
+	slices.Reverse(out)
 	return out, nil
 }
 func (m *memMessageStore) SetMessageMetadata(ctx context.Context, id int64, metadata json.RawMessage) error {

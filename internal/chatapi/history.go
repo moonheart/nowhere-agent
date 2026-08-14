@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/provider"
@@ -124,6 +125,49 @@ func nestedFromBlocks(blocks []provider.Block) []historyMessage {
 // record, persist-raw-messages) so a reloading client can restore prior
 // messages (user text + assistant reasoning/text). Content deltas no longer
 // live in run_events (redis-stream-live), so this reads the message store.
+// maxHistoryPage caps one history tail page (limit param).
+const maxHistoryPage = 500
+
+// historyPage reads the session's messages for /history: the FULL conversation
+// when no limit is given (legacy contract — every caller keeps working), else
+// the newest messages bounded by limit, keyset-paged backwards via `before`
+// (the previous page's first message id; the limit+1 probe makes hasMore exact
+// without a second query). A bounded page is the deliberate tradeoff for long
+// sessions: the client renders the tail and shows a truncation hint instead of
+// loading the whole conversation.
+func (h *Handler) historyPage(r *http.Request, sessionID string) (stored []session.StoredMessage, hasMore bool, err error) {
+	if h.msgStore == nil {
+		return nil, false, nil
+	}
+	limit := 0
+	if lv := r.URL.Query().Get("limit"); lv != "" {
+		if n, perr := strconv.Atoi(lv); perr == nil && n > 0 {
+			limit = min(n, maxHistoryPage)
+		}
+	}
+	if limit <= 0 {
+		stored, err = h.msgStore.MessagesFor(r.Context(), sessionID)
+		return stored, false, err
+	}
+	var before int64
+	if bv := r.URL.Query().Get("before"); bv != "" {
+		if n, perr := strconv.ParseInt(bv, 10, 64); perr == nil && n > 0 {
+			before = n
+		}
+	}
+	page, err := h.msgStore.MessagesTail(r.Context(), sessionID, before, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	// The page is ascending; the limit+1'th (oldest) row proves truncation.
+	// Keep the NEWEST limit rows — the oldest extra one is at the front.
+	if len(page) > limit {
+		page = page[len(page)-limit:]
+		hasMore = true
+	}
+	return page, hasMore, nil
+}
+
 func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 	threadID := r.URL.Query().Get("threadId")
 	if threadID == "" {
@@ -138,7 +182,13 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgs, err := h.buildHistory(r, threadID)
+	stored, hasMore, err := h.historyPage(r, threadID)
+	if err != nil {
+		slog.Warn("history rebuild failed", "thread", threadID, "err", err)
+		httpx.ErrorFrom(w, err)
+		return
+	}
+	msgs, err := h.buildHistoryFrom(r, threadID, stored)
 	if err != nil {
 		slog.Warn("history rebuild failed", "thread", threadID, "err", err)
 		httpx.ErrorFrom(w, err)
@@ -199,7 +249,7 @@ func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "pendingApproval": pending, "pendingInteractions": pendingList, "sessionState": sessionState})
+	_ = json.NewEncoder(w).Encode(map[string]any{"messages": msgs, "active": active, "pendingApproval": pending, "pendingInteractions": pendingList, "sessionState": sessionState, "hasMore": hasMore})
 }
 
 // isToolResultOnly reports whether a stored message is a user-role message that
@@ -217,32 +267,41 @@ func isToolResultOnly(m session.StoredMessage) bool {
 	return true
 }
 
-// buildHistory reads the session's persisted messages and folds them into an
-// ordered message list. Consecutive assistant rounds of one logical turn —
-// assistant → tool_result → assistant → … — merge into a SINGLE assistant
-// message, so a reloaded client renders the reply as one bubble (matching the
-// live stream) instead of one bubble per round. Tool calls are rendered as
-// tool-call parts: a tool_use block starts a call and the matching tool_result
-// block (keyed by id) fills in its result.
+// buildHistory reads the session's persisted messages (the full conversation)
+// and folds them into an ordered message list. Consecutive assistant rounds of
+// one logical turn — assistant → tool_result → assistant → … — merge into a
+// SINGLE assistant message, so a reloaded client renders the reply as one
+// bubble (matching the live stream) instead of one bubble per round. Tool calls
+// are rendered as tool-call parts: a tool_use block starts a call and the
+// matching tool_result block (keyed by id) fills in its result.
 //
 // The exception is a HITL gate: an ask_user / permission tool_use whose
 // tool_result arrives via a SEPARATE verdict run (capability-gap O2), not inline
 // in the same run. That gate ENDS the turn — the live client shows the gated
 // message and the verdict's reply as two bubbles — so buildHistory flushes the
 // turn at a gated (unanswered) tool_use instead of folding the reply in.
+//
+// serveHistory's paginated path folds a bounded tail page instead (see
+// buildHistoryFrom); a boundary cut inside a merged turn renders that turn's
+// visible part as its own bubble, and a page head may carry orphaned
+// tool_result rows (whose call lives on the previous page) that are dropped —
+// the documented cost of rendering only the tail.
 func (h *Handler) buildHistory(r *http.Request, sessionID string) ([]historyMessage, error) {
 	if h.msgStore == nil {
 		return nil, nil
 	}
-	// Full conversation, unbounded (MessagesFor has no LIMIT): the client's
-	// history.load() renders every returned message and has no truncation
-	// semantics, so paging or cutting here would present a partial conversation
-	// as complete. Keeping the read unbounded is the deliberate tradeoff for
-	// long sessions; see PGMessageStore.MessagesFor for the full rationale.
 	stored, err := h.msgStore.MessagesFor(r.Context(), sessionID)
 	if err != nil {
 		return nil, err
 	}
+	return h.buildHistoryFrom(r, sessionID, stored)
+}
+
+// buildHistoryFrom folds an already-read stored-message slice into the ordered
+// message list (see buildHistory for the folding semantics). The slice is
+// either the full conversation (buildHistory) or a bounded tail page
+// (serveHistory's limit path).
+func (h *Handler) buildHistoryFrom(r *http.Request, sessionID string, stored []session.StoredMessage) ([]historyMessage, error) {
 
 	var msgs []historyMessage
 	// calls indexes the tool-call parts already appended, keyed by tool_use id,

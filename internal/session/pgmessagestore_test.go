@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 
 	"nowhere-agent/internal/provider"
@@ -400,5 +401,74 @@ func TestPGMessageStoreLastAssistantMessage(t *testing.T) {
 	got, err = ms.LastAssistantMessage(ctx, sessID, "00000000-0000-0000-0000-000000000000")
 	if err != nil || got != nil {
 		t.Fatalf("unknown run = %+v, %v; want nil", got, err)
+	}
+}
+
+// TestMemMessageStoreMessagesTail pins the tail-page read: the newest limit
+// messages win, the before cursor pages backwards, and ordering stays seq
+// ascending.
+func TestMemMessageStoreMessagesTail(t *testing.T) {
+	ms := NewMemMessageStore()
+	ctx := context.Background()
+	var second int64
+	for i := 0; i < 5; i++ {
+		m, err := ms.AppendMessage(ctx, StoredMessage{SessionID: "s1", RunID: "r1", Role: provider.RoleUser, Content: []provider.Block{{Type: provider.BlockText, Text: fmt.Sprintf("m%d", i)}}})
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		if i == 1 {
+			second = m.ID
+		}
+	}
+
+	page, err := ms.MessagesTail(ctx, "s1", 0, 2)
+	if err != nil || len(page) != 2 || page[0].Content[0].Text != "m3" || page[1].Content[0].Text != "m4" {
+		t.Fatalf("tail page = %+v, %v; want [m3 m4]", page, err)
+	}
+	// Before cursor: everything strictly older than the cursor (m1).
+	page, err = ms.MessagesTail(ctx, "s1", second, 10)
+	if err != nil || len(page) != 1 || page[0].Content[0].Text != "m0" {
+		t.Fatalf("before page = %+v, %v; want [m0]", page, err)
+	}
+	// Unknown session / non-positive limit.
+	if page, err := ms.MessagesTail(ctx, "nope", 0, 5); err != nil || len(page) != 0 {
+		t.Fatalf("unknown session = %+v, %v", page, err)
+	}
+	if page, err := ms.MessagesTail(ctx, "s1", 0, 0); err != nil || len(page) != 0 {
+		t.Fatalf("zero limit = %+v, %v", page, err)
+	}
+}
+
+// TestPGMessageStoreMessagesTail verifies the SQL tail-page read against the
+// real schema: newest-first selection, the before cursor, and seq-ascending
+// output order.
+func TestPGMessageStoreMessagesTail(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ms := NewPGMessageStore(db)
+	ctx := context.Background()
+	sessID, runID := setupMessageSession(t, ctx, db, store)
+
+	var second int64
+	for i := 0; i < 5; i++ {
+		m, err := ms.AppendMessage(ctx, StoredMessage{SessionID: sessID, RunID: runID, Role: provider.RoleUser, Content: []provider.Block{{Type: provider.BlockText, Text: fmt.Sprintf("m%d", i)}}})
+		if err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+		if i == 1 {
+			second = m.ID
+		}
+	}
+
+	page, err := ms.MessagesTail(ctx, sessID, 0, 2)
+	if err != nil || len(page) != 2 || page[0].Content[0].Text != "m3" || page[1].Content[0].Text != "m4" {
+		t.Fatalf("tail page = %+v, %v; want [m3 m4]", page, err)
+	}
+	page, err = ms.MessagesTail(ctx, sessID, second, 10)
+	if err != nil || len(page) != 1 || page[0].Content[0].Text != "m0" {
+		t.Fatalf("before page = %+v, %v; want [m0]", page, err)
+	}
+	if page, err := ms.MessagesTail(ctx, sessID, 0, 0); err != nil || len(page) != 0 {
+		t.Fatalf("zero limit = %+v, %v", page, err)
 	}
 }

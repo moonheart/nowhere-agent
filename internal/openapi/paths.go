@@ -141,10 +141,15 @@ func paths() map[string]PathItem {
 		"/api/chat/history": {
 			"get": Operation{
 				Summary:    "Fetch a session's durable message history",
+				Description: "Rebuilds the conversation from the durable message store. Without a limit the FULL conversation is returned (legacy contract); with limit, only the newest limit messages come back, keyset-paged backwards via before (the previous page's first message id) — hasMore reports whether older messages exist.",
 				Tags:       []string{"chat"},
 				Security:   bearer,
-				Parameters: []Parameter{{Name: "session_id", In: "query", Required: true, Schema: map[string]any{"type": "string"}}},
-				Responses:  jsonResp("messages", map[string]any{"type": "array", "items": ref("Message")}),
+				Parameters: []Parameter{
+					{Name: "threadId", In: "query", Required: true, Schema: map[string]any{"type": "string"}},
+					{Name: "limit", In: "query", Schema: map[string]any{"type": "integer", "description": "max messages to return (newest; 1..500). Absent = full conversation."}},
+					{Name: "before", In: "query", Schema: map[string]any{"type": "integer", "description": "keyset cursor: return only messages with id strictly below this (the previous page's first message id)"}},
+				},
+				Responses: jsonResp("messages", map[string]any{"type": "array", "items": ref("Message")}),
 			},
 		},
 		"/api/chat/models": {

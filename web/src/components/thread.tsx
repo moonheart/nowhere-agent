@@ -52,12 +52,14 @@ import {
   usePendingImages,
 } from "@/lib/image-attachment";
 import { reportNotice } from "@/lib/notice";
+import { useHistoryTruncated } from "@/lib/history";
 
 export const Thread: FC<{ sessionId: string | null }> = ({ sessionId }) => {
   return (
     <ThreadPrimitive.Root className="flex h-full flex-col bg-background">
       <PlanPanel />
       <PendingNotice />
+      <TruncatedNotice />
       {/* This wrapper exists only so the scroll-to-bottom button can be
           positioned against the viewport without living inside it — a child of
           the scroller would scroll away with the messages. min-h-0 because the
@@ -117,6 +119,20 @@ const EmptyState: FC = () => (
     </EmptyHeader>
   </Empty>
 );
+
+// TruncatedNotice renders when the history load returned a bounded tail page
+// (server hasMore): the conversation is longer than the loaded window, so the
+// older turns are deliberately not shown — the hint keeps the partial render
+// honest instead of reading as the complete conversation.
+const TruncatedNotice: FC = () => {
+  const truncated = useHistoryTruncated();
+  if (!truncated) return null;
+  return (
+    <div className="border-b border-border/60 bg-muted/40 px-6 py-1.5 text-center text-[11px] text-muted-foreground">
+      {t("chat.historyTruncated")}
+    </div>
+  );
+};
 
 // Deliberately NOT wearing shadcn MessageScrollerItem's
 // `content-visibility: auto` + `contain-intrinsic-size: auto 10rem`. That pair

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"sync"
 	"time"
 
@@ -77,6 +78,26 @@ func (m *MemMessageStore) MessagesPage(_ context.Context, sessionID string, afte
 			}
 		}
 	}
+	return out, nil
+}
+
+// MessagesTail returns up to limit messages with id < beforeID, in seq order
+// (see MessageStore.MessagesTail): the newest messages older than the cursor.
+func (m *MemMessageStore) MessagesTail(_ context.Context, sessionID string, beforeID int64, limit int) ([]StoredMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if limit <= 0 {
+		return nil, nil
+	}
+	src := m.bySess[sessionID]
+	var out []StoredMessage
+	for i := len(src) - 1; i >= 0 && len(out) < limit; i-- {
+		if beforeID > 0 && src[i].ID >= beforeID {
+			continue
+		}
+		out = append(out, src[i])
+	}
+	slices.Reverse(out)
 	return out, nil
 }
 
