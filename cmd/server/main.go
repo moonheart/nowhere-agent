@@ -609,6 +609,25 @@ func run() error {
 	if sandboxPort != nil {
 		sandboxMgr = sandbox.NewManager(sandboxPort)
 	}
+	// Sandbox lifecycle reaper (resource leak D3): the Manager's sweep destroys
+	// sandboxes whose deferred-stop deadline passed. Registered for the DOCKER
+	// backend only: the local backend's Destroy removes the session workspace
+	// dir (<root>/<sessionID>), which overlaps the ImageStore's per-session
+	// image dir under the same root — a sweep there would delete a retention-
+	// window session's images early. The docker Destroy only stops/removes the
+	// container (workspace bind-mount files are untouched), so it is safe.
+	if cfg.Sandbox.Backend == "docker" && sandboxMgr != nil {
+		hourlySweep(ctx, log, "sandbox", func() error {
+			destroyed, err := sandboxMgr.Sweep(ctx, time.Now())
+			if err != nil {
+				return err
+			}
+			if len(destroyed) > 0 {
+				log.Info("sandbox sweep destroyed ended-session sandboxes", "sessions", destroyed)
+			}
+			return nil
+		})
+	}
 
 	// run_command availability: the docker backend always offers it (the command
 	// is contained in the Linux container); the local backend only when
@@ -1720,6 +1739,13 @@ func run() error {
 		// SSRF allowlist) apply to new deliveries within a few seconds.
 		settingsSync.Add(applyWebhookPolicy)
 		if sandboxMgr != nil {
+			// Sandbox lifecycle (D13/D15): a terminal run opens the deferred-
+			// stop grace period; the hourly sandbox sweep (registered above)
+			// destroys the container once it expires. Sessions resume with a
+			// fresh sandbox (Ensure recreates a non-running one).
+			handler.WithRunDoneHook(func(_ context.Context, sessionID string, _ session.Run, _ session.RunStatus) {
+				sandboxMgr.MarkSessionEnded(sessionID, sandboxStopGrace)
+			})
 			log.Info("file tools enabled (read_file/write_file/list_dir/edit_file/grep/glob/move_file/copy_file/delete_file/make_dir)")
 		}
 		if execEnabledFor() {
@@ -2193,6 +2219,11 @@ const (
 	openEndpointRPS   = 10
 	openEndpointBurst = 20
 )
+
+// sandboxStopGrace is how long a finished run's sandbox stays resumable after
+// its last run terminates before the hourly sweep destroys it (one hourly
+// sweep window: a container lives 1-2 hours past the session's last run).
+const sandboxStopGrace = time.Hour
 
 // openEndpointKey is the floor limiter's bucket key: the client IP for the
 // unauthenticated open endpoints, "" (opt-out) for everything else. The
