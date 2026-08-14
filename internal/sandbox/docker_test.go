@@ -260,3 +260,42 @@ func TestDockerPortWorkspaceBindMountPersists(t *testing.T) {
 		t.Errorf("host file content = %q, want host-visible", b)
 	}
 }
+
+// TestDockerPortResolveInterpreterProbesLive: the default image must actually
+// carry the interpreters the skill scripts need — the whole point of the
+// python:3.12-alpine default (alpine:latest has no python3, which made every
+// .py skill script fail despite ResolveInterpreter reporting python3 as usable).
+func TestDockerPortResolveInterpreterProbesLive(t *testing.T) {
+	p, err := NewDockerPort()
+	if err != nil {
+		t.Skipf("no docker client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	ping, err := p.cli.Ping(ctx)
+	if err != nil {
+		p.cli.Close()
+		t.Skipf("no docker daemon: %v", err)
+	}
+	defer p.cli.Close()
+	if strings.EqualFold(ping.OSType, "windows") {
+		t.Skipf("docker daemon serves %s containers; this test targets linux", ping.OSType)
+	}
+
+	h, err := p.Create(ctx, "itest-interp", Options{WorkspaceDir: t.TempDir(), Network: NetworkPolicy{Mode: NetworkDeny}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer p.Destroy(ctx, h)
+
+	if got := p.ResolveInterpreter(ctx, h, []string{"python3", "python", "py"}); got != "python3" {
+		t.Errorf("ResolveInterpreter = %q, want python3 (must exist in the default image)", got)
+	}
+	if got := p.ResolveInterpreter(ctx, h, []string{"sh", "bash"}); got != "sh" {
+		t.Errorf("ResolveInterpreter = %q, want sh", got)
+	}
+	if got := p.ResolveInterpreter(ctx, h, []string{"definitely-not-an-interp-xyz"}); got != "" {
+		t.Errorf("ResolveInterpreter = %q, want \"\" for a missing binary", got)
+	}
+}

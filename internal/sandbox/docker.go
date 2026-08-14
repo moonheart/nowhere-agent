@@ -26,6 +26,9 @@ type DockerPort struct {
 	cli    *client.Client
 	image  string
 	workMt string // container path the workspace is mounted at
+	// probeFn is a test seam overriding the interpreter probe (interpreterExists);
+	// nil uses the exec-based probe against the live container.
+	probeFn func(ctx context.Context, h Handle, cmd string) bool
 }
 
 // Per-container resource limits so one tenant cannot exhaust the shared host
@@ -35,6 +38,16 @@ const (
 	defaultMemoryLimitBytes = 512 * 1024 * 1024 // 512 MiB
 	defaultCPULimitNano     = 1_000_000_000     // 1 CPU
 	defaultPidsLimit        = 256
+
+	// defaultImage is the container image for the docker sandbox. A FIXED tag
+	// (never "latest"): reproducible. It ships python3 + sh, the interpreters
+	// the skill scripts need (.py runs under python3; .sh runs under sh, which
+	// every Linux image has — run_command likewise wraps scripts with sh -c).
+	// There is deliberately no bash: nothing here requires it, and the
+	// alpine-based image stays small (~55MB). Override with SANDBOX_DOCKER_IMAGE
+	// (e.g. a Debian-based image with bash/node apt-installed) when a skill
+	// needs more.
+	defaultImage = "docker.io/library/python:3.12-alpine"
 )
 
 // DockerOption customizes DockerPort.
@@ -43,13 +56,16 @@ type DockerOption func(*DockerPort)
 // WithImage sets the container image.
 func WithImage(img string) DockerOption { return func(p *DockerPort) { p.image = img } }
 
+// Image returns the configured container image (the default or the override).
+func (p *DockerPort) Image() string { return p.image }
+
 // NewDockerPort creates a Docker-backed Port using the environment's Docker.
 func NewDockerPort(opts ...DockerOption) (*DockerPort, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	p := &DockerPort{cli: cli, image: "alpine:latest", workMt: "/workspace"}
+	p := &DockerPort{cli: cli, image: defaultImage, workMt: "/workspace"}
 	for _, o := range opts {
 		o(p)
 	}
@@ -318,16 +334,38 @@ func (p *DockerPort) Mkdir(ctx context.Context, h Handle, path string) error {
 	return nil
 }
 
-// ResolveInterpreter answers for the container (InterpreterResolver capability).
-// The container is a conventional Linux image, so the candidate order (python3
-// first) already matches; the host cannot probe inside the image cheaply, so the
-// first candidate is returned and a missing interpreter surfaces as a clear exec
-// error from Exec itself.
-func (p *DockerPort) ResolveInterpreter(candidates []string) string {
+// ResolveInterpreter answers for the container (InterpreterResolver capability):
+// it probes the container with `command -v` and returns the first candidate that
+// actually exists there — mirroring the local backend's LookPath semantics, and
+// ending the old "trust candidates[0]" behaviour that made skill scripts fail
+// with a confusing exec error whenever the image lacked python3. Each probe is
+// one container exec; skill scripts run once per session at most, so no caching
+// is needed.
+func (p *DockerPort) ResolveInterpreter(ctx context.Context, h Handle, candidates []string) string {
 	if len(candidates) == 0 {
 		return ""
 	}
-	return candidates[0]
+	for _, c := range candidates {
+		if p.interpreterExists(ctx, h, c) {
+			return c
+		}
+	}
+	return ""
+}
+
+// interpreterExists reports whether cmd resolves inside the container. The
+// candidate is passed as a positional argument to a fixed shell line, never
+// concatenated, so no quoting/injection risk (candidates come from the code
+// whitelist anyway).
+func (p *DockerPort) interpreterExists(ctx context.Context, h Handle, cmd string) bool {
+	if p.probeFn != nil {
+		return p.probeFn(ctx, h, cmd)
+	}
+	res, err := p.Exec(ctx, h, []string{"sh", "-c", `command -v -- "$1" >/dev/null 2>&1`, "probe", cmd})
+	if err != nil {
+		return false
+	}
+	return res.ExitCode == 0
 }
 
 // Walk lists every file under root recursively (Walker capability), as

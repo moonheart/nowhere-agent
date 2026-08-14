@@ -209,7 +209,7 @@ type resolverSandbox struct {
 	got  []string
 }
 
-func (r *resolverSandbox) ResolveInterpreter(candidates []string) string {
+func (r *resolverSandbox) ResolveInterpreter(_ context.Context, _ sandbox.Handle, candidates []string) string {
 	r.got = append([]string(nil), candidates...)
 	if r.pick == "" {
 		return ""

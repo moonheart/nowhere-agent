@@ -285,6 +285,12 @@ type Sandbox struct {
 	// run_command. Empty auto-detects (bash on PATH; Git Bash on Windows). Set it
 	// to your Git Bash bash.exe if auto-detection fails.
 	Shell string `envconfig:"SANDBOX_SHELL" default:""`
+	// Image overrides the docker backend's container image. Empty uses the
+	// default (docker.io/library/python:3.12-alpine — a FIXED tag shipping
+	// python3 + sh, the interpreters the skill scripts need; no bash, and
+	// nothing here requires it). Bring your own image when a skill needs more:
+	// e.g. a Debian-based image with bash/node apt-installed.
+	Image string `envconfig:"SANDBOX_DOCKER_IMAGE" default:""`
 }
 
 // HTTPTool configures the http_request built-in tool (enterprise integration):

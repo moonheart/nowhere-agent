@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -68,25 +69,41 @@ func TestResolveInterpreterPicksAvailable(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	p := NewLocalPort(t.TempDir())
-	if got := p.ResolveInterpreter([]string{"definitely-not-a-real-interp-xyz", "sh"}); got != "sh" {
+	if got := p.ResolveInterpreter(context.Background(), Handle{}, []string{"definitely-not-a-real-interp-xyz", "sh"}); got != "sh" {
 		t.Errorf("ResolveInterpreter = %q, want sh (first available candidate)", got)
 	}
 
 	t.Setenv("PATH", bin)
-	if got := p.ResolveInterpreter([]string{"definitely-not-a-real-interp-xyz"}); got != "" {
+	if got := p.ResolveInterpreter(context.Background(), Handle{}, []string{"definitely-not-a-real-interp-xyz"}); got != "" {
 		t.Errorf("ResolveInterpreter with no usable candidate = %q, want \"\"", got)
 	}
 }
 
-// TestDockerResolveInterpreterKeepsOrder: the docker backend cannot probe the
-// image from the host, so it trusts the candidate order (python3 first).
-func TestDockerResolveInterpreterKeepsOrder(t *testing.T) {
-	p := &DockerPort{}
-	in := []string{"python3", "python", "py"}
-	if got := p.ResolveInterpreter(in); got != "python3" {
-		t.Errorf("DockerPort.ResolveInterpreter = %q, want python3", got)
+// TestDockerResolveInterpreterProbesContainer: the docker backend probes the
+// container with `command -v` and returns the first candidate that exists —
+// mirroring the local backend's LookPath semantics (the container, not the
+// host, decides). The probe is injected so the selection logic is testable
+// without a daemon.
+func TestDockerResolveInterpreterProbesContainer(t *testing.T) {
+	have := map[string]bool{"python": true}
+	p := &DockerPort{probeFn: func(_ context.Context, _ Handle, cmd string) bool { return have[cmd] }}
+
+	// First candidate missing, second present: python3 is absent (plain alpine),
+	// python is available.
+	if got := p.ResolveInterpreter(context.Background(), Handle{}, []string{"python3", "python", "py"}); got != "python" {
+		t.Errorf("ResolveInterpreter = %q, want python (first available candidate)", got)
 	}
-	if got := p.ResolveInterpreter(nil); got != "" {
-		t.Errorf("DockerPort.ResolveInterpreter(nil) = %q, want \"\"", got)
+	if got := p.ResolveInterpreter(context.Background(), Handle{}, nil); got != "" {
+		t.Errorf("ResolveInterpreter(nil) = %q, want \"\"", got)
+	}
+	// No candidate exists in the container: report "" so the tool surfaces a
+	// clear "no interpreter available" error instead of a bare exec failure.
+	have["python"] = false
+	if got := p.ResolveInterpreter(context.Background(), Handle{}, []string{"python3", "python"}); got != "" {
+		t.Errorf("ResolveInterpreter with no usable candidate = %q, want \"\"", got)
+	}
+	// A probe failure (container gone, transient docker error) counts as missing.
+	if got := p.ResolveInterpreter(context.Background(), Handle{}, []string{"python3"}); got != "" {
+		t.Errorf("ResolveInterpreter after probe failure = %q, want \"\"", got)
 	}
 }

@@ -669,12 +669,16 @@ func run() error {
 		if wsRoot == "" {
 			return fmt.Errorf("SANDBOX_BACKEND=docker requires SANDBOX_WORKSPACE_DIR or WORKSPACE_DIR")
 		}
-		dp, err := sandbox.NewDockerPort()
+		var dockerOpts []sandbox.DockerOption
+		if cfg.Sandbox.Image != "" {
+			dockerOpts = append(dockerOpts, sandbox.WithImage(cfg.Sandbox.Image))
+		}
+		dp, err := sandbox.NewDockerPort(dockerOpts...)
 		if err != nil {
 			return fmt.Errorf("docker sandbox: %w", err)
 		}
 		sandboxPort = dp
-		log.Info("sandbox backend: docker", "root", wsRoot)
+		log.Info("sandbox backend: docker", "root", wsRoot, "image", dp.Image())
 	case "off", "":
 		log.Info("sandbox backend: off (no built-in tools)")
 	default:

@@ -50,7 +50,7 @@ func (p *LocalPort) ShellArgv(script string) ([]string, error) {
 // the Windows Store `python3` stub: that shim sits on PATH as a real executable
 // yet exits nonzero doing nothing, so on Windows the `py` launcher and a real
 // `python` are preferred over it. Other interpreters resolve in candidate order.
-func (p *LocalPort) ResolveInterpreter(candidates []string) string {
+func (p *LocalPort) ResolveInterpreter(_ context.Context, _ Handle, candidates []string) string {
 	ordered := orderForHost(runtime.GOOS, candidates)
 	for _, c := range ordered {
 		if _, err := exec.LookPath(c); err == nil {

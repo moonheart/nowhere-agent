@@ -94,10 +94,10 @@ func interpreterCandidates(scriptPath string) []string {
 // asks the backend which candidate is usable (sidestepping host shims like the
 // Windows Store python3 stub); a backend without that capability uses the first
 // candidate. Returns "" when no candidate is available.
-func (t *RunSkillScriptTool) resolveInterpreter(scriptName string) string {
+func (t *RunSkillScriptTool) resolveInterpreter(ctx context.Context, scriptName string) string {
 	candidates := interpreterCandidates(scriptName)
 	if r, ok := t.sandbox.(sandbox.InterpreterResolver); ok {
-		return r.ResolveInterpreter(candidates)
+		return r.ResolveInterpreter(ctx, t.handle, candidates)
 	}
 	return candidates[0]
 }
@@ -138,7 +138,7 @@ func (t *RunSkillScriptTool) Call(ctx context.Context, args map[string]any) (too
 	}
 
 	argv := []string{}
-	interp := t.resolveInterpreter(scriptName)
+	interp := t.resolveInterpreter(ctx, scriptName)
 	if interp == "" {
 		// A clear, actionable error beats a bare nonzero exit with no output: the
 		// model can report the missing runtime instead of guessing.
