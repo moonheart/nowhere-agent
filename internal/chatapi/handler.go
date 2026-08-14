@@ -447,7 +447,8 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
 			return
 		}
-		writeSSEError(w, err.Error())
+		slog.Warn("resolve session", "err", err)
+		writeSSEError(w, "internal error")
 		return
 	}
 	sessID := s.ID
@@ -482,7 +483,8 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 				httpx.Error(w, http.StatusTooManyRequests, err.Error())
 				return
 			}
-			writeSSEError(w, err.Error())
+			slog.Warn("budget gate", "err", err)
+			writeSSEError(w, "internal error")
 			return
 		}
 	}
@@ -553,7 +555,8 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
 			return
 		}
-		writeSSEError(w, err.Error())
+		slog.Warn("submit run", "session", sessID, "err", err)
+		writeSSEError(w, "internal error")
 		return
 	}
 
@@ -691,7 +694,8 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	// does not have it stamped (only run ctxs are).
 	history, err := h.registry.FoldBatch(agent.ContextWithSessionID(r.Context(), sessID), sessID, ap2.RunID, loop.Tools(), session.ToolGate(loop.Gate()))
 	if err != nil {
-		writeSSEError(w, err.Error())
+		slog.Warn("fold batch", "session", sessID, "run", ap2.RunID, "err", err)
+		writeSSEError(w, "internal error")
 		return
 	}
 	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history})
@@ -700,7 +704,8 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 			http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
 			return
 		}
-		writeSSEError(w, err.Error())
+		slog.Warn("submit run", "session", sessID, "err", err)
+		writeSSEError(w, "internal error")
 		return
 	}
 

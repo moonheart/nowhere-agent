@@ -105,11 +105,16 @@ func TestChatResumeRetryAfterFoldFailure(t *testing.T) {
 	verdict := `{"threadId":"` + sessID + `","approval":{"approvalId":"` + ap.ID + `","approved":true}}`
 
 	// Attempt 1: the fold fails AFTER the decision committed. The batch is NOT
-	// folded; the tool never ran.
+	// folded; the tool never ran. The client must learn the continuation failed
+	// (an error frame with a fixed message — the fold's internal error is never
+	// streamed), so the verdict stays retriable.
 	rec1 := httptest.NewRecorder()
 	mux.ServeHTTP(rec1, httptest.NewRequest("POST", "/api/chat", strings.NewReader(verdict)))
-	if !strings.Contains(rec1.Body.String(), "fold boom") {
+	if !strings.Contains(rec1.Body.String(), `"type":"error"`) {
 		t.Fatalf("attempt 1 should surface the fold failure, got %d %s", rec1.Code, rec1.Body.String())
+	}
+	if strings.Contains(rec1.Body.String(), "fold boom") {
+		t.Fatalf("attempt 1 leaked the fold error text, got %d %s", rec1.Code, rec1.Body.String())
 	}
 	folded, _, err := h.Registry().BatchFoldState(ctx, run2.ID)
 	if err != nil {
