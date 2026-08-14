@@ -766,6 +766,23 @@ func (h *Handler) systemPromptForText(r *http.Request, text string) string {
 	return h.ctxBuilder.SystemPrompt(r.Context(), user, text)
 }
 
+// maxSessionTitleRunes bounds the durable session title. The title is the
+// first user message verbatim, and an unbounded title would bloat the sessions
+// list projection and the title trigram search index (000045) with full-text
+// payloads. 200 runes + an ellipsis keeps list/search semantics intact.
+const maxSessionTitleRunes = 200
+
+// sessionTitle truncates a raw title candidate to maxSessionTitleRunes runes,
+// appending an ellipsis when it had to cut. Rune-based so CJK text never gets
+// split mid-character.
+func sessionTitle(text string) string {
+	r := []rune(text)
+	if len(r) <= maxSessionTitleRunes {
+		return text
+	}
+	return string(r[:maxSessionTitleRunes]) + "…"
+}
+
 // errSessionNotFound marks a request that EXPLICITLY named a threadId which
 // does not exist or is not visible to the caller. It answers 404 instead of
 // silently starting a fresh session: a shared or forged link must not land in
@@ -788,7 +805,7 @@ func (h *Handler) resolveSession(r *http.Request, req dataStreamRequest) (sessio
 		}
 		return session.Session{}, errSessionNotFound
 	}
-	return h.runtime.CreateSession(r.Context(), userID, lastUserText(req))
+	return h.runtime.CreateSession(r.Context(), userID, sessionTitle(lastUserText(req)))
 }
 
 // sessionVisibleTo reports whether a caller may read/act on a session. A

@@ -3,6 +3,7 @@ package chatapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/toolruntime"
 )
 
@@ -92,6 +94,41 @@ func TestServeChatStreamsUIProtocol(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("response missing %q\n---\n%s", want, out)
 		}
+	}
+}
+
+func TestServeChatTruncatesSessionTitle(t *testing.T) {
+	rt := session.NewRuntime(session.NewMemStore())
+	h := NewHandler(newTestLoop, "sys").WithRuntime(rt)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	// A long first user message must not become the full durable session title.
+	long := strings.Repeat("长", maxSessionTitleRunes*2) + " END"
+	body := fmt.Sprintf(`{"messages":[{"role":"user","content":%q}]}`, long)
+	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	page, err := rt.ListSessionsByUser(context.Background(), "", "", 10, nil)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(page.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(page.Sessions))
+	}
+	title := page.Sessions[0].Title
+	if n := len([]rune(title)); n != maxSessionTitleRunes+1 {
+		t.Errorf("title runes = %d, want %d (cap %d + ellipsis)", n, maxSessionTitleRunes+1, maxSessionTitleRunes)
+	}
+	if !strings.HasSuffix(title, "…") {
+		t.Errorf("title %q missing the truncation ellipsis", title)
+	}
+	if !strings.HasPrefix(title, long[:6]) {
+		t.Errorf("title %q lost its prefix", title)
 	}
 }
 
