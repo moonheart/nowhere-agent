@@ -7,162 +7,14 @@
 // full i18n framework — so the most visible screens can be localized without
 // churning every component in the admin console.
 //
-// Add keys here as more surfaces are localized; keep the key list typed so a
-// missing translation is a compile error, not a runtime "undefined".
+// The key type is DERIVED from the two dictionaries below (I18nKey = keyof zh
+// & keyof en): a key added to one dictionary and forgotten in the other is a
+// compile error at the call site, not a runtime "undefined". Keep the
+// dictionaries exactly balanced (the _assertBalanced check enforces it).
 
 import { useSyncExternalStore } from "react";
 
-export type I18nKey =
-  | "login.title"
-  | "login.titleSignup"
-  | "login.subtitle"
-  | "login.subtitleSignup"
-  | "login.sso"
-  | "login.orEmail"
-  | "login.email"
-  | "login.password"
-  | "login.busy"
-  | "login.submit"
-  | "login.submitSignup"
-  | "login.toggleToSignup"
-  | "login.toggleToLogin"
-  | "chat.new"
-  | "chat.help"
-  | "chat.placeholder"
-  | "chat.send"
-  | "chat.scrollBottom"
-  | "chat.attachImage"
-  | "chat.removeImage"
-  | "chat.stop"
-  | "chat.loading"
-  | "chat.error"
-  | "chat.emptyState"
-  | "chat.rerunTitle"
-  | "chat.retry"
-  | "chat.disclaimer"
-  | "chat.searchChats"
-  | "chat.loadError"
-  | "chat.noConversations"
-  | "chat.noConversationsHint"
-  | "chat.noMatches"
-  | "chat.noMatchesHint"
-  | "chat.deleteConversation"
-  | "chat.deleteConfirm"
-  | "chat.deleteFailed"
-  | "chat.untitled"
-  | "chat.searching"
-  | "chat.loadingMore"
-  | "chat.webpImage"
-  | "approval.approveRunning"
-  | "approval.approve"
-  | "approval.approving"
-  | "approval.deny"
-  | "approval.denying"
-  | "approval.waitingEarlier"
-  | "clientTool.failedInBrowser"
-  | "clientTool.runningInBrowser"
-  | "clientTool.retry"
-  | "clientTool.retrying"
-  | "ask.submit"
-  | "ask.sending"
-  | "ask.skip"
-  | "ask.customPlaceholder"
-  | "ask.customAria"
-  | "profile.exportData"
-  | "login.phone"
-  | "login.phoneSubtitle"
-  | "login.sendCode"
-  | "login.resendIn"
-  | "login.code"
-  | "login.backToEmail"
-  | "login.totpHint"
-  | "login.totpCode"
-  | "login.forgotPassword"
-  | "login.forgotHint"
-  | "admin.sectionAccount"
-  | "admin.sectionTeams"
-  | "admin.sectionPlatform"
-  | "admin.profile"
-  | "admin.myUsage"
-  | "admin.myMemories"
-  | "admin.mySkills"
-  | "admin.myAgents"
-  | "admin.scheduledTasks"
-  | "admin.allMyTeams"
-  | "admin.users"
-  | "admin.teams"
-  | "admin.usage"
-  | "admin.quotas"
-  | "admin.providers"
-  | "admin.memories"
-  | "admin.skills"
-  | "admin.agents"
-  | "admin.auditTrail"
-  | "admin.settings"
-  | "admin.backToChat"
-  | "lang.switchToZh"
-  | "lang.switchToEn"
-  | "settingsPage.title"
-  | "settingsPage.description"
-  | "settingsPage.group.tools"
-  | "settingsPage.group.webhooks"
-  | "settingsPage.group.llm"
-  | "settingsPage.group.sandbox"
-  | "settingsPage.group.permissions"
-  | "settingsPage.group.redaction"
-  | "settingsPage.group.subagents"
-  | "settingsPage.group.background"
-  | "settingsPage.group.http"
-  | "settingsPage.group.auth"
-  | "settingsPage.group.integrations"
-  | "settingsPage.clearOverride"
-  | "settingsPage.permissionTitle"
-  | "settingsPage.permissionDescription"
-  | "settingsPage.currentValue"
-  | "settingsPage.save"
-  | "settingsPage.saving"
-  | "settingsPage.applied"
-  | "settingsPage.nothingToChange"
-  | "settingsPage.loading"
-  | "settingsPage.notSet"
-  | "settingsPage.secretSet"
-  | "usersPage.title"
-  | "usersPage.description"
-  | "usersPage.searchPlaceholder"
-  | "usersPage.search"
-  | "usersPage.loading"
-  | "usersPage.colAccount"
-  | "usersPage.colRole"
-  | "usersPage.colEnabled"
-  | "usersPage.colJoined"
-  | "usersPage.noAccounts"
-  | "usersPage.range"
-  | "usersPage.previous"
-  | "usersPage.next"
-  | "usersPage.you"
-  | "usersPage.roleUser"
-  | "usersPage.roleAdmin"
-  | "usersPage.roleAria"
-  | "usersPage.enableAria"
-  | "usersPage.deleteAccount"
-  | "usersPage.deleteTitle"
-  | "usersPage.deleteDescription"
-  | "usersPage.resetTitle"
-  | "usersPage.resetDescription"
-  | "usersPage.newPassword"
-  | "usersPage.minLength"
-  | "usersPage.reset"
-  | "usersPage.newAccount"
-  | "usersPage.createTitle"
-  | "usersPage.createDescription"
-  | "usersPage.email"
-  | "usersPage.displayName"
-  | "usersPage.namePlaceholder"
-  | "usersPage.initialPassword"
-  | "usersPage.creating"
-  | "usersPage.create";
-
-const zh: Record<I18nKey, string> = {
+const zh = {
   "login.title": "登录",
   "login.titleSignup": "创建账号",
   "login.subtitle": "继续使用 nowhere-agent。",
@@ -313,7 +165,7 @@ const zh: Record<I18nKey, string> = {
   "usersPage.create": "创建",
 };
 
-const en: Record<I18nKey, string> = {
+const en = {
   "login.title": "Sign in",
   "login.titleSignup": "Create account",
   "login.subtitle": "Continue to nowhere-agent.",
@@ -464,6 +316,22 @@ const en: Record<I18nKey, string> = {
   "usersPage.create": "Create",
 };
 
+// I18nKey is derived from BOTH dictionaries: every key must exist in zh AND
+// en, so a key added to one dictionary and forgotten in the other is a
+// compile error at the t() call site instead of a runtime "undefined".
+export type I18nKey = keyof typeof zh & keyof typeof en;
+
+// Compile-time check that the dictionaries are exactly balanced: no key may
+// live on one side only — an orphaned key would be unreachable through t()
+// and silently rot. A one-sided key makes the type `never`, so the assignment
+// below fails to compile.
+type _assertBalanced = [Exclude<keyof typeof zh, I18nKey>] extends [never]
+  ? [Exclude<keyof typeof en, I18nKey>] extends [never]
+    ? true
+    : never
+  : never;
+const _assertBalanced: _assertBalanced = true;
+
 // lang resolves the UI language once: a stored choice (nowhere.lang) wins,
 // else the browser locale (zh-* → zh). setLang persists the choice and
 // notifies subscribers; t() reads the mutable value at call time, so text
@@ -513,9 +381,13 @@ export function useLang(): "zh" | "en" {
 
 // t returns the localized string for key. vars, when given, substitutes
 // {name} placeholders in the translation (e.g. t("chat.noMatchesHint", {term})).
+// Defensive fallback: if the key is somehow missing from the active dict at
+// runtime (a future key the compiled-in dicts predate), the key itself is
+// rendered rather than throwing a TypeError.
 export function t(key: I18nKey, vars?: Record<string, string | number>): string {
   const dict = lang === "zh" ? zh : en;
   let s = dict[key];
+  if (s === undefined) return key;
   if (vars) {
     for (const [k, v] of Object.entries(vars)) {
       s = s.replaceAll(`{${k}}`, String(v));
@@ -529,3 +401,6 @@ export function t(key: I18nKey, vars?: Record<string, string | number>): string 
 export function isZh(): boolean {
   return lang === "zh";
 }
+
+
+
