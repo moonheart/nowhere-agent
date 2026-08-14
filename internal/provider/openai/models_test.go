@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // TestAdapterModels verifies the GET /models list is decoded from a base URL
@@ -47,5 +48,29 @@ func TestAdapterModelsLegacyEndpoint(t *testing.T) {
 	a := New("k", WithEndpoint(srv.URL+"/v1/chat/completions"))
 	if _, err := a.Models(context.Background()); err != nil {
 		t.Fatalf("Models: %v", err)
+	}
+}
+
+// TestAdapterModelsCallDeadline pins the non-streaming bound: a hanging
+// provider must not outlive the call. The full 30s constant is not waited
+// out — the bound is a floor, so an EARLIER caller deadline (as an admin
+// console request would carry under load) wins and surfaces the same ctx
+// plumbing.
+func TestAdapterModelsCallDeadline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // hold the response open until the client gives up
+	}))
+	defer srv.Close()
+
+	a := New("k", WithEndpoint(srv.URL+"/v1"))
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := a.Models(ctx)
+	if err == nil {
+		t.Fatal("Models returned nil error on a hung provider")
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Errorf("Models took %v, want the caller deadline to bound it", time.Since(start))
 	}
 }

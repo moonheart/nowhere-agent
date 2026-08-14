@@ -15,6 +15,13 @@ import (
 
 const defaultEndpoint = "https://api.anthropic.com/v1"
 
+// modelsCallTimeout bounds the non-streaming models list. It lives on the
+// CALL, not the client: http.Client.Timeout covers the whole response read,
+// which would also cap STREAMING bodies (Stream shares this client), and the
+// HTTP server's WriteTimeout never reaches a provider read that hangs before
+// the handler writes anything.
+const modelsCallTimeout = 30 * time.Second
+
 // Adapter implements provider.Adapter for the Anthropic Messages API.
 type Adapter struct {
 	apiKey      string
@@ -87,6 +94,9 @@ func (a *Adapter) modelsEndpoint() string {
 // Models lists the model identifiers the API serves (GET /models on the base
 // URL), used by the admin console's "fetch models" action to seed the registry.
 func (a *Adapter) Models(ctx context.Context) ([]string, error) {
+	// The bound is a floor: a caller deadline earlier than 30s wins.
+	ctx, cancel := context.WithTimeout(ctx, modelsCallTimeout)
+	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, a.modelsEndpoint(), nil)
 	if err != nil {
 		return nil, err
