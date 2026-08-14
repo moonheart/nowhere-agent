@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"testing"
+
+	"nowhere-agent/internal/provider"
 )
 
 // TestPGStoreListSessionsPagination verifies keyset pagination against real
@@ -158,6 +160,133 @@ func TestPGStoreListSessionsSearchAcrossPages(t *testing.T) {
 
 	if want := []string{"needle one", "needle two", "needle three"}; !slices.Equal(got, want) {
 		t.Fatalf("search walk = %v, want %v (hits only, in order, no duplicates)", got, want)
+	}
+}
+
+// TestPGStoreListSessionsSearchMatchesMessageContent verifies the migration
+// 000049 leg of the sidebar search: a q that matches no title still returns
+// the session when one of its messages' free text contains the term. Text,
+// thinking, and tool_result blocks must all count; a term present only in
+// JSON keys or tool-input payloads must NOT match; and the user's other
+// sessions stay out.
+func TestPGStoreListSessionsSearchMatchesMessageContent(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	msgStore := NewPGMessageStore(db)
+	ctx := context.Background()
+	userID := pgNewUser(t, db)
+
+	sessionFor := func(title string) (string, string) {
+		t.Helper()
+		s, err := store.CreateSession(ctx, userID, title)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := store.CreateRun(ctx, s.ID, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, s.ID) })
+		return s.ID, run.ID
+	}
+
+	// Session A: title mentions nothing searchable; a user message holds the
+	// needle in a text block (apricot is repeated so the pagination walk
+	// below has a second match).
+	sessA, runA := sessionFor("monday standup")
+	_, err := msgStore.AppendMessage(ctx, StoredMessage{
+		SessionID: sessA, RunID: runA, Role: provider.RoleUser,
+		Content: []provider.Block{{Type: provider.BlockText, Text: "the pineapple and apricot deployment is green"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Session B: needle in a thinking block.
+	sessB, runB := sessionFor("tuesday review")
+	_, err = msgStore.AppendMessage(ctx, StoredMessage{
+		SessionID: sessB, RunID: runB, Role: provider.RoleAssistant,
+		Content: []provider.Block{{Type: provider.BlockThinking, Thinking: "check the avocado quota first"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Session C: needle in a tool_result's tool_content.
+	sessC, runC := sessionFor("wednesday retro")
+	_, err = msgStore.AppendMessage(ctx, StoredMessage{
+		SessionID: sessC, RunID: runC, Role: provider.RoleAssistant,
+		Content: []provider.Block{{
+			Type: provider.BlockToolUse, ToolUseID: "u1", ToolName: "query_db",
+			ToolInput: map[string]any{"sql": "SELECT 1"},
+		}, {
+			Type: provider.BlockToolResult, ToolUseID: "u1",
+			ToolContent: "rows: mango sentinel",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Session D: the needle appears ONLY in a block ID field — identifiers
+	// and key names are not free text, so it must NOT match.
+	sessD, runD := sessionFor("thursday demo")
+	_, err = msgStore.AppendMessage(ctx, StoredMessage{
+		SessionID: sessD, RunID: runD, Role: provider.RoleAssistant,
+		Content: []provider.Block{{
+			Type: provider.BlockToolUse, ToolUseID: "grapefruit-1", ToolName: "query_db",
+			ToolInput: map[string]any{"sql": "SELECT 1"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for q, want := range map[string][]string{
+		"pineapple":  {"monday standup"},
+		"avocado":    {"tuesday review"},
+		"mango":      {"wednesday retro"},
+		"grapefruit": {},
+	} {
+		p, err := store.ListSessionsByUser(ctx, userID, q, 10, nil)
+		if err != nil {
+			t.Fatalf("q=%s: %v", q, err)
+		}
+		got := titlesOf(p)
+		if !slices.Equal(got, want) {
+			t.Errorf("q=%s -> %v, want %v", q, got, want)
+		}
+	}
+
+	// The message leg must also paginate: two content-matched sessions with
+	// one page of size 1 walk both without duplicating either.
+	sessE, runE := sessionFor("friday ship")
+	_, err = msgStore.AppendMessage(ctx, StoredMessage{
+		SessionID: sessE, RunID: runE, Role: provider.RoleUser,
+		Content: []provider.Block{{Type: provider.BlockText, Text: "pass the apricot merge"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	p1, err := store.ListSessionsByUser(ctx, userID, "apricot", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p1.Sessions) != 1 || p1.NextCursor == nil {
+		t.Fatalf("apricot page 1 = %d sessions, cursor set = %v", len(p1.Sessions), p1.NextCursor != nil)
+	}
+	got = append(got, titlesOf(p1)...)
+	p2, err := store.ListSessionsByUser(ctx, userID, "apricot", 1, p1.NextCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p2.Sessions) != 1 || p2.NextCursor != nil {
+		t.Fatalf("apricot page 2 = %d sessions, cursor set = %v", len(p2.Sessions), p2.NextCursor != nil)
+	}
+	got = append(got, titlesOf(p2)...)
+	if want := []string{"friday ship", "monday standup"}; !slices.Equal(got, want) {
+		t.Fatalf("apricot walk = %v, want %v", got, want)
 	}
 }
 

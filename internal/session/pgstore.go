@@ -308,7 +308,9 @@ func (s *PGStore) SessionState(ctx context.Context, id string) (map[string]json.
 // ListSessionsByUser returns a page of a user's active (non-deleted) sessions,
 // most-recently-active first. Ended sessions are hidden from the sidebar. q,
 // when non-empty, narrows the list to sessions whose title contains it
-// (case-insensitive, ILIKE; wildcards in the term are matched literally).
+// (case-insensitive, ILIKE; wildcards in the term are matched literally) or
+// whose message content matches it (full-text, against the content_tsv
+// generated column — migration 000049).
 // Pagination is keyset: the query fetches limit+1 rows, the extra one proving
 // that another page exists, and NextCursor pins (updated_at, id) of the page's
 // last row (id breaks ties between sessions updated in the same instant).
@@ -322,13 +324,21 @@ func (s *PGStore) ListSessionsByUser(ctx context.Context, userID string, q strin
 		WHERE user_id = $1 AND status = $2`
 	args := []any{userID, string(SessionActive)}
 	if q != "" {
-		// The leading wildcard makes the pattern non-prefix, so a plain btree
-		// index on title cannot serve it. Acceptable here: the scan is confined
-		// to ONE user's active sessions, a small set per user, so a sequential
-		// scan is cheap at the scale this serves. If it ever grows, a trigram
-		// GIN index (pg_trgm) is the upgrade path — no query change needed.
-		query += ` AND title ILIKE '%' || $` + strconv.Itoa(len(args)+1) + ` || '%'`
-		args = append(args, escapeLike(q))
+		// The leading wildcard makes the title pattern non-prefix, so a plain
+		// btree index on title cannot serve it; the pg_trgm GIN index
+		// (migration 000045) does, with no query change. The message-content
+		// leg is an EXISTS subquery, so the match stays on the sessions row —
+		// no join means keyset pagination on (updated_at, id) and session
+		// dedup are unaffected. The term is escaped for the ILIKE leg and
+		// passed raw to plainto_tsquery (natural-language words, ANDed — the
+		// same convention as memory recall).
+		query += ` AND (title ILIKE '%' || $` + strconv.Itoa(len(args)+1) + ` || '%'
+			OR EXISTS (
+				SELECT 1 FROM messages m
+				WHERE m.session_id = sessions.id
+				  AND m.content_tsv @@ plainto_tsquery('simple', $` + strconv.Itoa(len(args)+2) + `)
+			))`
+		args = append(args, escapeLike(q), q)
 	}
 	if cursor != nil {
 		query += ` AND (updated_at, id) < ($` + strconv.Itoa(len(args)+1) + `::timestamptz, $` + strconv.Itoa(len(args)+2) + `::uuid)`
