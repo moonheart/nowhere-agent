@@ -83,6 +83,16 @@ type RunRegistry struct {
 	mu      sync.Mutex
 	workers map[string]*runWorker // sessionID -> active worker
 
+	// stepLocks serializes run_steps appends per SESSION (map: sessionID ->
+	// mutex). The store assigns seq and attempt with MAX+1 subqueries scoped to
+	// one run, so only appends for the SAME run can race — a parallel tool
+	// batch's concurrent WrapToolCall intents — and the single-active-run
+	// constraint makes "per session" == "per run". One lock per session (not
+	// one process-wide lock) lets runs of different sessions account steps
+	// concurrently. Entries live exactly as long as the session's worker and
+	// are removed by the same identity-guarded cleanup (execute).
+	stepLocks map[string]*sync.Mutex
+
 	// interactionHandlers maps an interaction Kind to the handler that folds its
 	// result into a tool_result on resume (general interrupt). Defaults wire the
 	// three built-in kinds; RegisterInteractionHandler adds/overrides kinds.
@@ -107,6 +117,7 @@ func NewRunRegistry(rt *Runtime) *RunRegistry {
 	return &RunRegistry{
 		rt:                  rt,
 		workers:             map[string]*runWorker{},
+		stepLocks:           map[string]*sync.Mutex{},
 		interactionHandlers: defaultInteractionHandlers(),
 	}
 }
@@ -243,9 +254,12 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 		// Remove the worker only if it is still the registered one — a new run
 		// (a resume after an interaction, or a newer submission) installs a NEW
 		// worker for the same session, and this worker's deferred cleanup must
-		// not clobber it.
+		// not clobber it. The step lock is dropped together with the worker:
+		// this run's loop has returned, so no appendStep can still hold it, and
+		// the successor worker installs a fresh lock for its own run.
 		if rg.workers[sessionID] == w {
 			delete(rg.workers, sessionID)
+			delete(rg.stepLocks, sessionID)
 		}
 		rg.mu.Unlock()
 	}()
@@ -898,18 +912,30 @@ func (rg *RunRegistry) append(ctx context.Context, sessionID, runID string, kind
 	})
 }
 
-// stepMu serializes run_steps appends per process. The store assigns seq and
-// attempt with MAX+1 subqueries, which two concurrent appends for one run (a
-// parallel tool batch) would race; the run worker is the only writer per run,
-// and the process is the only writer per session (single-instance assumption),
-// so one registry-level mutex is the whole story.
-var stepMu sync.Mutex
+// stepLock returns (creating on first use) the per-session lock that
+// serializes run_steps appends. The store assigns seq and attempt with MAX+1
+// subqueries scoped to one run, so only concurrent appends for the SAME run (a
+// parallel tool batch's WrapToolCall intents) can race; the single-active-run
+// constraint means a session carries at most one live run, so the session is
+// the right serialization key. Entries are removed with the worker in execute.
+func (rg *RunRegistry) stepLock(sessionID string) *sync.Mutex {
+	rg.mu.Lock()
+	defer rg.mu.Unlock()
+	l, ok := rg.stepLocks[sessionID]
+	if !ok {
+		l = &sync.Mutex{}
+		rg.stepLocks[sessionID] = l
+	}
+	return l
+}
 
-// appendStep writes one step intent, serializing concurrent appends (parallel
-// tool batches) through the per-process mutex.
-func (rg *RunRegistry) appendStep(ctx context.Context, runID string, kind StepKind, toolCallID string, sharedID *int64) (RunStep, error) {
-	stepMu.Lock()
-	defer stepMu.Unlock()
+// appendStep writes one step intent, serializing concurrent appends for the
+// same run (parallel tool batches) through the session's lock. Appends of
+// different runs proceed concurrently.
+func (rg *RunRegistry) appendStep(ctx context.Context, sessionID, runID string, kind StepKind, toolCallID string, sharedID *int64) (RunStep, error) {
+	lock := rg.stepLock(sessionID)
+	lock.Lock()
+	defer lock.Unlock()
 	return rg.rt.store.AppendRunStep(ctx, runID, kind, toolCallID, sharedID)
 }
 
@@ -973,7 +999,7 @@ func (e *registryEmitter) Emit(ctx context.Context, kind agent.EventKind, payloa
 				slog.Warn("record overflow usage ledger", "run", e.runID, "err", err)
 			}
 		}
-		if _, err := e.rg.appendStep(context.Background(), e.runID, StepOverflowCompact, "", nil); err != nil {
+		if _, err := e.rg.appendStep(context.Background(), e.sessionID, e.runID, StepOverflowCompact, "", nil); err != nil {
 			slog.Warn("record overflow recovery", "run", e.runID, "err", err)
 		}
 		return nil

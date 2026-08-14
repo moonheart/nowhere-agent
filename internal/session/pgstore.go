@@ -558,7 +558,7 @@ func (s *PGStore) StrandedRuns(ctx context.Context) ([]Run, error) {
 // from the messages sequence and returned on the step; the effect's result
 // message must be inserted with exactly that id. overflow_compact rows carry no
 // provisioned id. Callers MUST serialize appends for one run (the run worker
-// owns the run, so a registry-level mutex suffices).
+// owns the run, so a per-session lock suffices — see RunRegistry.appendStep).
 func (s *PGStore) AppendRunStep(ctx context.Context, runID string, kind StepKind, toolCallID string, resultMessageID *int64) (RunStep, error) {
 	var st RunStep
 	var provision *int64

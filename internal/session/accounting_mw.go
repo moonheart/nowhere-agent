@@ -31,7 +31,7 @@ func (m *stepIntentMW) MiddlewareName() string { return "step-intent" }
 
 // BeforeModel writes the assistant step intent for the upcoming provider call.
 func (m *stepIntentMW) BeforeModel(ctx context.Context, _ *agent.RunState) error {
-	st, err := m.rg.appendStep(ctx, m.runID, StepAssistant, "", nil)
+	st, err := m.rg.appendStep(ctx, m.sessionID, m.runID, StepAssistant, "", nil)
 	if err != nil {
 		return fmt.Errorf("write assistant step intent: %w", err)
 	}
@@ -73,7 +73,7 @@ func (m *toolIntentMW) WrapToolCall(ctx context.Context, c *agent.ToolCall, next
 	m.mu.Lock()
 	shared := m.batchID
 	if shared == nil {
-		st, err := m.rg.appendStep(ctx, m.runID, StepTool, c.Call.ID, nil)
+		st, err := m.rg.appendStep(ctx, m.sessionID, m.runID, StepTool, c.Call.ID, nil)
 		if err != nil {
 			m.mu.Unlock()
 			slog.Warn("write tool step intent failed; skipping tool", "run", m.runID, "tool", c.Call.Name, "err", err)
@@ -88,7 +88,7 @@ func (m *toolIntentMW) WrapToolCall(ctx context.Context, c *agent.ToolCall, next
 		return next(ctx, c)
 	}
 	m.mu.Unlock()
-	st, err := m.rg.appendStep(ctx, m.runID, StepTool, c.Call.ID, shared)
+	st, err := m.rg.appendStep(ctx, m.sessionID, m.runID, StepTool, c.Call.ID, shared)
 	if err != nil {
 		slog.Warn("write tool step intent failed; skipping tool", "run", m.runID, "tool", c.Call.Name, "err", err)
 		return toolruntime.Result{

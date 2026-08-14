@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/provider"
@@ -485,5 +486,70 @@ func TestToolIntentMWParallelBatchProvisionsOnce(t *testing.T) {
 		// the way the emitter's tool-result persist path does.
 		mw.resetBatch()
 		_ = pending.popTools()
+	}
+}
+
+// blockingStepStore wraps a MemStore and tracks how many AppendRunStep calls
+// are in flight simultaneously, so tests can assert the registry's step lock
+// scope: same-session appends serialize, different sessions proceed
+// concurrently.
+type blockingStepStore struct {
+	*MemStore
+	mu          sync.Mutex
+	inflight    int
+	maxInflight int
+}
+
+func (b *blockingStepStore) AppendRunStep(ctx context.Context, runID string, kind StepKind, toolCallID string, resultMessageID *int64) (RunStep, error) {
+	b.mu.Lock()
+	b.inflight++
+	if b.inflight > b.maxInflight {
+		b.maxInflight = b.inflight
+	}
+	b.mu.Unlock()
+	time.Sleep(150 * time.Millisecond)
+	defer func() {
+		b.mu.Lock()
+		b.inflight--
+		b.mu.Unlock()
+	}()
+	return b.MemStore.AppendRunStep(ctx, runID, kind, toolCallID, resultMessageID)
+}
+
+func (b *blockingStepStore) reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.inflight, b.maxInflight = 0, 0
+}
+
+// TestAppendStepSerializesPerSessionNotPerProcess pins the lock-scope change:
+// the registry's per-session step lock serializes concurrent intents for the
+// SAME session (a parallel tool batch races on the run's seq/attempt MAX+1)
+// but appends of DIFFERENT sessions overlap — the old process-wide stepMu
+// serialized every session's accounting on one mutex.
+func TestAppendStepSerializesPerSessionNotPerProcess(t *testing.T) {
+	ctx := context.Background()
+	blocking := &blockingStepStore{MemStore: NewMemStore()}
+	rg := NewRunRegistry(NewRuntime(blocking))
+
+	// Two appends for DIFFERENT sessions must overlap (per-session locks).
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = rg.appendStep(ctx, "s1", "r1", StepAssistant, "", nil) }()
+	go func() { defer wg.Done(); _, _ = rg.appendStep(ctx, "s2", "r2", StepAssistant, "", nil) }()
+	wg.Wait()
+	if got := blocking.maxInflight; got < 2 {
+		t.Fatalf("different sessions: max concurrent step appends = %d, want >= 2 (lock must not be process-wide)", got)
+	}
+
+	// Two appends for the SAME session must serialize (a parallel tool batch
+	// within one run).
+	blocking.reset()
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = rg.appendStep(ctx, "s1", "r1", StepTool, "tu-a", nil) }()
+	go func() { defer wg.Done(); _, _ = rg.appendStep(ctx, "s1", "r1", StepTool, "tu-b", nil) }()
+	wg.Wait()
+	if got := blocking.maxInflight; got > 1 {
+		t.Fatalf("same session: max concurrent step appends = %d, want 1 (serialized)", got)
 	}
 }
