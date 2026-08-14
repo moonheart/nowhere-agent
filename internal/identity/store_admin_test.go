@@ -154,9 +154,12 @@ func swapDatabase(dsn, name string) (string, error) {
 	return u.String(), nil
 }
 
+// TestCreateUserFirstAccountBecomesAdmin covers the legacy bootstrap path: a
+// store opted in via WithFirstAccountAdmin (wired from BOOTSTRAP_ADMIN_EMAIL
+// being set) makes the first account on an empty platform the admin.
 func TestCreateUserFirstAccountBecomesAdmin(t *testing.T) {
 	db := freshDB(t)
-	store := NewStore(db)
+	store := NewStore(db).WithFirstAccountAdmin(true)
 	ctx := context.Background()
 
 	first, err := store.CreateUser(ctx, "first@test.dev", "hash", "First")
@@ -176,12 +179,30 @@ func TestCreateUserFirstAccountBecomesAdmin(t *testing.T) {
 	}
 }
 
+// TestCreateUserFirstAccountIsOrdinaryByDefault pins the safe default: without
+// the explicit bootstrap opt-in (BOOTSTRAP_ADMIN_EMAIL unset) the first
+// account on an empty platform is a plain user — a public deployment must not
+// hand the admin role to the first random signup.
+func TestCreateUserFirstAccountIsOrdinaryByDefault(t *testing.T) {
+	db := freshDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	first, err := store.CreateUser(ctx, "first-default@test.dev", "hash", "First")
+	if err != nil {
+		t.Fatalf("create first user: %v", err)
+	}
+	if first.IsAdmin() {
+		t.Errorf("first account platform_role = %q, want user (bootstrap needs explicit opt-in)", first.PlatformRole)
+	}
+}
+
 // Two signups racing on an empty platform must not both become administrators:
 // the advisory lock is the only thing ordering them, since there is no row to
 // lock on an empty table.
 func TestCreateUserConcurrentFirstAccountsYieldOneAdmin(t *testing.T) {
 	db := freshDB(t)
-	store := NewStore(db)
+	store := NewStore(db).WithFirstAccountAdmin(true)
 
 	const n = 8
 	var (
@@ -220,7 +241,7 @@ func TestCreateUserConcurrentFirstAccountsYieldOneAdmin(t *testing.T) {
 
 func TestCreateUserOnPopulatedPlatformIsOrdinary(t *testing.T) {
 	db := pgTestDB(t)
-	store := NewStore(db)
+	store := NewStore(db).WithFirstAccountAdmin(true)
 	// The shared development database already has accounts; if it somehow does
 	// not, this assertion would be about the bootstrap path instead.
 	if n, err := store.CountUsers(context.Background()); err != nil || n == 0 {

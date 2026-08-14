@@ -41,6 +41,11 @@ type Handler struct {
 	// caller, so the 6-digit code is the only secret left to protect. The same
 	// pair gates how many challenge tokens a login may mint.
 	totpThrottle *LoginThrottler
+	// signupThrottle, when set, locks an (email, ip) pair after repeated
+	// signup attempts that did not create an account (the account-creation
+	// analogue of login throttling; the gateway's global request limiter still
+	// bounds raw volume).
+	signupThrottle *LoginThrottler
 }
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
@@ -56,6 +61,13 @@ func (h *Handler) WithThrottle(t *LoginThrottler) *Handler {
 // verify has no per-pair lockout.
 func (h *Handler) WithTOTPThrottle(t *LoginThrottler) *Handler {
 	h.totpThrottle = t
+	return h
+}
+
+// WithSignupThrottle wires signup throttling. Left nil, /api/auth/signup has
+// no per-pair lockout.
+func (h *Handler) WithSignupThrottle(t *LoginThrottler) *Handler {
+	h.signupThrottle = t
 	return h
 }
 
@@ -155,13 +167,29 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "email and password required")
 		return
 	}
+	// Signup throttling gate, mirroring login: an (email, ip) pair that keeps
+	// failing to create an account is refused before any work, with
+	// Retry-After. A nil throttler keeps the endpoint unthrottled.
+	if h.signupThrottle != nil {
+		if allowed, retryAfter := h.signupThrottle.Check(req.Email, audit.ClientIP(r)); !allowed {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
+			writeError(w, http.StatusTooManyRequests, "too many signup attempts; try again later")
+			return
+		}
+	}
 	u, err := h.svc.Signup(r.Context(), req.Email, req.Password, req.DisplayName)
 	if errors.Is(err, ErrUserExists) {
+		if h.signupThrottle != nil {
+			h.signupThrottle.Fail(req.Email, audit.ClientIP(r))
+		}
 		h.record(audit.Failure(audit.ActionAuthSignup).FromRequest(r).Detail(map[string]any{"reason": "email_taken"}))
 		writeError(w, http.StatusConflict, "user already exists")
 		return
 	}
 	if errors.Is(err, ErrWeakPassword) {
+		if h.signupThrottle != nil {
+			h.signupThrottle.Fail(req.Email, audit.ClientIP(r))
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -169,6 +197,9 @@ func (h *Handler) signup(w http.ResponseWriter, r *http.Request) {
 		h.record(audit.Failure(audit.ActionAuthSignup).FromRequest(r).Detail(map[string]any{"reason": "internal"}))
 		writeError(w, http.StatusInternalServerError, "signup failed")
 		return
+	}
+	if h.signupThrottle != nil {
+		h.signupThrottle.Success(req.Email, audit.ClientIP(r))
 	}
 	h.record(audit.Success(audit.ActionAuthSignup).FromRequest(r).Actor(u.ID, u.Email).Target("user", u.ID))
 	writeJSON(w, http.StatusCreated, map[string]any{"user": toDTO(u)})

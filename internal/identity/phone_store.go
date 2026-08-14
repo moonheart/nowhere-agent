@@ -24,9 +24,10 @@ func (s *Store) UserByPhone(ctx context.Context, phone string) (User, error) {
 	return s.scanUser(ctx, `SELECT `+userColumns+` FROM users WHERE phone = $1`, phone)
 }
 
-// CreatePhoneUser provisions an account for a verified phone number. The
-// first account on an empty platform becomes admin, exactly like email
-// signup. Returns ErrUserExists when the phone already holds an account.
+// CreatePhoneUser provisions an account for a verified phone number. With the
+// first-account bootstrap enabled (see Store.WithFirstAccountAdmin), the first
+// account on an empty platform becomes admin, exactly like email signup.
+// Returns ErrUserExists when the phone already holds an account.
 func (s *Store) CreatePhoneUser(ctx context.Context, phone, displayName string) (User, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -34,17 +35,18 @@ func (s *Store) CreatePhoneUser(ctx context.Context, phone, displayName string) 
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, bootstrapAdminLockKey); err != nil {
-		return User{}, fmt.Errorf("bootstrap lock: %w", err)
-	}
-
-	var existing int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&existing); err != nil {
-		return User{}, fmt.Errorf("count users: %w", err)
-	}
 	role := PlatformRoleUser
-	if existing == 0 {
-		role = PlatformRoleAdmin
+	if s.firstAccountAdmin {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, bootstrapAdminLockKey); err != nil {
+			return User{}, fmt.Errorf("bootstrap lock: %w", err)
+		}
+		var existing int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&existing); err != nil {
+			return User{}, fmt.Errorf("count users: %w", err)
+		}
+		if existing == 0 {
+			role = PlatformRoleAdmin
+		}
 	}
 
 	u, err := scanUserRow(tx.QueryRowContext(ctx, `

@@ -376,16 +376,20 @@ type Web struct {
 	Dir string `envconfig:"WEB_DIR" default:""`
 }
 
-// Identity configures the account layer (admin-console). The first account
-// created on an empty platform is made a platform admin automatically, which
-// does nothing for a deployment whose accounts predate the role — those
-// designate one here.
+// Identity configures the account layer (admin-console). Setting
+// BOOTSTRAP_ADMIN_EMAIL does double duty: it opts the deployment into the
+// legacy "first account on an empty platform becomes admin" bootstrap (a
+// public deployment without it must not hand the admin role to the first
+// random signup) AND names an existing account to promote at startup, which
+// covers deployments whose accounts predate the role.
 type Identity struct {
 	// BootstrapAdminEmail names an existing account to promote to platform
 	// admin at startup. Applied idempotently on every boot; an email matching
 	// no account logs a warning rather than failing startup, so a stale value
 	// never blocks a deploy. It is also the recovery path if the last admin
-	// loses the role.
+	// loses the role. When set, the first account created on an empty platform
+	// is also made a platform admin (the legacy bootstrap); when unset, every
+	// signup is a plain user.
 	BootstrapAdminEmail string `envconfig:"BOOTSTRAP_ADMIN_EMAIL" default:""`
 }
 

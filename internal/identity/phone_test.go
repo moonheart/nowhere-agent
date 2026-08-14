@@ -60,6 +60,31 @@ func phoneEnv(t *testing.T) (*Service, *recordingSMS, *Store, context.Context) {
 	return svc, &recordingSMS{}, s, context.Background()
 }
 
+// TestCreatePhoneUserFirstAccountHonorsBootstrapFlag pins the phone path to
+// the same bootstrap rule as email signup: the first account on an empty
+// platform is admin only with the explicit opt-in (WithFirstAccountAdmin).
+func TestCreatePhoneUserFirstAccountHonorsBootstrapFlag(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		store     *Store
+		wantAdmin bool
+	}{
+		{"opt-in", NewStore(freshDB(t)).WithFirstAccountAdmin(true), true},
+		{"default", NewStore(freshDB(t)), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := tc.store.CreatePhoneUser(ctx, phoneNumber(), "First")
+			if err != nil {
+				t.Fatalf("create first phone user: %v", err)
+			}
+			if u.IsAdmin() != tc.wantAdmin {
+				t.Errorf("first phone account platform_role = %q, want admin=%v", u.PlatformRole, tc.wantAdmin)
+			}
+		})
+	}
+}
+
 // advanceClock fast-forwards the service clock by d (for cooldown tests).
 func advanceClock(svc *Service, d time.Duration) {
 	base := svc.now()

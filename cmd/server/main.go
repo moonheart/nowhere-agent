@@ -130,7 +130,11 @@ func run() error {
 	}
 	log.Info("openapi contract served at /openapi.json")
 
-	identityStore := identity.NewStore(pool)
+	// First-account admin bootstrap (legacy) is enabled only when the
+	// deployment explicitly opted in via BOOTSTRAP_ADMIN_EMAIL: on a public
+	// deployment the first random signup must not claim the admin role before
+	// operations can.
+	identityStore := identity.NewStore(pool).WithFirstAccountAdmin(cfg.Identity.BootstrapAdminEmail != "")
 	identitySvc := identity.NewService(identityStore)
 
 	// Credential reaper: expired session tokens, phone OTPs, and service keys
@@ -245,7 +249,7 @@ func run() error {
 	// Components register their callback where they are wired; the loop
 	// starts once at the end of run().
 	settingsSync := settings.NewWatcher()
-	identityHandler := identity.NewHandler(identitySvc).WithThrottle(identity.NewLoginThrottler()).WithTOTPThrottle(identity.NewLoginThrottler())
+	identityHandler := identity.NewHandler(identitySvc).WithThrottle(identity.NewLoginThrottler()).WithTOTPThrottle(identity.NewLoginThrottler()).WithSignupThrottle(identity.NewLoginThrottler())
 	identityHandler.Register(mux)
 
 	// Protected route tier (httpx.Router): auth — and any future per-route

@@ -12,9 +12,23 @@ import (
 // Store persists identity data in Postgres.
 type Store struct {
 	db *sql.DB
+	// firstAccountAdmin, when true, makes the first account created on an
+	// empty platform a platform admin (the legacy bootstrap). Off by default:
+	// on a public deployment the first random signup must not claim the admin
+	// role before operations can — only a deployment that explicitly set
+	// BOOTSTRAP_ADMIN_EMAIL opts in (see cmd/server wiring).
+	firstAccountAdmin bool
 }
 
 func NewStore(db *sql.DB) *Store { return &Store{db: db} }
+
+// WithFirstAccountAdmin toggles the "first account on an empty platform
+// becomes admin" bootstrap. Off by default; cmd/server enables it exactly when
+// BOOTSTRAP_ADMIN_EMAIL is set.
+func (s *Store) WithFirstAccountAdmin(enabled bool) *Store {
+	s.firstAccountAdmin = enabled
+	return s
+}
 
 // userColumns is the projection every user query shares, in the order scanUser
 // expects. Kept in one place so adding a column touches one line.
@@ -28,10 +42,11 @@ const bootstrapAdminLockKey = `nowhere.bootstrap_admin`
 
 // CreateUser inserts a user. Returns ErrUserExists on duplicate email.
 //
-// The first account on an empty platform is created as a platform admin, so a
-// fresh deployment always has someone who can administer it. Deployments whose
-// accounts predate the role designate one via BOOTSTRAP_ADMIN_EMAIL instead
-// (see Service.PromoteByEmail).
+// With the first-account bootstrap enabled (see WithFirstAccountAdmin, wired
+// from BOOTSTRAP_ADMIN_EMAIL being set), the first account on an empty
+// platform is created as a platform admin, so a fresh deployment always has
+// someone who can administer it. Deployments whose accounts predate the role
+// designate one via BOOTSTRAP_ADMIN_EMAIL instead (see Service.PromoteByEmail).
 func (s *Store) CreateUser(ctx context.Context, email, passwordHash, displayName string) (User, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -39,17 +54,22 @@ func (s *Store) CreateUser(ctx context.Context, email, passwordHash, displayName
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, bootstrapAdminLockKey); err != nil {
-		return User{}, fmt.Errorf("bootstrap lock: %w", err)
-	}
-
-	var existing int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&existing); err != nil {
-		return User{}, fmt.Errorf("count users: %w", err)
-	}
 	role := PlatformRoleUser
-	if existing == 0 {
-		role = PlatformRoleAdmin
+	if s.firstAccountAdmin {
+		// Serialize concurrent first-signups: there is no row to lock on an
+		// empty table, so two racing signups would both see zero users and
+		// both become admins; a transaction-scoped advisory lock is the only
+		// thing that orders them. Released at commit.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, bootstrapAdminLockKey); err != nil {
+			return User{}, fmt.Errorf("bootstrap lock: %w", err)
+		}
+		var existing int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&existing); err != nil {
+			return User{}, fmt.Errorf("count users: %w", err)
+		}
+		if existing == 0 {
+			role = PlatformRoleAdmin
+		}
 	}
 
 	u, err := scanUserRow(tx.QueryRowContext(ctx, `
@@ -283,21 +303,23 @@ func (s *Store) ProvisionExternalUser(ctx context.Context, issuer, subject, emai
 	}
 
 	// Not linked. Join onto an existing account with the same email when one
-	// exists; otherwise create one (first account on an empty platform is admin,
-	// matching CreateUser's bootstrap so an SSO-first deployment still gets an
-	// administrator).
+	// exists; otherwise create one (with the first-account bootstrap enabled,
+	// the first account on an empty platform is admin, matching CreateUser so
+	// an SSO-first deployment still gets an administrator).
 	userID := ""
 	if email != "" {
 		_ = tx.QueryRowContext(ctx, `SELECT id FROM users WHERE email = $1`, email).Scan(&userID)
 	}
 	if userID == "" {
-		var existing int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&existing); err != nil {
-			return User{}, fmt.Errorf("count users: %w", err)
-		}
 		role := PlatformRoleUser
-		if existing == 0 {
-			role = PlatformRoleAdmin
+		if s.firstAccountAdmin {
+			var existing int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&existing); err != nil {
+				return User{}, fmt.Errorf("count users: %w", err)
+			}
+			if existing == 0 {
+				role = PlatformRoleAdmin
+			}
 		}
 		// Unusable-password sentinel: not a valid bcrypt hash, so bcrypt compare
 		// always fails; satisfies NOT NULL without allowing password sign-in.
