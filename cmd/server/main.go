@@ -1809,8 +1809,10 @@ func run() error {
 		if sandboxMgr != nil {
 			// Sandbox lifecycle (D13/D15): a terminal run opens the deferred-
 			// stop grace period; the hourly sandbox sweep (registered above)
-			// destroys the container once it expires. Sessions resume with a
-			// fresh sandbox (Ensure recreates a non-running one).
+			// destroys the container once it expires. Sessions resumed inside
+			// the grace window get a fresh sandbox: Ensure best-effort destroys
+			// the stopped container first, so the fixed-name docker container
+			// cannot collide on recreation.
 			handler.WithRunDoneHook(func(_ context.Context, sessionID string, _ session.Run, _ session.RunStatus) {
 				sandboxMgr.MarkSessionEnded(sessionID, sandboxStopGrace)
 			})

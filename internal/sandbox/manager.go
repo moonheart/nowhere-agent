@@ -45,13 +45,24 @@ func NewManager(port Port) *Manager {
 // Ensure returns a running sandbox for the session, creating one if needed.
 func (m *Manager) Ensure(ctx context.Context, sessionID string, opts Options) (Handle, error) {
 	m.mu.Lock()
-	if e, ok := m.active[sessionID]; ok && e.state == StateRunning {
+	e, ok := m.active[sessionID]
+	if ok && e.state == StateRunning {
 		e.lastUsed = time.Now()
 		h := e.handle
 		m.mu.Unlock()
 		return h, nil
 	}
 	m.mu.Unlock()
+
+	// A session resuming inside the deferred-stop grace period still holds a
+	// stopped handle whose underlying resource — e.g. a fixed-name Docker
+	// container — would collide with the fresh Create. Best-effort destroy it
+	// first, so the recreate path works and the sweep never has to catch up:
+	// a failed destroy leaves the old resource in place, and Create surfaces
+	// its own conflict error rather than silently degrading the run.
+	if ok {
+		_ = m.port.Destroy(ctx, e.handle)
+	}
 
 	h, err := m.port.Create(ctx, sessionID, opts)
 	if err != nil {

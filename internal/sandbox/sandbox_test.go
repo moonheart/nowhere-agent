@@ -52,6 +52,55 @@ func TestManagerEnsureIsolatesSessions(t *testing.T) {
 	}
 }
 
+// TestManagerEnsureRecreatesAfterDeferredStop: a session resuming inside the
+// deferred-stop grace period must get a FRESH sandbox — the stale handle is
+// best-effort destroyed first, so fixed-name backends (docker containers) do
+// not fail with a name conflict and silently lose the file tools.
+func TestManagerEnsureRecreatesAfterDeferredStop(t *testing.T) {
+	m := NewManager(NewMemPort())
+	ctx := context.Background()
+
+	h1, err := m.Ensure(ctx, "s1", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.MarkSessionEnded("s1", time.Hour)
+
+	h2, err := m.Ensure(ctx, "s1", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1.ID == h2.ID {
+		t.Errorf("Ensure reused the stopped handle %s; want a fresh one", h1.ID)
+	}
+	// The stale handle must be gone: exec against it has to fail.
+	if _, err := m.port.Exec(ctx, h1, []string{"ls"}); err == nil {
+		t.Error("old handle still alive after Ensure recreated the sandbox")
+	}
+	if _, ok := m.Get("s1"); !ok {
+		t.Error("recreated sandbox should be running")
+	}
+}
+
+// TestManagerEnsureBestEffortDestroyFallsThroughToCreate: a destroy failure on
+// the stale handle must not block the recreate — Ensure proceeds to Create
+// and the sweep retries the destroy later.
+func TestManagerEnsureBestEffortDestroyFallsThroughToCreate(t *testing.T) {
+	m := NewManager(&failingDestroyPort{MemPort: NewMemPort(), fail: map[string]bool{"s1": true}, done: map[string]bool{}})
+	ctx := context.Background()
+	m.Ensure(ctx, "s1", Options{})
+	m.MarkSessionEnded("s1", time.Hour)
+
+	h2, err := m.Ensure(ctx, "s1", Options{})
+	if err != nil {
+		t.Fatalf("Ensure must fall through to Create when the stale destroy fails: %v", err)
+	}
+	if _, ok := m.Get("s1"); !ok {
+		t.Error("recreated sandbox should be running")
+	}
+	_ = h2
+}
+
 func TestManagerDeferredStopAndSweep(t *testing.T) {
 	m := NewManager(NewMemPort())
 	ctx := context.Background()
