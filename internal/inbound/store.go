@@ -228,15 +228,10 @@ func (s *Store) TouchLastUsed(ctx context.Context, id string) error {
 var ErrReplay = errors.New("replayed nonce")
 
 // ClaimNonce deduplicates a trigger's nonce: it records (webhook_id, nonce)
-// and reports false — with ErrReplay — when the pair was already claimed.
-// Expired rows are pruned opportunistically on each claim, keeping the table
-// bounded to the signature window.
+// and reports false — with ErrReplay — when the pair was already claimed. This
+// is the trigger's hot path, so expired rows are NOT pruned here; the hourly
+// SweepExpiredNonces pass keeps the table bounded to the signature window.
 func (s *Store) ClaimNonce(ctx context.Context, webhookID, nonce string, now time.Time) error {
-	cutoff := now.Add(-signatureWindow - time.Minute)
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM inbound_webhook_nonces WHERE seen_at < $1`, cutoff); err != nil {
-		return err
-	}
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO inbound_webhook_nonces (webhook_id, nonce, seen_at)
 		VALUES ($1, $2, $3)
@@ -253,6 +248,20 @@ func (s *Store) ClaimNonce(ctx context.Context, webhookID, nonce string, now tim
 		return ErrReplay
 	}
 	return nil
+}
+
+// SweepExpiredNonces deletes nonce rows seen before cutoff and reports how
+// many were removed. Called by the gateway's hourly sweep, off the trigger
+// hot path; the grace (cutoff = now - signatureWindow - 1m) matches the
+// per-claim prune the hot path used to run.
+func (s *Store) SweepExpiredNonces(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM inbound_webhook_nonces WHERE seen_at < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return n, err
 }
 
 func nullIfEmpty(s string) any {

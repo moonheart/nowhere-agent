@@ -1778,6 +1778,32 @@ func run() error {
 		inboundHandler.RegisterAuthed(protected)
 		log.Info("inbound webhook endpoint enabled (POST /api/inbound/{id}, HMAC-signed)")
 
+		// Expired inbound nonce rows are garbage the dedupe check ignores (a
+		// replayed nonce outside the signature window is a fresh event); an
+		// hourly pass prunes them, off the trigger hot path (ClaimNonce only
+		// upserts). The grace matches the per-claim prune it replaces.
+		go func() {
+			nonceSweepLog := log
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					cutoff := time.Now().UTC().Add(-inbound.SignatureWindow - time.Minute)
+					removed, err := inboundStore.SweepExpiredNonces(ctx, cutoff)
+					if err != nil {
+						nonceSweepLog.Warn("inbound nonce sweep failed", "err", err)
+						continue
+					}
+					if removed > 0 {
+						nonceSweepLog.Info("inbound nonce sweep removed rows", "count", removed)
+					}
+				}
+			}
+		}()
+
 		log.Info("chat endpoint enabled (auth required); provider+model resolved per request from the registry")
 	}
 

@@ -29,8 +29,9 @@ const (
 	// maxToggleBodyBytes bounds the toggle payload (one bool) at 4 KiB.
 	maxToggleBodyBytes = 4 << 10
 	// signatureWindow bounds replay: X-Nowhere-Timestamp must be within
-	// signatureWindow of the server clock.
-	signatureWindow = 5 * time.Minute
+	// signatureWindow of the server clock. Exported so the gateway's hourly
+	// nonce sweep can derive its prune cutoff.
+	SignatureWindow = 5 * time.Minute
 	secretPrefix    = "wh_"
 )
 
@@ -234,7 +235,7 @@ func verifySignature(r *http.Request, secret string, body []byte, now time.Time)
 	if err != nil {
 		return false
 	}
-	if delta := now.Unix() - ts; delta < -int64(signatureWindow/time.Second) || delta > int64(signatureWindow/time.Second) {
+	if delta := now.Unix() - ts; delta < -int64(SignatureWindow/time.Second) || delta > int64(SignatureWindow/time.Second) {
 		return false
 	}
 	expected := hmacSHA256Hex(secret, tsStr+"."+nonce+"."+string(body))

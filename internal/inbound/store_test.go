@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -187,6 +188,47 @@ func TestOwnershipAndDelete(t *testing.T) {
 	}
 	if _, err := s.GetByID(ctx, w.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get after delete: %v", err)
+	}
+}
+
+// TestSweepExpiredNonces pins the off-hot-path cleanup: expired nonce rows are
+// removed by the hourly sweep (not per claim), and a fresh nonce still claims
+// and dedupes afterwards.
+func TestSweepExpiredNonces(t *testing.T) {
+	s, db := newStore(t, nil)
+	ctx := context.Background()
+	uid := seedUser(t, db)
+
+	w, err := s.Create(ctx, testWebhook(uid))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM inbound_webhooks WHERE id = $1`, w.ID) })
+
+	now := time.Now().UTC()
+	oldNonce := "n-old-" + randHex()
+	freshNonce := "n-fresh-" + randHex()
+	if err := s.ClaimNonce(ctx, w.ID, oldNonce, now.Add(-10*time.Minute)); err != nil {
+		t.Fatalf("claim old: %v", err)
+	}
+	if err := s.ClaimNonce(ctx, w.ID, freshNonce, now); err != nil {
+		t.Fatalf("claim fresh: %v", err)
+	}
+
+	removed, err := s.SweepExpiredNonces(ctx, now.Add(-SignatureWindow-time.Minute))
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("sweep removed %d nonces, want 1 (only the expired one)", removed)
+	}
+
+	// The expired nonce is gone (reusable), the fresh one still dedupes.
+	if err := s.ClaimNonce(ctx, w.ID, oldNonce, now); err != nil {
+		t.Errorf("re-claim of a swept nonce failed: %v", err)
+	}
+	if err := s.ClaimNonce(ctx, w.ID, freshNonce, now); !errors.Is(err, ErrReplay) {
+		t.Errorf("re-claim of the fresh nonce = %v, want ErrReplay", err)
 	}
 }
 
