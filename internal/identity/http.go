@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -286,7 +287,19 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	token := BearerToken(r)
 	if token != "" {
-		_ = h.svc.Logout(r.Context(), token)
+		if err := h.svc.Logout(r.Context(), token); err != nil {
+			// Token revocation failed: it stays valid server-side while the
+			// client has already discarded it. Log and audit the failure; the
+			// response stays 204 — logout is idempotent, and a 500 would only
+			// wedge the client without making the token any safer.
+			slog.Warn("logout: token revocation failed", "err", err)
+			if u, ok := UserFromContext(r.Context()); ok {
+				h.record(audit.Failure(audit.ActionAuthLogout).FromRequest(r).Actor(u.ID, u.Email).
+					Detail(map[string]any{"reason": "token_revocation_failed"}))
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if u, ok := UserFromContext(r.Context()); ok {
 			h.record(audit.Success(audit.ActionAuthLogout).FromRequest(r).Actor(u.ID, u.Email))
 		}
