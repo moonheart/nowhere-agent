@@ -232,14 +232,17 @@ func (s *PGStore) Put(ctx context.Context, sk Skill, createdBy string) (Skill, e
 	}
 	userID, teamID := scopeOwner(sk.Scope)
 
-	// Find the existing pointer row for this identity, if any.
+	// Find the existing pointer row for this identity, if any. The row is
+	// locked so concurrent Puts serialize on the version bump instead of
+	// racing to insert the same (skill_id, version) row.
 	var existingID string
 	var existingVersion int
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, current_version FROM skills
 		WHERE name = $1 AND scope = $2
 		  AND COALESCE(user_id,'') = COALESCE($3,'')
-		  AND COALESCE(team_id,'') = COALESCE($4,'')`,
+		  AND COALESCE(team_id,'') = COALESCE($4,'')
+		FOR UPDATE`,
 		sk.Name, string(sk.Scope.Scope), userID, teamID).Scan(&existingID, &existingVersion)
 	notFound := errors.Is(err, sql.ErrNoRows)
 	if err != nil && !notFound {
