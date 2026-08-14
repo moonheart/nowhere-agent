@@ -173,8 +173,34 @@ func TestResolveModelFailClosed(t *testing.T) {
 	_ = db
 }
 
-func TestVisionModelPick(t *testing.T) {
+// TestEnabledModelsListsOnlyEnabled verifies the picker read: enabled models
+// of the resolved provider are listed, disabled ones are not.
+func TestEnabledModelsListsOnlyEnabled(t *testing.T) {
 	r, s, db := resolverEnv(t)
+	ctx := context.Background()
+	_, teamID := seedUserTeam(t, db)
+
+	if _, err := s.PlatformDefault(ctx); err != nil {
+		t.Fatalf("platform default: %v", err)
+	}
+	tg, err := r.ResolveForTeam(ctx, teamID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// resolverEnv seeded "sys-model" (enabled). Add a disabled model: it must
+	// not appear in the picker.
+	seedModel(t, db, tg.ProviderID, "disabled-model", false, false, false)
+	names, err := r.EnabledModels(ctx, tg)
+	if err != nil {
+		t.Fatalf("enabled models: %v", err)
+	}
+	if len(names) != 1 || names[0] != "sys-model" {
+		t.Fatalf("models = %v, want [sys-model]", names)
+	}
+}
+
+func TestVisionModelPick(t *testing.T) {	r, s, db := resolverEnv(t)
 	ctx := context.Background()
 	_, teamID := seedUserTeam(t, db)
 

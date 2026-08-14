@@ -38,6 +38,7 @@ var registeredRoutes = map[string][]string{
 
 	// ---- chatapi (internal/chatapi/handler.go Register + RegisterAuthed) ----
 	"/api/chat":                            {"post"},
+	"/api/chat/models":                     {"get"},
 	"/api/chat/history":                    {"get"},
 	"/api/chat/resume":                     {"post"},
 	"/api/chat/cancel":                     {"post"},

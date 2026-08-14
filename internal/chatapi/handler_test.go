@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"nowhere-agent/internal/agent"
+	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/provider"
 	"nowhere-agent/internal/session"
 	"nowhere-agent/internal/toolruntime"
@@ -65,6 +66,70 @@ func TestServeChatForwardsRequestedModel(t *testing.T) {
 	}
 	if m := <-got; m != "" {
 		t.Errorf("loop model without a request field = %q, want \"\"", m)
+	}
+}
+
+// TestServeChatModels pins the model-picker contract: the lister's default +
+// enabled names reach the client as JSON, a request without an authenticated
+// user resolves with an empty user id (the lister still answers), an unwired
+// lister serves an empty list, and a lister error 500s.
+func TestServeChatModels(t *testing.T) {
+	h := NewHandler(newTestLoop, "sys").WithModelLister(func(_ context.Context, userID string) (string, []string, error) {
+		if userID == "nobody" {
+			return "", nil, fmt.Errorf("no provider")
+		}
+		return "claude-sonnet-4-5", []string{"claude-sonnet-4-5", "claude-haiku-4-5"}, nil
+	})
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest("GET", "/api/chat/models", nil)
+	req = req.WithContext(identity.NewContextWithUser(req.Context(), identity.User{ID: "u1"}))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Default string   `json:"default"`
+		Models  []string `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Default != "claude-sonnet-4-5" || len(got.Models) != 2 || got.Models[1] != "claude-haiku-4-5" {
+		t.Errorf("payload = %+v, want default + 2 models", got)
+	}
+
+	// An unauthenticated request carries no user: the lister still answers
+	// (userID ""), so a missing identity never breaks the picker endpoint.
+	req = httptest.NewRequest("GET", "/api/chat/models", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("anonymous status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// No lister wired: empty list, still 200.
+	h2 := NewHandler(newTestLoop, "sys")
+	mux2 := http.NewServeMux()
+	h2.Register(mux2)
+	rec = httptest.NewRecorder()
+	mux2.ServeHTTP(rec, httptest.NewRequest("GET", "/api/chat/models", nil))
+	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) == "" {
+		t.Fatalf("unwired lister status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// A lister error is an internal failure, not an empty picker.
+	bad := NewHandler(newTestLoop, "sys").WithModelLister(func(context.Context, string) (string, []string, error) {
+		return "", nil, fmt.Errorf("boom")
+	})
+	muxBad := http.NewServeMux()
+	bad.Register(muxBad)
+	rec = httptest.NewRecorder()
+	muxBad.ServeHTTP(rec, httptest.NewRequest("GET", "/api/chat/models", nil))
+	if rec.Code != 500 {
+		t.Fatalf("lister error status = %d, want 500", rec.Code)
 	}
 }
 

@@ -1518,6 +1518,25 @@ func run() error {
 			_, visionOK := provResolver.VisionModel(ctx, t)
 			return t.Vendor, visionOK
 		})
+		// Model picker (chat-side model selection): lists the enabled models of
+		// the provider the caller's chat runs resolve to — the same resolution
+		// chat uses, so the picker can never offer a model chat would reject.
+		// Only names are exposed; the resolved target's key stays server-side.
+		// No resolvable provider = empty list (the picker hides).
+		handler = handler.WithModelLister(func(ctx context.Context, userID string) (string, []string, error) {
+			t, err := provResolver.Resolve(ctx, userID)
+			if err != nil {
+				if errors.Is(err, providerreg.ErrNoProvider) {
+					return "", nil, nil
+				}
+				return "", nil, err
+			}
+			names, err := provResolver.EnabledModels(ctx, t)
+			if err != nil {
+				return "", nil, err
+			}
+			return t.Model, names, nil
+		})
 		// Incremental memory injection (capability K / context-mgmt): each run's
 		// loop surfaces newly-created memories into the outgoing view (never the
 		// durable history), keeping the system prefix byte-stable for caching.

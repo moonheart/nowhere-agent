@@ -43,6 +43,7 @@ import {
   AttachmentTitle,
 } from "@/components/ui/attachment";
 import { PermissionSelect } from "@/components/permission-select";
+import { ModelSelect } from "@/components/model-select";
 import { uploadUserImage } from "@/lib/api";
 import {
   addImage,
@@ -463,6 +464,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
               />
             </ThreadPrimitive.If>
             <PermissionSelect sessionId={sessionId} />
+            <ModelSelect />
             <ThreadPrimitive.If running={false}>
               <ComposerPrimitive.Send asChild>
                 <Button size="icon-sm" title={t("chat.send")} className="ml-auto">

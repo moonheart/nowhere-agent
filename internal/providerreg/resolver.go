@@ -181,3 +181,21 @@ func (r *Resolver) VisionModel(ctx context.Context, t Target) (string, bool) {
 	}
 	return "", false
 }
+
+// EnabledModels returns the enabled model names of a resolved target's
+// provider, for the chat model picker. Only names are exposed — never keys,
+// base URLs, or other provider internals; the caller already holds the
+// resolved Target (whose RawKey must stay server-side).
+func (r *Resolver) EnabledModels(ctx context.Context, t Target) ([]string, error) {
+	models, err := r.store.ListModels(ctx, t.ProviderID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		if m.Enabled {
+			out = append(out, m.Name)
+		}
+	}
+	return out, nil
+}

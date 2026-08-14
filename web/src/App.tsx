@@ -42,6 +42,7 @@ import { clearNotice, reportNotice } from "@/lib/notice";
 import { clientToolDeclarations } from "@/lib/client-tools";
 import { reportPlan, resetPlan, planFromSessionState, planFromMetadata } from "@/lib/plan";
 import { takeImages, addImage, resetImages, type PendingImage } from "@/lib/image-attachment";
+import { selectedModel } from "@/lib/models";
 import {
   resetPermissionMode,
   reportPermissionMode,
@@ -113,8 +114,13 @@ function Chat({
       sendImages = [];
       const images = takeImages();
       if (images.length > 0) sendImages = images;
+      // The composer's model picker: the chosen model rides this turn's body
+      // ("" = the server's resolved default). A stale picker name is harmless —
+      // the backend falls back to the default rather than failing the run.
+      const model = selectedModel();
       return {
         ...(threadId ? { threadId } : {}),
+        ...(model ? { model } : {}),
         ...(Object.keys(tools).length > 0 ? { tools } : {}),
         ...(images.length > 0
           ? { images: images.map((p) => ({ path: p.path, mediaType: p.mediaType })) }

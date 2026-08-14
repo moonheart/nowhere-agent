@@ -147,6 +147,21 @@ func paths() map[string]PathItem {
 				Responses:  jsonResp("messages", map[string]any{"type": "array", "items": ref("Message")}),
 			},
 		},
+		"/api/chat/models": {
+			"get": Operation{
+				Summary:    "List the caller's chat model picker",
+				Description: "Returns the default model the caller's chat runs resolve to (team assignment → platform default) plus every enabled model name on that provider. Empty list when no provider serves the caller; names only, never credentials.",
+				Tags:       []string{"chat"},
+				Security:   bearer,
+				Responses: jsonResp("model list", map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"default": map[string]any{"type": "string"},
+						"models":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					},
+				}),
+			},
+		},
 		"/api/chat/sessions": {
 			"get": Operation{
 				Summary:  "List the caller's conversations (keyset pagination)",

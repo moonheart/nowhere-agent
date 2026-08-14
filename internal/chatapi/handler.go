@@ -109,6 +109,10 @@ type Handler struct {
 	// provider's vendor and whether a vision model is available for it — so
 	// team-scoped provider resolution stays live.
 	visionGate VisionGateResolver
+	// models, when set, serves the model picker (GET /api/chat/models): the
+	// caller's resolved default model plus enabled model names. Nil serves an
+	// empty list (tests / unconfigured deployments).
+	models ModelLister
 }
 
 // VisionGateResolver reports the vision-gate inputs for a request: the main
@@ -117,6 +121,14 @@ type Handler struct {
 // to the adapter's own degrade path). The server implements it over the
 // provider registry so the gate follows per-team resolution.
 type VisionGateResolver func(ctx context.Context) (vendor string, visionAvailable bool)
+
+// ModelLister lists the model-picker payload for a caller: the default model
+// their chat runs resolve to plus every enabled model on the resolved provider
+// (team assignment → platform default, the same selection chat uses). Only
+// names — never credentials. An empty list (and empty default) when no
+// provider serves the caller. The server implements it over the provider
+// registry resolver. Nil disables the endpoint (serves an empty list).
+type ModelLister func(ctx context.Context, userID string) (defaultModel string, models []string, err error)
 
 // NewHandler creates a chat Handler.
 func NewHandler(newLoop LoopFactory, systemPrompt string) *Handler {
@@ -223,6 +235,14 @@ func (h *Handler) WithVisionGate(resolver VisionGateResolver) *Handler {
 	return h
 }
 
+// WithModelLister wires the model picker (GET /api/chat/models): lister
+// resolves the caller's default model plus enabled models for their chat
+// provider. Nil disables the endpoint (serves an empty list).
+func (h *Handler) WithModelLister(l ModelLister) *Handler {
+	h.models = l
+	return h
+}
+
 // WithToolBinder enables per-session tool wiring (file-tools): the binder runs
 // for each run after the session is resolved, attaching the session's
 // sandbox-bound tools to the loop.
@@ -234,6 +254,7 @@ func (h *Handler) WithToolBinder(b ToolBinder) *Handler {
 // Register mounts the route.
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/chat", h.serveChat)
+	mux.HandleFunc("GET /api/chat/models", h.serveModels)
 	mux.HandleFunc("GET /api/chat/history", h.serveHistory)
 	mux.HandleFunc("POST /api/chat/resume", h.serveResume)
 	mux.HandleFunc("POST /api/chat/cancel", h.serveCancel)
@@ -254,6 +275,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 // (sessions are user-owned).
 func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	g.HandleFunc("POST /api/chat", h.serveChat)
+	g.HandleFunc("GET /api/chat/models", h.serveModels)
 	g.HandleFunc("GET /api/chat/history", h.serveHistory)
 	g.HandleFunc("POST /api/chat/resume", h.serveResume)
 	g.HandleFunc("POST /api/chat/cancel", h.serveCancel)
@@ -337,6 +359,33 @@ func newSSEEmitter(w http.ResponseWriter, flusher http.Flusher, msgID, textID, t
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 	}
 	return e
+}
+
+// serveModels answers GET /api/chat/models with the model-picker payload: the
+// caller's resolved default model plus every enabled model on the provider
+// their chat runs resolve to. An empty list when no provider serves the caller
+// (or no lister is wired) — the picker hides rather than failing chat. Names
+// only; the server's lister never exposes credentials.
+func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
+	type response struct {
+		Default string   `json:"default"`
+		Models  []string `json:"models"`
+	}
+	resp := response{}
+	if h.models != nil {
+		userID := ""
+		if u, ok := identity.UserFromContext(r.Context()); ok {
+			userID = u.ID
+		}
+		def, names, err := h.models(r.Context(), userID)
+		if err != nil {
+			slog.Warn("list chat models", "user", userID, "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		resp.Default, resp.Models = def, names
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
