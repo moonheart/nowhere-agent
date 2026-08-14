@@ -41,13 +41,13 @@ var ErrBlocked = errors.New("webhook: delivery target blocked by SSRF guard")
 
 // Guard blocks outbound delivery to private/loopback network targets.
 type Guard struct {
-	resolver   netResolver // injectable for tests
+	resolver   Resolver // injectable for tests
 	allowNets  []*net.IPNet
 	allowHosts map[string]struct{}
 }
 
-// netResolver is the DNS surface the guard needs; *net.Resolver satisfies it.
-type netResolver interface {
+// Resolver is the DNS surface the guard needs; *net.Resolver satisfies it.
+type Resolver interface {
 	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
@@ -57,8 +57,16 @@ type netResolver interface {
 // private address. A malformed CIDR is an error, not a silent skip — a typo'd
 // allowlist must not quietly disable the guard.
 func NewGuard(allowCIDRs, allowHosts []string) (*Guard, error) {
+	return NewGuardWithResolver(allowCIDRs, allowHosts, net.DefaultResolver)
+}
+
+// NewGuardWithResolver builds a Guard like NewGuard but with an explicit DNS
+// resolver. It is the seam the http_request tool (internal/toolruntime/builtin)
+// uses to share the same resolve→vet→pin pipeline with an injectable resolver
+// (tests, a custom DNS setup).
+func NewGuardWithResolver(allowCIDRs, allowHosts []string, resolver Resolver) (*Guard, error) {
 	g := &Guard{
-		resolver:   net.DefaultResolver,
+		resolver:   resolver,
 		allowHosts: make(map[string]struct{}, len(allowHosts)),
 	}
 	for _, h := range allowHosts {
@@ -190,6 +198,15 @@ func (g *Guard) pinRequest(req *http.Request, raw string) error {
 		ips:  ips,
 	}))
 	return nil
+}
+
+// PinRequest is the exported form of pinRequest: it validates raw with
+// ResolveURL and, when addresses were vetted, pins them into req's context so
+// the transport dials exactly those addresses. The http_request tool calls it
+// on every request and redirect hop to run its hostname targets through the
+// same guard as webhook delivery.
+func (g *Guard) PinRequest(req *http.Request, raw string) error {
+	return g.pinRequest(req, raw)
 }
 
 // CheckRedirect re-validates every redirect hop (installed as the http

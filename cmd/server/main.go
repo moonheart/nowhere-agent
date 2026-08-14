@@ -1222,19 +1222,16 @@ func run() error {
 		// http_request allowlist (enterprise integration): resolved PER SESSION
 		// from the runtime settings (default: HTTP_TOOL_ALLOWLIST), so editing
 		// the allowlist in the admin console applies to the next run — no
-		// restart. A malformed pattern is logged and treated as "no tool"
-		// rather than failing the run.
-		httpAllowFor := func() builtin.AllowlistFunc {
+		// restart. An empty allowlist disables the tool (fail-closed: no
+		// allowlist, no tool). Hostname targets are additionally SSRF-vetted
+		// at call time (resolved addresses must be public or explicitly
+		// CIDR-allowed; connections are pinned to the vetted addresses).
+		httpToolFor := func() toolruntime.Tool {
 			list := splitComma(settingsRuntime.String(settings.KeyHTTPToolAllowlist))
 			if len(list) == 0 {
 				return nil
 			}
-			fn, err := builtin.Allowlist(list)
-			if err != nil {
-				log.Warn("http tool allowlist invalid; tool disabled", "allowlist", list, "err", err)
-				return nil
-			}
-			return fn
+			return builtin.NewHTTPRequest(list, settingsRuntime.Duration(settings.KeyHTTPToolTimeout))
 		}
 		// query_db (enterprise integration): the agent runs read-only SQL
 		// against operator-named business databases (default: QUERY_DB_DSNS).
@@ -1304,8 +1301,8 @@ func run() error {
 			// governs it like MCP tools. Registered only when the allowlist is
 			// non-empty — no allowlist, no tool (fail-closed). The allowlist
 			// is re-read per session from the runtime settings.
-			if httpAllow := httpAllowFor(); httpAllow != nil {
-				reg.Register(builtin.NewHTTPRequest(httpAllow, settingsRuntime.Duration(settings.KeyHTTPToolTimeout)))
+			if httpTool := httpToolFor(); httpTool != nil {
+				reg.Register(httpTool)
 			}
 			// query_db (enterprise integration): read-only SQL against the
 			// named business databases. RiskReadOnly (the tool cannot mutate

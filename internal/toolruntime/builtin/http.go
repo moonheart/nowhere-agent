@@ -13,6 +13,7 @@ import (
 
 	"nowhere-agent/internal/netutil"
 	"nowhere-agent/internal/toolruntime"
+	"nowhere-agent/internal/webhook"
 )
 
 // HTTPToolName is the built-in tool that calls an external HTTP API from the
@@ -51,36 +52,84 @@ type AllowlistFunc func(rawURL string) bool
 
 // httpRequestTool calls external HTTP APIs, confined to the configured host
 // allowlist. RiskNetwork so the permission gate controls it like MCP tools.
+// The string allowlist decides WHICH hosts the operator permits; the SSRF
+// guard (webhook.Guard) then resolves every hostname target and refuses any
+// address that is private/loopback/etc. unless it falls in an explicitly
+// allowlisted CIDR (or IP literal) — closing the split-horizon-DNS hole where
+// an allowlisted name resolves to an internal address — and pins the vetted
+// addresses into the request so the transport dials exactly them.
 type httpRequestTool struct {
-	allow   AllowlistFunc
-	client  *http.Client
-	timeout time.Duration
+	allow    AllowlistFunc
+	guard    *webhook.Guard
+	resolver webhook.Resolver
+	client   *http.Client
+	timeout  time.Duration
 }
 
-// NewHTTPRequest returns the http_request tool, gated on allow. allow decides
-// whether a requested URL is permitted; nil disables the tool.
-func NewHTTPRequest(allow AllowlistFunc, timeout time.Duration) toolruntime.Tool {
-	if allow == nil {
+// NewHTTPRequest returns the http_request tool, gated on the allowlist
+// patterns. An empty pattern list disables the tool (nil return): no
+// allowlist, no tool. The patterns keep their documented string semantics
+// (exact host, *.subdomain, CIDR, *); on top of that, every hostname target is
+// resolved at call time and refused when any resolved address is
+// private/loopback/link-local unless it falls in an explicitly allowlisted
+// CIDR or IP literal — the same resolve→vet→pin pipeline as webhook delivery
+// (internal/webhook ssrf guard). The tool-level timeout bounds one call; the
+// per-request timeout is capped below by the caller's argument.
+func NewHTTPRequest(patterns []string, timeout time.Duration) toolruntime.Tool {
+	allow, err := Allowlist(patterns)
+	if err != nil || allow == nil {
 		return nil
 	}
 	if timeout <= 0 {
 		timeout = httpDefaultTimeout
 	}
 	t := &httpRequestTool{
-		allow: allow,
-		// The tool-level timeout bounds one call; the per-request timeout is
-		// capped below by the caller's argument.
-		timeout: timeout,
+		allow:    allow,
+		resolver: net.DefaultResolver,
+		timeout:  timeout,
+	}
+	t.guard, err = webhook.NewGuardWithResolver(explicitIPAllowances(patterns), nil, t.resolver)
+	if err != nil {
+		return nil
 	}
 	// The default redirect policy only re-checks nothing: without a custom
 	// CheckRedirect an allowlisted host could 302 the request to a private
-	// target that the allowlist gate never sees. Re-verify every hop.
-	t.client = &http.Client{CheckRedirect: t.checkRedirect}
+	// target that the allowlist gate never sees. Re-verify every hop — both
+	// the string rules and the SSRF vetting + pin.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = t.dialContext
+	t.client = &http.Client{Transport: tr, CheckRedirect: t.checkRedirect}
 	return t
 }
 
-// checkRedirect re-verifies every redirect hop against the allowlist, so an
-// allowlisted host cannot smuggle the request elsewhere via a 302.
+// explicitIPAllowances collects the allowlist's explicit IP allowances — CIDR
+// patterns and bare IP-literal patterns (as /32|/128) — which the SSRF guard
+// treats as the operator's escape hatch for legitimately internal targets
+// (mirroring webhook's allowlist CIDRs). A hostname rule grants no IP
+// exemption: its addresses are always vetted.
+func explicitIPAllowances(patterns []string) []string {
+	out := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		host, _ := splitHostPort(strings.TrimSpace(p))
+		if _, _, err := net.ParseCIDR(host); err == nil {
+			out = append(out, host)
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.To4() != nil {
+				out = append(out, host+"/32")
+			} else {
+				out = append(out, host+"/128")
+			}
+		}
+	}
+	return out
+}
+
+// checkRedirect re-verifies every redirect hop against the allowlist AND the
+// SSRF guard, so an allowlisted host cannot smuggle the request elsewhere via
+// a 302 — neither past the host rules nor past the private-address vetting
+// (each hop is vetted and re-pinned into the hop request).
 func (t *httpRequestTool) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("too many redirects")
@@ -88,7 +137,16 @@ func (t *httpRequestTool) checkRedirect(req *http.Request, via []*http.Request) 
 	if !t.allow(req.URL.String()) {
 		return errors.New("redirect target not allowed")
 	}
-	return nil
+	return t.guard.PinRequest(req, req.URL.String())
+}
+
+// dialContext closes the check-to-dial race: when the request context carries
+// the SSRF vetting pin, the transport dials exactly those vetted addresses —
+// never re-resolving the host — so a host that rebinds between the vetting
+// and the connection cannot redirect the dial to a private address. Shares
+// the webhook guard's dial hook.
+func (t *httpRequestTool) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return t.guard.DialContext(ctx, network, addr)
 }
 
 func (t *httpRequestTool) Name() string { return HTTPToolName }
@@ -146,7 +204,16 @@ func (t *httpRequestTool) Call(ctx context.Context, args map[string]any) (toolru
 	}
 	client := t.client
 	if timeout != t.timeout {
-		client = &http.Client{Timeout: timeout, CheckRedirect: t.checkRedirect}
+		client = &http.Client{Transport: t.client.Transport, CheckRedirect: t.checkRedirect, Timeout: timeout}
+	}
+
+	// SSRF vetting runs here, on the caller's URL: hostname targets are
+	// resolved and refused when any address is private/loopback/etc. unless
+	// explicitly CIDR-allowed, and the vetted addresses are pinned into the
+	// request so the transport dials exactly them (a host that rebinds
+	// between this check and the connection cannot redirect the dial).
+	if err := t.guard.PinRequest(req, rawURL); err != nil {
+		return toolruntime.Result{Content: fmt.Sprintf("http_request: %v", err), IsError: true}, nil
 	}
 
 	resp, err := client.Do(req)
