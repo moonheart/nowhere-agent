@@ -74,8 +74,11 @@ type apiTool struct {
 // buildRequest converts a canonical Request into the OpenAI API shape.
 // Thinking blocks cannot be represented in chat.completions and are dropped;
 // consecutive blocks of one message are flattened per OpenAI's message model.
-// Sampling parameters are gated on the model's capability profile (reasoning
-// models reject temperature/top_p). Pure: no I/O.
+// The extended-thinking request spec (Request.Thinking) is likewise
+// unrepresentable — no OpenAI-compatible gateway accepts a thinking token
+// budget — and is dropped here; Adapter.Stream logs a warning when a budget
+// was configured. Sampling parameters are gated on the model's capability
+// profile (reasoning models reject temperature/top_p). Pure: no I/O.
 func buildRequest(r provider.Request) (apiRequest, error) {
 	req := apiRequest{Model: r.Model, MaxTokens: r.MaxTokens, Stream: true, StreamOptions: &streamOptions{IncludeUsage: true}}
 

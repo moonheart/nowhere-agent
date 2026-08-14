@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -123,6 +124,15 @@ func (a *Adapter) Models(ctx context.Context) ([]string, error) {
 // Stream starts a streaming generation and returns canonical events. The
 // caller's ctx governs cancellation: cancelling it aborts the HTTP request.
 func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	// chat.completions has no native extended-thinking parameter: no
+	// OpenAI-compatible gateway accepts a thinking token budget (Anthropic's
+	// thinking.budget_tokens is protocol-specific), so a configured budget is
+	// unrepresentable here and is dropped by buildRequest. Log it so a
+	// deployment expecting LLM_THINKING_BUDGET to take effect sees why it
+	// does not — silent drops were a recurring config surprise.
+	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
+		slog.Warn("thinking budget ignored: openai chat.completions has no extended-thinking parameter", "model", req.Model, "budget", req.Thinking.BudgetTokens)
+	}
 	apiReq, err := buildRequest(req)
 	if err != nil {
 		return nil, err

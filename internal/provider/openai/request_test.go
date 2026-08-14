@@ -199,6 +199,27 @@ func TestBuildRequestSamplingPassThrough(t *testing.T) {
 	}
 }
 
+// TestBuildRequestDropsThinkingSpec pins that the extended-thinking spec never
+// reaches the wire: chat.completions has no native parameter for a thinking
+// token budget, and inventing one per vendor risks a 400 from strict gateways
+// (vLLM etc.). The adapter logs a warning instead (see Adapter.Stream); this
+// test keeps the golden wire shape honest — no thinking field even when the
+// spec is non-nil.
+func TestBuildRequestDropsThinkingSpec(t *testing.T) {
+	req, err := buildRequest(provider.Request{
+		Model:    "deepseek-reasoner",
+		Messages: []provider.Message{provider.TextMessage(provider.RoleUser, "hi")},
+		Thinking: &provider.ThinkingSpec{BudgetTokens: 4096},
+	})
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	b, _ := json.Marshal(req)
+	if strings.Contains(string(b), "thinking") {
+		t.Errorf("thinking spec must not be sent on the wire: %s", b)
+	}
+}
+
 // Reasoning models reject temperature/top_p with a 400; the profile gates
 // them out before the wire.
 func TestBuildRequestSamplingGatedForReasoners(t *testing.T) {
