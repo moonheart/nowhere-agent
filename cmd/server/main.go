@@ -72,6 +72,30 @@ func main() {
 	}
 }
 
+// hourlySweep runs fn every hour on its own goroutine until ctx ends — the
+// shared skeleton of the credential / raw-log / pending-interaction / image
+// retention / inbound-nonce sweepers, which are all the same ticker+select
+// with different work. A failed pass is logged under name ("<name> sweep
+// failed") and retried next tick; a slow pass simply delays the next tick
+// (the ticker drops missed ticks). fn must be best-effort and cheap; it
+// logs its own success detail (per-sweep wording and counts).
+func hourlySweep(ctx context.Context, log *slog.Logger, name string, fn func() error) {
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := fn(); err != nil {
+					log.Warn(name+" sweep failed", "err", err)
+				}
+			}
+		}
+	}()
+}
+
 func run() error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -143,27 +167,17 @@ func run() error {
 	// just-expired token's audit trail). Revoked service keys are deliberately
 	// kept — the admin console's revoked list shows them. Best-effort: a
 	// failed pass is logged and retried next hour.
-	go func() {
-		sweepLog := log
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				cutoff := time.Now().UTC().Add(-24 * time.Hour)
-				removed, err := identityStore.SweepExpired(ctx, cutoff)
-				if err != nil {
-					sweepLog.Warn("identity credential sweep failed", "err", err)
-					continue
-				}
-				if removed > 0 {
-					sweepLog.Info("identity credential sweep removed rows", "count", removed)
-				}
-			}
+	hourlySweep(ctx, log, "identity credential", func() error {
+		cutoff := time.Now().UTC().Add(-24 * time.Hour)
+		removed, err := identityStore.SweepExpired(ctx, cutoff)
+		if err != nil {
+			return err
 		}
-	}()
+		if removed > 0 {
+			log.Info("identity credential sweep removed rows", "count", removed)
+		}
+		return nil
+	})
 
 	// Runtime-settable platform settings (no-restart configuration): operator
 	// knobs that used to be env-only now default from env at boot and can be
@@ -399,31 +413,21 @@ func run() error {
 	// even when the boot value disabled it.
 	var rawLogRetention atomic.Int64
 	rawLogRetention.Store(int64(cfg.LLM.RawLogRetentionDays))
-	go func() {
-		rawLogSweepLog := log
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				days := rawLogRetention.Load()
-				if days <= 0 {
-					continue
-				}
-				cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
-				removed, err := recorder.Sweep(cutoff)
-				if err != nil {
-					rawLogSweepLog.Warn("raw log retention sweep failed", "err", err)
-					continue
-				}
-				if removed > 0 {
-					rawLogSweepLog.Info("raw log retention sweep removed files", "count", removed)
-				}
-			}
+	hourlySweep(ctx, log, "raw log retention", func() error {
+		days := rawLogRetention.Load()
+		if days <= 0 {
+			return nil
 		}
-	}()
+		cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+		removed, err := recorder.Sweep(cutoff)
+		if err != nil {
+			return err
+		}
+		if removed > 0 {
+			log.Info("raw log retention sweep removed files", "count", removed)
+		}
+		return nil
+	})
 	settingsSync.Add(func() {
 		rawLogRetention.Store(int64(settingsRuntime.Int(settings.KeyLLMRawLogRetentionDays)))
 	})
@@ -448,27 +452,17 @@ func run() error {
 	// (created_at based, so a verdict raced by the sweep still wins via the
 	// status='pending' predicate). Best-effort like the credential sweep: a
 	// failed pass is logged and retried next hour.
-	go func() {
-		approvalSweepLog := log
-		ticker := time.NewTicker(time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				cutoff := time.Now().UTC().Add(-24 * time.Hour)
-				removed, err := sessionStore.SweepExpiredInteractions(ctx, cutoff)
-				if err != nil {
-					approvalSweepLog.Warn("pending-interaction sweep failed", "err", err)
-					continue
-				}
-				if removed > 0 {
-					approvalSweepLog.Info("pending-interaction sweep expired rows", "count", removed)
-				}
-			}
+	hourlySweep(ctx, log, "pending-interaction", func() error {
+		cutoff := time.Now().UTC().Add(-24 * time.Hour)
+		removed, err := sessionStore.SweepExpiredInteractions(ctx, cutoff)
+		if err != nil {
+			return err
 		}
-	}()
+		if removed > 0 {
+			log.Info("pending-interaction sweep expired rows", "count", removed)
+		}
+		return nil
+	})
 
 	// Reconcile runs stranded non-terminal by a previous process (their in-memory
 	// workers died with it): mark them failed at startup so they don't read as
@@ -554,32 +548,22 @@ func run() error {
 		// runtime works even when the boot value disabled it.
 		var imageRetention atomic.Int64
 		imageRetention.Store(int64(cfg.Workspace.RetentionDays))
-		go func() {
-			imageSweepLog := log
-			ticker := time.NewTicker(time.Hour)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					days := imageRetention.Load()
-					if days <= 0 {
-						continue
-					}
-					cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
-					removed, err := workspace.SweepEndedSessionImages(ctx, imageSweepLog, imageStore,
-						sessionStore.ListEndedSessionsEndedBefore, cutoff, 200)
-					if err != nil {
-						imageSweepLog.Warn("image retention sweep failed", "err", err)
-						continue
-					}
-					if removed > 0 {
-						imageSweepLog.Info("image retention sweep removed session images", "count", removed)
-					}
-				}
+		hourlySweep(ctx, log, "image retention", func() error {
+			days := imageRetention.Load()
+			if days <= 0 {
+				return nil
 			}
-		}()
+			cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+			removed, err := workspace.SweepEndedSessionImages(ctx, log, imageStore,
+				sessionStore.ListEndedSessionsEndedBefore, cutoff, 200)
+			if err != nil {
+				return err
+			}
+			if removed > 0 {
+				log.Info("image retention sweep removed session images", "count", removed)
+			}
+			return nil
+		})
 		settingsSync.Add(func() {
 			imageRetention.Store(int64(settingsRuntime.Int(settings.KeyWorkspaceRetentionDays)))
 		})
@@ -1825,27 +1809,17 @@ func run() error {
 		// replayed nonce outside the signature window is a fresh event); an
 		// hourly pass prunes them, off the trigger hot path (ClaimNonce only
 		// upserts). The grace matches the per-claim prune it replaces.
-		go func() {
-			nonceSweepLog := log
-			ticker := time.NewTicker(time.Hour)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					cutoff := time.Now().UTC().Add(-inbound.SignatureWindow - time.Minute)
-					removed, err := inboundStore.SweepExpiredNonces(ctx, cutoff)
-					if err != nil {
-						nonceSweepLog.Warn("inbound nonce sweep failed", "err", err)
-						continue
-					}
-					if removed > 0 {
-						nonceSweepLog.Info("inbound nonce sweep removed rows", "count", removed)
-					}
-				}
+		hourlySweep(ctx, log, "inbound nonce", func() error {
+			cutoff := time.Now().UTC().Add(-inbound.SignatureWindow - time.Minute)
+			removed, err := inboundStore.SweepExpiredNonces(ctx, cutoff)
+			if err != nil {
+				return err
 			}
-		}()
+			if removed > 0 {
+				log.Info("inbound nonce sweep removed rows", "count", removed)
+			}
+			return nil
+		})
 
 		log.Info("chat endpoint enabled (auth required); provider+model resolved per request from the registry")
 	}
