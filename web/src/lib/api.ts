@@ -44,6 +44,13 @@ type Options = {
   signal?: AbortSignal;
 };
 
+// apiTimeoutMs bounds requests that carry no caller signal. Every server
+// endpoint has its own deadline, but a half-open TCP connection (server
+// process gone without a FIN) would otherwise hang fetch forever and the
+// console would spin indefinitely. 60s keeps uploads and exports safe;
+// callers that need finer control pass their own signal, which wins outright.
+const apiTimeoutMs = 60_000;
+
 export async function api<T>(path: string, opts: Options = {}): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {};
@@ -52,19 +59,35 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
     headers["content-type"] = opts.contentType ?? "application/json";
   }
 
-  const res = await fetch(path, {
-    method: opts.method ?? "GET",
-    headers,
-    // JSON callers pass an object to stringify; a contentType override signals a
-    // raw binary body (the image upload endpoint) passed through untouched.
-    body:
-      opts.body === undefined
-        ? undefined
-        : opts.contentType
-          ? (opts.body as BodyInit)
-          : JSON.stringify(opts.body),
-    signal: opts.signal,
-  });
+  // A caller-provided signal wins outright (no watchdog); otherwise a timeout
+  // aborts the request after apiTimeoutMs so a dead connection surfaces as an
+  // ApiError instead of an endless spinner.
+  const controller = new AbortController();
+  const signal = opts.signal ?? controller.signal;
+  const timer = setTimeout(() => controller.abort(), apiTimeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: opts.method ?? "GET",
+      headers,
+      // JSON callers pass an object to stringify; a contentType override signals a
+      // raw binary body (the image upload endpoint) passed through untouched.
+      body:
+        opts.body === undefined
+          ? undefined
+          : opts.contentType
+            ? (opts.body as BodyInit)
+            : JSON.stringify(opts.body),
+      signal,
+    });
+  } catch (err) {
+    if (opts.signal) throw err; // caller-owned abort propagates untouched
+    // No caller signal, so this abort is the watchdog's: the request never
+    // settled. Report it as a request-timeout error, not the raw AbortError.
+    throw new ApiError("request timed out", 408);
+  } finally {
+    clearTimeout(timer);
+  }
 
   // An expired/revoked token answers 401 on every protected route: sign out
   // rather than surfacing each request's generic error to a dead session.
