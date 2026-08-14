@@ -350,6 +350,15 @@ const streamWriteTimeout = 30 * time.Second
 // was lost.
 const settlePollSilence = 5 * time.Second
 
+// heartbeatInterval is how often the attach loop writes an SSE comment frame
+// (": ping\n\n") while its run is silent. Comment frames are invisible to
+// EventSource and assistant-ui decoders, but they keep the connection alive
+// across idle-cutoff proxies (nginx proxy_read_timeout defaults to 60s) and
+// refresh the rolling write deadline, so a long silent tool call (run_command
+// can run for minutes) never drops the stream while the run continues
+// headless. Must stay well below both the proxy cutoff and streamWriteTimeout.
+const heartbeatInterval = 20 * time.Second
+
 // newSSEEmitter builds the production emitter over w, wiring the rolling write
 // deadline refresh that writeStreamHeaders armed. Tests build sseEmitter
 // literals directly (no deadline refresh, which is a no-op for their recorders).
@@ -1000,6 +1009,8 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 	// caller's pre-check and this loop.
 	settlePoll := time.NewTicker(250 * time.Millisecond)
 	defer settlePoll.Stop()
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
 
 	// One-shot settle check: a run that settled since the caller's pre-check
 	// will never send another frame, and catching it here is free (this is the
@@ -1033,6 +1044,14 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 		select {
 		case <-r.Context().Done():
 			return
+		case <-heartbeat.C:
+			// Heartbeat: only while the run is silent do idle-cutoff proxies
+			// threaten the connection; when frames flow the stream is already
+			// alive, so skip the comment frame. terminal runs close on the
+			// poll tick and need no heartbeat.
+			if !terminal && time.Since(lastFrame) >= heartbeatInterval {
+				emitter.ping()
+			}
 		case <-settlePoll.C:
 			// While the run's frames are flowing (or were very recent) the run
 			// is provably active: skip the ActiveRun check and keep following.
@@ -1502,6 +1521,15 @@ func (e *sseEmitter) writeToolCallStart(id, name string) {
 
 func (e *sseEmitter) write(c chunk) {
 	e.writeRaw(sseFrame(c))
+	e.flusher.Flush()
+}
+
+// ping writes an SSE comment frame (": ping\n\n"). Comment lines carry no
+// event data, so EventSource and assistant-ui decoders ignore them entirely;
+// the frame's only job is keeping the connection alive while the run is
+// silent (see heartbeatInterval) and re-arming the rolling write deadline.
+func (e *sseEmitter) ping() {
+	e.writeRaw(": ping\n\n")
 	e.flusher.Flush()
 }
 
