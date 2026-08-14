@@ -17,6 +17,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useActivity } from "@/lib/activity";
+import { t, type I18nKey } from "@/lib/i18n";
 import { listSkills, enableSkill, disableSkill, type Skill } from "@/lib/skills";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,9 +35,11 @@ import { cn } from "@/lib/utils";
 
 type TabId = "workspace" | "skills";
 
-const TABS: { id: TabId; label: string; icon: LucideIcon }[] = [
-  { id: "workspace", label: "Workspace", icon: FolderTree },
-  { id: "skills", label: "Skills", icon: Blocks },
+// Label keys go through t() at render time (not module scope), so a language
+// switch is picked up on the next render like every other localized surface.
+const TABS: { id: TabId; labelKey: I18nKey; icon: LucideIcon }[] = [
+  { id: "workspace", labelKey: "panel.workspace", icon: FolderTree },
+  { id: "skills", labelKey: "panel.skills", icon: Blocks },
 ];
 
 /**
@@ -106,13 +109,13 @@ export const RightPanel: FC = () => {
   if (collapsed) {
     return (
       <div className="flex w-12 flex-col items-center gap-1 border-l border-border py-2">
-        {TABS.map(({ id, label, icon: Icon }) => (
+        {TABS.map(({ id, labelKey, icon: Icon }) => (
           <Button
             key={id}
             variant="ghost"
             size="icon"
-            title={label}
-            aria-label={label}
+            title={t(labelKey)}
+            aria-label={t(labelKey)}
             onClick={() => {
               setTab(id);
               setCollapsed(false);
@@ -139,7 +142,7 @@ export const RightPanel: FC = () => {
       <div
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize panel"
+        aria-label={t("panel.resizePanel")}
         onPointerDown={onHandlePointerDown}
         onPointerMove={onHandlePointerMove}
         onPointerUp={endDrag}
@@ -153,23 +156,23 @@ export const RightPanel: FC = () => {
       >
         <div className="flex items-center gap-0.5 border-b border-border px-2 py-2">
           <TabsList variant="line" className="h-auto flex-1">
-            {TABS.map(({ id, label, icon: Icon }) => (
+            {TABS.map(({ id, labelKey, icon: Icon }) => (
               <TabsTrigger
                 key={id}
                 value={id}
-                title={label}
+                title={t(labelKey)}
                 className="h-auto py-1.5 pr-2 text-[11px]"
               >
                 <Icon />
-                {label}
+                {t(labelKey)}
               </TabsTrigger>
             ))}
           </TabsList>
           <Button
             variant="ghost"
             size="icon-sm"
-            title="Collapse panel"
-            aria-label="Collapse panel"
+            title={t("panel.collapsePanel")}
+            aria-label={t("panel.collapsePanel")}
             onClick={() => setCollapsed(true)}
             className="text-muted-foreground"
           >
@@ -227,8 +230,8 @@ const WorkspaceTab: FC = () => {
     return (
       <TabEmpty
         icon={FolderTree}
-        title="No files yet"
-        hint="Files the agent reads or writes in this conversation will appear here."
+        title={t("panel.noFilesTitle")}
+        hint={t("panel.noFilesHint")}
       />
     );
   }
@@ -274,7 +277,7 @@ const SkillsTab: FC<{ active: boolean }> = ({ active }) => {
       setSkills(skills.sort((a, b) => a.name.localeCompare(b.name)));
       setError("");
     } catch (e) {
-      setError(`Failed to load skills: ${e instanceof Error ? e.message : String(e)}`);
+      setError(t("panel.failedToLoadSkills", { detail: e instanceof Error ? e.message : String(e) }));
     }
   }, []);
 
@@ -294,8 +297,11 @@ const SkillsTab: FC<{ active: boolean }> = ({ active }) => {
     } catch (e) {
       // A failed toggle must not vanish: surface the reason at the tab top and
       // keep the previous state.
+      const detail = e instanceof Error ? e.message : String(e);
       setError(
-        `Failed to ${s.enabled ? "disable" : "enable"} ${s.name}: ${e instanceof Error ? e.message : String(e)}`,
+        s.enabled
+          ? t("panel.failedToDisableSkill", { name: s.name, detail })
+          : t("panel.failedToEnableSkill", { name: s.name, detail }),
       );
     } finally {
       setBusy(null);
@@ -303,14 +309,14 @@ const SkillsTab: FC<{ active: boolean }> = ({ active }) => {
   };
 
   if (skills === null && !error) {
-    return <TabLoading label="Loading skills…" />;
+    return <TabLoading label={t("panel.loadingSkills")} />;
   }
   if (skills !== null && skills.length === 0) {
     return (
       <TabEmpty
         icon={Blocks}
-        title="No skills yet"
-        hint="Skills you author in the Console appear here. Team and system skills are managed there too."
+        title={t("panel.noSkillsTitle")}
+        hint={t("panel.noSkillsHint")}
       />
     );
   }
@@ -348,7 +354,11 @@ const SkillsTab: FC<{ active: boolean }> = ({ active }) => {
               checked={s.enabled}
               disabled={busy === s.id}
               onCheckedChange={() => void toggle(s)}
-              aria-label={`${s.enabled ? "Disable" : "Enable"} ${s.name}`}
+              aria-label={
+                s.enabled
+                  ? t("panel.disableSkill", { name: s.name })
+                  : t("panel.enableSkill", { name: s.name })
+              }
             />
           </li>
         ))}
