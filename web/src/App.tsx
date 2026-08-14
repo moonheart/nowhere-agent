@@ -373,9 +373,7 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
     const onMissing = () => {
       clearSessionId();
       setActiveSessionId(null);
-      reportNotice(
-        "This conversation doesn't exist or you don't have access to it.",
-      );
+      reportNotice(t("chat.missingSession"));
       setConversationKey((k) => k + 1);
     };
     window.addEventListener("session:missing", onMissing);
