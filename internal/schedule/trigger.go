@@ -88,6 +88,16 @@ type Trigger struct {
 	// fireTimeout bounds one fire's environment construction; the run itself is
 	// unbounded (registry-owned), this only guards the pre-submit work.
 	fireTimeout time.Duration
+	// deleteOnDone maps a scheduled run's id to the fresh session it created
+	// when on_run_completed = delete. watchRunDelete adds an entry at fire
+	// time; the registry RunDoneHook (onRunDone) removes the session once the
+	// run settles, so the delete follows the run's actual lifetime instead of
+	// a fixed polling timeout. In-memory and per-process: a crashed process
+	// loses the entry (the session stays, and the workspace retention sweep
+	// still reclaims its images).
+	deleteOnDone map[string]string
+	// ddMu guards deleteOnDone.
+	ddMu sync.Mutex
 }
 
 // NewTrigger wires a Trigger. scanInterval <= 0 defaults to 30s.
@@ -95,12 +105,22 @@ func NewTrigger(store Store, rt *session.Runtime, rg *session.RunRegistry, defs 
 	if scanInterval <= 0 {
 		scanInterval = 30 * time.Second
 	}
-	return &Trigger{
+	tr := &Trigger{
 		store: store, runtime: rt, registry: rg, defs: defs, identity: ids,
 		buildLoop: build, db: db, log: slog.Default(),
 		now:          func() time.Time { return time.Now().UTC() },
 		scanInterval: scanInterval, fireTimeout: 30 * time.Second,
+		deleteOnDone: map[string]string{},
 	}
+	// on_run_completed = delete: the registry's RunDoneHook performs the
+	// session deletion when a fired run settles (see onRunDone), so a run
+	// that outlives any fixed poll window still gets its session cleaned up.
+	// Registered before any Submit; the hook fires only for terminal runs and
+	// is a no-op for every session not registered via watchRunDelete.
+	if rg != nil {
+		rg.WithRunDoneHook(tr.onRunDone)
+	}
+	return tr
 }
 
 // WithToolBinder wires the session-scoped, whitelist-filtered tool binder. Nil
@@ -384,9 +404,11 @@ func (tr *Trigger) submit(ctx context.Context, task Task, claimed bool) error {
 	tr.log.Info("schedule: fired", "task", task.ID, "session", sessID, "run", run.ID)
 
 	// on_run_completed = delete: remove a freshly-created session once the run
-	// reaches a terminal state. Watch in the background so submit stays fast.
+	// reaches a terminal state. The registry's RunDoneHook performs the
+	// deletion when the run settles, so submit stays fast and a run that
+	// outlives any fixed poll window still gets its session cleaned up.
 	if fresh && task.OnRunCompleted == OnRunDelete {
-		go tr.deleteWhenTerminal(task, sessID, run.ID)
+		tr.watchRunDelete(run.ID, sessID)
 	}
 	return nil
 }
@@ -534,35 +556,39 @@ func (tr *Trigger) requeue(ctx context.Context, task Task) {
 	}
 }
 
-// deleteWhenTerminal waits for a run to reach a terminal state, then removes a
-// freshly-created session (on_run_completed = delete).
-func (tr *Trigger) deleteWhenTerminal(task Task, sessID, runID string) {
-	if tr.db == nil {
+// watchRunDelete records a freshly-created session whose run's completion
+// must delete it (on_run_completed = delete). The RunDoneHook registered in
+// NewTrigger performs the deletion when the run settles, so submit stays fast
+// and the delete follows the run's actual lifetime.
+func (tr *Trigger) watchRunDelete(runID, sessID string) {
+	tr.ddMu.Lock()
+	defer tr.ddMu.Unlock()
+	tr.deleteOnDone[runID] = sessID
+}
+
+// onRunDone is the registry's RunDoneHook: a settled run whose session is
+// registered for delete-on-completion removes the session. It runs on its own
+// goroutine, is fire-and-forget (a delete failure logs, never propagates),
+// and must tolerate the run context being cancelled — so the delete runs on
+// an uncancelled view of the context. A non-terminal notification (the hook
+// contract is terminal-only) leaves the entry registered.
+func (tr *Trigger) onRunDone(ctx context.Context, sessionID string, run session.Run, status session.RunStatus) {
+	switch status {
+	case session.RunDone, session.RunFailed, session.RunCancelled:
+	default:
 		return
 	}
-	// Poll the run until terminal, bounded so a stuck run cannot leak a goroutine.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			var status string
-			err := tr.db.QueryRowContext(ctx, `SELECT status FROM runs WHERE id = $1`, runID).Scan(&status)
-			if err != nil {
-				return
-			}
-			switch session.RunStatus(status) {
-			case session.RunDone, session.RunFailed, session.RunCancelled:
-				if _, err := tr.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = $1`, sessID); err != nil {
-					tr.log.Warn("schedule: on_run_completed delete failed", "session", sessID, "err", err)
-				}
-				return
-			}
-		}
+	tr.ddMu.Lock()
+	sessID, ok := tr.deleteOnDone[run.ID]
+	if ok {
+		delete(tr.deleteOnDone, run.ID)
+	}
+	tr.ddMu.Unlock()
+	if !ok || tr.db == nil {
+		return
+	}
+	if _, err := tr.db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM sessions WHERE id = $1`, sessID); err != nil {
+		tr.log.Warn("schedule: on_run_completed delete failed", "session", sessID, "err", err)
 	}
 }
 

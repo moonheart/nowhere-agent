@@ -872,6 +872,127 @@ type dueScopedStore struct {
 	ids map[string]bool
 }
 
+// TestTriggerDeletesFreshSessionOnRunCompletion pins on_run_completed = delete
+// to the RUN's lifetime: the fresh session is removed only once the run
+// settles (done/failed/cancelled) — the RunDoneHook path, not a fixed poll
+// window — so a run that outlives the old 30-minute timeout still gets its
+// session cleaned up, and an in-flight run keeps its session.
+func TestTriggerDeletesFreshSessionOnRunCompletion(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	store := NewPGStore(db)
+	task := validTask(userID)
+	task.OnRunCompleted = OnRunDelete
+	created, err := store.Create(context.Background(), task)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	// Gate the run: the fired run stays in flight until released — the
+	// stand-in for a long-running scheduled run.
+	gate := make(chan struct{})
+	spy := &loopSpy{gate: gate}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+	if err := tr.submit(context.Background(), created, false); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	ids, err := store.ListSessions(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("want 1 produced session, got %v", ids)
+	}
+	sessID := ids[0]
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, sessID) })
+
+	// The run is still in flight: the session must NOT be deleted yet.
+	if n := countSessions(t, db, sessID); n != 1 {
+		t.Fatalf("session count while the run is in flight = %d, want 1", n)
+	}
+
+	// Release the run; it settles done and the hook deletes the session.
+	close(gate)
+	waitForNoSession(t, db, sessID)
+}
+
+// TestTriggerKeepsFreshSessionOnCompletion pins on_run_completed = keep (the
+// default): a settled run must NOT delete the fresh session.
+func TestTriggerKeepsFreshSessionOnCompletion(t *testing.T) {
+	db := pgTestDB(t)
+	rt, rg, userID := newRuntime(t, db)
+
+	store := NewPGStore(db)
+	created, err := store.Create(context.Background(), validTask(userID))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() { store.Delete(context.Background(), created.ID) })
+
+	spy := &loopSpy{}
+	tr := NewTrigger(store, rt, rg, fakeDefs{}, fakeScopes{}, spy.build, db, time.Hour)
+	if err := tr.submit(context.Background(), created, false); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	ids, err := store.ListSessions(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("want 1 produced session, got %v", ids)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM sessions WHERE id = $1`, ids[0]) })
+
+	// Wait for the run to settle (the stub provider finishes immediately),
+	// then the session must still exist.
+	waitForSessionSettled(t, db, ids[0])
+	if n := countSessions(t, db, ids[0]); n != 1 {
+		t.Fatalf("session count after a keep run = %d, want 1", n)
+	}
+}
+
+func countSessions(t *testing.T, db *sql.DB, sessID string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM sessions WHERE id = $1`, sessID).Scan(&n); err != nil {
+		t.Fatalf("count session: %v", err)
+	}
+	return n
+}
+
+// waitForSessionSettled polls until the session has no active run (the run
+// reached a terminal state), so a follow-up assertion sees the post-run state.
+func waitForSessionSettled(t *testing.T, db *sql.DB, sessID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM runs WHERE session_id = $1 AND status IN ('running','queued')`, sessID).Scan(&status); err == sql.ErrNoRows {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session %s run did not settle within 10s", sessID)
+}
+
+// waitForNoSession polls until the session row is gone (deleted by the
+// on_run_completed = delete hook once the run settled).
+func waitForNoSession(t *testing.T, db *sql.DB, sessID string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if countSessions(t, db, sessID) == 0 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session %s still present after its run settled", sessID)
+}
+
 func (s *dueScopedStore) ListDue(ctx context.Context, now time.Time) ([]Task, error) {
 	due, err := s.Store.ListDue(ctx, now)
 	if err != nil {
