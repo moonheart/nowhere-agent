@@ -389,7 +389,7 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 		def, names, err := h.models(r.Context(), userID)
 		if err != nil {
 			slog.Warn("list chat models", "user", userID, "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			httpx.Error(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		resp.Default, resp.Models = def, names
@@ -405,7 +405,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// after, which is how a wrapped ResponseWriter once 500'd while the run
 	// went on to suspend with no client attached.
 	if _, ok := w.(http.Flusher); !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, "streaming unsupported")
 		return
 	}
 	// maxChatBodyBytes bounds the chat request (history, tool args, context)
@@ -454,7 +454,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errSessionNotFound) {
 			// Existence and ownership stay indistinguishable (both "not found"),
 			// matching authorizeSession and the delete path.
-			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+			httpx.Error(w, http.StatusNotFound, "session not found")
 			return
 		}
 		slog.Warn("resolve session", "err", err)
@@ -470,7 +470,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// mirrors the budget gate): a genuine race still trips the single-active-run
 	// lock below.
 	if pending, err := h.registry.PendingApprovalsForSession(r.Context(), sessID); err == nil && len(pending) > 0 {
-		http.Error(w, `{"error":"pending_interaction"}`, http.StatusConflict)
+		httpx.Error(w, http.StatusConflict, "pending_interaction")
 		return
 	}
 
@@ -562,7 +562,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		// is rejected (multi-writer prevention), not queued. Checked before any
 		// SSE headers are written so the status isn't locked to 200.
 		if errors.Is(err, session.ErrRunActive) {
-			http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
+			httpx.Error(w, http.StatusConflict, "a run is already active in this session")
 			return
 		}
 		slog.Warn("submit run", "session", sessID, "err", err)
@@ -594,11 +594,11 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 // the new run's history by the registry.
 func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *approvalRequest, clientTools map[string]clientToolDecl) {
 	if h.runtime == nil || h.registry == nil {
-		http.Error(w, `{"error":"approval unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "approval unavailable")
 		return
 	}
 	if av.ApprovalID == "" {
-		http.Error(w, `{"error":"approvalId required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "approvalId required")
 		return
 	}
 
@@ -607,7 +607,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	ap, err := h.registry.ApprovalByID(r.Context(), av.ApprovalID)
 	if err != nil {
 		if errors.Is(err, session.ErrNoPendingApproval) {
-			http.Error(w, `{"error":"approval not found"}`, http.StatusNotFound)
+			httpx.Error(w, http.StatusNotFound, "approval not found")
 			return
 		}
 		slog.Warn("resolve approval", "approvalID", av.ApprovalID, "err", err)
@@ -645,7 +645,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	// decided-but-unsubmitted (which would lose the verdict). A genuine concurrent
 	// run (another tab submitting a new turn) still trips the timeout → 409.
 	if !h.waitForIdle(r.Context(), sessID, 5*time.Second) {
-		http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
+		httpx.Error(w, http.StatusConflict, "a run is already active in this session")
 		return
 	}
 
@@ -666,7 +666,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 			return
 		}
 		if folded {
-			http.Error(w, `{"error":"approval already decided"}`, http.StatusConflict)
+			httpx.Error(w, http.StatusConflict, "approval already decided")
 			return
 		}
 		complete = pending == 0
@@ -711,7 +711,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history})
 	if err != nil {
 		if errors.Is(err, session.ErrRunActive) {
-			http.Error(w, `{"error":"a run is already active in this session"}`, http.StatusConflict)
+			httpx.Error(w, http.StatusConflict, "a run is already active in this session")
 			return
 		}
 		slog.Warn("submit run", "session", sessID, "err", err)
@@ -888,7 +888,7 @@ func sessionVisibleTo(s session.Session, callerID string) bool {
 func (h *Handler) authorizeSession(w http.ResponseWriter, r *http.Request, sessionID string) (session.Session, bool) {
 	s, err := h.runtime.GetSession(r.Context(), sessionID)
 	if err != nil {
-		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		httpx.Error(w, http.StatusNotFound, "session not found")
 		return session.Session{}, false
 	}
 	callerID := ""
@@ -896,7 +896,7 @@ func (h *Handler) authorizeSession(w http.ResponseWriter, r *http.Request, sessi
 		callerID = u.ID
 	}
 	if !sessionVisibleTo(s, callerID) {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		httpx.Error(w, http.StatusForbidden, "forbidden")
 		return session.Session{}, false
 	}
 	return s, true
@@ -910,7 +910,7 @@ func writeStreamHeaders(w http.ResponseWriter) bool {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("x-vercel-ai-ui-message-stream", "v1")
 	if _, ok := w.(http.Flusher); !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, "streaming unsupported")
 		return false
 	}
 	// Rolling write deadline for this streaming response: the server's

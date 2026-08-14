@@ -17,12 +17,12 @@ import (
 // /api/chat so the client's history.resume() decodes it with the same pipeline.
 func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
-		http.Error(w, `{"error":"resume unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "resume unavailable")
 		return
 	}
 	threadID := r.URL.Query().Get("threadId")
 	if threadID == "" {
-		http.Error(w, `{"error":"threadId required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "threadId required")
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, threadID); !ok {
@@ -40,7 +40,7 @@ func (h *Handler) serveResume(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		run, ok = h.latestRun(r, threadID)
 		if !ok {
-			http.Error(w, `{"error":"no run to resume"}`, http.StatusNotFound)
+			httpx.Error(w, http.StatusNotFound, "no run to resume")
 			return
 		}
 	}

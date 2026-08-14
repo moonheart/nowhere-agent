@@ -171,11 +171,11 @@ func (h *Handler) historyPage(r *http.Request, sessionID string) (stored []sessi
 func (h *Handler) serveHistory(w http.ResponseWriter, r *http.Request) {
 	threadID := r.URL.Query().Get("threadId")
 	if threadID == "" {
-		http.Error(w, `{"error":"threadId required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "threadId required")
 		return
 	}
 	if h.runtime == nil {
-		http.Error(w, `{"error":"history unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "history unavailable")
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, threadID); !ok {

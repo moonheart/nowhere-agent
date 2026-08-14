@@ -68,12 +68,12 @@ func decodeSessionCursor(raw string) (*session.SessionCursor, error) {
 // own conversations.
 func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
-		http.Error(w, `{"error":"sessions unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "sessions unavailable")
 		return
 	}
 	user, ok := identity.UserFromContext(r.Context())
 	if !ok {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -87,7 +87,7 @@ func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 	if raw := r.URL.Query().Get("cursor"); raw != "" {
 		c, err := decodeSessionCursor(raw)
 		if err != nil {
-			http.Error(w, `{"error":"invalid cursor"}`, http.StatusBadRequest)
+			httpx.Error(w, http.StatusBadRequest, "invalid cursor")
 			return
 		}
 		cursor = c
@@ -121,17 +121,17 @@ func (h *Handler) serveSessions(w http.ResponseWriter, r *http.Request) {
 // on success.
 func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
-		http.Error(w, `{"error":"sessions unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "sessions unavailable")
 		return
 	}
 	user, ok := identity.UserFromContext(r.Context())
 	if !ok {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "id required")
 		return
 	}
 
@@ -154,7 +154,7 @@ func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !deleted {
-		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		httpx.Error(w, http.StatusNotFound, "session not found")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -172,12 +172,12 @@ func (h *Handler) serveDeleteSession(w http.ResponseWriter, r *http.Request) {
 // without the worker (tests/dev) and agrees with the /history active flag.
 func (h *Handler) serveSessionActive(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
-		http.Error(w, `{"error":"sessions unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "sessions unavailable")
 		return
 	}
 	sessionID := r.PathValue("id")
 	if sessionID == "" {
-		http.Error(w, `{"error":"session id required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "session id required")
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, sessionID); !ok {

@@ -3,6 +3,8 @@ package chatapi
 import (
 	"encoding/json"
 	"net/http"
+
+	"nowhere-agent/internal/httpx"
 )
 
 // serveCancel handles POST /api/chat/cancel?threadId=<id>: it stops the
@@ -12,12 +14,12 @@ import (
 // HTTP stream while the model keeps generating (and the sandbox keeps running).
 func (h *Handler) serveCancel(w http.ResponseWriter, r *http.Request) {
 	if h.registry == nil {
-		http.Error(w, `{"error":"cancel unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "cancel unavailable")
 		return
 	}
 	threadID := r.URL.Query().Get("threadId")
 	if threadID == "" {
-		http.Error(w, `{"error":"threadId required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "threadId required")
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, threadID); !ok {

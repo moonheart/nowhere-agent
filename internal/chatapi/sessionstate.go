@@ -21,12 +21,12 @@ import (
 // are accepted here.
 func (h *Handler) serveSetSessionState(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil {
-		http.Error(w, `{"error":"state unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "state unavailable")
 		return
 	}
 	sessionID := r.PathValue("id")
 	if sessionID == "" {
-		http.Error(w, `{"error":"session id required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "session id required")
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, sessionID); !ok {
@@ -42,18 +42,18 @@ func (h *Handler) serveSetSessionState(w http.ResponseWriter, r *http.Request) {
 	raw, err := httpx.ReadBodyMax(r, 4<<20)
 	if err != nil {
 		if errors.Is(err, httpx.ErrBodyTooLarge) {
-			http.Error(w, `{"error":"payload too large"}`, http.StatusRequestEntityTooLarge)
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "payload too large")
 			return
 		}
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if !clientSettableStateKey(body.Key) {
-		http.Error(w, `{"error":"key not client-settable"}`, http.StatusForbidden)
+		httpx.Error(w, http.StatusForbidden, "key not client-settable")
 		return
 	}
 	if len(body.Value) == 0 {

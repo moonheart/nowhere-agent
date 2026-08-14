@@ -25,12 +25,12 @@ const maxImageUploadBytes = 10 << 20 // 10 MiB
 // frontend then includes as an image part in the next chat message.
 func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil || h.images == nil {
-		http.Error(w, `{"error":"image upload unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "image upload unavailable")
 		return
 	}
 	sessID := r.PathValue("id")
 	if sessID == "" {
-		http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "id required")
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, sessID); !ok {
@@ -58,15 +58,15 @@ func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 		if q.MaxFiles > 0 || q.MaxBytes > 0 {
 			files, used, err := h.images.SessionUsage(sessID)
 			if err != nil {
-				http.Error(w, `{"error":"image save failed"}`, http.StatusInternalServerError)
+				httpx.Error(w, http.StatusInternalServerError, "image save failed")
 				return
 			}
 			if q.MaxFiles > 0 && files >= q.MaxFiles {
-				http.Error(w, `{"error":"upload quota exceeded"}`, http.StatusRequestEntityTooLarge)
+				httpx.Error(w, http.StatusRequestEntityTooLarge, "upload quota exceeded")
 				return
 			}
 			if q.MaxBytes > 0 && used+int64(len(body)) > q.MaxBytes {
-				http.Error(w, `{"error":"upload quota exceeded"}`, http.StatusRequestEntityTooLarge)
+				httpx.Error(w, http.StatusRequestEntityTooLarge, "upload quota exceeded")
 				return
 			}
 		}
@@ -82,14 +82,14 @@ func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 	rel, err := h.images.Save(sessID, name, body)
 	if err != nil {
 		if errors.Is(err, workspace.ErrUnsupportedImage) {
-			http.Error(w, `{"error":"unsupported or malformed image"}`, http.StatusUnsupportedMediaType)
+			httpx.Error(w, http.StatusUnsupportedMediaType, "unsupported or malformed image")
 			return
 		}
 		if errors.Is(err, workspace.ErrImagePixelLimit) {
-			http.Error(w, `{"error":"image too large"}`, http.StatusRequestEntityTooLarge)
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "image too large")
 			return
 		}
-		http.Error(w, `{"error":"image save failed"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, "image save failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -104,12 +104,12 @@ func (h *Handler) serveImageUpload(w http.ResponseWriter, r *http.Request) {
 // conversation's first message, which has no session yet.
 func (h *Handler) serveUserImageUpload(w http.ResponseWriter, r *http.Request) {
 	if h.uploads == nil {
-		http.Error(w, `{"error":"image upload unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "image upload unavailable")
 		return
 	}
 	u, ok := identity.UserFromContext(r.Context())
 	if !ok {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -130,18 +130,18 @@ func (h *Handler) serveUserImageUpload(w http.ResponseWriter, r *http.Request) {
 	up, err := h.uploads.Upload(r.Context(), u.ID, name, body)
 	if err != nil {
 		if errors.Is(err, workspace.ErrUnsupportedImage) {
-			http.Error(w, `{"error":"unsupported or malformed image"}`, http.StatusUnsupportedMediaType)
+			httpx.Error(w, http.StatusUnsupportedMediaType, "unsupported or malformed image")
 			return
 		}
 		if errors.Is(err, workspace.ErrImagePixelLimit) {
-			http.Error(w, `{"error":"image too large"}`, http.StatusRequestEntityTooLarge)
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "image too large")
 			return
 		}
 		if errors.Is(err, upload.ErrQuotaExceeded) {
-			http.Error(w, `{"error":"upload quota exceeded"}`, http.StatusRequestEntityTooLarge)
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "upload quota exceeded")
 			return
 		}
-		http.Error(w, `{"error":"image save failed"}`, http.StatusInternalServerError)
+		httpx.Error(w, http.StatusInternalServerError, "image save failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -154,12 +154,12 @@ func (h *Handler) serveUserImageUpload(w http.ResponseWriter, r *http.Request) {
 // caller's own upload scope), so a guessed id from another user 404s.
 func (h *Handler) serveUserFile(w http.ResponseWriter, r *http.Request) {
 	if h.images == nil {
-		http.Error(w, `{"error":"files unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "files unavailable")
 		return
 	}
 	u, ok := identity.UserFromContext(r.Context())
 	if !ok {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		httpx.Error(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -167,7 +167,7 @@ func (h *Handler) serveUserFile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Missing file or rejected (malformed/escape) — indistinguishable to the
 		// caller, so we don't leak upload layout.
-		http.Error(w, `{"error":"file not found"}`, http.StatusNotFound)
+		httpx.Error(w, http.StatusNotFound, "file not found")
 		return
 	}
 	defer rc.Close()
@@ -185,12 +185,12 @@ func (h *Handler) serveUserFile(w http.ResponseWriter, r *http.Request) {
 // the ImageStore (path traversal is rejected there too — defense in depth).
 func (h *Handler) serveFile(w http.ResponseWriter, r *http.Request) {
 	if h.runtime == nil || h.images == nil {
-		http.Error(w, `{"error":"files unavailable"}`, http.StatusServiceUnavailable)
+		httpx.Error(w, http.StatusServiceUnavailable, "files unavailable")
 		return
 	}
 	sessID := r.PathValue("id")
 	if sessID == "" {
-		http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
+		httpx.Error(w, http.StatusBadRequest, "id required")
 		return
 	}
 	if _, ok := h.authorizeSession(w, r, sessID); !ok {
@@ -202,7 +202,7 @@ func (h *Handler) serveFile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Missing file or rejected (escape/absolute) — indistinguishable to the
 		// caller, so we don't leak workspace layout.
-		http.Error(w, `{"error":"file not found"}`, http.StatusNotFound)
+		httpx.Error(w, http.StatusNotFound, "file not found")
 		return
 	}
 	defer rc.Close()
