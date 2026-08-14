@@ -813,7 +813,7 @@ func run() error {
 		// risk before dispatch. An "ask" decision suspends the run and presents an
 		// approval card in the chat UI (only a client that consumes none of the
 		// suspension experiences it as a plain deny). Defaults allow
-		// read-only/sandbox-write/network and deny external-write; tighten via
+		// read-only/sandbox-write/network and ask external-write; tighten via
 		// PERMISSION_* env. The
 		// policy is re-resolved from the runtime settings on EVERY check, so the
 		// admin console retunes it live.
