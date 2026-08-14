@@ -420,6 +420,40 @@ func (s *ImageStore) DeleteUserUploadScope(userID string) error {
 	return nil
 }
 
+// ListUserUploads enumerates the blobs on disk as userID -> blob ids
+// (<root>/__uploads__/<userID>/<id>.webp, one level deep, nothing else lives
+// there). It backs the upload-orphan sweep: the sweep compares the on-disk set
+// against the uploads metadata rows and deletes blobs with no row and no
+// message reference. The layout is owned entirely by the blob store, so the
+// walk is confined by construction; a missing uploads dir is an empty set.
+func (s *ImageStore) ListUserUploads() (map[string][]string, error) {
+	root := filepath.Join(s.root, uploadsDir)
+	userDirs, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read uploads dir: %w", err)
+	}
+	out := make(map[string][]string, len(userDirs))
+	for _, ud := range userDirs {
+		if !ud.IsDir() || ud.Name() == "." || ud.Name() == ".." || strings.ContainsAny(ud.Name(), `/\`) {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(root, ud.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read upload dir %q: %w", ud.Name(), err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), userUploadSuffix) {
+				continue
+			}
+			out[ud.Name()] = append(out[ud.Name()], strings.TrimSuffix(e.Name(), userUploadSuffix))
+		}
+	}
+	return out, nil
+}
+
 // SweepEndedSessionImages is the retention sweep (P2-8 no-data-hard-delete):
 // it deletes the image directory of every session the lister reports as ended
 // before cutoff, bounded by limit per pass so one scan cannot grow unbounded.

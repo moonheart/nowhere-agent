@@ -580,6 +580,22 @@ func run() error {
 		settingsSync.Add(func() {
 			imageRetention.Store(int64(settingsRuntime.Int(settings.KeyWorkspaceRetentionDays)))
 		})
+		// Upload-orphan sweep (resource leak): Delete removes the uploads row
+		// BEFORE the blob, so a blob-store hiccup leaves a terminal orphan
+		// (ErrBlobRemovalFailed — a retry answers ErrNotFound) that no API path
+		// can ever reclaim. An hourly pass deletes blobs that have no metadata
+		// row AND no message reference — unambiguous garbage only; a row or a
+		// reference keeps the blob.
+		hourlySweep(ctx, log, "upload orphan", func() error {
+			removed, err := uploadSvc.SweepOrphans(ctx, log)
+			if err != nil {
+				return err
+			}
+			if removed > 0 {
+				log.Info("upload orphan sweep removed blobs", "count", removed)
+			}
+			return nil
+		})
 	}
 
 	// Sandbox for built-in tools (file-tools): a per-session sandbox Manager

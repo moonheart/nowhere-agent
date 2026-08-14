@@ -404,6 +404,74 @@ func (f failCreateStore) Create(context.Context, Upload) (Upload, error) {
 	return Upload{}, errors.New("simulated record insert failure")
 }
 
+// TestSweepOrphansRemovesRowlessUnreferencedBlobs: a blob with no metadata row
+// and no message reference is unambiguous garbage — the sweep must delete it
+// and count it. Blobs with a row, and rowless blobs still referenced by a
+// message, must survive.
+func TestSweepOrphans(t *testing.T) {
+	s, db, blobs := svc(t)
+	ctx := context.Background()
+	userID := createUser(t, db)
+
+	// Owned blob (row + blob): must survive.
+	owned, err := s.Upload(ctx, userID, "owned.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Rowless blob, no reference: must be swept.
+	orphanPath, _, err := blobs.SaveUserUpload(userID, "orphan.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanID := strings.TrimSuffix(strings.TrimPrefix(orphanPath, "uploads/"), ".webp")
+
+	// Rowless blob, still referenced by a message: must survive.
+	refPath, _, err := blobs.SaveUserUpload(userID, "referenced.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refID := strings.TrimSuffix(strings.TrimPrefix(refPath, "uploads/"), ".webp")
+	addMessage(t, db, userID, refID)
+
+	// A second user's blob with no row and no reference: also swept (the
+	// sweep is per user scope, not per account).
+	other := createUser(t, db)
+	_, _, err = blobs.SaveUserUpload(other, "other-orphan.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := s.SweepOrphans(ctx, nil)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 2 {
+		t.Fatalf("sweep removed %d blobs, want 2", removed)
+	}
+
+	// The orphan blob file is gone; the owned and referenced ones remain.
+	userDir := filepath.Join(blobs.Root(), "__uploads__", userID)
+	for _, wantGone := range []string{orphanID + ".webp"} {
+		if _, err := os.Stat(filepath.Join(userDir, wantGone)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("orphan blob %s should be gone after sweep: %v", wantGone, err)
+		}
+	}
+	for _, wantKeep := range []string{owned.ID + ".webp", refID + ".webp"} {
+		if _, err := os.Stat(filepath.Join(userDir, wantKeep)); err != nil {
+			t.Errorf("owned/referenced blob %s should survive the sweep: %v", wantKeep, err)
+		}
+	}
+	// A second pass removes nothing: the sweep is idempotent.
+	again, err := s.SweepOrphans(ctx, nil)
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if again != 0 {
+		t.Errorf("second sweep removed %d blobs, want 0", again)
+	}
+}
+
 // TestUploadCompensatesOrphanBlob: when the record insert fails after the blob
 // landed, the blob must be removed again — a failed upload must not leak an
 // orphan blob that quota (record-based) can never reclaim.

@@ -185,3 +185,50 @@ func (s *Service) Delete(ctx context.Context, userID, id string) error {
 	}
 	return nil
 }
+
+// SweepOrphans is the hourly garbage collection for user-level upload blobs: a
+// blob whose Delete failed after the record went (ErrBlobRemovalFailed is
+// terminal — the record is gone, so a retry of Delete answers ErrNotFound) can
+// never be reclaimed through the API. This pass scans the on-disk blob set and
+// deletes blobs that have NO metadata row AND are not referenced by any
+// message (both checks per blob, so a history image can never be swept out
+// under a record). It is deliberately conservative: only unambiguous garbage
+// is removed.
+//
+// Best-effort, matching the other hourly sweepers: a per-blob failure is
+// logged and the pass continues; a store error (DB hiccup) aborts the pass so
+// the next tick retries, and the caller's hourlySweep logs it. Returns the
+// number of blobs removed.
+func (s *Service) SweepOrphans(ctx context.Context, log *slog.Logger) (int, error) {
+	byUser, err := s.blobs.ListUserUploads()
+	if err != nil {
+		return 0, err
+	}
+	var removed int
+	for userID, ids := range byUser {
+		for _, id := range ids {
+			if _, err := s.store.Get(ctx, id); err == nil {
+				continue // a metadata row owns this blob: keep
+			} else if !errors.Is(err, ErrNotFound) {
+				// DB hiccup: one user's pass must not silently sweep blind —
+				// abort so the next tick retries against a healthy store.
+				return removed, fmt.Errorf("look up upload %q: %w", id, err)
+			}
+			ref, err := s.store.ReferencedByMessage(ctx, userID, id)
+			if err != nil {
+				return removed, fmt.Errorf("check references for upload %q: %w", id, err)
+			}
+			if ref {
+				continue // a message still references it: keep
+			}
+			if err := s.blobs.DeleteUserUpload(userID, id); err != nil {
+				if log != nil {
+					log.Warn("upload orphan sweep: blob removal failed", "user_id", userID, "id", id, "err", err)
+				}
+				continue
+			}
+			removed++
+		}
+	}
+	return removed, nil
+}
