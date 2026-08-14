@@ -119,4 +119,19 @@ func (m *MemMessageStore) LastAssistantText(_ context.Context, sessionID string,
 	return "", nil
 }
 
+// LastAssistantMessage returns the run's most recent assistant message (see
+// MessageStore.LastAssistantMessage), scanning the session's tail backwards.
+func (m *MemMessageStore) LastAssistantMessage(_ context.Context, sessionID, runID string) (*StoredMessage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	src := m.bySess[sessionID]
+	for i := len(src) - 1; i >= 0; i-- {
+		if src[i].Role == provider.RoleAssistant && src[i].RunID == runID {
+			msg := src[i]
+			return &msg, nil
+		}
+	}
+	return nil, nil
+}
+
 var _ MessageStore = (*MemMessageStore)(nil)

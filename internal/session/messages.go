@@ -69,6 +69,14 @@ type MessageStore interface {
 	// wasted work. Empty string when no such message exists within the bound.
 	LastAssistantText(ctx context.Context, sessionID string, limit int) (string, error)
 
+	// LastAssistantMessage returns the run's most recent assistant message
+	// (newest by seq), or nil when the run has none. It is the cheap bounded
+	// form of MessagesFor for the failed-run error attach (attachRunError only
+	// needs the last assistant message of the failing run, never the whole
+	// conversation). A run is a single turn, so the query returns at most one
+	// row regardless of session length.
+	LastAssistantMessage(ctx context.Context, sessionID, runID string) (*StoredMessage, error)
+
 	// SetMessageMetadata replaces one message's metadata JSON (used to attach a
 	// failed run's terminal error to its last assistant message after the run
 	// settles — the message row is append-only, so the update is the seam).

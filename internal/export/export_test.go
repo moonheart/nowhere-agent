@@ -97,6 +97,16 @@ func (m *memMessageStore) LastAssistantText(ctx context.Context, sessionID strin
 	}
 	return "", nil
 }
+func (m *memMessageStore) LastAssistantMessage(ctx context.Context, sessionID, runID string) (*session.StoredMessage, error) {
+	msgs := m.sessions[sessionID]
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" && msgs[i].RunID == runID {
+			msg := msgs[i]
+			return &msg, nil
+		}
+	}
+	return nil, nil
+}
 
 func TestWriteProducesCompleteJSON(t *testing.T) {
 	msgs := &memMessageStore{sessions: map[string][]session.StoredMessage{

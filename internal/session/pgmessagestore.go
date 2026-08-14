@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"nowhere-agent/internal/provider"
@@ -136,6 +137,48 @@ func (s *PGMessageStore) MessagesPage(ctx context.Context, sessionID string, aft
 	}
 	defer rows.Close()
 	return scanMessages(rows)
+}
+
+// LastAssistantMessage returns the run's most recent assistant message (see
+// MessageStore.LastAssistantMessage). The query is bounded to the run's
+// assistant rows and ordered newest-first, so the cost is at most one row
+// regardless of conversation length.
+func (s *PGMessageStore) LastAssistantMessage(ctx context.Context, sessionID, runID string) (*StoredMessage, error) {
+	var m StoredMessage
+	var role string
+	var content []byte
+	var ui, uo, ucr, ucw sql.NullInt64
+	var metadata []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, session_id, run_id, seq, role, content, created_at,
+			usage_input, usage_output, usage_cache_read, usage_cache_write, metadata
+		FROM messages
+		WHERE session_id = $1 AND run_id = $2 AND role = 'assistant'
+		ORDER BY seq DESC
+		LIMIT 1`, sessionID, runID).
+		Scan(&m.ID, &m.SessionID, &m.RunID, &m.Seq, &role, &content, &m.CreatedAt, &ui, &uo, &ucr, &ucw, &metadata)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("last assistant message: %w", err)
+	}
+	m.Role = provider.Role(role)
+	if err := json.Unmarshal(content, &m.Content); err != nil {
+		return nil, fmt.Errorf("last assistant message: %w", err)
+	}
+	if len(metadata) > 0 {
+		m.Metadata = json.RawMessage(metadata)
+	}
+	if ui.Valid {
+		m.Usage = &provider.Usage{
+			InputTokens:      int(ui.Int64),
+			OutputTokens:     int(uo.Int64),
+			CacheReadTokens:  int(ucr.Int64),
+			CacheWriteTokens: int(ucw.Int64),
+		}
+	}
+	return &m, nil
 }
 
 // SetMessageMetadata replaces one message's metadata JSON. The row is keyed by

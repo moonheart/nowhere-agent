@@ -323,3 +323,82 @@ func TestPGMessageStoreLastAssistantText(t *testing.T) {
 		t.Fatalf("unknown session = %q, %v; want empty", got, err)
 	}
 }
+
+// TestMemMessageStoreLastAssistantMessage pins the per-run bounded read: the
+// newest assistant message OF THE REQUESTED RUN wins, other runs' messages in
+// the same session and non-assistant rows are skipped, and a run with no
+// assistant message yields nil.
+func TestMemMessageStoreLastAssistantMessage(t *testing.T) {
+	ms := NewMemMessageStore()
+	ctx := context.Background()
+	appendMsg := func(sessionID, runID string, role provider.Role, text string) {
+		t.Helper()
+		if _, err := ms.AppendMessage(ctx, StoredMessage{SessionID: sessionID, RunID: runID, Role: role, Content: []provider.Block{{Type: provider.BlockText, Text: text}}}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	appendMsg("s1", "r1", provider.RoleUser, "first user turn")
+	appendMsg("s1", "r1", provider.RoleAssistant, "answer from r1")
+	appendMsg("s1", "r1", provider.RoleAssistant, "later answer from r1")
+	appendMsg("s1", "r2", provider.RoleAssistant, "answer from r2")
+	appendMsg("s2", "r3", provider.RoleAssistant, "other session")
+
+	got, err := ms.LastAssistantMessage(ctx, "s1", "r1")
+	if err != nil || got == nil || got.Content[0].Text != "later answer from r1" {
+		t.Fatalf("LastAssistantMessage(r1) = %+v, %v; want r1's latest", got, err)
+	}
+	got, err = ms.LastAssistantMessage(ctx, "s1", "r2")
+	if err != nil || got == nil || got.Content[0].Text != "answer from r2" {
+		t.Fatalf("LastAssistantMessage(r2) = %+v, %v; want r2's answer", got, err)
+	}
+	// A run with no assistant message yields nil, not an error.
+	got, err = ms.LastAssistantMessage(ctx, "s1", "nope")
+	if err != nil || got != nil {
+		t.Fatalf("unknown run = %+v, %v; want nil", got, err)
+	}
+}
+
+// TestPGMessageStoreLastAssistantMessage verifies the SQL bounded per-run read
+// against the real schema: the run's newest assistant message wins, other runs
+// in the same session are ignored, and a run with no assistant message yields
+// nil.
+func TestPGMessageStoreLastAssistantMessage(t *testing.T) {
+	db := pgTestDB(t)
+	store := NewPGStore(db)
+	ms := NewPGMessageStore(db)
+	ctx := context.Background()
+	sessID, run1 := setupMessageSession(t, ctx, db, store)
+
+	appendMsg := func(runID string, role provider.Role, text string) {
+		t.Helper()
+		if _, err := ms.AppendMessage(ctx, StoredMessage{SessionID: sessID, RunID: runID, Role: role, Content: []provider.Block{{Type: provider.BlockText, Text: text}}}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+	appendMsg(run1, provider.RoleUser, "user turn")
+	appendMsg(run1, provider.RoleAssistant, "answer from run1")
+
+	// A second run on the same session needs run1 settled (single-active-run).
+	if err := store.UpdateRunStatus(ctx, run1, RunDone); err != nil {
+		t.Fatalf("settle run1: %v", err)
+	}
+	run2, err := store.CreateRun(ctx, sessID, 2)
+	if err != nil {
+		t.Fatalf("create run2: %v", err)
+	}
+	appendMsg(run2.ID, provider.RoleAssistant, "answer from run2")
+
+	got, err := ms.LastAssistantMessage(ctx, sessID, run1)
+	if err != nil || got == nil || got.Content[0].Text != "answer from run1" {
+		t.Fatalf("LastAssistantMessage(run1) = %+v, %v; want run1's answer", got, err)
+	}
+	got, err = ms.LastAssistantMessage(ctx, sessID, run2.ID)
+	if err != nil || got == nil || got.Content[0].Text != "answer from run2" {
+		t.Fatalf("LastAssistantMessage(run2) = %+v, %v; want run2's answer", got, err)
+	}
+	// A run with no assistant message yields nil.
+	got, err = ms.LastAssistantMessage(ctx, sessID, "00000000-0000-0000-0000-000000000000")
+	if err != nil || got != nil {
+		t.Fatalf("unknown run = %+v, %v; want nil", got, err)
+	}
+}

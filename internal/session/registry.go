@@ -432,26 +432,24 @@ func (rg *RunRegistry) attachRunError(ctx context.Context, sessionID, runID, err
 	if rg.msgStore == nil {
 		return
 	}
-	stored, err := rg.msgStore.MessagesFor(ctx, sessionID)
+	// Bounded read: only the failing run's last assistant message is needed,
+	// never the whole conversation (LastAssistantMessage is O(1) rows).
+	m, err := rg.msgStore.LastAssistantMessage(ctx, sessionID, runID)
 	if err != nil {
 		slog.Warn("attach run error to message", "session", sessionID, "run", runID, "err", err)
 		return
 	}
-	for i := len(stored) - 1; i >= 0; i-- {
-		m := stored[i]
-		if m.Role != provider.RoleAssistant || m.RunID != runID {
-			continue
-		}
-		meta, merr := json.Marshal(map[string]string{"error": errText})
-		if merr != nil {
-			return
-		}
-		if uerr := rg.msgStore.SetMessageMetadata(ctx, m.ID, meta); uerr != nil {
-			slog.Warn("attach run error to message", "session", sessionID, "run", runID, "message", m.ID, "err", uerr)
-		}
+	if m == nil {
+		slog.Warn("failed run has no assistant message to carry its error", "session", sessionID, "run", runID)
 		return
 	}
-	slog.Warn("failed run has no assistant message to carry its error", "session", sessionID, "run", runID)
+	meta, merr := json.Marshal(map[string]string{"error": errText})
+	if merr != nil {
+		return
+	}
+	if uerr := rg.msgStore.SetMessageMetadata(ctx, m.ID, meta); uerr != nil {
+		slog.Warn("attach run error to message", "session", sessionID, "run", runID, "message", m.ID, "err", uerr)
+	}
 }
 
 // RecordDecision applies the client's verdict to ONE pending interaction and
