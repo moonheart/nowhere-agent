@@ -193,12 +193,6 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 		return errf("%v", err), nil
 	}
 
-	// Per-run total-spawn budget (this tool instance is shared across the whole
-	// run tree): bound cost and prevent a fork/cost bomb from unbounded fan-out.
-	if int(t.spawned.Add(1)) > t.maxTotal {
-		return errf("subagent budget exhausted (at most %d subagent runs per request) — complete the task with fewer agents", t.maxTotal), nil
-	}
-
 	childDepth := depth + 1
 
 	// Build the child's scoped tool pool: the def's allow-list (plus any skill
@@ -271,6 +265,16 @@ func (t *SpawnTool) Call(ctx context.Context, args map[string]any) (toolruntime.
 		default:
 			return errf("subagent concurrency saturated — retry later or reduce parallel spawns"), nil
 		}
+	}
+
+	// Per-run total-spawn budget (this tool instance is shared across the whole
+	// run tree): bound cost and prevent a fork/cost bomb from unbounded fan-out.
+	// Counted only after the slot is secured and the child is built — a spawn
+	// rejected for saturation, cancelled while queued, or failed at build never
+	// consumes budget, so the model retrying a rejected spawn cannot burn the
+	// cap on attempts that never ran.
+	if int(t.spawned.Add(1)) > t.maxTotal {
+		return errf("subagent budget exhausted (at most %d subagent runs per request) — complete the task with fewer agents", t.maxTotal), nil
 	}
 
 	msgs, runErr := child.Run(childCtx, history, emitter)

@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,6 +142,74 @@ func TestNestedSpawnRejectsSaturatedConcurrency(t *testing.T) {
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Errorf("nested spawn took %v, want an immediate rejection (no slot wait)", d)
+	}
+
+	close(release)
+	wg.Wait()
+}
+
+// TestFailedChildBuildDoesNotConsumeBudget: a spawn whose child could not be
+// built returns an error result but must NOT count against the total budget —
+// the model retries after an error result, and counting attempts that never
+// ran would exhaust the cap on tries, not runs.
+func TestFailedChildBuildDoesNotConsumeBudget(t *testing.T) {
+	store := agentdef.NewStore()
+	reg := toolruntime.NewRegistry()
+	failBuild := true
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		if failBuild {
+			return nil, errors.New("boom")
+		}
+		return agent.New(echoProvider{"ok"}, toolruntime.NewRegistry(), childCfg()), nil
+	}
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3).WithBudget(1, 2)
+	reg.Register(tool)
+
+	res, err := tool.Call(context.Background(), map[string]any{"prompt": "go"})
+	if err != nil || !res.IsError {
+		t.Fatalf("build-failed spawn = %+v err=%v, want an error result", res, err)
+	}
+	failBuild = false
+	res, err = tool.Call(context.Background(), map[string]any{"prompt": "go"})
+	if err != nil || res.IsError {
+		t.Fatalf("retry after a build failure = %+v err=%v, want success (failed builds must not consume budget)", res, err)
+	}
+}
+
+// TestSaturatedNestedSpawnRejectedAtSemaphoreNotBudget: a nested spawn on a
+// saturated semaphore is rejected THERE (before the budget counter), so the
+// attempt neither blocks nor consumes a budget slot. With a budget of 1 held
+// by the running root spawn, a budget-first implementation would answer
+// "budget exhausted" instead of "saturated".
+func TestSaturatedNestedSpawnRejectedAtSemaphoreNotBudget(t *testing.T) {
+	var running, maxRunning int32
+	release := make(chan struct{})
+	store := agentdef.NewStore()
+	reg := toolruntime.NewRegistry()
+	factory := func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+		return agent.New(gateProvider{running: &running, maxRunning: &maxRunning, release: release}, toolruntime.NewRegistry(), childCfg()), nil
+	}
+	tool := NewSpawnTool(testResolver(store), reg, factory, 3).WithBudget(1, 1) // 1 total spawn, 1 concurrent
+	reg.Register(tool)
+
+	// One root spawn holds the sole semaphore slot AND the sole budget slot.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = tool.Call(context.Background(), map[string]any{"prompt": "go"})
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if m := atomic.LoadInt32(&maxRunning); m != 1 {
+		t.Fatalf("root spawn should hold the slot, peak = %d", m)
+	}
+
+	res, err := tool.Call(withDepth(context.Background(), 1), map[string]any{"prompt": "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Content, "saturated") {
+		t.Errorf("nested spawn on saturated semaphore = %+v, want a saturation error (not a budget error)", res)
 	}
 
 	close(release)
