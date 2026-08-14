@@ -315,7 +315,7 @@ func Catalog() []KeyInfo {
 		{Key: KeyLLMRawLogRetentionDays, Group: GroupLLM, Kind: KindInt, Description: "Days raw LLM request/response logs are kept before the hourly sweep deletes them (overrides LLM_RAW_LOG_RETENTION_DAYS). 0 disables the sweep. Applies within an hour."},
 
 		// Sandbox tab.
-		{Key: KeySandboxNetwork, Group: GroupSandbox, Kind: KindString, Description: "Docker-backend container egress policy: deny | open (overrides SANDBOX_NETWORK). allowlist is accepted for compatibility but NOT implemented — the docker backend maps it to deny (zero egress) and the local backend ignores it. Applies to the next session."},
+		{Key: KeySandboxNetwork, Group: GroupSandbox, Kind: KindString, Description: "Container egress policy: deny | open (overrides SANDBOX_NETWORK). allowlist is accepted for compatibility but NOT implemented — the docker backend maps it to deny (zero egress); the local backend cannot restrict host egress at all and logs a loud warning each session when the policy is not open. Applies to the next session."},
 		{Key: KeySandboxLocalExec, Group: GroupSandbox, Kind: KindBool, Description: "Enable the run_command tool on the local (host) sandbox backend (overrides SANDBOX_LOCAL_EXEC). Trusted single-tenant switch; multi-tenant deployments should use docker. Applies to the next session."},
 
 		// Permissions tab.

@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -274,6 +275,42 @@ func TestLocalPortExecBoundedCapture(t *testing.T) {
 	}
 	if !strings.HasPrefix(res.Stdout, strings.Repeat("x\n", 512)) {
 		t.Error("runaway stdout lost its prefix")
+	}
+}
+
+func TestLocalPortNetworkPolicyWarnsLoudly(t *testing.T) {
+	ctx := context.Background()
+
+	var buf strings.Builder
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	cases := []struct {
+		name string
+		opts Options
+		warn bool
+	}{
+		{"empty mode stays quiet", Options{}, false},
+		{"open stays quiet", Options{Network: NetworkPolicy{Mode: NetworkOpen}}, false},
+		{"deny warns", Options{Network: NetworkPolicy{Mode: NetworkDeny}}, true},
+		{"allowlist warns", Options{Network: NetworkPolicy{Mode: NetworkAllowlist, AllowedHosts: []string{"api.example.com"}}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewLocalPort(t.TempDir())
+			if _, err := p.Create(ctx, "sess-"+strings.ReplaceAll(tc.name, " ", "-"), tc.opts); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			out := buf.String()
+			if tc.warn && !strings.Contains(out, "cannot enforce the network policy") {
+				t.Errorf("expected a loud warning, got:\n%s", out)
+			}
+			if !tc.warn && strings.Contains(out, "cannot enforce the network policy") {
+				t.Errorf("unexpected warning for %s:\n%s", tc.name, out)
+			}
+			buf.Reset()
+		})
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +18,10 @@ import (
 // LocalPort is a Port backed by a per-session host directory (design file-tools
 // D4). It is the default backend for development and single-tenant self-hosting
 // where a container runtime is unavailable. Files are confined to the session
-// workspace by resolve(); the network policy is a no-op here (egress control
-// requires a container/proxy layer — see the Docker backend and task 16.1).
+// workspace by resolve(); the network policy CANNOT be enforced here (egress
+// control requires a container/proxy layer — see the Docker backend), so a
+// non-open policy is flagged loudly at session start instead of being silently
+// ignored (see Create).
 type LocalPort struct {
 	root  string
 	shell string // optional bash override (SANDBOX_SHELL); empty = auto-detect
@@ -84,6 +87,16 @@ func orderForHost(goos string, candidates []string) []string {
 // <root>/<sessionID>. Idempotent: re-creating an existing workspace keeps its
 // files (the workspace is the durable state).
 func (p *LocalPort) Create(_ context.Context, sessionID string, opts Options) (Handle, error) {
+	// The local backend cannot enforce an egress policy — the tools run on the
+	// host and the host's network is whatever it is. Say that out loud for any
+	// non-open policy (the docker backend fails allowlist closed; here there is
+	// nothing to fail closed) so "policy granted, network open" never happens
+	// silently mid-incident. Open (and the unset empty mode used by tests) is
+	// the honest configuration for this backend and stays quiet.
+	if mode := opts.Network.Mode; mode != "" && mode != NetworkOpen {
+		slog.Warn("sandbox: local backend cannot enforce the network policy; egress is whatever the host allows",
+			"mode", mode, "allowed_hosts", len(opts.Network.AllowedHosts))
+	}
 	dir := opts.WorkspaceDir
 	if dir == "" {
 		if p.root == "" {
