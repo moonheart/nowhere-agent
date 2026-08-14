@@ -228,6 +228,15 @@ export function ModelFormDialog({
   const [windowText, setWindowText] = useState(
     initial?.context_window != null ? String(initial.context_window) : "",
   );
+  const [priceInput, setPriceInput] = useState(
+    initial?.price_input != null ? String(initial.price_input) : "",
+  );
+  const [priceOutput, setPriceOutput] = useState(
+    initial?.price_output != null ? String(initial.price_output) : "",
+  );
+  const [priceCacheRead, setPriceCacheRead] = useState(
+    initial?.price_cache_read != null ? String(initial.price_cache_read) : "",
+  );
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -236,6 +245,13 @@ export function ModelFormDialog({
   const setOpen = (v: boolean) => {
     if (onOpenChange) onOpenChange(v);
     else setSelfOpen(v);
+  };
+
+  // empty => clear to unpriced; NaN from a malformed field => leave unchanged.
+  const priceField = (s: string, fallback?: number): number | null | undefined => {
+    if (s.trim() === "") return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : fallback;
   };
 
   const submit = async (e: React.FormEvent) => {
@@ -248,6 +264,10 @@ export function ModelFormDialog({
         ...(displayName ? { display_name: displayName.trim() } : {}),
         vision,
         context_window: windowText.trim() === "" ? null : Number(windowText),
+        price_input: priceField(priceInput, initial?.price_input),
+        price_output: priceField(priceOutput, initial?.price_output),
+        price_cache_read: priceField(priceCacheRead, initial?.price_cache_read),
+        clear_prices: [priceInput, priceOutput, priceCacheRead].every((s) => s.trim() === ""),
         enabled,
       });
       setOpen(false);
@@ -297,6 +317,48 @@ export function ModelFormDialog({
                 value={windowText}
                 onChange={(e) => setWindowText(e.target.value)}
                 placeholder={t("providersPage.contextWindowPlaceholder")}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="model-price-input">
+                {t("providersPage.priceInput")}
+              </Label>
+              <Input
+                id="model-price-input"
+                type="number"
+                min={0}
+                step="0.01"
+                value={priceInput}
+                onChange={(e) => setPriceInput(e.target.value)}
+                placeholder={t("providersPage.pricePlaceholder")}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="model-price-output">
+                {t("providersPage.priceOutput")}
+              </Label>
+              <Input
+                id="model-price-output"
+                type="number"
+                min={0}
+                step="0.01"
+                value={priceOutput}
+                onChange={(e) => setPriceOutput(e.target.value)}
+                placeholder={t("providersPage.pricePlaceholder")}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="model-price-cache-read">
+                {t("providersPage.priceCacheRead")}
+              </Label>
+              <Input
+                id="model-price-cache-read"
+                type="number"
+                min={0}
+                step="0.01"
+                value={priceCacheRead}
+                onChange={(e) => setPriceCacheRead(e.target.value)}
+                placeholder={t("providersPage.pricePlaceholder")}
               />
             </div>
             <div className="flex items-center justify-between">

@@ -35,6 +35,7 @@ import {
   AsyncSection,
   ErrorNotice,
   formatCount,
+  formatCurrency,
   formatDate,
   formatDateTime,
   PageHeader,
@@ -499,12 +500,21 @@ function MemoryRow({
 }
 
 // UsageRowsTable renders a grouped usage report (by account or by team).
+// showCost renders the estimated spend column (per-model view, where prices
+// exist); the other groupings carry no cost.
 export function UsageRowsTable({
   rows,
   groupLabel,
+  showCost = false,
 }: {
-  rows: { id: string; label: string; tokens: { input: number; output: number; runs: number } }[];
+  rows: {
+    id: string;
+    label: string;
+    tokens: { input: number; output: number; runs: number };
+    cost?: number;
+  }[];
   groupLabel: string;
+  showCost?: boolean;
 }) {
   if (rows.length === 0) {
     return (
@@ -522,6 +532,7 @@ export function UsageRowsTable({
           <TableHead className="text-right">Output</TableHead>
           <TableHead className="text-right">Total</TableHead>
           <TableHead className="text-right">Runs</TableHead>
+          {showCost && <TableHead className="text-right">Cost</TableHead>}
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -540,6 +551,11 @@ export function UsageRowsTable({
             <TableCell className="text-right tabular-nums text-muted-foreground">
               {r.tokens.runs}
             </TableCell>
+            {showCost && (
+              <TableCell className="text-right tabular-nums">
+                {formatCurrency(r.cost ?? 0)}
+              </TableCell>
+            )}
           </TableRow>
         ))}
       </TableBody>

@@ -121,6 +121,15 @@ export function formatCount(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
+// formatCurrency renders a USD amount. Prices and costs are small per run
+// ($0.001–$100), so the fixed 4-decimal style keeps cents readable without
+// scientific notation or digit noise.
+export function formatCurrency(n: number): string {
+  if (n === 0) return "$0.00";
+  if (n < 0.01) return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(2)}`;
+}
+
 export function formatDate(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";

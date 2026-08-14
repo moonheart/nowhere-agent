@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -497,5 +498,57 @@ func TestByModelGroupsAndLabels(t *testing.T) {
 	}
 	if got := byModel[m2]; got.Input != 7 || got.Runs != 1 {
 		t.Errorf("%s = %+v, want input 7 over 1 run", m2, got)
+	}
+}
+
+// The ByModel cost column derives from the model's CURRENT configured
+// per-million-token prices in provider_models (input/output/cache-read);
+// unpriced models count as zero. Model/provider names are random so the
+// whole-table aggregation stays self-contained, and only rows this test
+// creates are ever deleted.
+func TestByModelCostFromConfiguredPrices(t *testing.T) {
+	db := pgTestDB(t)
+	f := newFixture(t, db)
+	store := NewStore(db)
+	at := time.Now()
+
+	priced := "usg-" + randSuffix() + "-priced"
+	unpriced := "usg-" + randSuffix() + "-unpriced"
+
+	var providerID string
+	if err := db.QueryRow(`
+		INSERT INTO providers (scope, name, vendor) VALUES ('system', $1, 'openai') RETURNING id`,
+		"usg-"+randSuffix()+"-prov").Scan(&providerID); err != nil {
+		t.Fatalf("insert provider: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM providers WHERE id = $1`, providerID) })
+	var modelID string
+	if err := db.QueryRow(`
+		INSERT INTO provider_models (provider_id, name, price_input_per_mtok, price_output_per_mtok, price_cache_read_per_mtok)
+		VALUES ($1, $2, 3.0, 15.0, 2.0) RETURNING id`,
+		providerID, priced).Scan(&modelID); err != nil {
+		t.Fatalf("insert model: %v", err)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM provider_models WHERE id = $1`, modelID) })
+
+	f.addRunAttr(t, at, "", priced, ip(100), ip(10), ip(100), nil)
+	f.addRunAttr(t, at, "", priced, ip(50), ip(5), nil, nil)
+	f.addRunAttr(t, at, "", unpriced, ip(7), ip(3), nil, nil)
+
+	rows, err := store.ByModel(context.Background(), windowAround(at), 100)
+	if err != nil {
+		t.Fatalf("ByModel: %v", err)
+	}
+	cost := map[string]float64{}
+	for _, r := range rows {
+		cost[r.ID] = r.Cost
+	}
+	// 150 input × $3 + 15 output × $15 + 100 cache-read × $2, per million tokens.
+	want := (150*3.0 + 15*15.0 + 100*2.0) / 1e6
+	if got := cost[priced]; math.Abs(got-want) > 1e-12 {
+		t.Errorf("cost(%s) = %v, want %v", priced, got, want)
+	}
+	if got := cost[unpriced]; got != 0 {
+		t.Errorf("cost(%s) = %v, want 0 (unpriced model)", unpriced, got)
 	}
 }

@@ -13,9 +13,14 @@
 // teamAttributionClause). That fallback only ever touches legacy rows; over
 // time the attributed share grows toward 100% and the approximation fades.
 //
-// Reports are in tokens only. `runs.model` (P1-3) now records which model
-// produced each run, so per-model breakdown is possible; cost estimation still
-// requires per-model pricing, which is config, not something this store owns.
+// Reports are in tokens; the per-model report also carries an estimated USD
+// cost. `runs.model` (P1-3) records which model produced each run, and the
+// provider registry's per-model prices (provider_models.price_*_per_mtok,
+// editable from the admin console) turn those tokens into money. The
+// estimation is config-driven and deliberately coarse: runs record the model
+// NAME only, so two providers sharing a model name use the first matching
+// price row, and price edits revalue history because the join reads CURRENT
+// prices (see ByModel).
 package usage
 
 import (
@@ -51,6 +56,11 @@ type Row struct {
 	// Label is a human name for the group — email, team name, or the date.
 	Label  string `json:"label"`
 	Tokens Tokens `json:"tokens"`
+	// Cost is the estimated USD spend of the group, derived from the model's
+	// configured per-million-token prices (input/output/cache-read). Filled by
+	// the per-model report only; 0 when no price is configured. See ByModel for
+	// the approximation this is built on.
+	Cost float64 `json:"cost,omitempty"`
 }
 
 // Range bounds a report. A zero From means "since the beginning"; a zero To
@@ -262,19 +272,39 @@ func (s *Store) DailyTotals(ctx context.Context, rng Range) ([]Row, error) {
 }
 
 // ByModel returns per-model usage over the range, heaviest first
-// (enterprise-readiness P1-3). This is the cost-accounting read: with the model
-// known per run, a caller can attach per-model pricing and turn tokens into
-// money — which was impossible while the model had to be guessed. Runs with no
-// recorded model (predating the stamp, or a provider that did not report one)
-// group under the empty string; the caller labels that bucket.
+// (enterprise-readiness P1-3). This is the cost-accounting read: each row also
+// carries the estimated USD spend, derived by joining runs.model to the
+// provider registry's CURRENT per-million-token prices (input/output/
+// cache-read); unpriced models (no row, or NULL prices) count as zero. Runs
+// with no recorded model (predating the stamp, or a provider that did not
+// report one) group under the empty string; the caller labels that bucket.
+//
+// Approximation, stated out loud: runs record the model name but NOT the
+// provider, so the join takes the first matching provider_models row by
+// name (created_at-stable); two providers sharing a model name with different
+// prices both resolve to that first row. And because the join reads CURRENT
+// prices, changing a price revalues historical runs — this is a cost estimate,
+// not billing.
 func (s *Store) ByModel(ctx context.Context, rng Range, limit int) ([]Row, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	from, to := rng.bounds()
-	return s.rows(ctx, `
-		SELECT COALESCE(r.model, ''), COALESCE(r.model, '(unrecorded)'), `+selectTokens+`
+	return s.modelRows(ctx, `
+		SELECT COALESCE(r.model, ''), COALESCE(r.model, '(unrecorded)'), `+selectTokens+`,
+		       COALESCE(SUM(
+		           COALESCE(r.usage_input, 0) * COALESCE(pm.price_input_per_mtok, 0)
+		         + COALESCE(r.usage_output, 0) * COALESCE(pm.price_output_per_mtok, 0)
+		         + COALESCE(r.usage_cache_read, 0) * COALESCE(pm.price_cache_read_per_mtok, 0)
+		       ) / 1000000.0, 0)
 		FROM runs r
+		LEFT JOIN LATERAL (
+			SELECT price_input_per_mtok, price_output_per_mtok, price_cache_read_per_mtok
+			FROM provider_models
+			WHERE name = r.model
+			ORDER BY created_at
+			LIMIT 1
+		) pm ON true
 		WHERE r.created_at >= $1 AND r.created_at < $2
 		GROUP BY r.model
 		ORDER BY `+orderByTotal+`, r.model
@@ -297,6 +327,30 @@ func (s *Store) rows(ctx context.Context, q string, args ...any) ([]Row, error) 
 		var r Row
 		if err := rs.Scan(&r.ID, &r.Label,
 			&r.Tokens.Input, &r.Tokens.Output, &r.Tokens.CacheRead, &r.Tokens.CacheWrite, &r.Tokens.Runs); err != nil {
+			return nil, fmt.Errorf("scan usage row: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rs.Err()
+}
+
+// modelRows is rows plus the trailing estimated-cost column (see ByModel).
+func (s *Store) modelRows(ctx context.Context, q string, args ...any) ([]Row, error) {
+	rs, err := s.db.QueryContext(ctx, q, args...)
+	if identity.IsMalformedID(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("usage query: %w", err)
+	}
+	defer rs.Close()
+
+	var out []Row
+	for rs.Next() {
+		var r Row
+		if err := rs.Scan(&r.ID, &r.Label,
+			&r.Tokens.Input, &r.Tokens.Output, &r.Tokens.CacheRead, &r.Tokens.CacheWrite, &r.Tokens.Runs,
+			&r.Cost); err != nil {
 			return nil, fmt.Errorf("scan usage row: %w", err)
 		}
 		out = append(out, r)

@@ -76,10 +76,16 @@ type Model struct {
 	DisplayName   string
 	Vision        bool
 	ContextWindow *int64 // nil = derive from the capability table
-	IsDefault     bool
-	Enabled       bool
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// Price* are the model's price in USD per MILLION tokens for each billable
+	// counter (input, output, cache-read), used by the usage report to turn
+	// tokens into money. nil = unpriced (cost estimates count it as zero).
+	PriceInput     *float64
+	PriceOutput    *float64
+	PriceCacheRead *float64
+	IsDefault      bool
+	Enabled        bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // TeamAssignment is a team's selected provider and default model.
@@ -110,7 +116,12 @@ type ModelUpdate struct {
 	Vision        *bool
 	ContextWindow *int64 // nil = no change
 	ClearContext  bool   // drop the override and derive from the capability table
-	Enabled       *bool
+	// Price* are nil = no change; ClearPrices drops all three back to unpriced.
+	PriceInput     *float64
+	PriceOutput    *float64
+	PriceCacheRead *float64
+	ClearPrices    bool
+	Enabled        *bool
 }
 
 // Store is the provider registry boundary. Implementations are symmetric (PG in

@@ -33,7 +33,7 @@ var _ Store = (*PGStore)(nil)
 
 const providerCols = `id, scope, COALESCE(team_id::text, ''), name, vendor, base_url, api_key, is_default, enabled, created_at, updated_at`
 
-const modelCols = `id, provider_id, name, display_name, vision, context_window, is_default, enabled, created_at, updated_at`
+const modelCols = `id, provider_id, name, display_name, vision, context_window, price_input_per_mtok, price_output_per_mtok, price_cache_read_per_mtok, is_default, enabled, created_at, updated_at`
 
 func scanProvider(row interface{ Scan(...any) error }) (Provider, error) {
 	var p Provider
@@ -44,9 +44,19 @@ func scanProvider(row interface{ Scan(...any) error }) (Provider, error) {
 func scanModel(row interface{ Scan(...any) error }) (Model, error) {
 	var m Model
 	var cw sql.NullInt64
-	err := row.Scan(&m.ID, &m.ProviderID, &m.Name, &m.DisplayName, &m.Vision, &cw, &m.IsDefault, &m.Enabled, &m.CreatedAt, &m.UpdatedAt)
+	var pi, po, pcr sql.NullFloat64
+	err := row.Scan(&m.ID, &m.ProviderID, &m.Name, &m.DisplayName, &m.Vision, &cw, &pi, &po, &pcr, &m.IsDefault, &m.Enabled, &m.CreatedAt, &m.UpdatedAt)
 	if cw.Valid {
 		m.ContextWindow = &cw.Int64
+	}
+	if pi.Valid {
+		m.PriceInput = &pi.Float64
+	}
+	if po.Valid {
+		m.PriceOutput = &po.Float64
+	}
+	if pcr.Valid {
+		m.PriceCacheRead = &pcr.Float64
 	}
 	return m, err
 }
@@ -316,10 +326,12 @@ func (s *PGStore) GetModel(ctx context.Context, id string) (Model, error) {
 // CreateModel inserts a model under a provider.
 func (s *PGStore) CreateModel(ctx context.Context, m Model) (Model, error) {
 	created, err := scanModel(s.db.QueryRowContext(ctx, `
-		INSERT INTO provider_models (provider_id, name, display_name, vision, context_window, is_default, enabled)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO provider_models (provider_id, name, display_name, vision, context_window, price_input_per_mtok, price_output_per_mtok, price_cache_read_per_mtok, is_default, enabled)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+modelCols,
-		m.ProviderID, m.Name, m.DisplayName, m.Vision, int64Ptr(m.ContextWindow), m.IsDefault, m.Enabled))
+		m.ProviderID, m.Name, m.DisplayName, m.Vision, int64Ptr(m.ContextWindow),
+		float64Ptr(m.PriceInput), float64Ptr(m.PriceOutput), float64Ptr(m.PriceCacheRead),
+		m.IsDefault, m.Enabled))
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Model{}, ErrNameConflict
@@ -352,6 +364,20 @@ func (s *PGStore) UpdateModel(ctx context.Context, id string, upd ModelUpdate) (
 		add("context_window", int64Ptr(upd.ContextWindow))
 	} else if upd.ClearContext {
 		add("context_window", nil)
+	}
+	if upd.PriceInput != nil {
+		add("price_input_per_mtok", *upd.PriceInput)
+	}
+	if upd.PriceOutput != nil {
+		add("price_output_per_mtok", *upd.PriceOutput)
+	}
+	if upd.PriceCacheRead != nil {
+		add("price_cache_read_per_mtok", *upd.PriceCacheRead)
+	}
+	if upd.ClearPrices {
+		add("price_input_per_mtok", nil)
+		add("price_output_per_mtok", nil)
+		add("price_cache_read_per_mtok", nil)
 	}
 	if upd.Enabled != nil {
 		add("enabled", *upd.Enabled)
@@ -552,6 +578,13 @@ func nullIfEmpty(s string) any {
 }
 
 func int64Ptr(v *int64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+func float64Ptr(v *float64) any {
 	if v == nil {
 		return nil
 	}

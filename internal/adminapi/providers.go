@@ -41,10 +41,15 @@ type modelDTO struct {
 	DisplayName   string    `json:"display_name,omitempty"`
 	Vision        bool      `json:"vision"`
 	ContextWindow *int64    `json:"context_window,omitempty"`
-	IsDefault     bool      `json:"is_default"`
-	Enabled       bool      `json:"enabled"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	// Price* are USD per million tokens; omitted (null) = unpriced, cost
+	// estimates count it as zero.
+	PriceInput     *float64  `json:"price_input,omitempty"`
+	PriceOutput    *float64  `json:"price_output,omitempty"`
+	PriceCacheRead *float64  `json:"price_cache_read,omitempty"`
+	IsDefault      bool      `json:"is_default"`
+	Enabled        bool      `json:"enabled"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func providerDTOs(providers []providerreg.Provider, withModels bool) []providerDTO {
@@ -89,16 +94,19 @@ func (h *Handler) providerDTO(ctx context.Context, p providerreg.Provider) (prov
 		d.Models = make([]modelDTO, 0, len(models))
 		for _, m := range models {
 			d.Models = append(d.Models, modelDTO{
-				ID:            m.ID,
-				ProviderID:    m.ProviderID,
-				Name:          m.Name,
-				DisplayName:   m.DisplayName,
-				Vision:        m.Vision,
-				ContextWindow: m.ContextWindow,
-				IsDefault:     m.IsDefault,
-				Enabled:       m.Enabled,
-				CreatedAt:     m.CreatedAt,
-				UpdatedAt:     m.UpdatedAt,
+				ID:             m.ID,
+				ProviderID:     m.ProviderID,
+				Name:           m.Name,
+				DisplayName:    m.DisplayName,
+				Vision:         m.Vision,
+				ContextWindow:  m.ContextWindow,
+				PriceInput:     m.PriceInput,
+				PriceOutput:    m.PriceOutput,
+				PriceCacheRead: m.PriceCacheRead,
+				IsDefault:      m.IsDefault,
+				Enabled:        m.Enabled,
+				CreatedAt:      m.CreatedAt,
+				UpdatedAt:      m.UpdatedAt,
 			})
 		}
 	}
@@ -109,16 +117,19 @@ func modelDTOs(models []providerreg.Model) []modelDTO {
 	out := make([]modelDTO, 0, len(models))
 	for _, m := range models {
 		out = append(out, modelDTO{
-			ID:            m.ID,
-			ProviderID:    m.ProviderID,
-			Name:          m.Name,
-			DisplayName:   m.DisplayName,
-			Vision:        m.Vision,
-			ContextWindow: m.ContextWindow,
-			IsDefault:     m.IsDefault,
-			Enabled:       m.Enabled,
-			CreatedAt:     m.CreatedAt,
-			UpdatedAt:     m.UpdatedAt,
+			ID:             m.ID,
+			ProviderID:     m.ProviderID,
+			Name:           m.Name,
+			DisplayName:    m.DisplayName,
+			Vision:         m.Vision,
+			ContextWindow:  m.ContextWindow,
+			PriceInput:     m.PriceInput,
+			PriceOutput:    m.PriceOutput,
+			PriceCacheRead: m.PriceCacheRead,
+			IsDefault:      m.IsDefault,
+			Enabled:        m.Enabled,
+			CreatedAt:      m.CreatedAt,
+			UpdatedAt:      m.UpdatedAt,
 		})
 	}
 	return out
@@ -504,11 +515,14 @@ func (h *Handler) listProviderModels(w http.ResponseWriter, r *http.Request) {
 }
 
 type createModelRequest struct {
-	Name          string `json:"name"`
-	DisplayName   string `json:"display_name"`
-	Vision        bool   `json:"vision"`
-	ContextWindow *int64 `json:"context_window"`
-	Enabled       *bool  `json:"enabled"`
+	Name          string   `json:"name"`
+	DisplayName   string   `json:"display_name"`
+	Vision        bool     `json:"vision"`
+	ContextWindow *int64   `json:"context_window"`
+	PriceInput    *float64 `json:"price_input"`
+	PriceOutput   *float64 `json:"price_output"`
+	PriceCacheRead *float64 `json:"price_cache_read"`
+	Enabled       *bool    `json:"enabled"`
 }
 
 func (h *Handler) createModel(w http.ResponseWriter, r *http.Request, scope string) {
@@ -526,12 +540,15 @@ func (h *Handler) createModel(w http.ResponseWriter, r *http.Request, scope stri
 		enabled = *req.Enabled
 	}
 	m, err := h.providers.CreateModel(r.Context(), providerreg.Model{
-		ProviderID:    r.PathValue("pid"),
-		Name:          req.Name,
-		DisplayName:   req.DisplayName,
-		Vision:        req.Vision,
-		ContextWindow: req.ContextWindow,
-		Enabled:       enabled,
+		ProviderID:     r.PathValue("pid"),
+		Name:           req.Name,
+		DisplayName:    req.DisplayName,
+		Vision:         req.Vision,
+		ContextWindow:  req.ContextWindow,
+		PriceInput:     req.PriceInput,
+		PriceOutput:    req.PriceOutput,
+		PriceCacheRead: req.PriceCacheRead,
+		Enabled:        enabled,
 	})
 	if err != nil {
 		writeServiceError(w, err)
@@ -557,12 +574,16 @@ func (h *Handler) createTeamModel(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateModelRequest struct {
-	Name          *string `json:"name"`
-	DisplayName   *string `json:"display_name"`
-	Vision        *bool   `json:"vision"`
-	ContextWindow *int64  `json:"context_window"`
-	ClearContext  bool    `json:"clear_context_window"`
-	Enabled       *bool   `json:"enabled"`
+	Name           *string  `json:"name"`
+	DisplayName    *string  `json:"display_name"`
+	Vision         *bool    `json:"vision"`
+	ContextWindow  *int64   `json:"context_window"`
+	ClearContext   bool     `json:"clear_context_window"`
+	PriceInput     *float64 `json:"price_input"`
+	PriceOutput    *float64 `json:"price_output"`
+	PriceCacheRead *float64 `json:"price_cache_read"`
+	ClearPrices    bool     `json:"clear_prices"`
+	Enabled        *bool    `json:"enabled"`
 }
 
 func (h *Handler) updateModel(w http.ResponseWriter, r *http.Request, scope string) {
@@ -571,12 +592,16 @@ func (h *Handler) updateModel(w http.ResponseWriter, r *http.Request, scope stri
 		return
 	}
 	m, err := h.providers.UpdateModel(r.Context(), r.PathValue("mid"), providerreg.ModelUpdate{
-		Name:          req.Name,
-		DisplayName:   req.DisplayName,
-		Vision:        req.Vision,
-		ContextWindow: req.ContextWindow,
-		ClearContext:  req.ClearContext,
-		Enabled:       req.Enabled,
+		Name:           req.Name,
+		DisplayName:    req.DisplayName,
+		Vision:         req.Vision,
+		ContextWindow:  req.ContextWindow,
+		ClearContext:   req.ClearContext,
+		PriceInput:     req.PriceInput,
+		PriceOutput:    req.PriceOutput,
+		PriceCacheRead: req.PriceCacheRead,
+		ClearPrices:    req.ClearPrices,
+		Enabled:        req.Enabled,
 	})
 	if err != nil {
 		writeServiceError(w, err)

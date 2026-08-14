@@ -66,6 +66,10 @@ export type ProviderModel = {
   display_name?: string;
   vision: boolean;
   context_window?: number | null;
+  // USD per million tokens; absent = unpriced (cost estimates count as zero).
+  price_input?: number;
+  price_output?: number;
+  price_cache_read?: number;
   is_default: boolean;
   enabled: boolean;
   created_at: string;
@@ -91,6 +95,11 @@ export type ProviderModelBody = {
   vision?: boolean;
   context_window?: number | null;
   clear_context_window?: boolean;
+  // USD per million tokens; undefined = no change, null = clear to unpriced.
+  price_input?: number | null;
+  price_output?: number | null;
+  price_cache_read?: number | null;
+  clear_prices?: boolean;
   enabled?: boolean;
 };
 
@@ -107,7 +116,14 @@ export type Tokens = {
   runs: number;
 };
 
-export type UsageRow = { id: string; label: string; tokens: Tokens };
+export type UsageRow = {
+  id: string;
+  label: string;
+  tokens: Tokens;
+  // Estimated USD spend (model-grouped reports only, from the models'
+  // configured per-million-token prices; 0 when unpriced).
+  cost?: number;
+};
 
 export type UsageReport = {
   total: Tokens;

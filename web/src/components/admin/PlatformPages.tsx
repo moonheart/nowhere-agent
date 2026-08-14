@@ -562,7 +562,7 @@ export function PlatformUsagePage() {
     <>
       <PageHeader
         title="Platform usage"
-        description="Tokens consumed across every account, grouped by account, team, or model. The per-model view is the cost read: attach per-model pricing to turn tokens into money. Counts are tokens — no pricing is configured here."
+        description="Tokens consumed across every account, grouped by account, team, or model. The per-model view is the cost read: it prices each model's tokens using the per-million-token prices configured on the provider registry (unpriced models count as zero)."
         actions={
           <div className="flex items-center gap-2">
             <NativeSelect
@@ -587,6 +587,7 @@ export function PlatformUsagePage() {
             <UsageTrend rows={data.daily} />
             <UsageRowsTable
               rows={data.rows ?? []}
+              showCost={groupBy === "model"}
               groupLabel={
                 groupBy === "team"
                   ? "Team"
