@@ -3,6 +3,8 @@ package sandbox
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -82,6 +84,20 @@ func TestDockerHostConfigHardening(t *testing.T) {
 	}
 	if len(hc.Mounts) != 1 || hc.Mounts[0].Source != "/tmp/ws" {
 		t.Errorf("workspace mount = %+v, want a single bind mount of /tmp/ws", hc.Mounts)
+	}
+}
+
+// TestDockerHostConfigNoWorkspaceNoMount: without a WorkspaceDir the container
+// gets NO bind mount — and since the rootfs is read-only, a mountless container
+// cannot persist anything (the production wiring must always pass one).
+func TestDockerHostConfigNoWorkspaceNoMount(t *testing.T) {
+	p := &DockerPort{image: "alpine:latest", workMt: "/workspace"}
+	hc, err := p.hostConfig(Options{Network: NetworkPolicy{Mode: NetworkDeny}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hc.Mounts) != 0 {
+		t.Errorf("mounts = %+v, want none when WorkspaceDir is empty", hc.Mounts)
 	}
 }
 
@@ -200,5 +216,47 @@ func TestDockerPortIntegration(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("note.txt not in listing %v", entries)
+	}
+}
+
+// TestDockerPortWorkspaceBindMountPersists: the production wiring contract —
+// a pre-created host dir passed as WorkspaceDir must be the durable home of
+// the session's files. WriteFile inside the container writes THROUGH the bind
+// mount, so the file must appear on the host at the host-side source path
+// (this is what the tool-result spill and run_command outputs rely on).
+func TestDockerPortWorkspaceBindMountPersists(t *testing.T) {
+	p, err := NewDockerPort()
+	if err != nil {
+		t.Skipf("no docker client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	ping, err := p.cli.Ping(ctx)
+	if err != nil {
+		p.cli.Close()
+		t.Skipf("no docker daemon: %v", err)
+	}
+	defer p.cli.Close()
+	if strings.EqualFold(ping.OSType, "windows") {
+		t.Skipf("docker daemon serves %s containers; this test targets linux", ping.OSType)
+	}
+
+	wsDir := t.TempDir()
+	h, err := p.Create(ctx, "itest-ws", Options{WorkspaceDir: wsDir, Network: NetworkPolicy{Mode: NetworkDeny}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer p.Destroy(ctx, h)
+
+	if err := p.WriteFile(ctx, h, "/workspace/durable.txt", strings.NewReader("host-visible")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(wsDir, "durable.txt"))
+	if err != nil {
+		t.Fatalf("host-side read of the mounted workspace failed: %v", err)
+	}
+	if string(b) != "host-visible" {
+		t.Errorf("host file content = %q, want host-visible", b)
 	}
 }

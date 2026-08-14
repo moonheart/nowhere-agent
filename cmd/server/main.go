@@ -648,26 +648,33 @@ func run() error {
 	// over the configured backend. The tool binder (below) ensures the session's
 	// sandbox and registers its file tools for each run. "off" leaves tools
 	// unregistered (pre-file-tools behaviour).
+	// The workspace root hosts per-session sandbox workspaces under
+	// <root>/<sessionID> for BOTH backends (the same convention the ImageStore
+	// and workspace.Store use): the local backend confines files to it, the
+	// docker backend bind-mounts it into the container.
+	wsRoot := cfg.Sandbox.WorkspaceDir
+	if wsRoot == "" {
+		wsRoot = cfg.Workspace.Dir
+	}
 	var sandboxMgr *sandbox.Manager
 	var sandboxPort sandbox.Port
 	switch cfg.Sandbox.Backend {
 	case "local":
-		root := cfg.Sandbox.WorkspaceDir
-		if root == "" {
-			root = cfg.Workspace.Dir
-		}
-		if root == "" {
+		if wsRoot == "" {
 			return fmt.Errorf("SANDBOX_BACKEND=local requires SANDBOX_WORKSPACE_DIR or WORKSPACE_DIR")
 		}
-		sandboxPort = sandbox.NewLocalPort(root).WithShell(cfg.Sandbox.Shell)
-		log.Info("sandbox backend: local fs", "root", root)
+		sandboxPort = sandbox.NewLocalPort(wsRoot).WithShell(cfg.Sandbox.Shell)
+		log.Info("sandbox backend: local fs", "root", wsRoot)
 	case "docker":
+		if wsRoot == "" {
+			return fmt.Errorf("SANDBOX_BACKEND=docker requires SANDBOX_WORKSPACE_DIR or WORKSPACE_DIR")
+		}
 		dp, err := sandbox.NewDockerPort()
 		if err != nil {
 			return fmt.Errorf("docker sandbox: %w", err)
 		}
 		sandboxPort = dp
-		log.Info("sandbox backend: docker")
+		log.Info("sandbox backend: docker", "root", wsRoot)
 	case "off", "":
 		log.Info("sandbox backend: off (no built-in tools)")
 	default:
@@ -1452,36 +1459,48 @@ func run() error {
 				reg.Register(memory.NewForgetMemoryTool(memPort, sess.UserID))
 			}
 			if sandboxMgr != nil {
-				h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
-					// Egress policy is re-read from the runtime settings per
-					// session, so the admin console retunes SANDBOX_NETWORK for
-					// new sessions without a restart.
-					Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(settingsRuntime.String(settings.KeySandboxNetwork))},
-				})
-				if err != nil {
-					log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
+				// The session workspace is bind-mounted into the container at
+				// /workspace — the container rootfs is read-only, so without
+				// the mount every file-tool write fails EROFS and run_command
+				// has no working directory. Pre-create the host dir (docker
+				// needs the bind source to exist); the <root>/<sessionID>
+				// layout mirrors the ImageStore and local-backend convention.
+				workspaceDir := filepath.Join(wsRoot, sessionID)
+				if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+					log.Warn("sandbox workspace create failed; run has no file tools", "session", sessionID, "dir", workspaceDir, "err", err)
 				} else {
-					for _, t := range builtin.FileTools(sandboxPort, h) {
-						reg.Register(t)
-					}
-					if execEnabledFor() {
-						// run_command's per-call ceiling is re-read from the
-						// runtime settings per session, so the admin console can
-						// retune it without a restart (default 120s).
-						reg.Register(builtin.NewRunCommand(sandboxPort, h, settingsRuntime.Duration(settings.KeyRunCommandTimeout)))
-						// Skill L2 script execution (capability-gap K3b): ONE fixed
-						// run_skill_script tool runs any visible skill's script by
-						// name, resolved lazily against the caller's scopes. A single
-						// constant tool — instead of one tool per script — keeps the
-						// tools array (and thus the LLM's cacheable prompt prefix)
-						// byte-stable no matter how many scripts exist or how often
-						// skills are edited. Execution stays C17-safe: argv +
-						// interpreter whitelist, no sh -c concatenation. Registered
-						// only when some visible skill actually has scripts.
-						for _, meta := range skillL0 {
-							if len(meta.Scripts) > 0 {
-								reg.Register(skill.NewRunSkillScript(skillEngine, scopes, sandboxPort, h))
-								break
+					h, err := sandboxMgr.Ensure(ctx, sessionID, sandbox.Options{
+						// Egress policy is re-read from the runtime settings per
+						// session, so the admin console retunes SANDBOX_NETWORK for
+						// new sessions without a restart.
+						WorkspaceDir: workspaceDir,
+						Network:      sandbox.NetworkPolicy{Mode: sandbox.NetworkMode(settingsRuntime.String(settings.KeySandboxNetwork))},
+					})
+					if err != nil {
+						log.Warn("sandbox ensure failed; run has no file tools", "session", sessionID, "err", err)
+					} else {
+						for _, t := range builtin.FileTools(sandboxPort, h) {
+							reg.Register(t)
+						}
+						if execEnabledFor() {
+							// run_command's per-call ceiling is re-read from the
+							// runtime settings per session, so the admin console can
+							// retune it without a restart (default 120s).
+							reg.Register(builtin.NewRunCommand(sandboxPort, h, settingsRuntime.Duration(settings.KeyRunCommandTimeout)))
+							// Skill L2 script execution (capability-gap K3b): ONE fixed
+							// run_skill_script tool runs any visible skill's script by
+							// name, resolved lazily against the caller's scopes. A single
+							// constant tool — instead of one tool per script — keeps the
+							// tools array (and thus the LLM's cacheable prompt prefix)
+							// byte-stable no matter how many scripts exist or how often
+							// skills are edited. Execution stays C17-safe: argv +
+							// interpreter whitelist, no sh -c concatenation. Registered
+							// only when some visible skill actually has scripts.
+							for _, meta := range skillL0 {
+								if len(meta.Scripts) > 0 {
+									reg.Register(skill.NewRunSkillScript(skillEngine, scopes, sandboxPort, h))
+									break
+								}
 							}
 						}
 					}
