@@ -75,7 +75,7 @@ func (p failingProvider) Stream(context.Context, provider.Request) (<-chan provi
 }
 
 func failingLoop(err error) LoopFactory {
-	return func(ctx context.Context, system string) *agent.Loop {
+	return func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(failingProvider{err: err}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}
 }
@@ -164,7 +164,7 @@ func newFailingGatedProvider(errText string) *failingGatedProvider {
 }
 
 func gatedLoopFailing(p *failingGatedProvider) LoopFactory {
-	return func(ctx context.Context, system string) *agent.Loop {
+	return func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(p, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}
 }

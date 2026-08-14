@@ -31,7 +31,7 @@ func main() {
 
 	adapter := anthropic.New("test-key", anthropic.WithEndpoint(mock.URL))
 	mux := http.NewServeMux()
-	chatapi.NewHandler(func(ctx context.Context, system string) *agent.Loop {
+	chatapi.NewHandler(func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(adapter, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}, "").Register(mux)
 

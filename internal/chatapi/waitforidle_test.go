@@ -16,7 +16,7 @@ import (
 // settle succeed instead of 409-ing on a run that is already on its way out.
 func TestWaitForIdle(t *testing.T) {
 	rt := session.NewRuntime(session.NewMemStore()).WithBus(session.NewMemBus())
-	h := NewHandler(func(context.Context, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
+	h := NewHandler(func(context.Context, string, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestWaitForIdle(t *testing.T) {
 // (the resume client disconnected) rather than spinning to the timeout.
 func TestWaitForIdleHonoursContext(t *testing.T) {
 	rt := session.NewRuntime(session.NewMemStore()).WithBus(session.NewMemBus())
-	h := NewHandler(func(context.Context, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
+	h := NewHandler(func(context.Context, string, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
 	sess, err := rt.CreateSession(context.Background(), "u", "t")
 	if err != nil {
 		t.Fatal(err)

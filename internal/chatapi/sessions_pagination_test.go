@@ -23,7 +23,7 @@ import (
 func TestServeSessionsPagination(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
-	h := NewHandler(func(context.Context, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
+	h := NewHandler(func(context.Context, string, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	user := identity.User{ID: "paging"}
@@ -92,7 +92,7 @@ func TestServeSessionsPagination(t *testing.T) {
 func TestServeSessionsSearch(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
-	h := NewHandler(func(context.Context, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
+	h := NewHandler(func(context.Context, string, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	user := identity.User{ID: "searcher"}
@@ -144,7 +144,7 @@ func TestServeSessionsSearch(t *testing.T) {
 func TestServeSessionsSearchAcrossPages(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
-	h := NewHandler(func(context.Context, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
+	h := NewHandler(func(context.Context, string, string) *agent.Loop { return nil }, "sys").WithRuntime(rt)
 	mux := http.NewServeMux()
 	h.Register(mux)
 	user := identity.User{ID: "searchpager"}

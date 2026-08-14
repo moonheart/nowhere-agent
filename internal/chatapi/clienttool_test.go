@@ -63,7 +63,7 @@ func TestChatClientToolEndToEnd(t *testing.T) {
 	rt := session.NewRuntime(store)
 	msgStore := session.NewMemMessageStore()
 
-	h := NewHandler(func(ctx context.Context, system string) *agent.Loop {
+	h := NewHandler(func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(&clientToolScriptProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}, "sys").WithRuntime(rt).WithMessageStore(msgStore)
 
@@ -152,7 +152,7 @@ func TestChatClientToolOutputValidated(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
 	msgStore := session.NewMemMessageStore()
-	h := NewHandler(func(ctx context.Context, system string) *agent.Loop {
+	h := NewHandler(func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(&clientToolScriptProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}, "sys").WithRuntime(rt).WithMessageStore(msgStore)
 	mux := http.NewServeMux()

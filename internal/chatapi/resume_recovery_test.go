@@ -60,7 +60,7 @@ func TestChatResumeRetryAfterFoldFailure(t *testing.T) {
 	msgStore := session.NewMemMessageStore()
 
 	dangerRuns := 0
-	h := NewHandler(func(ctx context.Context, system string) *agent.Loop {
+	h := NewHandler(func(ctx context.Context, system, model string) *agent.Loop {
 		loop := agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 		loop.RegisterTool(dangerCountTool{runs: &dangerRuns})
 		return loop

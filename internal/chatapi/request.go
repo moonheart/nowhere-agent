@@ -24,6 +24,11 @@ type dataStreamRequest struct {
 	// blocks to the most recent user message. (The data-stream runtime mangles
 	// per-message image parts into opaque file parts, so images travel top-level.)
 	Images []incomingImagePart `json:"images,omitempty"`
+	// Model optionally selects the model this run uses on the caller's
+	// resolved provider. Empty = the provider's default model. An unknown or
+	// disabled name falls back to the default rather than failing the run
+	// (a stale client picker must not break chat).
+	Model string `json:"model,omitempty"`
 	// Approval, when set, turns this POST into a verdict on a parked run rather
 	// than a new turn: the handler resumes the run and streams its continuation
 	// over the same ui-message-stream response (reusing the chat attach path).

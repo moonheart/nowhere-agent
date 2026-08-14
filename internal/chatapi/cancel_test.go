@@ -92,7 +92,7 @@ func newParkedHandler() (*Handler, *session.Runtime, *parkedProvider) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
 	pp := &parkedProvider{start: make(chan struct{})}
-	factory := func(ctx context.Context, system string) *agent.Loop {
+	factory := func(ctx context.Context, system, model string) *agent.Loop {
 		pp.ctx = ctx
 		return agent.New(pp, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}
@@ -311,7 +311,7 @@ func TestDisconnectLeavesRunRunning(t *testing.T) {
 	store := session.NewMemStore()
 	rt := session.NewRuntime(store)
 	pp := &dripProvider{start: make(chan struct{})}
-	factory := func(ctx context.Context, system string) *agent.Loop {
+	factory := func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(pp, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}
 	h := NewHandler(factory, "sys").WithRuntime(rt)

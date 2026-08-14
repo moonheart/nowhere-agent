@@ -73,7 +73,7 @@ func (p *gatedProvider) Stream(ctx context.Context, _ provider.Request) (<-chan 
 }
 
 func gatedLoop(p *gatedProvider) LoopFactory {
-	return func(ctx context.Context, system string) *agent.Loop {
+	return func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(p, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}
 }

@@ -67,7 +67,7 @@ func TestCrossRunHistoryRebuiltFromStore(t *testing.T) {
 	rt := session.NewRuntime(store)
 	ms := session.NewMemMessageStore()
 	rp := &recordingProvider{}
-	loop := func(ctx context.Context, system string) *agent.Loop {
+	loop := func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(rp, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}
 	h := NewHandler(loop, "sys").WithRuntime(rt).WithMessageStore(ms)
@@ -105,7 +105,7 @@ func TestForgedClientHistoryIgnored(t *testing.T) {
 	rt := session.NewRuntime(store)
 	ms := session.NewMemMessageStore()
 	rp := &recordingProvider{}
-	loop := func(ctx context.Context, system string) *agent.Loop {
+	loop := func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(rp, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}
 	h := NewHandler(loop, "sys").WithRuntime(rt).WithMessageStore(ms)

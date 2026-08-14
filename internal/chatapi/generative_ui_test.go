@@ -57,7 +57,7 @@ func TestChatStreamsGenerativeUIFrameLive(t *testing.T) {
 	msgStore := session.NewMemMessageStore()
 	user := identity.User{ID: "genui-user"}
 
-	h := NewHandler(func(ctx context.Context, system string) *agent.Loop {
+	h := NewHandler(func(ctx context.Context, system, model string) *agent.Loop {
 		reg := toolruntime.NewRegistry()
 		reg.Register(builtin.NewTestUI())
 		return agent.New(&genUIProvider{}, reg, agent.Config{Model: "m", System: system, MaxTokens: 100})
@@ -149,7 +149,7 @@ func TestChatStreamsProgressFramesLive(t *testing.T) {
 	msgStore := session.NewMemMessageStore()
 	user := identity.User{ID: "progress-user"}
 
-	h := NewHandler(func(ctx context.Context, system string) *agent.Loop {
+	h := NewHandler(func(ctx context.Context, system, model string) *agent.Loop {
 		reg := toolruntime.NewRegistry()
 		reg.Register(builtin.NewProgressUI())
 		return agent.New(&progressUIProvider{}, reg, agent.Config{Model: "m", System: system, MaxTokens: 100})

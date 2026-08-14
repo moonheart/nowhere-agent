@@ -1688,7 +1688,7 @@ func schemas() map[string]any {
 				"session_id":    map[string]any{"type": "string", "description": "continue an existing session (empty = new)"},
 				"mode":          map[string]any{"type": "string", "description": "response_mode: chat | resume", "enum": []string{"chat", "resume"}},
 				"system_prompt": map[string]any{"type": "string", "description": "override the system prompt for this run"},
-				"model":         map[string]any{"type": "string", "description": "model override on the resolved provider"},
+				"model":         map[string]any{"type": "string", "description": "model override on the resolved provider; an unknown/disabled name falls back to the provider's default"},
 				"images": map[string]any{
 					"type":        "array",
 					"description": "images attached to the current user turn, pre-uploaded to the session workspace",

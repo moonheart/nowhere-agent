@@ -28,8 +28,42 @@ func (stubProvider) Stream(context.Context, provider.Request) (<-chan provider.E
 	return ch, nil
 }
 
-func newTestLoop(ctx context.Context, system string) *agent.Loop {
+func newTestLoop(ctx context.Context, system, model string) *agent.Loop {
 	return agent.New(stubProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
+}
+
+// TestServeChatForwardsRequestedModel pins the chat-side model selection
+// contract: the request's optional model field reaches the LoopFactory, and
+// an absent field arrives as "" (the server resolves the default).
+func TestServeChatForwardsRequestedModel(t *testing.T) {
+	got := make(chan string, 1)
+	loop := func(ctx context.Context, system, model string) *agent.Loop {
+		got <- model
+		return newTestLoop(ctx, system, model)
+	}
+	h := NewHandler(loop, "sys")
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}],"model":"gpt-4o-mini"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if m := <-got; m != "gpt-4o-mini" {
+		t.Errorf("loop model = %q, want gpt-4o-mini", m)
+	}
+
+	req = httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if m := <-got; m != "" {
+		t.Errorf("loop model without a request field = %q, want \"\"", m)
+	}
 }
 
 func TestServeChatStreamsUIProtocol(t *testing.T) {

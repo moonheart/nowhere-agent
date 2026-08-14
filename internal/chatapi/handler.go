@@ -24,9 +24,11 @@ import (
 
 // LoopFactory builds an agent loop for a chat request (provider + tools wired
 // by the server). system is the composed system prompt for this request
-// (base + skills + recalled memory). Keeping it a factory lets the handler
-// stay transport-only.
-type LoopFactory func(ctx context.Context, system string) *agent.Loop
+// (base + skills + recalled memory). model is the client-requested model name
+// ("" = the resolved provider's default; an invalid name is the server's job
+// to fall back, never a reason to fail the run). Keeping it a factory lets
+// the handler stay transport-only.
+type LoopFactory func(ctx context.Context, system, model string) *agent.Loop
 
 // TeamAttributor resolves which team's provider key bills a request from this
 // user (enterprise-readiness P1-3): the team id when a team key applies, ""
@@ -375,7 +377,7 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loop := h.newLoop(r.Context(), h.systemPromptFor(r, req))
+	loop := h.newLoop(r.Context(), h.systemPromptFor(r, req), req.Model)
 
 	// No runtime wired (tests/dev): stream the loop directly with no persistence,
 	// no registry, no run-state — the pre-registry behaviour.
@@ -560,7 +562,7 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	// system prompt goes through the ContextBuilder (skill L0 index) exactly
 	// like a fresh submission; a verdict carries no new user text, so the
 	// query is empty.
-	loop := h.newLoop(r.Context(), h.systemPromptForText(r, ""))
+	loop := h.newLoop(r.Context(), h.systemPromptForText(r, ""), "")
 	if h.bindTools != nil {
 		h.bindTools(r.Context(), loop, sessID)
 	}

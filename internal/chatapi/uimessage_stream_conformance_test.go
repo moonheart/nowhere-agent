@@ -260,7 +260,7 @@ func (echoToolForConformance) Call(_ context.Context, _ map[string]any) (toolrun
 }
 
 func toolLoop(p *scriptToolProvider) LoopFactory {
-	return func(ctx context.Context, system string) *agent.Loop {
+	return func(ctx context.Context, system, model string) *agent.Loop {
 		reg := toolruntime.NewRegistry()
 		reg.Register(echoToolForConformance{})
 		return agent.New(p, reg, agent.Config{Model: "m", System: system, MaxTokens: 100})

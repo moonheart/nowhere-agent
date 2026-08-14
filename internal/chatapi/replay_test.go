@@ -37,7 +37,7 @@ func (thinkingStub) Stream(context.Context, provider.Request) (<-chan provider.E
 	return ch, nil
 }
 
-func newThinkingLoop(ctx context.Context, system string) *agent.Loop {
+func newThinkingLoop(ctx context.Context, system, model string) *agent.Loop {
 	return agent.New(thinkingStub{}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 }
 

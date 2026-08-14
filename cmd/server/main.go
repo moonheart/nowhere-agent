@@ -1197,12 +1197,22 @@ func run() error {
 		// an error. An unresolvable request therefore gets a loop over a stub
 		// adapter that errors on the first model call — the client sees a clear
 		// "no provider available" error frame instead of a hang or a panic.
-		newChatLoop := func(ctx context.Context, system string) *agent.Loop {
+		// model is the client-requested model ("" = the resolved default):
+		// chat-side selection is BEST-EFFORT, so an unknown/disabled name falls
+		// back to the provider's default (a stale picker must not break chat),
+		// unlike scheduled-task/agent-definition overrides, which stay
+		// fail-closed inside buildLoop.
+		newChatLoop := func(ctx context.Context, system, model string) *agent.Loop {
 			userID := ""
 			if u, ok := identity.UserFromContext(ctx); ok {
 				userID = u.ID
 			}
-			loop, err := buildLoop(ctx, userID, "", system, "", chatCompressBreaker)
+			loop, err := buildLoop(ctx, userID, "", system, model, chatCompressBreaker)
+			if errors.Is(err, providerreg.ErrUnknownModel) {
+				log.Warn("chat requested model not enabled on the resolved provider; using its default", "user", userID, "model", model)
+				model = ""
+				loop, err = buildLoop(ctx, userID, "", system, model, chatCompressBreaker)
+			}
 			if err != nil {
 				log.Warn("chat loop build failed", "user", userID, "err", err)
 				return agent.New(noProviderAdapter{}, toolruntime.NewRegistry(), agent.Config{Model: "", System: system, MaxTokens: 1024})

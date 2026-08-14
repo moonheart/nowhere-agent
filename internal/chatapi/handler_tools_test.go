@@ -66,7 +66,7 @@ func TestChatToolBinderDrivesFileTools(t *testing.T) {
 	mgr := sandbox.NewManager(sb)
 	msgStore := session.NewMemMessageStore()
 
-	h := NewHandler(func(ctx context.Context, system string) *agent.Loop {
+	h := NewHandler(func(ctx context.Context, system, model string) *agent.Loop {
 		return agent.New(&toolScriptProvider{}, toolruntime.NewRegistry(), agent.Config{Model: "m", System: system, MaxTokens: 100})
 	}, "sys").WithRuntime(rt).WithMessageStore(msgStore).WithToolBinder(func(ctx context.Context, loop *agent.Loop, sessionID string) {
 		handle, err := mgr.Ensure(ctx, sessionID, sandbox.Options{})
