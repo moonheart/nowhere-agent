@@ -898,22 +898,47 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 		}
 	}
 
-	// Live-follow until the run settles or the client disconnects. A periodic
-	// settle check covers the case where the run finished between subscribe and
-	// now (no frame will ever arrive), which the frame-driven loop can't observe.
-	settlePoll := time.NewTicker(20 * time.Millisecond)
+	// Live-follow until the run settles or the client disconnects. Settle
+	// detection is event-driven: the run's terminal lifecycle event
+	// (done/error/cancelled) is the primary signal, and a one-shot ActiveRun
+	// check right after subscribe covers a run that settled between the
+	// caller's pre-check and this loop. The settle poll is only the FALLBACK
+	// for a settle no terminal event ever reported (a dropped bus event, or a
+	// run force-settled without one) — so a multi-instance attach no longer
+	// hits the DB at 50qps per client while following an active run.
+	settlePoll := time.NewTicker(250 * time.Millisecond)
 	defer settlePoll.Stop()
+
+	// One-shot settle check: a run that settled since the caller's pre-check
+	// will never send another frame, and catching it here is free (this is the
+	// case the first poll tick used to pay for).
+	if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
+		maxOffset = h.drainContent(r, emitter, broker, sessionID, contentCh, run.ID, maxOffset)
+		h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
+		h.settleFinish(r, emitter, sessionID, run.ID, "")
+		return
+	}
+
+	// terminal latches once this run's terminal lifecycle event is observed.
+	// From then on the poll tick closes the stream without another DB check;
+	// the tick is the trailing-content grace (content may still be in the
+	// broker poller's pipeline — the terminal event and the last content frame
+	// travel different channels).
+	terminal := false
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-settlePoll.C:
-			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
-				maxOffset = h.drainContent(r, emitter, broker, sessionID, contentCh, run.ID, maxOffset)
-				h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
-				h.settleFinish(r, emitter, sessionID, run.ID, "")
-				return
+			if !terminal {
+				if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); stillActive {
+					continue
+				}
 			}
+			maxOffset = h.drainContent(r, emitter, broker, sessionID, contentCh, run.ID, maxOffset)
+			h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
+			h.settleFinish(r, emitter, sessionID, run.ID, "")
+			return
 		case e, open := <-lifecycleCh:
 			if !open {
 				continue
@@ -922,8 +947,9 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 				continue
 			}
 			emitLifecycleEvent(r, emitter, e)
-			// A terminal lifecycle event ends the run; the settle check will close
-			// the stream on the next tick (giving any trailing content a chance).
+			if terminalLifecycle(e.Kind) {
+				terminal = true
+			}
 		case e, open := <-contentCh:
 			if !open {
 				maxOffset = h.drainContent(r, emitter, broker, sessionID, contentCh, run.ID, maxOffset)
@@ -946,14 +972,19 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			}
 			maxOffset = e.Offset
 			emitStreamEvent(r, emitter, e)
-			// The run may have settled without a further frame we can observe.
-			if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); !stillActive {
-				maxOffset = h.drainContent(r, emitter, broker, sessionID, contentCh, run.ID, maxOffset)
-				h.drainLifecycle(r, emitter, lifecycleCh, run.ID)
-				h.settleFinish(r, emitter, sessionID, run.ID, "")
-				return
-			}
 		}
+	}
+}
+
+// terminalLifecycle reports whether a lifecycle event ends its run. The run's
+// terminal frame (done/error/cancelled) is the attach loop's primary settle
+// signal; the settle poll exists only for settles it never reported.
+func terminalLifecycle(kind string) bool {
+	switch agent.EventKind(kind) {
+	case agent.KindDone, agent.KindError, agent.KindCancelled:
+		return true
+	default:
+		return false
 	}
 }
 
