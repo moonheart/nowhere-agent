@@ -8,6 +8,7 @@ package export
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,6 +76,45 @@ type memoryRow struct {
 	Deprecated bool      `json:"deprecated"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// uploadRow is one exported upload: the metadata (same field names the raw
+// record encoded before) plus the blob payload base64-embedded, so the
+// document is a self-contained copy off-platform — a bare blob pointer is
+// useless once the workspace is gone.
+type uploadRow struct {
+	ID            string    `json:"ID"`
+	UserID        string    `json:"UserID"`
+	Filename      string    `json:"Filename"`
+	Size          int64     `json:"Size"`
+	MediaType     string    `json:"MediaType"`
+	CreatedAt     time.Time `json:"CreatedAt"`
+	ContentBase64 string    `json:"ContentBase64"`
+}
+
+// embedUpload reads one upload's blob (confined to its owner's upload scope)
+// and returns the row with the payload base64-encoded. One blob is held in
+// memory at a time.
+func (s *Service) embedUpload(ctx context.Context, up upload.Upload) (uploadRow, error) {
+	row := uploadRow{
+		ID:        up.ID,
+		UserID:    up.UserID,
+		Filename:  up.Filename,
+		Size:      up.Size,
+		MediaType: up.MediaType,
+		CreatedAt: up.CreatedAt,
+	}
+	rc, err := s.uploads.Open(ctx, up.UserID, up.ID)
+	if err != nil {
+		return uploadRow{}, fmt.Errorf("export upload %s blob: %w", up.ID, err)
+	}
+	defer rc.Close()
+	raw, err := io.ReadAll(rc)
+	if err != nil {
+		return uploadRow{}, fmt.Errorf("export upload %s blob: %w", up.ID, err)
+	}
+	row.ContentBase64 = base64.StdEncoding.EncodeToString(raw)
+	return row, nil
 }
 
 // taskRow is one exported scheduled task (mirrors the console DTO shape).
@@ -275,8 +315,12 @@ func (s *Service) Write(ctx context.Context, w io.Writer, u identity.User) error
 		}
 	}
 
-	// Uploads (metadata + blob pointers; the blobs themselves are served by
-	// the existing upload endpoints).
+	// Uploads: metadata + the blob payload base64-embedded, so the document is
+	// a self-contained copy off-platform. Blobs are read and encoded ONE
+	// upload at a time (memory holds a single image, not the user's whole
+	// gallery); a read failure fails the export rather than silently dropping
+	// image content from a document that promises a complete copy. A user
+	// without uploads keeps the legacy `null` shape.
 	if s.uploads != nil {
 		ups, err := s.uploads.List(ctx, u.ID)
 		if err != nil {
@@ -285,8 +329,31 @@ func (s *Service) Write(ctx context.Context, w io.Writer, u identity.User) error
 		if _, err := io.WriteString(w, `,"uploads":`); err != nil {
 			return err
 		}
-		if err := enc.Encode(ups); err != nil {
-			return err
+		if len(ups) == 0 {
+			if _, err := io.WriteString(w, `null`); err != nil {
+				return err
+			}
+		} else {
+			if _, err := io.WriteString(w, `[`); err != nil {
+				return err
+			}
+			for i, up := range ups {
+				if i > 0 {
+					if _, err := io.WriteString(w, ","); err != nil {
+						return err
+					}
+				}
+				row, err := s.embedUpload(ctx, up)
+				if err != nil {
+					return err
+				}
+				if err := enc.Encode(row); err != nil {
+					return err
+				}
+			}
+			if _, err := io.WriteString(w, `]`); err != nil {
+				return err
+			}
 		}
 	}
 

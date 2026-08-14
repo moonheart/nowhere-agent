@@ -3,6 +3,7 @@ package upload
 import (
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
@@ -19,6 +20,10 @@ type Uploader interface {
 	Upload(ctx context.Context, userID, name string, raw []byte) (Upload, error)
 	// List returns the user's uploads, newest first.
 	List(ctx context.Context, userID string) ([]Upload, error)
+	// Open returns a reader over one of the user's upload blobs (confined to
+	// the user's own upload scope). It is the read half the data-export path
+	// uses to embed image content into the document.
+	Open(ctx context.Context, userID, id string) (io.ReadCloser, error)
 	// Delete removes the user's upload. Returns ErrNotFound for a missing or
 	// unowned upload and ErrReferenced when a message still uses the image.
 	Delete(ctx context.Context, userID, id string) error
@@ -126,6 +131,14 @@ func (s *Service) checkQuota(ctx context.Context, userID string, q Quota, incomi
 // List returns the caller's uploads, newest first.
 func (s *Service) List(ctx context.Context, userID string) ([]Upload, error) {
 	return s.store.ListByUser(ctx, userID)
+}
+
+// Open returns a reader over the upload's blob bytes, resolved through the
+// upload-scoped path ("uploads/<id>.webp") so a caller can never read outside
+// their own upload scope. A missing or unowned blob surfaces as the blob
+// store's not-found error.
+func (s *Service) Open(ctx context.Context, userID, id string) (io.ReadCloser, error) {
+	return s.blobs.OpenUserUpload(userID, "uploads/"+id+".webp")
 }
 
 // Delete removes the caller's upload. Ownership is enforced (a foreign id is a

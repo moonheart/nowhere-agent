@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -43,6 +44,24 @@ func (m *memUploader) List(_ context.Context, userID string) ([]upload.Upload, e
 		}
 	}
 	return out, nil
+}
+
+// Open returns a reader over the recorded blob (the memUploader keeps only
+// metadata; the bytes are reconstructed from the record so the export path
+// can round-trip).
+func (m *memUploader) Open(_ context.Context, userID, id string) (io.ReadCloser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, u := range m.uploads {
+		if u.ID != id && u.UserID != userID {
+			continue
+		}
+		if u.UserID != userID {
+			return nil, upload.ErrNotFound
+		}
+		return io.NopCloser(strings.NewReader("blob-" + id)), nil
+	}
+	return nil, upload.ErrNotFound
 }
 
 func (m *memUploader) Delete(_ context.Context, userID, id string) error {

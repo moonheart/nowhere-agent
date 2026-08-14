@@ -376,7 +376,10 @@ func (f *fakeUploader) Upload(_ context.Context, userID, name string, raw []byte
 }
 
 func (f *fakeUploader) List(context.Context, string) ([]upload.Upload, error) { return nil, nil }
-func (f *fakeUploader) Delete(context.Context, string, string) error          { return nil }
+func (f *fakeUploader) Open(_ context.Context, userID, id string) (io.ReadCloser, error) {
+	return f.store.OpenUserUpload(userID, "uploads/"+id+".webp")
+}
+func (f *fakeUploader) Delete(context.Context, string, string) error { return nil }
 
 func setupUserUploadHandler(t *testing.T) (http.Handler, *workspace.ImageStore) {
 	t.Helper()

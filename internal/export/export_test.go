@@ -1,8 +1,11 @@
 package export
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +13,24 @@ import (
 	"nowhere-agent/internal/identity"
 	"nowhere-agent/internal/memory"
 	"nowhere-agent/internal/session"
+	"nowhere-agent/internal/upload"
 )
+
+// fakeUploader serves upload metadata plus a fixed blob payload for export
+// tests.
+type fakeUploader struct {
+	ups  []upload.Upload
+	blob []byte
+}
+
+func (f *fakeUploader) Upload(context.Context, string, string, []byte) (upload.Upload, error) {
+	return upload.Upload{}, nil
+}
+func (f *fakeUploader) List(context.Context, string) ([]upload.Upload, error) { return f.ups, nil }
+func (f *fakeUploader) Open(context.Context, string, string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(f.blob)), nil
+}
+func (f *fakeUploader) Delete(context.Context, string, string) error { return nil }
 
 // memMessageStore is a minimal MessageStore for export tests.
 type memMessageStore struct {
@@ -129,6 +149,53 @@ func messages1N(n int) []session.StoredMessage {
 		out = append(out, session.StoredMessage{ID: int64(i), SessionID: "s1", Seq: i, Role: "assistant"})
 	}
 	return out
+}
+
+// TestWriteEmbedsUploadBlobs pins the uploads section: each upload carries its
+// blob payload base64-embedded, so the export document is a self-contained
+// copy off-platform. The metadata keeps the pre-existing field names.
+func TestWriteEmbedsUploadBlobs(t *testing.T) {
+	blob := []byte("fake-webp-bytes")
+	ups := []upload.Upload{
+		{ID: "u1", UserID: "u1", Filename: "a.png", Size: int64(len(blob)), MediaType: "image/webp", CreatedAt: time.Now()},
+	}
+	svc := New(nil, nil, nil, &fakeUploader{ups: ups, blob: blob}, nil)
+
+	var buf strings.Builder
+	u := identity.User{ID: "u1", Email: "a@b.cn", CreatedAt: time.Now()}
+	if err := svc.Write(context.Background(), &buf, u); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(buf.String()), &doc); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	arr, ok := doc["uploads"].([]any)
+	if !ok || len(arr) != 1 {
+		t.Fatalf("uploads = %v, want one row", doc["uploads"])
+	}
+	row := arr[0].(map[string]any)
+	if row["ID"] != "u1" || row["Filename"] != "a.png" || row["MediaType"] != "image/webp" {
+		t.Errorf("upload metadata wrong: %v", row)
+	}
+	if want := base64.StdEncoding.EncodeToString(blob); row["ContentBase64"] != want {
+		t.Errorf("ContentBase64 = %q, want %q", row["ContentBase64"], want)
+	}
+}
+
+// TestWriteNullUploadsWhenNone pins the legacy shape: a user without uploads
+// renders "uploads":null (the raw-record encoding emitted null for a nil
+// list).
+func TestWriteNullUploadsWhenNone(t *testing.T) {
+	svc := New(nil, nil, nil, &fakeUploader{}, nil)
+	var buf strings.Builder
+	u := identity.User{ID: "u1", Email: "a@b.cn", CreatedAt: time.Now()}
+	if err := svc.Write(context.Background(), &buf, u); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"uploads":null`) {
+		t.Errorf("no-upload user rendered %q, want \"uploads\":null", buf.String())
+	}
 }
 
 // TestWriteSessionStreamsMessagePages pins the keyset streaming: a session
