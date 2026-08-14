@@ -25,6 +25,9 @@ const defaultMaxDepth = 3
 // defaultTimeout bounds a single subagent run.
 const defaultTimeout = 5 * time.Minute
 
+// defaultDescTimeout bounds Description()'s definition-store lookup.
+const defaultDescTimeout = 5 * time.Second
+
 // Fan-out budget defaults: bound the total subagent runs and concurrency per
 // top-level run so a single prompt can't trigger a fork/cost bomb.
 const (
@@ -59,6 +62,10 @@ type SpawnTool struct {
 	maxTotal int
 	spawned  atomic.Int64
 	sem      chan struct{}
+	// descTimeout bounds the per-run tool-registry build's definition lookup
+	// (Description runs under a bare context; a stalled store must not hang
+	// run startup).
+	descTimeout time.Duration
 }
 
 // NewSpawnTool creates a spawn tool over a definition resolver, the run's tool
@@ -81,6 +88,7 @@ func NewSpawnTool(resolver *agentdef.Resolver, parent *toolruntime.Registry, fac
 		timeout:  defaultTimeout,
 		maxTotal: defaultMaxTotal,
 		sem:      make(chan struct{}, defaultMaxConcurrent),
+		descTimeout: defaultDescTimeout,
 	}
 }
 
@@ -113,14 +121,19 @@ func (t *SpawnTool) Name() string { return ToolName }
 
 // Description tells the model what the tool does, and lists the agent types
 // currently resolvable in this run's scopes (name + when-to-use) so the model
-// can pick a subagent_type instead of guessing.
+// can pick a subagent_type instead of guessing. The registry is rebuilt per
+// run (agent/loop.go) with no run ctx available, so the definition lookup runs
+// under a short timeout: a stalled definition store degrades to the built-in
+// list instead of hanging run startup indefinitely.
 func (t *SpawnTool) Description() string {
 	base := "Launch a subagent to handle a delegated task autonomously in an isolated context. " +
 		"The subagent runs its own agent loop with a scoped set of tools and returns a single result to you. " +
 		"It does NOT see this conversation, so write a self-contained prompt: state the goal, the relevant context, " +
 		"and whether you want research or changes. Omit subagent_type to use the general-purpose agent. " +
 		"To run subagents in parallel, emit multiple spawn_agent calls in one turn."
-	names := t.resolver.Available(context.Background(), t.scopes)
+	ctx, cancel := context.WithTimeout(context.Background(), t.descTimeout)
+	defer cancel()
+	names := t.resolver.Available(ctx, t.scopes)
 	if len(names) == 0 {
 		return base
 	}
@@ -130,7 +143,7 @@ func (t *SpawnTool) Description() string {
 	for _, n := range names {
 		b.WriteString("\n- ")
 		b.WriteString(n)
-		if def, err := t.resolver.Resolve(context.Background(), n, t.scopes); err == nil && def.WhenToUse != "" {
+		if def, err := t.resolver.Resolve(ctx, n, t.scopes); err == nil && def.WhenToUse != "" {
 			b.WriteString(": ")
 			b.WriteString(def.WhenToUse)
 		}

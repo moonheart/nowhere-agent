@@ -471,6 +471,41 @@ func TestSpawnToolDescriptionListsAgentTypes(t *testing.T) {
 	}
 }
 
+// blockingDefLister never returns: it blocks until its ctx ends, standing in
+// for a stalled definition store.
+type blockingDefLister struct{}
+
+func (blockingDefLister) ListVisible(ctx context.Context, _ []identity.ScopeRef) ([]agentdef.StoredDef, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestSpawnToolDescriptionBounded pins the Description timeout: the tool
+// registry is rebuilt per run with a bare context, so a stalled definition
+// store must degrade to the built-in list within the bound instead of
+// hanging run startup (agent/loop.go builds descriptions with no run ctx).
+func TestSpawnToolDescriptionBounded(t *testing.T) {
+	tool := NewSpawnTool(agentdef.NewResolver(agentdef.NewStore(), blockingDefLister{}),
+		toolruntime.NewRegistry(),
+		func(context.Context, agentdef.AgentDef, int) (*agent.Loop, error) {
+			return agent.New(echoProvider{"x"}, toolruntime.NewRegistry(), childCfg()), nil
+		}, 3)
+	tool.descTimeout = 50 * time.Millisecond
+
+	start := time.Now()
+	desc := tool.Description()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Description blocked past its timeout: %v", elapsed)
+	}
+	if !strings.Contains(desc, "Launch a subagent") {
+		t.Fatalf("description lost the base text: %q", desc)
+	}
+	// The store-degradation path still resolves the built-in list.
+	if !strings.Contains(desc, agentdef.GeneralPurpose) {
+		t.Fatalf("description must still list the built-in general-purpose type: %q", desc)
+	}
+}
+
 // kindRecorder is an agent.Emitter that records event kinds.
 type kindRecorder struct{ fn func(agent.EventKind) }
 
