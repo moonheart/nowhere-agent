@@ -22,10 +22,14 @@ import (
 // second-factor attempts run on the separate totp throttler, and a correct
 // password never records a throttle failure).
 //
-// In-memory by design: a single gateway process. Multi-instance deployments
-// share the limiter's effect only per instance — an acceptable trade for the
-// class of attack this stops (a remote attacker cannot use N instances to
-// multiply attempts against the same pair unless they control the pairing).
+// In-memory, per gateway process — the documented multi-instance degradation:
+// every instance counts its own failures, so N gateways multiply the failure
+// budget of one (email, ip) pair by N (5*N guesses per window from one
+// address, spread across instances). No shared state exists today. Operators
+// running more than one gateway should front the auth surface with a shared
+// reverse-proxy limiter or pin login to a single instance — the per-IP floor
+// and the global request limiter are likewise per-instance in-memory. A
+// shared (Redis/PG-backed) throttle is a future enhancement.
 
 const (
 	// loginMaxFailures is how many failed attempts within the window lock the

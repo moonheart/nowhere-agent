@@ -17,9 +17,13 @@ import (
 //     (a daily quota per address, so a scripted sweep across numbers cannot
 //     multiply sends). The per-code 60s cooldown stays the fine-grained wall.
 //
-// In-memory by design, like LoginThrottler: single gateway process; multi-
-// instance deployments share the effect per instance, acceptable for the
-// attack class this stops.
+// In-memory, per gateway process, like LoginThrottler — the documented
+// multi-instance degradation: N gateways multiply the daily send quotas (a
+// phone can receive 10*N codes and an IP can trigger 30*N sends per day) and
+// the (phone, ip) verify lockout budget by N. No shared state exists today;
+// operators running more than one gateway should front the phone routes with
+// a shared reverse-proxy limiter or pin them to a single instance. A shared
+// (Redis/PG-backed) throttle is a future enhancement.
 
 const (
 	// otpMaxVerifyFailures locks the (phone, ip) pair after this many wrong
