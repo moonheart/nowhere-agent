@@ -155,6 +155,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "upload not found")
 	case errors.Is(err, upload.ErrReferenced):
 		writeError(w, http.StatusConflict, "image is used by a conversation; delete it there first")
+	case errors.Is(err, upload.ErrBlobRemovalFailed):
+		writeError(w, http.StatusInternalServerError, "upload record removed but its stored file could not be deleted; contact the operator")
 	case errors.Is(err, session.ErrSessionNotFound):
 		writeError(w, http.StatusNotFound, "session not found")
 	case identity.IsNotFound(err):

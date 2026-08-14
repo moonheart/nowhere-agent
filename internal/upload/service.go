@@ -3,7 +3,9 @@ package upload
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
@@ -25,7 +27,9 @@ type Uploader interface {
 	// uses to embed image content into the document.
 	Open(ctx context.Context, userID, id string) (io.ReadCloser, error)
 	// Delete removes the user's upload. Returns ErrNotFound for a missing or
-	// unowned upload and ErrReferenced when a message still uses the image.
+	// unowned upload, ErrReferenced when a message still uses the image, and
+	// ErrBlobRemovalFailed when the record was deleted but its blob could not
+	// be removed (a partial deletion — the record is gone either way).
 	Delete(ctx context.Context, userID, id string) error
 }
 
@@ -57,6 +61,14 @@ var _ Uploader = (*Service)(nil)
 // ErrQuotaExceeded reports that the caller's upload quota is exhausted. The
 // upload endpoint maps it to 413.
 var ErrQuotaExceeded = errors.New("upload: per-user quota exceeded")
+
+// ErrBlobRemovalFailed reports a PARTIAL deletion: the upload record was
+// deleted but its blob could not be removed. A retry of Delete would answer
+// ErrNotFound (the record is gone), so this is terminal, not transient; it
+// exists so a deletion is never reported as fully successful while an orphan
+// blob remains. Quota counts records, so the orphan is never reclaimable by
+// the user — the adminapi maps it to a 500 with an explicit message.
+var ErrBlobRemovalFailed = errors.New("upload: record deleted but blob removal failed")
 
 // Upload validates the image bytes via the blob store (which WebP-normalizes),
 // then records the metadata row under the same id the blob path carries. The
@@ -164,6 +176,12 @@ func (s *Service) Delete(ctx context.Context, userID, id string) error {
 	}
 	// Remove the blob after the record, so a blob-store hiccup leaves a record
 	// that a retry can still resolve rather than an orphaned row pointing at
-	// nothing. The record is gone either way once this returns.
-	return s.blobs.DeleteUserUpload(userID, id)
+	// nothing. When the blob removal then fails, the record is already gone:
+	// surface it loudly instead of silently returning success — the caller
+	// must not believe the data is fully gone while an orphan blob remains.
+	if err := s.blobs.DeleteUserUpload(userID, id); err != nil {
+		slog.Warn("upload: record deleted but blob removal failed", "user_id", userID, "id", id, "err", err)
+		return fmt.Errorf("%w: %w", ErrBlobRemovalFailed, err)
+	}
+	return nil
 }

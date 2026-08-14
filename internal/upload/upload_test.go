@@ -258,6 +258,47 @@ func TestDeleteMissingIsNotFound(t *testing.T) {
 	}
 }
 
+// TestDeleteBlobFailureSurfacesError: a deletion whose record is removed but
+// whose blob cannot be deleted must return ErrBlobRemovalFailed — never a
+// silent success — and leave the orphan visible for the operator.
+func TestDeleteBlobFailureSurfacesError(t *testing.T) {
+	s, db, blobs := svc(t)
+	userID := createUser(t, db)
+	ctx := context.Background()
+
+	u, err := s.Upload(ctx, userID, "a.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace the blob file with a non-empty DIRECTORY of the same name, so
+	// the blob store's os.Remove fails deterministically (a non-empty dir
+	// cannot be removed on any platform).
+	blobPath := filepath.Join(blobs.Root(), "__uploads__", userID, u.ID+".webp")
+	if err := os.Remove(blobPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(blobPath, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err = s.Delete(ctx, userID, u.ID)
+	if !errors.Is(err, ErrBlobRemovalFailed) {
+		t.Fatalf("Delete err = %v, want ErrBlobRemovalFailed", err)
+	}
+	// The record is deleted either way; the orphan blob dir remains.
+	list, _ := s.List(ctx, userID)
+	if len(list) != 0 {
+		t.Errorf("record should be deleted despite the blob failure, list = %+v", list)
+	}
+	if _, err := os.Stat(blobPath); err != nil {
+		t.Errorf("orphan blob should remain after the failed removal: %v", err)
+	}
+	// A retry of the delete answers ErrNotFound — the failure is terminal.
+	if err := s.Delete(ctx, userID, u.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("retry delete err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestQuotaRejectsAtFileCap(t *testing.T) {
 	s, db := svcQuota(t, Quota{MaxFiles: 1, MaxBytes: 1 << 20})
 	userID := createUser(t, db)
