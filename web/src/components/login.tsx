@@ -4,7 +4,9 @@ import {
   completeTotpLogin,
   login,
   phoneAuthAvailable,
+  requestEmailResetCode,
   requestPhoneCode,
+  resetPasswordWithEmail,
   resetPasswordWithPhone,
   signup,
   verifyPhoneCode,
@@ -51,8 +53,10 @@ export const LoginForm: FC<{
   const [phoneEnabled, setPhoneEnabled] = useState(false);
   const [codeSent, setCodeSent] = useState(false);
   const [cooldown, setCooldown] = useState(0);
-  // Self-service password recovery (phone-bound accounts): the forgot link
-  // switches to a reset flow when the phone channel is enabled.
+  // Self-service password recovery: the forgot link switches to a reset flow.
+  // The recovery channel is the bound phone when phone login is enabled, and
+  // the account email otherwise (codes are printed to the server log until a
+  // mail channel exists — self-host/dev path).
   const [resetMode, setResetMode] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [resetDone, setResetDone] = useState(false);
@@ -63,7 +67,6 @@ export const LoginForm: FC<{
     initialTotpToken,
   );
   const [totpCode, setTotpCode] = useState("");
-  const [showForgotHint, setShowForgotHint] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -154,10 +157,34 @@ export const LoginForm: FC<{
     setError(null);
     setBusy(true);
     try {
-      await resetPasswordWithPhone(phone, code, newPassword);
+      if (phoneEnabled) {
+        await resetPasswordWithPhone(phone, code, newPassword);
+      } else {
+        await resetPasswordWithEmail(email, code, newPassword);
+      }
       setResetDone(true);
       setCodeSent(false);
       setCode("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // sendResetCode mints the recovery code for the active channel (bound phone
+  // when phone login is enabled, account email otherwise).
+  const sendResetCode = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      if (phoneEnabled) {
+        await requestPhoneCode(phone);
+      } else {
+        await requestEmailResetCode(email);
+      }
+      setCodeSent(true);
+      setCooldown(60);
     } catch (err) {
       setError(err instanceof Error ? err.message : "failed");
     } finally {
@@ -189,7 +216,9 @@ export const LoginForm: FC<{
           </CardTitle>
           <CardDescription>
             {resetMode
-              ? t("login.resetSubtitle")
+              ? phoneEnabled
+                ? t("login.resetSubtitle")
+                : t("login.resetSubtitleEmail")
               : phoneMode
                 ? t("login.phoneSubtitle")
                 : mode === "login"
@@ -292,19 +321,34 @@ export const LoginForm: FC<{
           ) : resetMode ? (
             <form onSubmit={submitReset} className="space-y-4">
               <FieldGroup>
-                <Field>
-                  <FieldLabel htmlFor="reset-phone">{t("login.phone")}</FieldLabel>
-                  <Input
-                    id="reset-phone"
-                    type="tel"
-                    required
-                    autoComplete="tel"
-                    inputMode="numeric"
-                    placeholder="13800138000"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                  />
-                </Field>
+                {phoneEnabled ? (
+                  <Field>
+                    <FieldLabel htmlFor="reset-phone">{t("login.phone")}</FieldLabel>
+                    <Input
+                      id="reset-phone"
+                      type="tel"
+                      required
+                      autoComplete="tel"
+                      inputMode="numeric"
+                      placeholder="13800138000"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                    />
+                  </Field>
+                ) : (
+                  <Field>
+                    <FieldLabel htmlFor="reset-email">{t("login.email")}</FieldLabel>
+                    <Input
+                      id="reset-email"
+                      type="email"
+                      required
+                      autoComplete="email"
+                      placeholder="you@example.com"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                    />
+                  </Field>
+                )}
                 {codeSent && (
                   <>
                     <Field>
@@ -354,8 +398,12 @@ export const LoginForm: FC<{
                   <Button
                     type="button"
                     size="lg"
-                    disabled={busy || cooldown > 0 || phone.trim() === ""}
-                    onClick={sendCode}
+                    disabled={
+                      busy ||
+                      cooldown > 0 ||
+                      (phoneEnabled ? phone.trim() === "" : email.trim() === "")
+                    }
+                    onClick={sendResetCode}
                   >
                     {cooldown > 0
                       ? `${t("login.resendIn")} ${cooldown}s`
@@ -470,22 +518,12 @@ export const LoginForm: FC<{
                       size="sm"
                       className="px-0"
                       onClick={() => {
-                        if (phoneEnabled) {
-                          setResetMode(true);
-                          setShowForgotHint(false);
-                          setCodeSent(false);
-                        } else {
-                          setShowForgotHint((s) => !s);
-                        }
+                        setResetMode(true);
+                        setCodeSent(false);
                       }}
                     >
                       {t("login.forgotPassword")}
                     </Button>
-                    {showForgotHint && (
-                      <p className="text-xs text-muted-foreground">
-                        {t("login.forgotHint")}
-                      </p>
-                    )}
                   </div>
                 )}
 

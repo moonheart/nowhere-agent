@@ -194,6 +194,31 @@ export async function resetPasswordWithPhone(
   }
 }
 
+// requestEmailResetCode asks the server to mint a one-time reset code for the
+// account's email. There is no mail channel yet: the code is printed to the
+// server log (dev/self-host path), like the phone channel's log:// mode.
+export async function requestEmailResetCode(email: string): Promise<void> {
+  const res = await post("/api/auth/email/reset-code", { email });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `request failed (${res.status})`);
+  }
+}
+
+// resetPasswordWithEmail verifies the reset code addressed to the account's
+// email and sets a new password. The server revokes every session.
+export async function resetPasswordWithEmail(
+  email: string,
+  code: string,
+  password: string,
+): Promise<void> {
+  const res = await post("/api/auth/email/reset-password", { email, code, password });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `request failed (${res.status})`);
+  }
+}
+
 export async function logout(): Promise<void> {
   const token = getToken();
   if (token) {

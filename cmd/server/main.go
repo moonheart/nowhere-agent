@@ -380,6 +380,21 @@ func run() error {
 		log.Info("phone OTP auth enabled (POST /api/auth/phone/*)", "channel", cfg.Phone.SMSURL)
 	}
 
+	// Email self-service password recovery: POST /api/auth/email/reset-code +
+	// reset-password, the recovery path for deployments without the phone
+	// channel. The platform has NO mail channel today, so codes are printed to
+	// the server log (the dev/self-host path, mirroring the phone channel's
+	// log:// mode) via a provider a deployment with SMTP can swap. The same
+	// shared OTP throttler guards both channels (keys never collide: emails
+	// contain "@", phones are 11 digits).
+	emailResetHandler := identity.NewEmailResetHandler(identitySvc,
+		identity.NewLogEmailResetCodeProvider(log)).
+		WithAudit(auditLogger).
+		WithThrottle(phoneThrottle)
+	emailResetHandler.SetLogger(log)
+	emailResetHandler.Register(mux)
+	log.Info("email password reset enabled (POST /api/auth/email/*)", "channel", "log://")
+
 	// Platform-admin bootstrap (admin-console): the first account to sign up on
 	// an empty database is made an admin automatically, which does nothing for a
 	// deployment whose accounts predate the role. BOOTSTRAP_ADMIN_EMAIL names
@@ -2305,11 +2320,11 @@ func rateLimitKey(r *http.Request, proxies *trustedproxy.Set) string {
 
 // openEndpointRPS/openEndpointBurst is the per-IP floor on the
 // UNAUTHENTICATED open endpoints that have no other built-in backstop: signup
-// (a flood burns bcrypt cost and can fill the user table), the phone
-// request-code (SMS gateway spend), the OIDC callback, and the inbound
-// trigger (HMAC-verified but still a public POST — a flood burns HMAC checks
-// and dispatches). 10 rps per IP is far above any human flow but stops a
-// single source from hammering. It is deliberately separate from the global
+// (a flood burns bcrypt cost and can fill the user table), the phone and email
+// request-code (gateway spend / code minting), the OIDC callback, and the
+// inbound trigger (HMAC-verified but still a public POST — a flood burns HMAC
+// checks and dispatches). 10 rps per IP is far above any human flow but stops
+// a single source from hammering. It is deliberately separate from the global
 // limiter: a deployment that disables HTTP_RATE_LIMIT_RPS/BURST (or has not
 // set them) still has a bounded edge.
 const (
@@ -2341,7 +2356,7 @@ func openEndpointKey(r *http.Request, proxies *trustedproxy.Set) string {
 		return quota.ClientIPKey(r, proxies)
 	}
 	switch r.URL.Path {
-	case "/api/auth/signup", "/api/auth/phone/request-code", "/auth/oidc/callback":
+	case "/api/auth/signup", "/api/auth/phone/request-code", "/api/auth/email/reset-code", "/auth/oidc/callback":
 		return quota.ClientIPKey(r, proxies)
 	}
 	return ""

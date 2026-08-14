@@ -52,6 +52,10 @@ const (
 	ActionPhoneOTPRequest Action = "auth.otp.request"
 	// Self-service password recovery through a bound phone (OTP-verified).
 	ActionPhonePasswordReset Action = "auth.phone.reset_password"
+	// Self-service password recovery through the account email (OTP-verified;
+	// codes are logged until a mail channel exists).
+	ActionEmailResetCodeRequest Action = "auth.email.reset_code"
+	ActionEmailPasswordReset    Action = "auth.email.reset_password"
 
 	// Self-service account management.
 	ActionMePasswordChange Action = "me.password.change"
