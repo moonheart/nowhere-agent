@@ -1,11 +1,14 @@
-// Minimal UI localization for the user-facing console surfaces (login, chat,
-// session list). The platform targets Chinese enterprises first, so the
-// language follows the browser locale: zh-* users get Chinese, everyone else
-// keeps English. A localStorage override (nowhere.lang, via setLang) wins over
-// the browser locale so a user can switch the UI language without changing the
-// OS/browser settings. This is deliberately a small typed dictionary — not a
-// full i18n framework — so the most visible screens can be localized without
-// churning every component in the admin console.
+// UI localization for the console: the platform targets Chinese enterprises
+// first, so the language follows the browser locale — zh-* users get Chinese,
+// everyone else keeps English. A localStorage override (nowhere.lang, via
+// setLang) wins over the browser locale so a user can switch the UI language
+// without changing the OS/browser settings. The dictionary has grown past
+// "just the login and chat screens": every surface — the session list, chat
+// thread, workspace panel, and the whole admin console (users, teams,
+// providers, skills, scheduled tasks, settings, audit, usage) — is localized
+// here. It stays deliberately framework-free: a plain typed dictionary rather
+// than an i18n framework, so the mechanism remains transparent and adds no
+// dependency.
 //
 // The key type is DERIVED from the two dictionaries below (I18nKey = keyof zh
 // & keyof en): a key added to one dictionary and forgotten in the other is a
