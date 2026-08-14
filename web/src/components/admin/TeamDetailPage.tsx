@@ -60,6 +60,7 @@ import {
   type TeamRole,
 } from "@/lib/admin";
 import { canManageTeam, isTeamOwner } from "@/lib/me";
+import { t } from "@/lib/i18n";
 import { useConsoleMe } from "@/components/admin/AdminLayout";
 import {
   AsyncSection,
@@ -99,12 +100,12 @@ export function TeamDetailPage() {
   const owner = isTeamOwner(me, teamId);
 
   return (
-    <AsyncSection state={state} loadingLabel="Loading team">
+    <AsyncSection state={state} loadingLabel={t("teamPage.loading")}>
       {(data) => (
         <>
           <PageHeader
             title={data.team.name}
-            description={`Created ${formatDate(data.team.created_at)}`}
+            description={t("teamPage.created", { date: formatDate(data.team.created_at) })}
             actions={
               <div className="flex items-center gap-2">
                 {manage && (
@@ -119,9 +120,9 @@ export function TeamDetailPage() {
                 )}
                 {owner && (
                   <ConfirmButton
-                    title={`Delete ${data.team.name}?`}
-                    description="The team, its memberships, and its provider keys are removed permanently. Team-scoped memories become unreachable."
-                    confirmLabel="Delete team"
+                    title={t("teamPage.deleteTitle", { name: data.team.name })}
+                    description={t("teamPage.deleteDescription")}
+                    confirmLabel={t("teamPage.deleteTeam")}
                     onConfirm={async () => {
                       await deleteTeam(teamId);
                       reloadMe();
@@ -129,7 +130,7 @@ export function TeamDetailPage() {
                     }}
                     trigger={
                       <Button variant="destructive" size="sm">
-                        Delete
+                        {t("teamPage.delete")}
                       </Button>
                     }
                   />
@@ -139,12 +140,12 @@ export function TeamDetailPage() {
           />
           <Tabs defaultValue="members">
             <TabsList>
-              <TabsTrigger value="members">Members</TabsTrigger>
-              {manage && <TabsTrigger value="providers">Providers</TabsTrigger>}
-              {manage && <TabsTrigger value="usage">Usage</TabsTrigger>}
-              <TabsTrigger value="memories">Memories</TabsTrigger>
-              <TabsTrigger value="skills">Skills</TabsTrigger>
-              <TabsTrigger value="agents">Agents</TabsTrigger>
+              <TabsTrigger value="members">{t("teamPage.tabMembers")}</TabsTrigger>
+              {manage && <TabsTrigger value="providers">{t("teamPage.tabProviders")}</TabsTrigger>}
+              {manage && <TabsTrigger value="usage">{t("teamPage.tabUsage")}</TabsTrigger>}
+              <TabsTrigger value="memories">{t("teamPage.tabMemories")}</TabsTrigger>
+              <TabsTrigger value="skills">{t("teamPage.tabSkills")}</TabsTrigger>
+              <TabsTrigger value="agents">{t("teamPage.tabAgents")}</TabsTrigger>
             </TabsList>
 
             <TabsContent value="members" className="pt-4">
@@ -214,24 +215,24 @@ function RenameTeamDialog({
       <DialogTrigger
         render={
           <Button variant="outline" size="sm">
-            Rename
+            {t("teamPage.rename")}
           </Button>
         }
       />
       <DialogContent>
         <form onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>Rename team</DialogTitle>
-            <DialogDescription>Members see the new name immediately.</DialogDescription>
+            <DialogTitle>{t("teamPage.renameTitle")}</DialogTitle>
+            <DialogDescription>{t("teamPage.renameDescription")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-1.5 py-4">
-            <Label htmlFor="rename">Name</Label>
+            <Label htmlFor="rename">{t("teamPage.name")}</Label>
             <Input id="rename" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
           </div>
           {error && <ErrorNotice message={error} />}
           <DialogFooter>
             <Button type="submit" disabled={busy || name.trim() === ""}>
-              {busy ? "Saving…" : "Save"}
+              {busy ? t("teamPage.saving") : t("teamPage.save")}
             </Button>
           </DialogFooter>
         </form>
@@ -280,14 +281,14 @@ function MembersTab({
         />
       )}
       {error && <ErrorNotice message={error} />}
-      <AsyncSection state={state} loadingLabel="Loading members">
+      <AsyncSection state={state} loadingLabel={t("teamPage.loadingMembers")}>
         {(data) => (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Member</TableHead>
-                <TableHead className="w-40">Role</TableHead>
-                <TableHead className="w-32">Joined</TableHead>
+                <TableHead>{t("teamPage.colMember")}</TableHead>
+                <TableHead className="w-40">{t("teamPage.colRole")}</TableHead>
+                <TableHead className="w-32">{t("teamPage.colJoined")}</TableHead>
                 <TableHead className="w-24" />
               </TableRow>
             </TableHeader>
@@ -299,12 +300,12 @@ function MembersTab({
                       {m.display_name || m.email}
                       {m.user_id === me.user.id && (
                         <Badge variant="secondary" className="ml-2">
-                          You
+                          {t("teamPage.you")}
                         </Badge>
                       )}
                       {m.disabled && (
                         <Badge variant="destructive" className="ml-2">
-                          Disabled
+                          {t("teamPage.disabled")}
                         </Badge>
                       )}
                     </div>
@@ -320,7 +321,7 @@ function MembersTab({
                             changeMemberRole(teamId, m.user_id, e.target.value as TeamRole),
                           )
                         }
-                        aria-label={`Role for ${m.email}`}
+                        aria-label={t("teamPage.roleAria", { email: m.email })}
                       >
                         {ROLES.map((r) => (
                           <NativeSelectOption key={r} value={r}>
@@ -373,20 +374,18 @@ function RemoveMemberButton({
 
   return (
     <ConfirmButton
-      title={isSelf ? "Leave this team?" : `Remove ${member.email}?`}
+      title={isSelf ? t("teamPage.leaveTitle") : t("teamPage.removeTitle", { email: member.email })}
       description={
-        isSelf
-          ? "You lose access to the team's shared memories, skills, and provider keys."
-          : "They lose access to the team's shared memories, skills, and provider keys. Their own data is untouched."
+        isSelf ? t("teamPage.leaveDescription") : t("teamPage.removeDescription")
       }
-      confirmLabel={isSelf ? "Leave" : "Remove"}
+      confirmLabel={isSelf ? t("teamPage.leave") : t("teamPage.remove")}
       onConfirm={async () => {
         await removeMember(teamId, member.user_id);
         onDone();
       }}
       trigger={
         <Button variant="ghost" size="sm">
-          {isSelf ? "Leave" : "Remove"}
+          {isSelf ? t("teamPage.leave") : t("teamPage.remove")}
         </Button>
       }
     />
@@ -432,32 +431,30 @@ function AddMemberDialog({
         render={
           <Button size="sm">
             <UserPlus />
-            Add member
+            {t("teamPage.addMember")}
           </Button>
         }
       />
       <DialogContent>
         <form onSubmit={submit}>
           <DialogHeader>
-            <DialogTitle>Add a member</DialogTitle>
-            <DialogDescription>
-              The person must already have an account — there is no invitation email.
-            </DialogDescription>
+            <DialogTitle>{t("teamPage.addMemberTitle")}</DialogTitle>
+            <DialogDescription>{t("teamPage.addMemberDescription")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="member-email">Email</Label>
+              <Label htmlFor="member-email">{t("teamPage.email")}</Label>
               <Input
                 id="member-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="teammate@example.com"
+                placeholder={t("teamPage.emailPlaceholder")}
                 autoFocus
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="member-role">Role</Label>
+              <Label htmlFor="member-role">{t("teamPage.role")}</Label>
               <NativeSelect
                 id="member-role"
                 value={role}
@@ -471,7 +468,7 @@ function AddMemberDialog({
               </NativeSelect>
               {!canSetOwner && (
                 <p className="text-xs text-muted-foreground">
-                  Only an owner can add another owner.
+                  {t("teamPage.ownerOnlyHint")}
                 </p>
               )}
             </div>
@@ -479,7 +476,7 @@ function AddMemberDialog({
           {error && <ErrorNotice message={error} />}
           <DialogFooter>
             <Button type="submit" disabled={busy || email.trim() === ""}>
-              {busy ? "Adding…" : "Add"}
+              {busy ? t("teamPage.adding") : t("teamPage.add")}
             </Button>
           </DialogFooter>
         </form>
@@ -511,13 +508,9 @@ function ProvidersTab({ teamId }: { teamId: string }) {
 
   return (
     <div className="space-y-4">
-      <p className="text-sm text-muted-foreground">
-        Pick which provider serves this team's runs. Teams may use any system
-        provider or one they configure here; without an assignment, the platform
-        default is used.
-      </p>
+      <p className="text-sm text-muted-foreground">{t("teamPage.providersIntro")}</p>
       {error && <ErrorNotice message={error} />}
-      <AsyncSection state={state} loadingLabel="Loading providers">
+      <AsyncSection state={state} loadingLabel={t("teamPage.loadingProviders")}>
         {(data) => (
           <>
             <AssignmentPicker
@@ -529,25 +522,24 @@ function ProvidersTab({ teamId }: { teamId: string }) {
               }}
             />
             <div className="flex items-center justify-between pt-2">
-              <h3 className="text-sm font-medium">Providers</h3>
+              <h3 className="text-sm font-medium">{t("teamPage.providersSection")}</h3>
               <ProviderFormDialog
                 trigger={
                   <Button size="sm">
                     <Plus />
-                    Add provider
+                    {t("teamPage.addProvider")}
                   </Button>
                 }
-                title="Add a provider"
-                description="A provider this team owns. It is visible only to this team's members and is billed to its own key."
-                submitLabel="Add provider"
+                title={t("teamPage.addProviderTitle")}
+                description={t("teamPage.addProviderDescription")}
+                submitLabel={t("teamPage.addProviderSubmit")}
                 onSave={(b) => createTeamProvider(teamId, b)}
                 onDone={state.reload}
               />
             </div>
             {data.providers.length === 0 ? (
               <p className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
-                No providers available to this team. A platform admin can add
-                system providers, or this team can add its own.
+                {t("teamPage.noProviders")}
               </p>
             ) : (
               <div className="space-y-4">
@@ -582,10 +574,10 @@ function ProvidersTab({ teamId }: { teamId: string }) {
         <ProviderFormDialog
           open
           onOpenChange={(open) => !open && setEditing(null)}
-          title="Edit provider"
-          description="Changes apply to the team's next model call."
+          title={t("teamPage.editProviderTitle")}
+          description={t("teamPage.editProviderDescription")}
           initial={editing}
-          submitLabel="Save"
+          submitLabel={t("teamPage.saveProvider")}
           onSave={(b) => updateTeamProvider(teamId, editing.id, b)}
           onDone={state.reload}
         />
@@ -603,8 +595,8 @@ function ProvidersTab({ teamId }: { teamId: string }) {
         <ModelFormDialog
           open
           onOpenChange={(open) => !open && setAddingModelTo(null)}
-          title={`Add a model to ${addingModelTo.name}`}
-          description="A vision-capable model backs the view_image tool."
+          title={t("teamPage.addModelTo", { name: addingModelTo.name })}
+          description={t("teamPage.modelVisionDescription")}
           onSave={(b) => createTeamModel(teamId, addingModelTo.id, b)}
           onDone={state.reload}
         />
@@ -613,8 +605,8 @@ function ProvidersTab({ teamId }: { teamId: string }) {
         <ModelFormDialog
           open
           onOpenChange={(open) => !open && setEditingModel(null)}
-          title="Edit model"
-          description="Changes apply to the team's next model call."
+          title={t("teamPage.editModelTitle")}
+          description={t("teamPage.editModelDescription")}
           initial={editingModel.model}
           onSave={(b) =>
             updateTeamModel(teamId, editingModel.provider.id, editingModel.model.id, b)
@@ -684,7 +676,7 @@ function AssignmentPicker({
     <form onSubmit={save} className="rounded-lg border border-border p-4">
       <div className="flex flex-wrap items-end gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="assign-provider">Provider</Label>
+          <Label htmlFor="assign-provider">{t("teamPage.labelProvider")}</Label>
           <NativeSelect
             id="assign-provider"
             value={providerId}
@@ -695,7 +687,7 @@ function AssignmentPicker({
             disabled={enabled.length === 0}
           >
             {enabled.length === 0 && (
-              <NativeSelectOption value="">No enabled providers</NativeSelectOption>
+              <NativeSelectOption value="">{t("teamPage.noEnabledProviders")}</NativeSelectOption>
             )}
             {enabled.map((p) => (
               <NativeSelectOption key={p.id} value={p.id}>
@@ -705,7 +697,7 @@ function AssignmentPicker({
           </NativeSelect>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="assign-model">Model</Label>
+          <Label htmlFor="assign-model">{t("teamPage.labelModel")}</Label>
           <NativeSelect
             id="assign-model"
             value={modelId}
@@ -713,7 +705,7 @@ function AssignmentPicker({
             disabled={models.length === 0}
           >
             <NativeSelectOption value="">
-              {models.length > 0 ? "Provider default" : "No models"}
+              {models.length > 0 ? t("teamPage.providerDefault") : t("teamPage.noModels")}
             </NativeSelectOption>
             {models
               .filter((m) => m.enabled)
@@ -725,7 +717,7 @@ function AssignmentPicker({
           </NativeSelect>
         </div>
         <Button type="submit" disabled={busy || !providerId}>
-          {busy ? "Saving…" : hasAssignment ? "Change" : "Assign"}
+          {busy ? t("teamPage.saving") : hasAssignment ? t("teamPage.change") : t("teamPage.assign")}
         </Button>
         {hasAssignment && (
           <Button
@@ -734,18 +726,18 @@ function AssignmentPicker({
             onClick={clear}
             disabled={busy}
           >
-            Use platform default
+            {t("teamPage.usePlatformDefault")}
           </Button>
         )}
       </div>
       {hasAssignment && (
         <p className="mt-2 text-xs text-muted-foreground">
-          This team is assigned to{" "}
+          {t("teamPage.assignedTo")}{" "}
           <span className="font-medium">
             {providers.find((p) => p.id === assignment.provider_id)?.name ??
-              "a provider"}
+              t("teamPage.aProvider")}
           </span>
-          . Clearing the assignment falls back to the platform default.
+          . {t("teamPage.clearingFallsBack")}
         </p>
       )}
       {error && (
@@ -766,7 +758,7 @@ function TeamUsageTab({ teamId }: { teamId: string }) {
       <div className="flex justify-end">
         <DateRangePicker range={range} onChange={setRange} />
       </div>
-      <AsyncSection state={state} loadingLabel="Loading usage">
+      <AsyncSection state={state} loadingLabel={t("teamPage.loadingUsage")}>
         {(data) => (
           <div className="space-y-4">
             <ApproximationNotice note={data.note} />
@@ -796,11 +788,11 @@ function TeamMemoriesTab({ teamId, canManage }: { teamId: string; canManage: boo
   return (
     <div className="space-y-4">
       {error && <ErrorNotice message={error} />}
-      <AsyncSection state={state} loadingLabel="Loading memories">
+      <AsyncSection state={state} loadingLabel={t("teamPage.loadingMemories")}>
         {(data) => (
           <MemoryTable
             memories={data.memories}
-            emptyMessage="Nothing shared yet. Team memories accumulate as the dreaming worker consolidates members' sessions."
+            emptyMessage={t("teamPage.noSharedMemories")}
             readOnly={!canManage}
             onDelete={canManage ? (m) => act(() => deleteTeamMemory(teamId, m.id)) : undefined}
             onDeprecate={

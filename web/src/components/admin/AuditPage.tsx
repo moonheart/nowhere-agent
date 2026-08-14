@@ -27,6 +27,7 @@ import {
   listAudit,
   type AuditEntry,
 } from "@/lib/admin";
+import { t } from "@/lib/i18n";
 import {
   AsyncSection,
   formatDateTime,
@@ -75,19 +76,19 @@ export function PlatformAuditPage() {
   return (
     <>
       <PageHeader
-        title="Audit trail"
-        description="Every sign-in and administrative or credential change on the platform, newest first. The trail is append-only — entries cannot be edited or removed from here. Conversation content is deliberately never recorded."
+        title={t("auditPage.title")}
+        description={t("auditPage.description")}
       />
 
       <form onSubmit={submit} className="flex flex-wrap items-end gap-2">
         <div className="space-y-1.5">
-          <Label htmlFor="audit-action">Action</Label>
+          <Label htmlFor="audit-action">{t("auditPage.labelAction")}</Label>
           <NativeSelect
             id="audit-action"
             value={draft.action}
             onChange={(e) => setDraft({ ...draft, action: e.target.value })}
           >
-            <NativeSelectOption value="">All actions</NativeSelectOption>
+            <NativeSelectOption value="">{t("auditPage.allActions")}</NativeSelectOption>
             {AUDIT_ACTIONS.map((a) => (
               <NativeSelectOption key={a} value={a}>
                 {a}
@@ -96,17 +97,17 @@ export function PlatformAuditPage() {
           </NativeSelect>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="audit-actor">Actor id</Label>
+          <Label htmlFor="audit-actor">{t("auditPage.labelActor")}</Label>
           <Input
             id="audit-actor"
             value={draft.actor}
             onChange={(e) => setDraft({ ...draft, actor: e.target.value })}
-            placeholder="Exact account id"
+            placeholder={t("auditPage.actorPlaceholder")}
             className="w-56 font-mono text-sm"
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="audit-from">From</Label>
+          <Label htmlFor="audit-from">{t("auditPage.labelFrom")}</Label>
           <Input
             id="audit-from"
             type="date"
@@ -115,7 +116,7 @@ export function PlatformAuditPage() {
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="audit-to">To</Label>
+          <Label htmlFor="audit-to">{t("auditPage.labelTo")}</Label>
           <Input
             id="audit-to"
             type="date"
@@ -125,22 +126,22 @@ export function PlatformAuditPage() {
         </div>
         <Button type="submit" variant="outline" size="sm">
           <Search />
-          Filter
+          {t("auditPage.filter")}
         </Button>
       </form>
 
-      <AsyncSection state={state} loadingLabel="Loading audit trail">
+      <AsyncSection state={state} loadingLabel={t("auditPage.loading")}>
         {(data) => (
           <div className="space-y-4">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-44">Time</TableHead>
-                  <TableHead>Actor</TableHead>
-                  <TableHead className="w-56">Action</TableHead>
-                  <TableHead className="w-24">Outcome</TableHead>
-                  <TableHead>Target</TableHead>
-                  <TableHead className="w-32">IP</TableHead>
+                  <TableHead className="w-44">{t("auditPage.colTime")}</TableHead>
+                  <TableHead>{t("auditPage.colActor")}</TableHead>
+                  <TableHead className="w-56">{t("auditPage.colAction")}</TableHead>
+                  <TableHead className="w-24">{t("auditPage.colOutcome")}</TableHead>
+                  <TableHead>{t("auditPage.colTarget")}</TableHead>
+                  <TableHead className="w-32">{t("auditPage.colIP")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -153,8 +154,12 @@ export function PlatformAuditPage() {
             <div className="flex items-center justify-between text-sm text-muted-foreground">
               <span>
                 {data.total === 0
-                  ? "No events match."
-                  : `${data.offset + 1}–${Math.min(data.offset + PAGE_SIZE, data.total)} of ${data.total}`}
+                  ? t("auditPage.noEvents")
+                  : t("auditPage.range", {
+                      from: data.offset + 1,
+                      to: Math.min(data.offset + PAGE_SIZE, data.total),
+                      total: data.total,
+                    })}
               </span>
               <div className="flex gap-2">
                 <Button
@@ -163,7 +168,7 @@ export function PlatformAuditPage() {
                   disabled={data.offset === 0}
                   onClick={() => setOffset(Math.max(0, data.offset - PAGE_SIZE))}
                 >
-                  Previous
+                  {t("auditPage.previous")}
                 </Button>
                 <Button
                   variant="outline"
@@ -171,7 +176,7 @@ export function PlatformAuditPage() {
                   disabled={data.offset + PAGE_SIZE >= data.total}
                   onClick={() => setOffset(data.offset + PAGE_SIZE)}
                 >
-                  Next
+                  {t("auditPage.next")}
                 </Button>
               </div>
             </div>
@@ -214,7 +219,7 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
   if (outcome === "success") {
-    return <Badge variant="secondary">success</Badge>;
+    return <Badge variant="secondary">{t("auditPage.outcomeSuccess")}</Badge>;
   }
   return <Badge variant="destructive">{outcome}</Badge>;
 }

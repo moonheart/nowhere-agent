@@ -44,6 +44,7 @@ import {
   putQuota,
   type QuotaBudget,
 } from "@/lib/admin";
+import { t } from "@/lib/i18n";
 import {
   ErrorNotice,
   formatCount,
@@ -143,20 +144,20 @@ export function PlatformQuotasPage() {
   return (
     <>
       <PageHeader
-        title="Quotas"
-        description="Monthly token budgets. A scope with a budget is rejected at run submit once it crosses its cap that month (HTTP 429); a scope with none runs uncapped. Account budgets cap one user; team budgets cap the spend billed to a team's provider key."
+        title={t("quotasPage.title")}
+        description={t("quotasPage.description")}
       />
 
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Gauge className="size-4" />
-            Look up a budget
+            {t("quotasPage.lookupTitle")}
           </CardTitle>
           <CardDescription>
-            Pick a scope, then search for the{" "}
-            {scope === "user" ? "account by email or display name" : "team by name"}{" "}
-            to read or edit its monthly cap.
+            {scope === "user"
+              ? t("quotasPage.lookupScopeAccount")
+              : t("quotasPage.lookupScopeTeam")}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -169,10 +170,10 @@ export function PlatformQuotasPage() {
             className="grid grid-cols-[max-content_max-content_max-content] items-end justify-start gap-x-2 gap-y-1.5"
           >
             <Label htmlFor="quota-scope" className="self-start">
-              Scope
+              {t("quotasPage.labelScope")}
             </Label>
             <Label className="self-start">
-              {scope === "user" ? "Account" : "Team"}
+              {scope === "user" ? t("quotasPage.labelAccount") : t("quotasPage.labelTeam")}
             </Label>
             <span aria-hidden />
             <NativeSelect
@@ -180,8 +181,8 @@ export function PlatformQuotasPage() {
               value={scope}
               onChange={(e) => changeScope(e.target.value as Scope)}
             >
-              <NativeSelectOption value="user">Account</NativeSelectOption>
-              <NativeSelectOption value="team">Team</NativeSelectOption>
+              <NativeSelectOption value="user">{t("quotasPage.labelAccount")}</NativeSelectOption>
+              <NativeSelectOption value="team">{t("quotasPage.labelTeam")}</NativeSelectOption>
             </NativeSelect>
             <OwnerPicker scope={scope} value={owner} onChange={setOwner} />
             <Button
@@ -191,7 +192,7 @@ export function PlatformQuotasPage() {
               className="justify-self-start"
             >
               <Search />
-              {busy ? "Loading…" : "Look up"}
+              {busy ? t("quotasPage.loading") : t("quotasPage.lookUp")}
             </Button>
           </form>
 
@@ -200,18 +201,18 @@ export function PlatformQuotasPage() {
           {searched && !error && (
             <div className="space-y-4 border-t border-border pt-4">
               <div className="flex items-center gap-2 text-sm">
-                <span className="text-muted-foreground">Current cap:</span>
+                <span className="text-muted-foreground">{t("quotasPage.currentCap")}</span>
                 {result ? (
                   <>
                     <Badge variant="secondary" className="tabular-nums">
-                      {formatCount(result.monthly_tokens)} tokens / month
+                      {t("quotasPage.tokensPerMonth", { count: formatCount(result.monthly_tokens) })}
                     </Badge>
                     <span className="text-xs text-muted-foreground">
-                      set {formatDateTime(result.updated_at)}
+                      {t("quotasPage.setAt", { time: formatDateTime(result.updated_at) })}
                     </span>
                   </>
                 ) : (
-                  <Badge variant="outline">No cap — uncapped</Badge>
+                  <Badge variant="outline">{t("quotasPage.noCap")}</Badge>
                 )}
               </div>
 
@@ -223,7 +224,7 @@ export function PlatformQuotasPage() {
                 className="flex flex-wrap items-end gap-2"
               >
                 <div className="space-y-1.5">
-                  <Label htmlFor="quota-limit">Monthly tokens</Label>
+                  <Label htmlFor="quota-limit">{t("quotasPage.monthlyTokens")}</Label>
                   <Input
                     id="quota-limit"
                     type="number"
@@ -231,29 +232,33 @@ export function PlatformQuotasPage() {
                     inputMode="numeric"
                     value={limit}
                     onChange={(e) => setLimit(e.target.value)}
-                    placeholder="e.g. 1000000"
+                    placeholder={t("quotasPage.limitPlaceholder")}
                     className="w-56 tabular-nums"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Billable tokens (input + output) per calendar month.
+                    {t("quotasPage.billableHint")}
                   </p>
                 </div>
                 <Button
                   type="submit"
                   disabled={busy || !Number.isFinite(parsedLimit) || parsedLimit <= 0}
                 >
-                  {result ? "Update cap" : "Set cap"}
+                  {result ? t("quotasPage.updateCap") : t("quotasPage.setCap")}
                 </Button>
                 {result && (
                   <ConfirmButton
-                    title="Clear this budget?"
-                    description={`${scope === "user" ? "This account" : "This team"} will run uncapped again from the next run. This does not refund spend already counted this month.`}
-                    confirmLabel="Clear cap"
+                    title={t("quotasPage.clearTitle")}
+                    description={
+                      scope === "user"
+                        ? t("quotasPage.clearDescriptionAccount")
+                        : t("quotasPage.clearDescriptionTeam")
+                    }
+                    confirmLabel={t("quotasPage.clearCap")}
                     onConfirm={clear}
                     trigger={
                       <Button variant="ghost" disabled={busy}>
                         <Trash2 />
-                        Clear cap
+                        {t("quotasPage.clearCap")}
                       </Button>
                     }
                   />
@@ -297,15 +302,19 @@ export function OwnerPicker({
   }, [results, value]);
 
   const status = isPending
-    ? "Searching…"
+    ? t("quotasPage.searching")
     : searchError
       ? searchError
       : trimmed === ""
         ? value
           ? null
-          : `Type to search ${scope === "user" ? "accounts" : "teams"}…`
+          : scope === "user"
+            ? t("quotasPage.typeToSearchAccounts")
+            : t("quotasPage.typeToSearchTeams")
         : results.length === 0
-          ? `No ${scope === "user" ? "account" : "team"} matches "${trimmed}".`
+          ? scope === "user"
+            ? t("quotasPage.noAccountMatches", { term: trimmed })
+            : t("quotasPage.noTeamMatches", { term: trimmed })
           : null;
 
   return (
@@ -351,11 +360,13 @@ export function OwnerPicker({
                     }),
                   )
                 : (await listAllTeams({ q: next, limit: 20 })).teams.map(
-                    (t): Owner => ({
-                      id: t.id,
-                      label: t.name,
+                    (tm): Owner => ({
+                      id: tm.id,
+                      label: tm.name,
                       sublabel:
-                        t.members === undefined ? undefined : `${t.members} members`,
+                        tm.members === undefined
+                          ? undefined
+                          : t("quotasPage.membersCount", { count: tm.members }),
                     }),
                   );
             if (controller.signal.aborted) return;
@@ -368,7 +379,7 @@ export function OwnerPicker({
       }}
     >
       <ComboboxInput
-        placeholder={scope === "user" ? "Search accounts…" : "Search teams…"}
+        placeholder={scope === "user" ? t("quotasPage.searchAccounts") : t("quotasPage.searchTeams")}
         showClear
         // The trigger/clear addon's default py-1.5 (24px button + 12px padding)
         // makes it 36px — taller than the h-8 group, so the field hung 4px below
@@ -382,7 +393,7 @@ export function OwnerPicker({
         </ComboboxPrimitive.Status>
         <ComboboxEmpty>
           {trimmed !== "" && !isPending && results.length === 0 && !searchError
-            ? "Try a different search."
+            ? t("quotasPage.tryDifferent")
             : null}
         </ComboboxEmpty>
         <ComboboxList>
