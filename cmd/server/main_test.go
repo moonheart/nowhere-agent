@@ -71,7 +71,8 @@ func TestRateLimitKey(t *testing.T) {
 
 // TestOpenEndpointKey pins the open-endpoint floor limiter's scope: exactly
 // the unauthenticated open endpoints (signup, phone request-code, OIDC
-// callback) are keyed by client IP; every other path opts out of the floor.
+// callback, inbound trigger) are keyed by client IP; every other path opts
+// out of the floor.
 func TestOpenEndpointKey(t *testing.T) {
 	proxies := trustedproxy.New(nil)
 
@@ -79,6 +80,7 @@ func TestOpenEndpointKey(t *testing.T) {
 		"/api/auth/signup",
 		"/api/auth/phone/request-code",
 		"/auth/oidc/callback",
+		"/api/inbound/11111111-1111-1111-1111-111111111111",
 	} {
 		req := httptest.NewRequest("POST", p, nil)
 		ip := req.RemoteAddr
@@ -90,14 +92,16 @@ func TestOpenEndpointKey(t *testing.T) {
 		}
 	}
 
-	// Everything else — including the other open auth routes and the callback
-	// with a query string — must not consume a floor bucket.
+	// Everything else — including the other open auth routes, the callback
+	// with a query string, and the bearer-authed inbound management routes —
+	// must not consume a floor bucket.
 	for _, p := range []string{
 		"/api/auth/login",
 		"/api/auth/phone/verify",
 		"/api/auth/totp/verify",
 		"/auth/oidc/login",
 		"/api/chat",
+		"/api/me/inbound/11111111-1111-1111-1111-111111111111",
 		"/healthz",
 		"/metrics",
 	} {

@@ -2143,18 +2143,26 @@ func rateLimitKey(r *http.Request, proxies *trustedproxy.Set) string {
 // openEndpointRPS/openEndpointBurst is the per-IP floor on the
 // UNAUTHENTICATED open endpoints that have no other built-in backstop: signup
 // (a flood burns bcrypt cost and can fill the user table), the phone
-// request-code (SMS gateway spend), and the OIDC callback. 10 rps per IP is
-// far above any human flow but stops a single source from hammering. It is
-// deliberately separate from the global limiter: a deployment that disables
-// HTTP_RATE_LIMIT_RPS/BURST (or has not set them) still has a bounded edge.
+// request-code (SMS gateway spend), the OIDC callback, and the inbound
+// trigger (HMAC-verified but still a public POST — a flood burns HMAC checks
+// and dispatches). 10 rps per IP is far above any human flow but stops a
+// single source from hammering. It is deliberately separate from the global
+// limiter: a deployment that disables HTTP_RATE_LIMIT_RPS/BURST (or has not
+// set them) still has a bounded edge.
 const (
 	openEndpointRPS   = 10
 	openEndpointBurst = 20
 )
 
 // openEndpointKey is the floor limiter's bucket key: the client IP for the
-// unauthenticated open endpoints, "" (opt-out) for everything else.
+// unauthenticated open endpoints, "" (opt-out) for everything else. The
+// inbound trigger is a prefix match (the endpoint carries a path param);
+// /api/me/inbound/* is NOT covered — it is bearer-authed and already keyed by
+// token hash in the global limiter.
 func openEndpointKey(r *http.Request, proxies *trustedproxy.Set) string {
+	if strings.HasPrefix(r.URL.Path, "/api/inbound/") {
+		return quota.ClientIPKey(r, proxies)
+	}
 	switch r.URL.Path {
 	case "/api/auth/signup", "/api/auth/phone/request-code", "/auth/oidc/callback":
 		return quota.ClientIPKey(r, proxies)
@@ -2185,7 +2193,7 @@ func httpHandler(ctx context.Context, cfg config.Config, log *slog.Logger, metri
 		)
 	})
 	if settingsRuntime.Float64(settings.KeyRateLimitRPS) <= 0 || settingsRuntime.Int(settings.KeyRateLimitBurst) <= 0 {
-		log.Warn("no global per-client rate limit in effect (HTTP_RATE_LIMIT_RPS/BURST unset; enable from the admin console): open auth endpoints keep their per-IP floor, everything else is unlimited",
+		log.Warn("no global per-client rate limit in effect (HTTP_RATE_LIMIT_RPS/BURST unset; enable from the admin console): open auth + inbound endpoints keep their per-IP floor, everything else is unlimited",
 			"open_endpoint_rps", openEndpointRPS)
 	}
 	// Per-IP floor for the unauthenticated open endpoints (see the consts).
