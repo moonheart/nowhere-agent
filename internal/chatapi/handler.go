@@ -319,6 +319,13 @@ type sseEmitter struct {
 // Redis broker, feeding the slow-consumer busy loop) forever.
 const streamWriteTimeout = 30 * time.Second
 
+// settlePollSilence is how long the attach loop tolerates frame silence before
+// its settle poll falls back to the ActiveRun check (see the poll in attach).
+// While a run's frames flow the run is provably active, so the DB check is
+// skipped; the window is the cost of noticing a settle whose terminal event
+// was lost.
+const settlePollSilence = 5 * time.Second
+
 // newSSEEmitter builds the production emitter over w, wiring the rolling write
 // deadline refresh that writeStreamHeaders armed. Tests build sseEmitter
 // literals directly (no deadline refresh, which is a no-op for their recorders).
@@ -916,10 +923,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 	// detection is event-driven: the run's terminal lifecycle event
 	// (done/error/cancelled) is the primary signal, and a one-shot ActiveRun
 	// check right after subscribe covers a run that settled between the
-	// caller's pre-check and this loop. The settle poll is only the FALLBACK
-	// for a settle no terminal event ever reported (a dropped bus event, or a
-	// run force-settled without one) — so a multi-instance attach no longer
-	// hits the DB at 50qps per client while following an active run.
+	// caller's pre-check and this loop.
 	settlePoll := time.NewTicker(250 * time.Millisecond)
 	defer settlePoll.Stop()
 
@@ -939,11 +943,32 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 	// broker poller's pipeline — the terminal event and the last content frame
 	// travel different channels).
 	terminal := false
+	// lastFrame marks when this attacher last saw a frame of ITS run (content
+	// or lifecycle). While frames flow the run is provably active, so the poll
+	// skips its ActiveRun check entirely; it only falls back to the DB after
+	// settlePollSilence of silence — a run that settled without reporting a
+	// terminal event (a dropped bus event, or a run force-settled without one)
+	// must be noticed somehow. A multi-instance attach (memory runtime miss →
+	// PGStore.ActiveRun per call) therefore hits the DB at most once per
+	// silence window per client while following an active run, instead of 4
+	// queries per second. The one-shot check above still bounds the settle
+	// latency at attach time, so the fallback window only stretches the
+	// pathological dropped-terminal-event case.
+	lastFrame := time.Now()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-settlePoll.C:
+			// While the run's frames are flowing (or were very recent) the run
+			// is provably active: skip the ActiveRun check and keep following.
+			// Only after settlePollSilence of silence does the poll fall back
+			// to the DB — the fallback exists for settles whose terminal event
+			// was lost, and skipping it while frames flow is what keeps a
+			// multi-instance attach off the DB while an active run streams.
+			if !terminal && time.Since(lastFrame) <= settlePollSilence {
+				continue
+			}
 			if !terminal {
 				if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); stillActive {
 					continue
@@ -961,6 +986,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 				continue
 			}
 			emitLifecycleEvent(r, emitter, e)
+			lastFrame = time.Now()
 			if terminalLifecycle(e.Kind) {
 				terminal = true
 			}
@@ -986,6 +1012,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			}
 			maxOffset = e.Offset
 			emitStreamEvent(r, emitter, e)
+			lastFrame = time.Now()
 		}
 	}
 }
