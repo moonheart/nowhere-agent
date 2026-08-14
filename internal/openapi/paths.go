@@ -155,10 +155,10 @@ func paths() map[string]PathItem {
 		},
 		"/api/chat/history": {
 			"get": Operation{
-				Summary:    "Fetch a session's durable message history",
+				Summary:     "Fetch a session's durable message history",
 				Description: "Rebuilds the conversation from the durable message store. Without a limit the FULL conversation is returned (legacy contract); with limit, only the newest limit messages come back, keyset-paged backwards via before (the previous page's first message id) — hasMore reports whether older messages exist.",
-				Tags:       []string{"chat"},
-				Security:   bearer,
+				Tags:        []string{"chat"},
+				Security:    bearer,
 				Parameters: []Parameter{
 					{Name: "threadId", In: "query", Required: true, Schema: map[string]any{"type": "string"}},
 					{Name: "limit", In: "query", Schema: map[string]any{"type": "integer", "description": "max messages to return (newest; 1..500). Absent = full conversation."}},
@@ -169,10 +169,10 @@ func paths() map[string]PathItem {
 		},
 		"/api/chat/models": {
 			"get": Operation{
-				Summary:    "List the caller's chat model picker",
+				Summary:     "List the caller's chat model picker",
 				Description: "Returns the default model the caller's chat runs resolve to (team assignment → platform default) plus every enabled model name on that provider. Empty list when no provider serves the caller; names only, never credentials.",
-				Tags:       []string{"chat"},
-				Security:   bearer,
+				Tags:        []string{"chat"},
+				Security:    bearer,
 				Responses: jsonResp("model list", map[string]any{
 					"type": "object",
 					"properties": map[string]any{

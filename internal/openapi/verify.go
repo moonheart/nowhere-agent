@@ -14,22 +14,22 @@ import (
 // recorded" direction; the spec test still pins them against the document.
 // Keep in sync with the open sections of registeredRoutes above.
 var openRoutes = map[string][]string{
-	"/healthz":            {"get"},
-	"/metrics":            {"get"},
-	"/openapi.json":       {"get"},
-	"/auth/oidc/enabled":  {"get"},
-	"/auth/oidc/login":    {"get"},
-	"/auth/oidc/callback": {"get"},
-	"/api/auth/signup":                  {"post"},
-	"/api/auth/login":                   {"post"},
-	"/api/auth/logout":                  {"post"},
-	"/api/auth/totp/verify":             {"post"},
-	"/api/auth/phone/request-code":      {"post"},
-	"/api/auth/phone/verify":            {"post"},
-	"/api/auth/phone/reset-password":    {"post"},
-	"/api/auth/phone/enabled":           {"get"},
-	"/api/me":                           {"get"},
-	"/api/inbound/{id}":                 {"post"},
+	"/healthz":                       {"get"},
+	"/metrics":                       {"get"},
+	"/openapi.json":                  {"get"},
+	"/auth/oidc/enabled":             {"get"},
+	"/auth/oidc/login":               {"get"},
+	"/auth/oidc/callback":            {"get"},
+	"/api/auth/signup":               {"post"},
+	"/api/auth/login":                {"post"},
+	"/api/auth/logout":               {"post"},
+	"/api/auth/totp/verify":          {"post"},
+	"/api/auth/phone/request-code":   {"post"},
+	"/api/auth/phone/verify":         {"post"},
+	"/api/auth/phone/reset-password": {"post"},
+	"/api/auth/phone/enabled":        {"get"},
+	"/api/me":                        {"get"},
+	"/api/inbound/{id}":              {"post"},
 }
 
 // VerifyAuthedRoutes cross-checks the patterns a real route assembly recorded
