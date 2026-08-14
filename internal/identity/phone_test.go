@@ -285,3 +285,229 @@ func TestPhoneVerifyNonCodeErrorsDoNotCount(t *testing.T) {
 		t.Errorf("non-code errors must not count toward the verify throttle (map holds %d entries)", n)
 	}
 }
+
+// bindPhoneTo requests a code for phone and binds it to the account, returning
+// the delivered code (already consumed) — the setup half of reset/bind tests.
+// The service clock is advanced past the resend cooldown so the next request
+// in the test is allowed.
+func bindPhoneTo(t *testing.T, svc *Service, sms *recordingSMS, userID, phone string) {
+	t.Helper()
+	if err := svc.RequestPhoneOTP(context.Background(), phone, sms); err != nil {
+		t.Fatalf("request code: %v", err)
+	}
+	if err := svc.BindPhone(context.Background(), userID, phone, sms.delivered[phone]); err != nil {
+		t.Fatalf("bind phone: %v", err)
+	}
+	advanceClock(svc, otpCooldown+time.Second)
+}
+
+func TestBindPhone(t *testing.T) {
+	svc, sms, store, ctx := phoneEnv(t)
+	phone := phoneNumber()
+	a, err := store.CreateUser(ctx, "a-"+phone+"@example.com", "correct-horse", "A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.CreateUser(ctx, "b-"+phone+"@example.com", "correct-horse", "B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		store.db.Exec(`DELETE FROM users WHERE id IN ($1, $2)`, a.ID, b.ID)
+		store.db.Exec(`DELETE FROM phone_otps WHERE phone = $1`, phone)
+	})
+
+	// Wrong code is refused without binding.
+	if err := svc.RequestPhoneOTP(ctx, phone, sms); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindPhone(ctx, a.ID, phone, "000000"); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("wrong code: %v, want ErrInvalidCode", err)
+	}
+	if _, err := store.UserByPhone(ctx, phone); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("unexpected user by phone before bind: %v", err)
+	}
+
+	// Correct code binds; the account is resolvable by phone.
+	advanceClock(svc, otpCooldown+time.Second)
+	if err := svc.RequestPhoneOTP(ctx, phone, sms); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindPhone(ctx, a.ID, phone, sms.delivered[phone]); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	u, err := store.UserByPhone(ctx, phone)
+	if err != nil {
+		t.Fatalf("user by phone after bind: %v", err)
+	}
+	if u.ID != a.ID {
+		t.Fatalf("phone bound to %s, want %s", u.ID, a.ID)
+	}
+
+	// Re-binding the SAME account is idempotent success.
+	if err := svc.BindPhone(ctx, a.ID, phone, "000000"); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("idempotent rebind must still verify the code first: %v", err)
+	}
+	advanceClock(svc, otpCooldown+time.Second)
+	if err := svc.RequestPhoneOTP(ctx, phone, sms); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindPhone(ctx, a.ID, phone, sms.delivered[phone]); err != nil {
+		t.Fatalf("idempotent rebind: %v", err)
+	}
+
+	// Another account cannot take a bound phone (the unique index holds).
+	advanceClock(svc, otpCooldown+time.Second)
+	if err := svc.RequestPhoneOTP(ctx, phone, sms); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindPhone(ctx, b.ID, phone, sms.delivered[phone]); !errors.Is(err, ErrPhoneTaken) {
+		t.Fatalf("cross-account bind: %v, want ErrPhoneTaken", err)
+	}
+
+	// Invalid input shapes are refused up front.
+	if err := svc.BindPhone(ctx, a.ID, "not-a-phone", "123456"); !errors.Is(err, ErrInvalidPhone) {
+		t.Fatalf("invalid phone: %v", err)
+	}
+}
+
+func TestResetPasswordByPhone(t *testing.T) {
+	svc, sms, store, ctx := phoneEnv(t)
+	phone := phoneNumber()
+	u, err := svc.Signup(ctx, "u-"+phone+"@example.com", "old-password-1", "U")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		store.db.Exec(`DELETE FROM users WHERE id = $1`, u.ID)
+		store.db.Exec(`DELETE FROM phone_otps WHERE phone = $1`, phone)
+	})
+
+	bindPhoneTo(t, svc, sms, u.ID, phone)
+
+	// A weak password is refused WITHOUT consuming the code.
+	if err := svc.RequestPhoneOTP(ctx, phone, sms); err != nil {
+		t.Fatal(err)
+	}
+	code := sms.delivered[phone]
+	if err := svc.ResetPasswordByPhone(ctx, phone, code, "short"); !errors.Is(err, ErrWeakPassword) {
+		t.Fatalf("weak password: %v, want ErrWeakPassword", err)
+	}
+	if _, _, err := svc.Login(ctx, u.Email, "old-password-1"); err != nil {
+		t.Fatalf("login with old password after weak-password attempt: %v", err)
+	}
+
+	// The same code still resets the password.
+	if err := svc.ResetPasswordByPhone(ctx, phone, code, "new-password-1"); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if _, _, err := svc.Login(ctx, u.Email, "old-password-1"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("old password still valid after reset: %v", err)
+	}
+	if _, _, err := svc.Login(ctx, u.Email, "new-password-1"); err != nil {
+		t.Fatalf("login with new password: %v", err)
+	}
+
+	// The code is single-use: replaying it cannot reset again.
+	if err := svc.ResetPasswordByPhone(ctx, phone, code, "third-password-1"); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("code replay: %v, want ErrInvalidCode", err)
+	}
+
+	// A wrong code never touches the password.
+	advanceClock(svc, otpCooldown+time.Second)
+	if err := svc.RequestPhoneOTP(ctx, phone, sms); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResetPasswordByPhone(ctx, phone, "000000", "fourth-password-1"); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("wrong code: %v, want ErrInvalidCode", err)
+	}
+	if _, _, err := svc.Login(ctx, u.Email, "new-password-1"); err != nil {
+		t.Fatalf("password changed by wrong code: %v", err)
+	}
+
+	// An unbound phone cannot reset (no account to target).
+	unbound := phoneNumber()
+	t.Cleanup(func() { store.db.Exec(`DELETE FROM phone_otps WHERE phone = $1`, unbound) })
+	advanceClock(svc, otpCooldown+time.Second)
+	if err := svc.RequestPhoneOTP(ctx, unbound, sms); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResetPasswordByPhone(ctx, unbound, sms.delivered[unbound], "any-password-1"); !errors.Is(err, ErrNoAccountForPhone) {
+		t.Fatalf("unbound reset: %v, want ErrNoAccountForPhone", err)
+	}
+}
+
+// TestPhoneResetHTTP wires the reset endpoint against the real handler: wrong
+// codes 401 and count toward the verify throttle; a valid reset is 204 and the
+// account can log in with the new password.
+func TestPhoneResetHTTP(t *testing.T) {
+	svc, sms, store, ctx := phoneEnv(t)
+	phone := phoneNumber()
+	u, err := store.CreateUser(ctx, "r-"+phone+"@example.com", "old-password-1", "R")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		store.db.Exec(`DELETE FROM users WHERE id = $1`, u.ID)
+		store.db.Exec(`DELETE FROM phone_otps WHERE phone = $1`, phone)
+	})
+	bindPhoneTo(t, svc, sms, u.ID, phone)
+
+	h := NewPhoneHandler(svc, sms)
+	th := NewOTPThrottler()
+	th.now = svc.now
+	h.throttle = th
+
+	reset := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/phone/reset-password",
+			strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.serveResetPassword(rec, req)
+		return rec
+	}
+
+	// Wrong code: 401 and one verify-throttle entry.
+	if err := svc.RequestPhoneOTP(ctx, phone, sms); err != nil {
+		t.Fatal(err)
+	}
+	rec := reset(fmt.Sprintf(`{"phone":%q,"code":"000000","password":"fresh-password-1"}`, phone))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-code status = %d, want 401", rec.Code)
+	}
+	th.mu.Lock()
+	if n := len(th.verify); n != 1 {
+		t.Fatalf("wrong code must count once, got %d entries", n)
+	}
+	th.mu.Unlock()
+
+	// Weak password: 400, and the code survives for a valid attempt.
+	rec = reset(fmt.Sprintf(`{"phone":%q,"code":%q,"password":"short"}`, phone, sms.delivered[phone]))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("weak-password status = %d, want 400", rec.Code)
+	}
+	rec = reset(fmt.Sprintf(`{"phone":%q,"code":%q,"password":"fresh-password-1"}`, phone, sms.delivered[phone]))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("reset status = %d, want 204", rec.Code)
+	}
+	if _, _, err := svc.Login(ctx, u.Email, "fresh-password-1"); err != nil {
+		t.Fatalf("login with reset password: %v", err)
+	}
+
+	// An unbound phone: 404, and it must NOT count toward the throttle (the
+	// pair's history was cleared by the successful reset above, so it stays 0).
+	unbound := phoneNumber()
+	t.Cleanup(func() { store.db.Exec(`DELETE FROM phone_otps WHERE phone = $1`, unbound) })
+	if err := svc.RequestPhoneOTP(ctx, unbound, sms); err != nil {
+		t.Fatal(err)
+	}
+	rec = reset(fmt.Sprintf(`{"phone":%q,"code":%q,"password":"fresh-password-1"}`, unbound, sms.delivered[unbound]))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unbound status = %d, want 404", rec.Code)
+	}
+	th.mu.Lock()
+	defer th.mu.Unlock()
+	if n := len(th.verify); n != 0 {
+		t.Errorf("non-code errors must not count toward the verify throttle (map holds %d entries)", n)
+	}
+}

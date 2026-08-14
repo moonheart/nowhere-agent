@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Phone/OTP authentication (domestic enterprise account convention): sign in
@@ -42,6 +44,12 @@ var (
 	ErrInvalidCode = errors.New("invalid verification code")
 	// ErrInvalidPhone means the number is not a valid Chinese mobile.
 	ErrInvalidPhone = errors.New("invalid phone number")
+	// ErrNoAccountForPhone means an OTP-verified phone has no bound account, so
+	// a password reset cannot target anyone (a phone-only account would have
+	// been created at verify time).
+	ErrNoAccountForPhone = errors.New("no account bound to this phone")
+	// ErrPhoneTaken means the phone is already bound to another account.
+	ErrPhoneTaken = errors.New("phone is bound to another account")
 )
 
 // cnMobile matches a mainland Chinese mobile number: 11 digits starting with
@@ -209,6 +217,35 @@ func (s *Service) RequestPhoneOTP(ctx context.Context, rawPhone string, provider
 	return s.store.CreateOTP(ctx, phone, hashCode(code), s.now().Add(otpTTL))
 }
 
+// consumeOTP validates the pending code for phone (constant-time,
+// attempt-capped) and single-use-consumes it on success. It is the shared
+// credential gate of every phone-verified operation: login/verify, password
+// reset, and phone binding.
+func (s *Service) consumeOTP(ctx context.Context, phone, code string) error {
+	otp, err := s.store.LatestOTP(ctx, phone, s.now())
+	if err != nil {
+		return ErrInvalidCode
+	}
+	if otp.Attempts >= otpMaxAttempts {
+		return ErrInvalidCode
+	}
+	if subtle.ConstantTimeCompare([]byte(hashCode(code)), []byte(otp.CodeHash)) != 1 {
+		if n, berr := s.store.BumpOTPAttempts(ctx, otp.ID); berr == nil && n >= otpMaxAttempts {
+			// Burn the code at the cap so the remaining window offers nothing.
+			_, _ = s.store.ConsumeOTP(ctx, otp.ID, s.now())
+		}
+		return ErrInvalidCode
+	}
+	ok, err := s.store.ConsumeOTP(ctx, otp.ID, s.now())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrInvalidCode // already used (raced)
+	}
+	return nil
+}
+
 // VerifyPhoneOTP checks the code (constant-time, attempt-capped, single-use)
 // and, on success, provisions or resolves the account and issues the platform
 // bearer token — the exact same token a password login returns.
@@ -217,28 +254,9 @@ func (s *Service) VerifyPhoneOTP(ctx context.Context, rawPhone, code string) (to
 	if phone == "" {
 		return "", User{}, ErrInvalidPhone
 	}
-	otp, err := s.store.LatestOTP(ctx, phone, s.now())
-	if err != nil {
-		return "", User{}, ErrInvalidCode
-	}
-	if otp.Attempts >= otpMaxAttempts {
-		return "", User{}, ErrInvalidCode
-	}
-	if subtle.ConstantTimeCompare([]byte(hashCode(code)), []byte(otp.CodeHash)) != 1 {
-		if n, berr := s.store.BumpOTPAttempts(ctx, otp.ID); berr == nil && n >= otpMaxAttempts {
-			// Burn the code at the cap so the remaining window offers nothing.
-			_, _ = s.store.ConsumeOTP(ctx, otp.ID, s.now())
-		}
-		return "", User{}, ErrInvalidCode
-	}
-	ok, err := s.store.ConsumeOTP(ctx, otp.ID, s.now())
-	if err != nil {
+	if err := s.consumeOTP(ctx, phone, code); err != nil {
 		return "", User{}, err
 	}
-	if !ok {
-		return "", User{}, ErrInvalidCode // already used (raced)
-	}
-
 	u, err = s.store.UserByPhone(ctx, phone)
 	if errors.Is(err, ErrUserNotFound) {
 		u, err = s.store.CreatePhoneUser(ctx, phone, "用户 "+phone[len(phone)-4:])
@@ -254,6 +272,65 @@ func (s *Service) VerifyPhoneOTP(ctx context.Context, rawPhone, code string) (to
 		return "", User{}, err
 	}
 	return raw, u, nil
+}
+
+// ResetPasswordByPhone resets an account's password after OTP verification
+// proves possession of the phone bound to it — the self-service recovery path
+// for an account whose password was lost. It shares the admin ResetPassword
+// semantics (SetPassword revokes every session), and deliberately bypasses
+// TOTP: a user who lost the password may have lost the authenticator too, and
+// the OTP is the recovery credential. Only a phone actually bound to an
+// account can reset it (verify would have created a phone-only account for a
+// fresh number, so no account = no reset).
+func (s *Service) ResetPasswordByPhone(ctx context.Context, rawPhone, code, newPassword string) error {
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+	phone := NormalizePhone(rawPhone)
+	if phone == "" {
+		return ErrInvalidPhone
+	}
+	if err := s.consumeOTP(ctx, phone, code); err != nil {
+		return err
+	}
+	u, err := s.store.UserByPhone(ctx, phone)
+	if errors.Is(err, ErrUserNotFound) {
+		return ErrNoAccountForPhone
+	}
+	if err != nil {
+		return err
+	}
+	if u.Disabled() {
+		return ErrUserDisabled
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	return s.store.SetPassword(ctx, u.ID, string(hash))
+}
+
+// BindPhone verifies possession of the phone via OTP, then binds it to the
+// caller's account (replacing any previous phone of theirs). The unique index
+// on users.phone rejects a number another account holds. Binding is the
+// prerequisite for phone-based password recovery, so it is reserved for the
+// authenticated account owner (POST /api/me/phone/bind).
+func (s *Service) BindPhone(ctx context.Context, userID, rawPhone, code string) error {
+	phone := NormalizePhone(rawPhone)
+	if phone == "" {
+		return ErrInvalidPhone
+	}
+	if err := s.consumeOTP(ctx, phone, code); err != nil {
+		return err
+	}
+	u, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if u.Phone == phone {
+		return nil // already bound to this account: idempotent success
+	}
+	return s.store.SetUserPhone(ctx, userID, phone)
 }
 
 // newOTPCode returns a cryptographically random 6-digit code.

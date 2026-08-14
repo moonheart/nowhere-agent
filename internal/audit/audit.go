@@ -50,10 +50,14 @@ const (
 	ActionAuthLogout Action = "auth.logout"
 	// Phone/OTP code delivery (the code itself is never recorded).
 	ActionPhoneOTPRequest Action = "auth.otp.request"
+	// Self-service password recovery through a bound phone (OTP-verified).
+	ActionPhonePasswordReset Action = "auth.phone.reset_password"
 
 	// Self-service account management.
 	ActionMePasswordChange Action = "me.password.change"
 	ActionMeTokenRevoke    Action = "me.token.revoke"
+	// Self-service phone binding (OTP-verified; enables phone recovery).
+	ActionMePhoneBind Action = "me.phone.bind"
 	// Self-service file uploads (change user-image-uploads).
 	ActionMeUploadDelete Action = "me.upload.delete"
 	// Self-service data export (data governance).

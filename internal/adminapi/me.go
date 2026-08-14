@@ -1,6 +1,8 @@
 package adminapi
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -49,6 +51,57 @@ func (h *Handler) updateMe(w http.ResponseWriter, r *http.Request) {
 type changePasswordRequest struct {
 	CurrentPassword string `json:"current_password"`
 	NewPassword     string `json:"new_password"`
+}
+
+type bindPhoneRequest struct {
+	Phone string `json:"phone"`
+	Code  string `json:"code"`
+}
+
+// bindPhone serves POST /api/me/phone/bind: OTP-verified binding of the
+// caller's mobile number. The code is issued by the open
+// /api/auth/phone/request-code route (the caller may be authed or not; SMS
+// quotas and the resend cooldown apply the same). Binding a phone is the
+// prerequisite for phone-based password recovery — hence the verify throttle
+// shared with the auth routes.
+func (h *Handler) bindPhone(w http.ResponseWriter, r *http.Request) {
+	var req bindPhoneRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	u := caller(r)
+	phone := identity.NormalizePhone(req.Phone)
+	if phone == "" {
+		writeError(w, http.StatusBadRequest, "invalid phone number")
+		return
+	}
+	ip := audit.ClientIP(r)
+	if h.phoneThrottle != nil {
+		if allowed, retryAfter := h.phoneThrottle.CheckVerify(phone, ip); !allowed {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
+			writeError(w, http.StatusTooManyRequests, "too many failed attempts")
+			return
+		}
+	}
+	if err := h.identity.BindPhone(r.Context(), u.ID, phone, req.Code); err != nil {
+		// Only a genuinely wrong code counts as a failed guess (mirroring the
+		// phone auth routes).
+		if errors.Is(err, identity.ErrInvalidCode) && h.phoneThrottle != nil {
+			h.phoneThrottle.FailVerify(phone, ip)
+		}
+		h.record(r, audit.Failure(audit.ActionMePhoneBind).Target("user", u.ID).
+			Detail(map[string]any{"phone": maskPhone(phone)}))
+		writeServiceError(w, err)
+		return
+	}
+	if h.phoneThrottle != nil {
+		h.phoneThrottle.SuccessVerify(phone, ip)
+	}
+	h.record(r, audit.Success(audit.ActionMePhoneBind).Target("user", u.ID).
+		Detail(map[string]any{"phone": maskPhone(phone)}))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "phone bound; it can now be used to recover your password",
+	})
 }
 
 func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
@@ -335,4 +388,13 @@ func (h *Handler) deleteUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	h.record(r, audit.Success(audit.ActionMeUploadDelete).Target("upload", id))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maskPhone keeps the last four digits, matching identity's log convention, so
+// audit detail never carries the full number.
+func maskPhone(phone string) string {
+	if len(phone) <= 4 {
+		return "****"
+	}
+	return "****" + phone[len(phone)-4:]
 }

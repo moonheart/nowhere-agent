@@ -41,6 +41,11 @@ type Handler struct {
 	// uploads is the user-level image upload service. Nil disables the
 	// /api/me/uploads routes with a 503 (see WithUploads).
 	uploads upload.Uploader
+	// phoneThrottle is the OTP verify throttle shared with the phone-auth
+	// routes: a locked (phone, ip) pair stays locked across login, reset, and
+	// bind. Nil leaves the bind route without the pair lockout (the per-code
+	// attempt cap still applies).
+	phoneThrottle *identity.OTPThrottler
 	// audit records administrative actions; nil disables recording.
 	audit *audit.Logger
 	// exporter assembles a user's data footprint for /api/me/export. Nil
@@ -150,6 +155,13 @@ func (h *Handler) WithUploads(u upload.Uploader) *Handler {
 	return h
 }
 
+// WithPhoneThrottle wires the OTP verify throttle (the same instance the
+// phone-auth handler uses), so phone-verify lockouts cover the bind route too.
+func (h *Handler) WithPhoneThrottle(t *identity.OTPThrottler) *Handler {
+	h.phoneThrottle = t
+	return h
+}
+
 // RegisterAuthed mounts every console route onto the protected group. Auth is
 // NOT wrapped per route: the group applies its middleware set once at Mount
 // time, so this handler only declares which routes belong to the protected
@@ -164,6 +176,7 @@ func (h *Handler) RegisterAuthed(g *httpx.Router) {
 	route(g, "PATCH /api/me", h.updateMe)
 	route(g, "DELETE /api/me", h.deleteMe)
 	route(g, "POST /api/me/password", h.changePassword)
+	route(g, "POST /api/me/phone/bind", h.bindPhone)
 	route(g, "POST /api/me/totp/enable", h.enableTOTP)
 	route(g, "POST /api/me/totp/confirm", h.confirmTOTP)
 	route(g, "POST /api/me/totp/disable", h.disableTOTP)

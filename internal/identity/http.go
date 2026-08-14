@@ -112,6 +112,10 @@ type userDTO struct {
 	ID          string `json:"id"`
 	Email       string `json:"email"`
 	DisplayName string `json:"display_name"`
+	// Phone is the account's bound mobile number, MASKED (e.g. "****8000");
+	// empty when none is bound. The profile renders it; the full number never
+	// leaves the server.
+	Phone string `json:"phone"`
 	// PlatformRole tells the client whether to offer platform administration.
 	// It is presentation only: every platform route enforces the role
 	// server-side regardless of what the client renders.
@@ -124,10 +128,15 @@ func toDTO(u User) userDTO {
 	if role == "" {
 		role = PlatformRoleUser
 	}
+	phone := ""
+	if u.Phone != "" {
+		phone = maskPhone(u.Phone)
+	}
 	return userDTO{
 		ID:           u.ID,
 		Email:        u.Email,
 		DisplayName:  u.DisplayName,
+		Phone:        phone,
 		PlatformRole: string(role),
 		Disabled:     u.Disabled(),
 	}

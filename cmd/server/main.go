@@ -361,11 +361,16 @@ func run() error {
 		!strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		return fmt.Errorf("phone sms: PHONE_SMS_URL must be an http(s) URL or log://, got %q", url)
 	}
+	// One OTP throttler shared by every phone-verified route (login verify,
+	// password reset, profile binding): a locked (phone, ip) pair stays locked
+	// across all of them.
+	phoneThrottle := identity.NewOTPThrottler()
 	phoneHandler := identity.NewPhoneHandler(identitySvc, identity.NewRuntimeSMSProvider(
 		func() string { return settingsRuntime.String(settings.KeyPhoneSMSURL) },
 		func() time.Duration { return settingsRuntime.Duration(settings.KeyPhoneSMSTimeout) },
 		log)).WithAudit(auditLogger).
-		WithEnabledFunc(func() bool { return settingsRuntime.String(settings.KeyPhoneSMSURL) != "" })
+		WithEnabledFunc(func() bool { return settingsRuntime.String(settings.KeyPhoneSMSURL) != "" }).
+		WithThrottle(phoneThrottle)
 	phoneHandler.SetLogger(log)
 	phoneHandler.Register(mux)
 	if cfg.Phone.Enabled() {
@@ -1869,6 +1874,7 @@ func run() error {
 		WithExporter(export.New(pool, messageStore, memPort, uploadSvc, schedule.NewPGStore(pool))).
 		WithWebhookDeliveries(webhook.NewDeliveryStore(pool)).
 		WithRuntimeSettings(settingsRuntime).
+		WithPhoneThrottle(phoneThrottle).
 		// Platform purge (no-data-hard-delete): hard-delete routes for
 		// sessions and image cleanup on user deletion. The shared run registry
 		// stops an in-flight run before the session row goes.

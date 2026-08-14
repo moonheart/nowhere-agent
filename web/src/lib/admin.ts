@@ -12,6 +12,8 @@ export type User = {
   id: string;
   email: string;
   display_name: string;
+  // Bound mobile number, masked server-side ("****8000"); empty when unbound.
+  phone?: string;
   platform_role: PlatformRole;
   disabled: boolean;
   disabled_at?: string;
@@ -151,6 +153,14 @@ export const changePassword = (current_password: string, new_password: string) =
   api<{ reauthenticate: boolean; message: string }>("/api/me/password", {
     method: "POST",
     body: { current_password, new_password },
+  });
+
+// bindPhone OTP-verifies and binds the caller's mobile number, enabling
+// phone-based password recovery. The code is issued by requestPhoneCode.
+export const bindPhone = (phone: string, code: string) =>
+  api<{ message: string }>("/api/me/phone/bind", {
+    method: "POST",
+    body: { phone, code },
   });
 
 // deleteMeAccount removes the caller's own account and its data (PIPL §47

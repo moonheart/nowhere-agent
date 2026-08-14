@@ -1,6 +1,6 @@
 // Self-service settings: display name, password, teams, and active sessions.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Download, LogOut, ShieldCheck, Smartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,6 +18,7 @@ import {
 import { api } from "@/lib/api";
 import { t } from "@/lib/i18n";
 import {
+  bindPhone,
   changePassword,
   confirmTotp,
   deleteMeAccount,
@@ -29,7 +30,7 @@ import {
   updateMe,
   type SessionToken,
 } from "@/lib/admin";
-import { clearToken } from "@/lib/auth";
+import { clearToken, requestPhoneCode } from "@/lib/auth";
 import { useConsoleMe } from "@/components/admin/AdminLayout";
 import {
   AsyncSection,
@@ -56,6 +57,7 @@ export function ProfilePage() {
         onSaved={reload}
       />
       <PasswordCard />
+      <PhoneCard phone={me.user.phone} onBound={reload} />
       <TotpCard />
       <DataCard />
       <TeamsCard teams={me.teams} />
@@ -468,6 +470,151 @@ function PasswordCard() {
           <Button type="submit" disabled={busy || !current || next.length < 8}>
             {busy ? "Changing…" : "Change password"}
           </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+// PhoneCard is the phone-binding self-service: a bound mobile number lets the
+// account recover its password from the login page (phone + SMS code). The
+// number shown is masked by the server; only the last four digits are visible.
+function PhoneCard({
+  phone,
+  onBound,
+}: {
+  phone?: string;
+  onBound: () => void;
+}) {
+  const [number, setNumber] = useState("");
+  const [code, setCode] = useState("");
+  const [codeSent, setCodeSent] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  // Resend cooldown countdown (60s), mirroring the server's OTP cooldown.
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = setInterval(() => setCooldown((c) => Math.max(0, c - 1)), 1000);
+    return () => clearInterval(id);
+  }, [cooldown]);
+
+  const send = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await requestPhoneCode(number);
+      setCodeSent(true);
+      setCooldown(60);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const bind = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await bindPhone(number, code);
+      setDone(true);
+      setCode("");
+      onBound();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Smartphone className="size-4 text-primary" />
+          Phone number
+        </CardTitle>
+        <CardDescription>
+          A bound phone number lets you reset a forgotten password from the
+          sign-in screen. The number is verified with a one-time SMS code.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {phone ? (
+          <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
+            <ShieldCheck className="size-4 text-primary" />
+            Bound: {phone}
+            <button
+              type="button"
+              className="ml-auto text-xs text-muted-foreground underline"
+              onClick={() => setNumber("")}
+            >
+              Change
+            </button>
+          </div>
+        ) : null}
+        {error && <ErrorNotice message={error} />}
+        {done && <p className="text-sm text-muted-foreground">Saved.</p>}
+        <form onSubmit={bind} className="space-y-3">
+          <div className="flex items-end gap-3">
+            <div className="flex-1 space-y-1.5">
+              <Label htmlFor="phone-number">Mobile number</Label>
+              <Input
+                id="phone-number"
+                type="tel"
+                inputMode="numeric"
+                placeholder="13800138000"
+                value={number}
+                onChange={(e) => setNumber(e.target.value)}
+              />
+            </div>
+            {codeSent ? null : (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy || cooldown > 0 || number.trim() === ""}
+                onClick={send}
+              >
+                {cooldown > 0 ? `Resend in ${cooldown}s` : "Send code"}
+              </Button>
+            )}
+          </div>
+          {codeSent && (
+            <>
+              <div className="flex items-end gap-3">
+                <div className="flex-1 space-y-1.5">
+                  <Label htmlFor="phone-code">Verification code</Label>
+                  <Input
+                    id="phone-code"
+                    inputMode="numeric"
+                    maxLength={6}
+                    placeholder="123456"
+                    value={code}
+                    onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                  />
+                </div>
+                <Button type="submit" disabled={busy || code.length !== 6}>
+                  {busy ? "Binding…" : "Bind"}
+                </Button>
+              </div>
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="px-0"
+                onClick={() => {
+                  setCodeSent(false);
+                  setCooldown(0);
+                }}
+              >
+                Use a different number
+              </Button>
+            </>
+          )}
         </form>
       </CardContent>
     </Card>

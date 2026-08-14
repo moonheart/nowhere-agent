@@ -131,6 +131,12 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, "role must be owner, admin, or member")
 	case errors.Is(err, identity.ErrInvalidCredentials):
 		writeError(w, http.StatusForbidden, "current password is incorrect")
+	case errors.Is(err, identity.ErrInvalidPhone):
+		writeError(w, http.StatusBadRequest, "invalid phone number")
+	case errors.Is(err, identity.ErrInvalidCode):
+		writeError(w, http.StatusUnauthorized, "invalid verification code")
+	case errors.Is(err, identity.ErrPhoneTaken):
+		writeError(w, http.StatusConflict, "this phone is bound to another account")
 	case errors.Is(err, identity.ErrInvalidToken):
 		writeError(w, http.StatusNotFound, "session not found")
 	case errors.Is(err, identity.ErrWeakPassword):

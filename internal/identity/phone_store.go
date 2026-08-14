@@ -24,6 +24,31 @@ func (s *Store) UserByPhone(ctx context.Context, phone string) (User, error) {
 	return s.scanUser(ctx, `SELECT `+userColumns+` FROM users WHERE phone = $1`, phone)
 }
 
+// SetUserPhone binds (or moves) phone onto the account. The partial unique
+// index on users.phone atomically rejects a number another account holds
+// (ErrPhoneTaken) — the check and the write race safely in one statement.
+func (s *Store) SetUserPhone(ctx context.Context, userID, phone string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET phone = $2, updated_at = now() WHERE id = $1`, userID, phone)
+	if IsMalformedID(err) {
+		return ErrUserNotFound
+	}
+	if isUniqueViolation(err) {
+		return ErrPhoneTaken
+	}
+	if err != nil {
+		return fmt.Errorf("set user phone: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 // CreatePhoneUser provisions an account for a verified phone number. With the
 // first-account bootstrap enabled (see Store.WithFirstAccountAdmin), the first
 // account on an empty platform becomes admin, exactly like email signup.

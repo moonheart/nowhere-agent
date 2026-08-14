@@ -166,6 +166,21 @@ export async function phoneAuthAvailable(): Promise<boolean> {
   }
 }
 
+// resetPasswordWithPhone verifies the code delivered to a BOUND phone and sets
+// a new password for its account — the self-service recovery path shown from
+// the login page's "forgot password" link. The server revokes every session.
+export async function resetPasswordWithPhone(
+  phone: string,
+  code: string,
+  password: string,
+): Promise<void> {
+  const res = await post("/api/auth/phone/reset-password", { phone, code, password });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `request failed (${res.status})`);
+  }
+}
+
 export async function logout(): Promise<void> {
   const token = getToken();
   if (token) {

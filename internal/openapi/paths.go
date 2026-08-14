@@ -106,6 +106,21 @@ func paths() map[string]PathItem {
 				Responses:   jsonResp("token + user", ref("AuthResponse")),
 			},
 		},
+		"/api/auth/phone/reset-password": {
+			"post": Operation{
+				Summary:     "Reset a password with an SMS code for the account's bound phone",
+				Description: "Verifies the code delivered to the phone number bound to the account, then sets the new password and signs every session out. The phone must already be bound to an account (self-service phone binding lives at /api/me/phone/bind).",
+				Tags:        []string{"auth"},
+				RequestBody: jsonBody(map[string]any{"type": "object", "required": []string{"phone", "code", "password"}, "properties": map[string]any{"phone": map[string]any{"type": "string"}, "code": map[string]any{"type": "string"}, "password": map[string]any{"type": "string"}}}),
+				Responses: map[string]Response{
+					"204": {Description: "password reset"},
+					"400": {Description: "invalid phone number or weak password"},
+					"401": {Description: "invalid verification code"},
+					"404": {Description: "no account bound to this phone"},
+					"429": {Description: "too many failed attempts; Retry-After set"},
+				},
+			},
+		},
 		"/api/auth/phone/enabled": {
 			"get": Operation{
 				Summary:   "Whether phone (SMS) login is enabled",
@@ -870,6 +885,22 @@ func paths() map[string]PathItem {
 					"200": {Description: "password changed", Content: map[string]Content{"application/json": {Schema: map[string]any{"type": "object", "properties": map[string]any{"ok": map[string]any{"type": "boolean"}}}}}},
 					"401": {Description: "invalid or missing bearer token"},
 					"403": {Description: "current password wrong or policy violation"},
+				},
+			},
+		},
+		"/api/me/phone/bind": {
+			"post": Operation{
+				Summary:     "Bind a mobile number to the caller's account (SMS-OTP verified)",
+				Description: "Verifies the code delivered to the phone (issued via /api/auth/phone/request-code) and binds it to the caller's account, enabling phone-based password recovery. A phone already bound to another account is rejected.",
+				Tags:        []string{"me"},
+				Security:    bearer,
+				RequestBody: jsonBody(map[string]any{"type": "object", "required": []string{"phone", "code"}, "properties": map[string]any{"phone": map[string]any{"type": "string"}, "code": map[string]any{"type": "string"}}}),
+				Responses: map[string]Response{
+					"200": {Description: "phone bound"},
+					"400": {Description: "invalid phone number"},
+					"401": {Description: "invalid verification code"},
+					"409": {Description: "phone is bound to another account"},
+					"429": {Description: "too many failed attempts; Retry-After set"},
 				},
 			},
 		},
@@ -1697,6 +1728,7 @@ func schemas() map[string]any {
 				"id":            map[string]any{"type": "string"},
 				"email":         map[string]any{"type": "string"},
 				"display_name":  map[string]any{"type": "string"},
+				"phone":         map[string]any{"type": "string", "description": "bound mobile number, masked (\"****8000\"); empty when unbound"},
 				"platform_role": map[string]any{"type": "string", "enum": []string{"user", "admin"}},
 			},
 		},

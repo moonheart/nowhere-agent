@@ -45,6 +45,14 @@ func (h *PhoneHandler) WithEnabledFunc(f func() bool) *PhoneHandler {
 	return h
 }
 
+// WithThrottle overrides the built-in OTP throttler, so a caller can share ONE
+// instance across the phone-auth routes and the console's phone-binding route
+// (a locked (phone, ip) pair then stays locked everywhere).
+func (h *PhoneHandler) WithThrottle(t *OTPThrottler) *PhoneHandler {
+	h.throttle = t
+	return h
+}
+
 // WithAudit wires the audit trail (best-effort).
 func (h *PhoneHandler) WithAudit(l *audit.Logger) *PhoneHandler {
 	h.audit = l
@@ -63,6 +71,7 @@ func (h *PhoneHandler) SetLogger(l *slog.Logger) *PhoneHandler {
 func (h *PhoneHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/auth/phone/request-code", h.serveRequestCode)
 	mux.HandleFunc("POST /api/auth/phone/verify", h.serveVerify)
+	mux.HandleFunc("POST /api/auth/phone/reset-password", h.serveResetPassword)
 	mux.HandleFunc("GET /api/auth/phone/enabled", h.serveEnabled)
 }
 
@@ -73,6 +82,12 @@ type phoneRequest struct {
 type phoneVerifyRequest struct {
 	Phone string `json:"phone"`
 	Code  string `json:"code"`
+}
+
+type phoneResetRequest struct {
+	Phone    string `json:"phone"`
+	Code     string `json:"code"`
+	Password string `json:"password"`
 }
 
 // serveEnabled lets the login page probe whether phone login exists (404 when
@@ -169,6 +184,61 @@ func (h *PhoneHandler) serveVerify(w http.ResponseWriter, r *http.Request) {
 	h.record(audit.Success(audit.ActionAuthLogin).FromRequest(r).Actor(u.ID, u.Email).
 		Target("user", u.ID).Detail(map[string]any{"method": "phone", "phone": maskPhone(phone)}))
 	writeJSON(w, http.StatusOK, authResponse{Token: token, User: toDTO(u)})
+}
+
+func (h *PhoneHandler) serveResetPassword(w http.ResponseWriter, r *http.Request) {
+	if h.enabledFor != nil && !h.enabledFor() {
+		http.NotFound(w, r)
+		return
+	}
+	var req phoneResetRequest
+	if !readAuthBody(w, r, &req) {
+		return
+	}
+	phone := NormalizePhone(req.Phone)
+	if phone == "" {
+		http.Error(w, "invalid phone number", http.StatusBadRequest)
+		return
+	}
+	ip := audit.ClientIP(r)
+	// Same (phone, ip) verify throttle as serveVerify: wrong codes lock the
+	// pair, so an attacker who steals one code cannot grind the 6-digit space
+	// against the recovery path any more than against login.
+	if allowed, retryAfter := h.throttle.CheckVerify(phone, ip); !allowed {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())+1))
+		http.Error(w, "too many failed attempts", http.StatusTooManyRequests)
+		return
+	}
+	err := h.svc.ResetPasswordByPhone(r.Context(), phone, req.Code, req.Password)
+	if err != nil {
+		// Only a genuinely wrong code counts as a failed guess; a DB hiccup,
+		// an unbound phone, or a weak password must not lock the pair.
+		if errors.Is(err, ErrInvalidCode) {
+			h.throttle.FailVerify(phone, ip)
+		}
+		h.record(audit.Failure(audit.ActionPhonePasswordReset).FromRequest(r).
+			Detail(map[string]any{"phone": maskPhone(phone)}))
+		switch {
+		case errors.Is(err, ErrInvalidPhone):
+			http.Error(w, "invalid phone number", http.StatusBadRequest)
+		case errors.Is(err, ErrInvalidCode):
+			http.Error(w, "invalid verification code", http.StatusUnauthorized)
+		case errors.Is(err, ErrWeakPassword):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, ErrNoAccountForPhone):
+			http.Error(w, "no account bound to this phone", http.StatusNotFound)
+		case errors.Is(err, ErrUserDisabled):
+			http.Error(w, "account disabled", http.StatusForbidden)
+		default:
+			h.log.Warn("phone password reset failed", "err", err)
+			http.Error(w, "password reset failed", http.StatusInternalServerError)
+		}
+		return
+	}
+	h.throttle.SuccessVerify(phone, ip)
+	h.record(audit.Success(audit.ActionPhonePasswordReset).FromRequest(r).
+		Detail(map[string]any{"phone": maskPhone(phone)}))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // record writes one event to the audit trail when one is wired. It is a no-op

@@ -5,6 +5,7 @@ import {
   login,
   phoneAuthAvailable,
   requestPhoneCode,
+  resetPasswordWithPhone,
   signup,
   verifyPhoneCode,
 } from "@/lib/auth";
@@ -50,6 +51,11 @@ export const LoginForm: FC<{
   const [phoneEnabled, setPhoneEnabled] = useState(false);
   const [codeSent, setCodeSent] = useState(false);
   const [cooldown, setCooldown] = useState(0);
+  // Self-service password recovery (phone-bound accounts): the forgot link
+  // switches to a reset flow when the phone channel is enabled.
+  const [resetMode, setResetMode] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [resetDone, setResetDone] = useState(false);
   // Second-factor challenge state (MFA): the password half succeeded (or the
   // IdP authenticated the account), the account demands an authenticator code
   // before any token is issued.
@@ -143,23 +149,52 @@ export const LoginForm: FC<{
     }
   };
 
+  const submitReset = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      await resetPasswordWithPhone(phone, code, newPassword);
+      setResetDone(true);
+      setCodeSent(false);
+      setCode("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const backToEmail = () => {
+    setPhoneMode(false);
+    setResetMode(false);
+    setCodeSent(false);
+    setResetDone(false);
+    setCode("");
+    setNewPassword("");
+  };
+
   return (
     <div className="flex h-full items-center justify-center p-6">
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle>
-            {phoneMode
-              ? t("login.phone")
-              : mode === "login"
-                ? t("login.title")
-                : t("login.titleSignup")}
+            {resetMode
+              ? t("login.resetTitle")
+              : phoneMode
+                ? t("login.phone")
+                : mode === "login"
+                  ? t("login.title")
+                  : t("login.titleSignup")}
           </CardTitle>
           <CardDescription>
-            {phoneMode
-              ? t("login.phoneSubtitle")
-              : mode === "login"
-                ? t("login.subtitle")
-                : t("login.subtitleSignup")}
+            {resetMode
+              ? t("login.resetSubtitle")
+              : phoneMode
+                ? t("login.phoneSubtitle")
+                : mode === "login"
+                  ? t("login.subtitle")
+                  : t("login.subtitleSignup")}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -216,8 +251,7 @@ export const LoginForm: FC<{
           )}
 
           {totpChallenge ? (
-            <form onSubmit={submitTotp} className="space-y-4">
-              <FieldGroup>
+            <form onSubmit={submitTotp} className="space-y-4">              <FieldGroup>
                 <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm">
                   <ShieldCheck className="size-4 text-primary" />
                   {t("login.totpHint")}
@@ -251,6 +285,84 @@ export const LoginForm: FC<{
                   size="sm"
                   onClick={() => setTotpChallenge(null)}
                 >
+                  {t("login.backToEmail")}
+                </Button>
+              </FieldGroup>
+            </form>
+          ) : resetMode ? (
+            <form onSubmit={submitReset} className="space-y-4">
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="reset-phone">{t("login.phone")}</FieldLabel>
+                  <Input
+                    id="reset-phone"
+                    type="tel"
+                    required
+                    autoComplete="tel"
+                    inputMode="numeric"
+                    placeholder="13800138000"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                  />
+                </Field>
+                {codeSent && (
+                  <>
+                    <Field>
+                      <FieldLabel htmlFor="reset-otp">{t("login.code")}</FieldLabel>
+                      <Input
+                        id="reset-otp"
+                        type="text"
+                        required
+                        inputMode="numeric"
+                        maxLength={6}
+                        placeholder={t("login.otpPlaceholder")}
+                        value={code}
+                        onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="reset-password">
+                        {t("login.newPassword")}
+                      </FieldLabel>
+                      <Input
+                        id="reset-password"
+                        type="password"
+                        required
+                        autoComplete="new-password"
+                        placeholder="••••••••"
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                      />
+                    </Field>
+                  </>
+                )}
+                {error && (
+                  <Alert variant="destructive">
+                    <AlertCircle />
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                )}
+                {resetDone ? (
+                  <p className="text-sm text-muted-foreground">
+                    {t("login.resetSuccess")}
+                  </p>
+                ) : codeSent ? (
+                  <Button type="submit" size="lg" disabled={busy || code.length !== 6 || newPassword.length < 8}>
+                    {busy ? t("login.busy") : t("login.resetSubmit")}
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    size="lg"
+                    disabled={busy || cooldown > 0 || phone.trim() === ""}
+                    onClick={sendCode}
+                  >
+                    {cooldown > 0
+                      ? `${t("login.resendIn")} ${cooldown}s`
+                      : t("login.sendCode")}
+                  </Button>
+                )}
+                <Button type="button" variant="link" size="sm" onClick={backToEmail}>
                   {t("login.backToEmail")}
                 </Button>
               </FieldGroup>
@@ -357,7 +469,15 @@ export const LoginForm: FC<{
                       variant="link"
                       size="sm"
                       className="px-0"
-                      onClick={() => setShowForgotHint((s) => !s)}
+                      onClick={() => {
+                        if (phoneEnabled) {
+                          setResetMode(true);
+                          setShowForgotHint(false);
+                          setCodeSent(false);
+                        } else {
+                          setShowForgotHint((s) => !s);
+                        }
+                      }}
                     >
                       {t("login.forgotPassword")}
                     </Button>
