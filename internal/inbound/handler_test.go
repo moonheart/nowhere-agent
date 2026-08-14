@@ -253,6 +253,39 @@ func TestTriggerRejectsEmptyPrompt(t *testing.T) {
 	}
 }
 
+// TestTriggerMalformedPayloadDoesNotBurnNonce pins the validation order: a
+// signature-valid but malformed request (bad JSON, missing prompt) is a 400
+// WITHOUT consuming the nonce, so the sender can re-sign the corrected
+// payload with the same nonce + timestamp and have it accepted — instead of
+// a replay 409 on a nonce that never started anything.
+func TestTriggerMalformedPayloadDoesNotBurnNonce(t *testing.T) {
+	e := newEnv(t)
+	now := time.Now().Unix()
+	nonce := "n-malformed-1"
+
+	bad := e.triggerWithNonce(`{"prompt":`, now, e.secret, nonce)
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("bad json: %d, want 400 (%s)", bad.Code, bad.Body)
+	}
+	// Same nonce + timestamp, corrected payload re-signed: must NOT be a replay.
+	good := e.triggerWithNonce(`{"prompt":"x"}`, now, e.secret, nonce)
+	if good.Code != http.StatusAccepted {
+		t.Fatalf("retry with same nonce: %d, want 202 (%s)", good.Code, good.Body)
+	}
+
+	// Same story for a valid-signature request missing the prompt.
+	now2 := time.Now().Unix()
+	nonce2 := "n-malformed-2"
+	noPrompt := e.triggerWithNonce(`{"metadata":{"ticket":"1"}}`, now2, e.secret, nonce2)
+	if noPrompt.Code != http.StatusBadRequest {
+		t.Fatalf("no prompt: %d, want 400", noPrompt.Code)
+	}
+	retry := e.triggerWithNonce(`{"prompt":"x"}`, now2, e.secret, nonce2)
+	if retry.Code != http.StatusAccepted {
+		t.Fatalf("retry after no-prompt: %d, want 202", retry.Code)
+	}
+}
+
 func TestTriggerRejectsOversizedPayload(t *testing.T) {
 	e := newEnv(t)
 	big := strings.Repeat("a", maxBodyBytes+10)

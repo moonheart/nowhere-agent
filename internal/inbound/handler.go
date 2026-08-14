@@ -154,6 +154,22 @@ func (h *Handler) serveTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
+
+	// Validate the payload BEFORE claiming the nonce: the signature covers the
+	// whole body, so this ordering weakens nothing, and a malformed request
+	// (bad JSON, missing prompt) then fails 400 without burning the nonce —
+	// the sender can fix the payload and retry with the SAME signed event
+	// instead of hitting a replay 409.
+	var p triggerPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(p.Prompt) == "" {
+		http.Error(w, "prompt is required", http.StatusBadRequest)
+		return
+	}
+
 	// Replay guard: the nonce is folded into the signature and deduplicated,
 	// so the same signed event can only start one run within the window.
 	if err := h.store.ClaimNonce(r.Context(), wh.ID, r.Header.Get("X-Nowhere-Nonce"), h.now()); err != nil {
@@ -162,16 +178,6 @@ func (h *Handler) serveTrigger(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "dedupe failed", http.StatusInternalServerError)
-		return
-	}
-
-	var p triggerPayload
-	if err := json.Unmarshal(body, &p); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
-		return
-	}
-	if strings.TrimSpace(p.Prompt) == "" {
-		http.Error(w, "prompt is required", http.StatusBadRequest)
 		return
 	}
 
