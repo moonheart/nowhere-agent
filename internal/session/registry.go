@@ -296,13 +296,17 @@ func (rg *RunRegistry) execute(runCtx context.Context, sessionID string, run Run
 
 	// Persist the user turn that started this run as its first message, so the
 	// conversation record (the compression/history source) includes the user side.
+	// Best-effort: a failure is logged, never fatal — the live stream is the
+	// run's real output and must not be aborted by a persist hiccup.
 	if rg.msgStore != nil && work.UserMessage != nil {
-		_, _ = rg.msgStore.AppendMessage(context.Background(), StoredMessage{
+		if _, err := rg.msgStore.AppendMessage(context.Background(), StoredMessage{
 			SessionID: sessionID,
 			RunID:     run.ID,
 			Role:      work.UserMessage.Role,
 			Content:   contextmgmt.TruncateBlocksForPersistence(work.UserMessage.Content),
-		})
+		}); err != nil {
+			log.Warn("persist user message", "role", work.UserMessage.Role, "err", err)
+		}
 	}
 
 	// Install a subagent activity sink so any spawn_agent tool call in this run
@@ -1180,7 +1184,9 @@ func (e *registryEmitter) persistMessage(ctx context.Context, payload any) {
 		if in.messageID != nil {
 			stored.ID = *in.messageID
 		}
-		_, _ = e.rg.msgStore.AppendMessage(bg, stored)
+		if _, err := e.rg.msgStore.AppendMessage(bg, stored); err != nil {
+			slog.Warn("persist assistant message", "session", e.sessionID, "run", e.runID, "role", msg.Role, "err", err)
+		}
 		return
 	}
 
@@ -1199,5 +1205,7 @@ func (e *registryEmitter) persistMessage(ctx context.Context, payload any) {
 	if toolID != nil {
 		stored.ID = *toolID
 	}
-	_, _ = e.rg.msgStore.AppendMessage(bg, stored)
+	if _, err := e.rg.msgStore.AppendMessage(bg, stored); err != nil {
+		slog.Warn("persist tool message", "session", e.sessionID, "run", e.runID, "role", msg.Role, "err", err)
+	}
 }
