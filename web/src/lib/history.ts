@@ -31,6 +31,7 @@ import { reportInteraction, approvalEpoch, type Interaction } from "@/lib/approv
 import { reportNotice } from "@/lib/notice";
 import { reportPlan, type Plan } from "@/lib/plan";
 import { reportPermissionMode, permissionModeFromSessionState } from "@/lib/permission";
+import { t } from "@/lib/i18n";
 
 // HISTORY_PAGE bounds the history load: the newest messages of a long
 // conversation, not the whole record. The server echoes hasMore when older
@@ -349,8 +350,8 @@ export const threadHistory: ThreadHistoryAdapter = {
       console.error("history load failed", err);
       reportNotice(
         err instanceof ApiError
-          ? `Could not load this conversation: ${err.message}`
-          : "Could not load this conversation.",
+          ? t("chat.historyLoadFailedDetail", { message: err.message })
+          : t("chat.historyLoadFailed"),
       );
       return ExportedMessageRepository.fromArray([]);
     }

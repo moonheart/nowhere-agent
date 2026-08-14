@@ -357,7 +357,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
         await uploadFile(file);
         uploaded++;
       } catch {
-        reportNotice(`Could not upload ${file.name} — try a different image.`);
+        reportNotice(t("chat.uploadFailedName", { name: file.name }));
       }
     }
     setUploading(false);
@@ -381,7 +381,7 @@ const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
     files.forEach((file) => {
       inFlight++;
       uploadFile(file)
-        .catch(() => reportNotice("Could not upload the pasted image — try again."))
+        .catch(() => reportNotice(t("chat.uploadFailedPaste")))
         .finally(() => {
           inFlight--;
           if (inFlight === 0) setUploading(false);

@@ -4,6 +4,7 @@ import { Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getSessionId } from "@/lib/thread";
 import { cancelSession } from "@/lib/sessions";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 // StopButton cancels the session's in-flight run. Unlike ComposerPrimitive.Cancel
@@ -27,12 +28,12 @@ export const StopButton: FC<{ className?: string }> = ({ className }) => {
       type="button"
       variant="secondary"
       size="sm"
-      title="Stop this run"
+      title={t("chat.stopTitle")}
       onClick={stop}
       className={cn(className)}
     >
       <Square className="fill-current" />
-      Stop
+      {t("chat.stop")}
     </Button>
   );
 };

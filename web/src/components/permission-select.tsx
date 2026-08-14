@@ -14,13 +14,9 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { usePermissionModeController, type PermissionMode } from "@/lib/permission";
+import { usePermissionModeController } from "@/lib/permission";
+import { t } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-
-const LABEL: Record<PermissionMode, string> = {
-  auto: "自动",
-  allow_all: "完全允许",
-};
 
 export const PermissionSelect: FC<{ sessionId: string | null }> = ({ sessionId }) => {
   const [mode, setMode] = usePermissionModeController(sessionId);
@@ -29,7 +25,7 @@ export const PermissionSelect: FC<{ sessionId: string | null }> = ({ sessionId }
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        title="执行权限：自动=按环境配置审批危险命令；完全允许=所有命令免审批"
+        title={t("permission.title")}
         className={cn(
           "flex items-center gap-1 rounded-md px-2 py-1 text-xs outline-none transition-colors",
           allowAll
@@ -38,7 +34,7 @@ export const PermissionSelect: FC<{ sessionId: string | null }> = ({ sessionId }
         )}
       >
         {allowAll ? <ShieldAlert className="size-3.5" /> : <ShieldCheck className="size-3.5" />}
-        <span>{LABEL[mode]}</span>
+        <span>{allowAll ? t("permission.allowAll") : t("permission.auto")}</span>
         <ChevronUp className="size-3 opacity-60" />
       </DropdownMenuTrigger>
       {/* side=top: the trigger sits at the composer's bottom edge, so the menu
@@ -52,14 +48,14 @@ export const PermissionSelect: FC<{ sessionId: string | null }> = ({ sessionId }
         >
           <DropdownMenuRadioItem value="auto">
             <span className="flex flex-col">
-              <span>自动</span>
-              <span className="text-[11px] text-muted-foreground">按环境配置审批危险命令</span>
+              <span>{t("permission.auto")}</span>
+              <span className="text-[11px] text-muted-foreground">{t("permission.autoHint")}</span>
             </span>
           </DropdownMenuRadioItem>
           <DropdownMenuRadioItem value="allow_all">
             <span className="flex flex-col">
-              <span>完全允许</span>
-              <span className="text-[11px] text-muted-foreground">所有命令免审批</span>
+              <span>{t("permission.allowAll")}</span>
+              <span className="text-[11px] text-muted-foreground">{t("permission.allowAllHint")}</span>
             </span>
           </DropdownMenuRadioItem>
         </DropdownMenuRadioGroup>

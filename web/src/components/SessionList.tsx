@@ -28,7 +28,7 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { t } from "@/lib/i18n";
+import { t, useLang } from "@/lib/i18n";
 import { reportNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +48,7 @@ type Props = {
 // The list is loaded from the backend in pages of SESSION_PAGE_SIZE, newest
 // first; scrolling near the bottom fetches the next page automatically.
 export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refreshToken }: Props) => {
+  const lang = useLang();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [nextCursor, setNextCursor] = useState("");
   const [loading, setLoading] = useState(true);
@@ -283,7 +284,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
                         </span>
                       </ItemTitle>
                       <ItemDescription className="text-xs">
-                        {relTime(s.updatedAt)}
+                        {relTime(s.updatedAt, lang)}
                       </ItemDescription>
                     </ItemContent>
                   </Item>

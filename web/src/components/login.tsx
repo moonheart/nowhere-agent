@@ -231,7 +231,7 @@ export const LoginForm: FC<{
                     inputMode="numeric"
                     autoFocus
                     maxLength={6}
-                    placeholder="6 位验证码"
+                    placeholder={t("login.otpPlaceholder")}
                     value={totpCode}
                     onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ""))}
                   />
@@ -280,7 +280,7 @@ export const LoginForm: FC<{
                       required
                       inputMode="numeric"
                       maxLength={6}
-                      placeholder="6 位验证码"
+                      placeholder={t("login.otpPlaceholder")}
                       value={code}
                       onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
                     />

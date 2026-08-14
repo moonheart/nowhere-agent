@@ -5,6 +5,7 @@
 
 import { getToken } from "@/lib/auth";
 import { handleUnauthorized } from "@/lib/api";
+import { t } from "@/lib/i18n";
 
 export type SessionSummary = {
   id: string;
@@ -88,17 +89,20 @@ export async function cancelSession(id: string): Promise<void> {
   if (res) handleUnauthorized(res);
 }
 
-// relTime renders a compact relative timestamp for the sidebar.
-export function relTime(iso: string): string {
+// relTime renders a compact relative timestamp for the sidebar. lang (the
+// active UI language, from getLang/useLang) selects the phrase: the browser
+// locale alone is not enough because an en-locale browser may still run the
+// Chinese UI (or vice versa).
+export function relTime(iso: string, lang: "zh" | "en"): string {
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return "";
   const s = Math.max(0, Math.floor((Date.now() - then) / 1000));
-  if (s < 60) return "just now";
+  if (s < 60) return t("chat.timeAgo.justNow");
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return t("chat.timeAgo.minutes", { n: m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
+  if (h < 24) return t("chat.timeAgo.hours", { n: h });
   const d = Math.floor(h / 24);
-  if (d < 7) return `${d}d ago`;
-  return new Date(then).toLocaleDateString();
+  if (d < 7) return t("chat.timeAgo.days", { n: d });
+  return new Date(then).toLocaleDateString(lang === "zh" ? "zh-CN" : "en-US");
 }

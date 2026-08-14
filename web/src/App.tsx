@@ -186,16 +186,14 @@ function Chat({
       // failed send while cards hang is this gate in practice. The rejected
       // message stays in the thread, so nothing typed is lost.
       if (hasPendingInteractions()) {
-        reportNotice(
-          "An approval or question is still pending — resolve the card in the conversation before sending a new message.",
-        );
+        reportNotice(t("chat.pendingNotice"));
         return;
       }
       // Any other send failure (4xx/5xx, network): surface it in the UI, not
       // just the console — a silent submit drop reads as "the message was
       // sent". The failed turn stays in the thread, so it can be retried.
       console.error("chat error", e);
-      reportNotice("The message could not be sent — try again.");
+      reportNotice(t("chat.sendFailedNotice"));
     },
   });
 
