@@ -181,6 +181,12 @@ func (r *Runner) RunScheduled(ctx context.Context) error {
 		r.log.Info("dreaming: scheduled pass skipped, another instance is consolidating")
 		return nil
 	}
+	// Bound the pass like TriggerForUser does: the scheduler hands us an
+	// unbounded job ctx, and a hung pass would otherwise hold both the
+	// in-process single-flight lock and the PG advisory lock forever. The
+	// timeout ctx derives from the scheduler's (so shutdown still cancels it).
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
 	start := r.now()
 	r.syncKnobs()
 	res, err := r.worker.Run(ctx)
