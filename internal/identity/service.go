@@ -36,6 +36,14 @@ func NewService(store *Store) *Service {
 // imposing the complexity rules that push users onto password managers.
 const minPasswordLen = 8
 
+// normalizeEmail canonicalizes an email for storage and lookup: trimmed and
+// lowercased, so "User@X.com" and "user@x.com" resolve to one account (signup,
+// login, and the SSO email merge agree on a single identity). Stored emails are
+// lowercased by migration 000046; entries must go through here to stay matched.
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
 // validatePassword applies the password policy. Returns ErrWeakPassword when
 // the password does not meet it.
 func validatePassword(password string) error {
@@ -54,7 +62,7 @@ func (s *Service) Signup(ctx context.Context, email, password, displayName strin
 	if err != nil {
 		return User{}, fmt.Errorf("hash password: %w", err)
 	}
-	return s.store.CreateUser(ctx, email, string(hash), displayName)
+	return s.store.CreateUser(ctx, normalizeEmail(email), string(hash), displayName)
 }
 
 // Login verifies credentials and returns a fresh bearer token plus the user.
@@ -66,7 +74,7 @@ func (s *Service) Signup(ctx context.Context, email, password, displayName strin
 // Login returns ErrTOTPRequired and the caller begins the second-factor
 // challenge instead.
 func (s *Service) Login(ctx context.Context, email, password string) (token string, u User, err error) {
-	u, err = s.store.UserByEmail(ctx, email)
+	u, err = s.store.UserByEmail(ctx, normalizeEmail(email))
 	if err != nil {
 		return "", User{}, ErrInvalidCredentials
 	}
@@ -99,7 +107,7 @@ func (s *Service) TOTPEnabled(ctx context.Context, userID string) (bool, error) 
 // LookupByEmail fetches a user by email (no credential check) — the login
 // challenge path needs the account after the password already verified.
 func (s *Service) LookupByEmail(ctx context.Context, email string) (User, error) {
-	return s.store.UserByEmail(ctx, email)
+	return s.store.UserByEmail(ctx, normalizeEmail(email))
 }
 
 // IssueToken issues a fresh bearer token for an already-authenticated account.

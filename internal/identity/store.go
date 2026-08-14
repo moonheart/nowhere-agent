@@ -90,11 +90,12 @@ func (s *Store) CreateUser(ctx context.Context, email, passwordHash, displayName
 	return u, nil
 }
 
-// UserByEmail fetches a user by email (for login). The match is exact: the
-// users.email unique constraint is case-sensitive, so a case-insensitive lookup
-// could match two distinct accounts and silently pick one.
+// UserByEmail fetches a user by email (for login). The input is normalized
+// (trimmed, lowercased) exactly like stored emails (migration 000046), so a
+// lookup matches regardless of the caller's casing; the users.email unique
+// constraint and the lower(email) index both guarantee one match.
 func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
-	return s.scanUser(ctx, `SELECT `+userColumns+` FROM users WHERE email = $1`, email)
+	return s.scanUser(ctx, `SELECT `+userColumns+` FROM users WHERE email = $1`, normalizeEmail(email))
 }
 
 // UserByID fetches a user by id.
@@ -271,6 +272,9 @@ func (s *Store) UserByExternalIdentity(ctx context.Context, issuer, subject stri
 // can never authenticate by password (sign-in is via the IdP only), keeping the
 // NOT NULL column satisfied. Returns the resolved account.
 func (s *Store) ProvisionExternalUser(ctx context.Context, issuer, subject, email, displayName string) (User, error) {
+	// IdP emails vary in casing; normalize before the merge lookup and storage
+	// so an SSO account joins the account the same address signed up with.
+	email = normalizeEmail(email)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return User{}, fmt.Errorf("begin provision: %w", err)

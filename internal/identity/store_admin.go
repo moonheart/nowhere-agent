@@ -82,7 +82,7 @@ func (s *Store) SetPlatformRole(ctx context.Context, userID string, role Platfor
 func (s *Store) PromoteByEmail(ctx context.Context, email string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE users SET platform_role = $2, updated_at = now() WHERE email = $1`,
-		email, string(PlatformRoleAdmin))
+		normalizeEmail(email), string(PlatformRoleAdmin))
 	if err != nil {
 		return false, fmt.Errorf("promote by email: %w", err)
 	}
