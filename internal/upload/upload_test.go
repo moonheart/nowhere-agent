@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -442,7 +443,7 @@ func TestSweepOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, err := s.SweepOrphans(ctx, nil)
+	removed, err := s.SweepOrphans(ctx, nil, time.Now().Add(-24*time.Hour)) // all rows are fresh
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -463,12 +464,77 @@ func TestSweepOrphans(t *testing.T) {
 		}
 	}
 	// A second pass removes nothing: the sweep is idempotent.
-	again, err := s.SweepOrphans(ctx, nil)
+	again, err := s.SweepOrphans(ctx, nil, time.Now().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("second sweep: %v", err)
 	}
 	if again != 0 {
 		t.Errorf("second sweep removed %d blobs, want 0", again)
+	}
+}
+
+// ageUpload rewinds one upload's created_at so the sweep treats it as stale.
+// Scoped to the single row the test created (UPDATE by id — never unscoped).
+func ageUpload(t *testing.T, db *sql.DB, id string, days int) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE uploads SET created_at = now() - make_interval(days => $1) WHERE id = $2`, days, id); err != nil {
+		t.Fatalf("age upload: %v", err)
+	}
+}
+
+// TestSweepOrphansRemovesStaleUnreferencedUploads: a row (and its blob) older
+// than the cutoff with no message reference is an abandoned staged upload —
+// the frontend uploads the moment the user picks an image, sent or not, and
+// the row alone counts against quota. The sweep must delete it (row + blob).
+// A stale but REFERENCED upload and a recent unreferenced one must survive.
+func TestSweepOrphansRemovesStaleUnreferencedUploads(t *testing.T) {
+	s, db, blobs := svc(t)
+	ctx := context.Background()
+	userID := createUser(t, db)
+
+	stale, err := s.Upload(ctx, userID, "stale.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageUpload(t, db, stale.ID, 40)
+
+	ref, err := s.Upload(ctx, userID, "referenced.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageUpload(t, db, ref.ID, 40)
+	addMessage(t, db, userID, ref.ID)
+
+	fresh, err := s.Upload(ctx, userID, "fresh.png", makePNG(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cutoff := time.Now().Add(-30 * 24 * time.Hour)
+	removed, err := s.SweepOrphans(ctx, nil, cutoff)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("sweep removed %d uploads, want 1 (stale+unreferenced only)", removed)
+	}
+
+	// The stale upload's row and blob are gone; the referenced and fresh ones
+	// remain.
+	if _, err := s.store.Get(ctx, stale.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("stale upload row still present: %v", err)
+	}
+	userDir := filepath.Join(blobs.Root(), "__uploads__", userID)
+	if _, err := os.Stat(filepath.Join(userDir, stale.ID+".webp")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale upload blob should be gone after sweep: %v", err)
+	}
+	for _, id := range []string{ref.ID, fresh.ID} {
+		if _, err := s.store.Get(ctx, id); err != nil {
+			t.Errorf("upload %s should survive the sweep: %v", id, err)
+		}
+		if _, err := os.Stat(filepath.Join(userDir, id+".webp")); err != nil {
+			t.Errorf("blob %s should survive the sweep: %v", id, err)
+		}
 	}
 }
 

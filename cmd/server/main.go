@@ -588,9 +588,12 @@ func run() error {
 		// (ErrBlobRemovalFailed — a retry answers ErrNotFound) that no API path
 		// can ever reclaim. An hourly pass deletes blobs that have no metadata
 		// row AND no message reference — unambiguous garbage only; a row or a
-		// reference keeps the blob.
+		// reference keeps the blob. The same pass also reclaims STALE staged
+		// uploads (row + blob, older than uploadStaleTTL, never referenced):
+		// the frontend uploads an image the moment the user picks it, sent or
+		// not, and the metadata row alone counts against their quota.
 		hourlySweep(ctx, log, "upload orphan", func() error {
-			removed, err := uploadSvc.SweepOrphans(ctx, log)
+			removed, err := uploadSvc.SweepOrphans(ctx, log, time.Now().UTC().Add(-uploadStaleTTL))
 			if err != nil {
 				return err
 			}
@@ -2318,6 +2321,15 @@ const (
 // its last run terminates before the hourly sweep destroys it (one hourly
 // sweep window: a container lives 1-2 hours past the session's last run).
 const sandboxStopGrace = time.Hour
+
+// uploadStaleTTL is how long an upload row may sit UNREFERENCED before the
+// hourly upload sweep deletes it (row + blob). The frontend uploads an image
+// the moment the user picks it — sent or not — and the metadata row alone
+// counts against their quota, so staged-but-never-sent images would otherwise
+// occupy quota forever. Chosen conservatively: 30 days matches the default
+// WORKSPACE_RETENTION_DAYS window, and any message reference (of any age)
+// always keeps the upload.
+const uploadStaleTTL = 30 * 24 * time.Hour
 
 // openEndpointKey is the floor limiter's bucket key: the client IP for the
 // unauthenticated open endpoints, "" (opt-out) for everything else. The

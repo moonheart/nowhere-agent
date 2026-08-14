@@ -195,11 +195,19 @@ func (s *Service) Delete(ctx context.Context, userID, id string) error {
 // under a record). It is deliberately conservative: only unambiguous garbage
 // is removed.
 //
+// The pass also reclaims "staged" uploads that were never used: a row (and its
+// blob) older than staleCutoff that no message references is deleted — the
+// frontend uploads an image the moment the user picks it, whether or not it is
+// ever sent, and the metadata row alone counts against the user's quota. The
+// cutoff keeps this conservative too: only uploads old enough that the user
+// has plainly abandoned them are touched, and a reference always wins. A
+// recent row is never considered regardless of references.
+//
 // Best-effort, matching the other hourly sweepers: a per-blob failure is
 // logged and the pass continues; a store error (DB hiccup) aborts the pass so
 // the next tick retries, and the caller's hourlySweep logs it. Returns the
 // number of blobs removed.
-func (s *Service) SweepOrphans(ctx context.Context, log *slog.Logger) (int, error) {
+func (s *Service) SweepOrphans(ctx context.Context, log *slog.Logger, staleCutoff time.Time) (int, error) {
 	byUser, err := s.blobs.ListUserUploads()
 	if err != nil {
 		return 0, err
@@ -207,8 +215,33 @@ func (s *Service) SweepOrphans(ctx context.Context, log *slog.Logger) (int, erro
 	var removed int
 	for userID, ids := range byUser {
 		for _, id := range ids {
-			if _, err := s.store.Get(ctx, id); err == nil {
-				continue // a metadata row owns this blob: keep
+			u, err := s.store.Get(ctx, id)
+			if err == nil {
+				// A metadata row owns this blob: keep it — unless it is a
+				// stale, unreferenced staged upload (see above).
+				if u.CreatedAt.After(staleCutoff) {
+					continue
+				}
+				ref, err := s.store.ReferencedByMessage(ctx, userID, id)
+				if err != nil {
+					return removed, fmt.Errorf("check references for upload %q: %w", id, err)
+				}
+				if ref {
+					continue // a message still references it: keep
+				}
+				// Record first, then blob — the same order Service.Delete
+				// uses, so a blob-store hiccup leaves a record a retry can
+				// still resolve, and the orphan blob the next pass reclaims.
+				if err := s.store.Delete(ctx, id); err != nil {
+					return removed, fmt.Errorf("delete stale upload %q: %w", id, err)
+				}
+				if err := s.blobs.DeleteUserUpload(userID, id); err != nil {
+					if log != nil {
+						log.Warn("upload orphan sweep: stale blob removal failed", "user_id", userID, "id", id, "err", err)
+					}
+				}
+				removed++
+				continue
 			} else if !errors.Is(err, ErrNotFound) {
 				// DB hiccup: one user's pass must not silently sweep blind —
 				// abort so the next tick retries against a healthy store.
