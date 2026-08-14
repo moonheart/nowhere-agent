@@ -59,3 +59,22 @@ func TestStallReaderTimesOut(t *testing.T) {
 		t.Errorf("second read err = %v, want the sticky stall error", err2)
 	}
 }
+
+// A pause between reads (consumer backpressure) must not trip the stall: the
+// deadline only counts while a read is pending, so data arriving after a gap
+// longer than the timeout still flows. This pins the event-driven watchdog
+// semantics — a polled watchdog would spuriously close a live stream here.
+func TestStallReaderGapBetweenReadsDoesNotStall(t *testing.T) {
+	r := NewStallReader(io.NopCloser(strings.NewReader("hello")), 30*time.Millisecond)
+	first := make([]byte, 1)
+	if _, err := r.Read(first); err != nil {
+		t.Fatalf("first read err = %v", err)
+	}
+	// No read pending for longer than the timeout.
+	time.Sleep(3 * time.Duration(30*time.Millisecond))
+	rest := make([]byte, 4)
+	if _, err := io.ReadFull(r, rest); err != nil {
+		t.Fatalf("read after gap err = %v, want data", err)
+	}
+	_ = r.Close()
+}
