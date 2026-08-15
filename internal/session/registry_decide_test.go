@@ -85,7 +85,7 @@ func TestDecideApprovedExecutesTool(t *testing.T) {
 	reg := toolruntime.NewRegistry()
 	reg.Register(decideTool{ran: &ran})
 
-	got, history, err := rg.Decide(context.Background(), ap.ID, true, nil, reg, nil)
+	got, history, err := rg.Decide(context.Background(), ap.ID, true, nil, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestDecideRejectedInjectsDenial(t *testing.T) {
 	reg := toolruntime.NewRegistry()
 	reg.Register(decideTool{ran: &ran})
 
-	_, history, err := rg.Decide(context.Background(), ap.ID, false, nil, reg, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, false, nil, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestDecideAskUserAnswer(t *testing.T) {
 	})
 
 	answer := json.RawMessage(`{"answers":{"q":"x"}}`)
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, answer, nil, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, answer, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide answer: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestDecideAskUserSkipped(t *testing.T) {
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "ask_user", Kind: "ask_user",
 	})
 
-	_, history, err := rg.Decide(context.Background(), ap.ID, false, nil, nil, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, false, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide skip: %v", err)
 	}
@@ -183,13 +183,13 @@ func TestDecideUnknownOrDecided(t *testing.T) {
 	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Approval{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "danger", Kind: "approval",
 	})
-	if _, _, err := rg.Decide(context.Background(), "no-such", true, nil, nil, nil); !errors.Is(err, ErrNoPendingApproval) {
+	if _, _, err := rg.Decide(context.Background(), "no-such", true, nil, nil, nil, nil); !errors.Is(err, ErrNoPendingApproval) {
 		t.Fatalf("unknown decide: %v", err)
 	}
-	if _, _, err := rg.Decide(context.Background(), ap.ID, false, nil, nil, nil); err != nil {
+	if _, _, err := rg.Decide(context.Background(), ap.ID, false, nil, nil, nil, nil); err != nil {
 		t.Fatalf("first decide: %v", err)
 	}
-	if _, _, err := rg.Decide(context.Background(), ap.ID, true, nil, nil, nil); !errors.Is(err, ErrNoPendingApproval) {
+	if _, _, err := rg.Decide(context.Background(), ap.ID, true, nil, nil, nil, nil); !errors.Is(err, ErrNoPendingApproval) {
 		t.Fatalf("second decide should error, got %v", err)
 	}
 }
@@ -239,7 +239,7 @@ func TestDecideParallelBatchResumesUngatedCall(t *testing.T) {
 	reg.Register(readTool{ran: &readRan})
 	reg.Register(decideTool{ran: &dangerRan})
 
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, nil, reg, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, nil, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}

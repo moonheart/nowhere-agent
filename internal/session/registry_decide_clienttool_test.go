@@ -55,7 +55,7 @@ func TestDecideClientToolValidOutput(t *testing.T) {
 	ap, reg := seedClientToolRun(t, rg, ms, sess)
 
 	result := json.RawMessage(`{"output":{"text":"copied text"}}`)
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestDecideClientToolInvalidOutput(t *testing.T) {
 
 	// Missing the required "text" property.
 	result := json.RawMessage(`{"output":{"wrong":123}}`)
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestDecideClientToolReportedError(t *testing.T) {
 	ap, reg := seedClientToolRun(t, rg, ms, sess)
 
 	result := json.RawMessage(`{"error":"clipboard access denied"}`)
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, result, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestDecideUnknownKindErrors(t *testing.T) {
 	ap := createSuspendedInteraction(t, rg, []string{"tu1"}, Interaction{
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "mystery", Kind: "mystery_kind",
 	})
-	if _, _, err := rg.Decide(context.Background(), ap.ID, true, nil, nil, nil); err == nil {
+	if _, _, err := rg.Decide(context.Background(), ap.ID, true, nil, nil, nil, nil); err == nil {
 		t.Fatal("an unregistered interaction kind should error, not silently fold")
 	}
 }
@@ -125,11 +125,11 @@ func TestRegisterInteractionHandlerOverride(t *testing.T) {
 		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu1", ToolName: "ask_user", Kind: KindAskUser,
 	})
 
-	rg.RegisterInteractionHandler(KindAskUser, foldFunc(func(_ context.Context, in Interaction, approve bool, _ *toolruntime.Registry) (toolruntime.Result, error) {
+	rg.RegisterInteractionHandler(KindAskUser, foldFunc(func(_ context.Context, in Interaction, approve bool, _ *toolruntime.Registry, _ ToolExecutor) (toolruntime.Result, error) {
 		return toolruntime.Result{Content: "custom fold for " + in.ToolName}, nil
 	}))
 
-	_, history, err := rg.Decide(context.Background(), ap.ID, true, nil, nil, nil)
+	_, history, err := rg.Decide(context.Background(), ap.ID, true, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -140,8 +140,8 @@ func TestRegisterInteractionHandlerOverride(t *testing.T) {
 }
 
 // foldFunc adapts a function to InteractionHandler for tests.
-type foldFunc func(context.Context, Interaction, bool, *toolruntime.Registry) (toolruntime.Result, error)
+type foldFunc func(context.Context, Interaction, bool, *toolruntime.Registry, ToolExecutor) (toolruntime.Result, error)
 
-func (f foldFunc) Fold(ctx context.Context, in Interaction, approve bool, tools *toolruntime.Registry) (toolruntime.Result, error) {
-	return f(ctx, in, approve, tools)
+func (f foldFunc) Fold(ctx context.Context, in Interaction, approve bool, tools *toolruntime.Registry, exec ToolExecutor) (toolruntime.Result, error) {
+	return f(ctx, in, approve, tools, exec)
 }

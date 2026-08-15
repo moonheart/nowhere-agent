@@ -10,6 +10,7 @@ import (
 
 	"nowhere-agent/internal/agent"
 	"nowhere-agent/internal/provider"
+	"nowhere-agent/internal/redact"
 	"nowhere-agent/internal/toolruntime"
 )
 
@@ -83,7 +84,7 @@ func TestFoldBatchSchemaInvalidSiblingNeverExecutes(t *testing.T) {
 	reg.Register(countTool{name: "danger", runs: &dangerRuns})
 	reg.Register(schemaFoldTool{name: "write_file", runs: &writeRuns})
 
-	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil)
+	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -196,7 +197,7 @@ func TestFoldBatchIgnoresNewerRuns(t *testing.T) {
 	reg.Register(countTool{name: "danger", runs: &dangerRuns})
 	reg.Register(countTool{name: "load_skill", runs: &readRuns})
 
-	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil)
+	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestFoldBatchSnapshotMismatch(t *testing.T) {
 	reg.Register(countTool{name: "danger", runs: &dangerRuns})
 
 	before, _ := ms.MessagesFor(ctx, sess.ID)
-	_, _, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil)
+	_, _, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "do not match") {
 		t.Fatalf("Decide = %v, want a snapshot-mismatch error", err)
 	}
@@ -259,7 +260,7 @@ func TestFoldBatchMissingSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := rg.Decide(ctx, ap.ID, true, nil, nil, nil); !errors.Is(err, ErrNoSuspendedBatch) {
+	if _, _, err := rg.Decide(ctx, ap.ID, true, nil, nil, nil, nil); !errors.Is(err, ErrNoSuspendedBatch) {
 		t.Fatalf("Decide = %v, want ErrNoSuspendedBatch", err)
 	}
 }
@@ -294,7 +295,7 @@ func TestFoldBatchArgsErrorNeverExecutes(t *testing.T) {
 	reg.Register(countTool{name: "danger", runs: &dangerRuns})
 	reg.Register(countTool{name: "write_file", runs: &writeRuns})
 
-	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil)
+	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -357,7 +358,7 @@ func TestFoldBatchHardDeniedSiblingNeverExecutes(t *testing.T) {
 		return false, ""
 	}
 
-	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg, gate)
+	_, history, err := rg.Decide(ctx, ap.ID, true, nil, reg, gate, nil)
 	if err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
@@ -379,7 +380,7 @@ func TestFoldBatchHardDeniedSiblingNeverExecutes(t *testing.T) {
 	}
 
 	// The hard-deny is folded, not executed: a resume retry stays idempotent.
-	if _, err := rg.FoldBatch(ctx, sess.ID, run.ID, reg, gate); err != nil {
+	if _, err := rg.FoldBatch(ctx, sess.ID, run.ID, reg, gate, nil); err != nil {
 		t.Fatalf("FoldBatch retry: %v", err)
 	}
 	if fetchRuns != 0 {
@@ -443,7 +444,7 @@ func TestFoldBatchCompletesDespiteCancelledCaller(t *testing.T) {
 	// cancelled, yet the fold must run to completion and persist.
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	history, err := rg.FoldBatch(cancelled, sess.ID, run.ID, reg, nil)
+	history, err := rg.FoldBatch(cancelled, sess.ID, run.ID, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("FoldBatch with a cancelled caller ctx: %v", err)
 	}
@@ -474,7 +475,7 @@ func TestFoldBatchIdempotentRetry(t *testing.T) {
 	reg := toolruntime.NewRegistry()
 	reg.Register(countTool{name: "danger", runs: &dangerRuns})
 
-	if _, _, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil); err != nil {
+	if _, _, err := rg.Decide(ctx, ap.ID, true, nil, reg, nil, nil); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if dangerRuns != 1 {
@@ -483,7 +484,7 @@ func TestFoldBatchIdempotentRetry(t *testing.T) {
 	afterFold, _ := ms.MessagesFor(ctx, sess.ID)
 
 	// Retry the resume (client timeout / crash between fold commit and response).
-	history, err := rg.FoldBatch(ctx, sess.ID, run.ID, reg, nil)
+	history, err := rg.FoldBatch(ctx, sess.ID, run.ID, reg, nil, nil)
 	if err != nil {
 		t.Fatalf("FoldBatch retry: %v", err)
 	}
@@ -496,5 +497,88 @@ func TestFoldBatchIdempotentRetry(t *testing.T) {
 	}
 	if len(history) == 0 || history[len(history)-1].Content[0].ToolResultID != "tu1" {
 		t.Errorf("retry history = %+v, want it to end with the folded result", history)
+	}
+}
+
+// secretFoldTool returns PII in its result — the shape RedactMW exists to scrub.
+type secretFoldTool struct{ name string }
+
+func (s secretFoldTool) Name() string           { return s.name }
+func (s secretFoldTool) Description() string    { return "secret-bearing" }
+func (s secretFoldTool) Schema() map[string]any { return map[string]any{"type": "object"} }
+func (s secretFoldTool) Risk() toolruntime.Risk { return toolruntime.RiskExternalWrite }
+func (s secretFoldTool) Timeout() time.Duration { return time.Second }
+func (s secretFoldTool) Call(context.Context, map[string]any) (toolruntime.Result, error) {
+	return toolruntime.Result{Content: "record owner: alice@example.com"}, nil
+}
+
+// TestFoldBatchExecutorRedactsToolResults is the regression test for the fold
+// path's middleware bypass: the fold used to dispatch through the bare
+// registry (Registry.CallAll), so WrapToolCall middleware — RedactMW above
+// all — never ran at resume time, and an approved tool's PII-bearing result
+// landed in the durable record unredacted while the same tool's live-dispatch
+// result was scrubbed. With the loop's ToolExecutor wired, fold-time
+// execution passes through the same middleware chain: BOTH the approved gated
+// call and its un-gated sibling come back redacted — in the returned history
+// and in the persisted fold message.
+func TestFoldBatchExecutorRedactsToolResults(t *testing.T) {
+	rg, ms, sess := newDecideRegistry(t)
+	ctx := context.Background()
+	run, _ := rg.rt.store.CreateRun(ctx, sess.ID, 1)
+	_, _ = ms.AppendMessage(ctx, StoredMessage{
+		SessionID: sess.ID, RunID: run.ID, Role: provider.RoleUser,
+		Content: []provider.Block{{Type: provider.BlockText, Text: "turn"}},
+	})
+	_, _ = ms.AppendMessage(ctx, StoredMessage{
+		SessionID: sess.ID, RunID: run.ID, Role: provider.RoleAssistant,
+		Content: []provider.Block{
+			{Type: provider.BlockToolUse, ToolUseID: "tu_g", ToolName: "danger", ToolInput: map[string]any{}},
+			{Type: provider.BlockToolUse, ToolUseID: "tu_s", ToolName: "report", ToolInput: map[string]any{}},
+		},
+	})
+	ap := createSuspendedInteraction(t, rg, []string{"tu_g", "tu_s"}, Interaction{
+		RunID: run.ID, SessionID: sess.ID, ToolCallID: "tu_g", ToolName: "danger", Kind: KindToolApproval,
+		Payload: json.RawMessage(`{}`),
+	})
+
+	r, err := redact.New(redact.Config{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := toolruntime.NewRegistry()
+	reg.Register(secretFoldTool{name: "danger"})
+	reg.Register(secretFoldTool{name: "report"})
+	loop := agent.New(&twoGatedProvider{}, reg, agent.Config{Model: "m", MaxTokens: 100})
+	loop.Use(&agent.RedactMW{Redactor: r})
+
+	_, history, err := rg.Decide(ctx, ap.ID, true, nil, loop.Tools(), nil, loop.ToolExecutor())
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	last := history[len(history)-1]
+	if len(last.Content) != 2 {
+		t.Fatalf("folded results = %+v, want [tu_g tu_s]", last.Content)
+	}
+	for i, id := range []string{"tu_g", "tu_s"} {
+		tr := last.Content[i]
+		if tr.IsError {
+			t.Errorf("%s result is_error: %+v, want success (approved / un-gated)", id, tr)
+		}
+		if strings.Contains(tr.ToolContent, "alice@example.com") {
+			t.Errorf("%s result leaked PII through the fold: %q", id, tr.ToolContent)
+		}
+		if !strings.Contains(tr.ToolContent, "REDACTED_") {
+			t.Errorf("%s result = %q, want a redaction placeholder", id, tr.ToolContent)
+		}
+	}
+	// The durable record, not just the returned view, must be scrubbed.
+	stored, err := ms.MessagesFor(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range stored[len(stored)-1].Content {
+		if m.Type == provider.BlockToolResult && strings.Contains(m.ToolContent, "alice@example.com") {
+			t.Errorf("persisted fold message leaked PII: %q", m.ToolContent)
+		}
 	}
 }

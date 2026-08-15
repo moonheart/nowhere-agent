@@ -1214,10 +1214,6 @@ func (l *Loop) dispatch(ctx context.Context, emit Emitter, calls []toolruntime.C
 	if len(live) == 0 {
 		return results
 	}
-	// One chain for the batch: the middleware slice is fixed for the run, so the
-	// composed handler is shared and must be safe for concurrent use (the same
-	// contract the tools themselves carry).
-	handler := chainTool(l.toolWrap, l.realToolCall())
 	// Tools that want live agent-driven UI (a progress card) receive a pusher in
 	// their ctx: each push emits a KindGenerativeUI frame immediately, so the
 	// client renders progress while the tool still runs. Pushes are live-only;
@@ -1225,16 +1221,70 @@ func (l *Loop) dispatch(ctx context.Context, emit Emitter, calls []toolruntime.C
 	toolCtx := toolruntime.ContextWithGenerativeUI(ctx, func(spec *provider.GenerativeUISpec) {
 		_ = emit.Emit(ctx, KindGenerativeUI, map[string]any{"spec": spec})
 	})
+	got := l.runChainedCalls(toolCtx, live)
+	for j, r := range got {
+		results[liveIdx[j]] = r
+	}
+	return results
+}
+
+// runChainedCalls fans pre-screened calls out concurrently, each through the
+// tool-middleware chain, and returns results index-aligned with calls. One
+// chain serves the whole batch: the middleware slice is fixed for the run, so
+// the composed handler is shared and must be safe for concurrent use (the
+// same contract the tools themselves carry). The ctx is used as-is — live
+// dispatch wraps it with the generative-UI pusher first.
+func (l *Loop) runChainedCalls(ctx context.Context, calls []*ToolCall) []toolruntime.Result {
+	handler := chainTool(l.toolWrap, l.realToolCall())
+	results := make([]toolruntime.Result, len(calls))
 	var wg sync.WaitGroup
-	for j, tc := range live {
+	for i, tc := range calls {
 		wg.Add(1)
-		go func(j int, tc *ToolCall) {
+		go func(i int, tc *ToolCall) {
 			defer wg.Done()
-			results[liveIdx[j]] = handler(toolCtx, tc)
-		}(j, tc)
+			results[i] = handler(ctx, tc)
+		}(i, tc)
 	}
 	wg.Wait()
 	return results
+}
+
+// ToolExecutor exposes the loop's dispatch machinery for executing tool calls
+// OUTSIDE a live run: the session layer's suspended-batch fold executes
+// approved and un-gated sibling calls at resume time, before any new run
+// exists, and that execution must pass through the same WrapToolCall
+// middleware chain (redaction, durable intents, ...) as live dispatch or the
+// two paths diverge — the fold used to call Registry.CallAll directly, which
+// silently bypassed RedactMW and persisted unredacted tool results.
+//
+// The caller pre-screens the batch exactly as dispatch does (malformed args,
+// schema violations, execution-gate denies — session.FoldBatch re-applies all
+// three); the unknown-tool guard is re-applied here only to keep the chain's
+// non-nil ToolCall.Tool guarantee. No generative-UI pusher is attached: no
+// live run exists at fold time to carry progress frames (a result's
+// GenerativeUI still lands durable via the fold message).
+func (l *Loop) ToolExecutor() func(ctx context.Context, calls []toolruntime.Call) []toolruntime.Result {
+	return func(ctx context.Context, calls []toolruntime.Call) []toolruntime.Result {
+		results := make([]toolruntime.Result, len(calls))
+		live := make([]*ToolCall, 0, len(calls))
+		liveIdx := make([]int, 0, len(calls))
+		for i, c := range calls {
+			// Mirror dispatch's unknown-tool screen so middleware always sees
+			// a real Tool; the message must match dispatch's.
+			tool, ok := l.tools.Get(c.Name)
+			if !ok {
+				results[i] = toolruntime.Result{Content: fmt.Sprintf("unknown tool: %s (available tools: %s)", c.Name, strings.Join(l.tools.Names(), ", ")), IsError: true}
+				continue
+			}
+			live = append(live, &ToolCall{Call: c, Tool: tool})
+			liveIdx = append(liveIdx, i)
+		}
+		got := l.runChainedCalls(ctx, live)
+		for j, r := range got {
+			results[liveIdx[j]] = r
+		}
+		return results
+	}
 }
 
 // realToolCall is the innermost tool-call handler: it executes the call through

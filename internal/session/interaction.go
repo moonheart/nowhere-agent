@@ -20,7 +20,9 @@ type InteractionHandler interface {
 	// tools is the session-bound registry, needed when a handler must execute an
 	// approved call; it may be nil for handlers that never execute. approve is the
 	// verdict's boolean arm (approved vs rejected/skipped) for kinds that need it.
-	Fold(ctx context.Context, in Interaction, approve bool, tools *toolruntime.Registry) (toolruntime.Result, error)
+	// exec routes execution through the run loop's WrapToolCall middleware chain
+	// (nil = bare registry dispatch — tests / middleware-free callers only).
+	Fold(ctx context.Context, in Interaction, approve bool, tools *toolruntime.Registry, exec ToolExecutor) (toolruntime.Result, error)
 }
 
 // interactionHandlers is the registry's kind → handler map, with the three
@@ -35,7 +37,7 @@ func defaultInteractionHandlers() map[string]InteractionHandler {
 
 // foldInteraction resolves an interaction's kind and delegates to its handler.
 // An unregistered kind is a clear error (a handler was never wired for it).
-func (rg *RunRegistry) foldInteraction(ctx context.Context, in Interaction, approve bool, tools *toolruntime.Registry) (toolruntime.Result, error) {
+func (rg *RunRegistry) foldInteraction(ctx context.Context, in Interaction, approve bool, tools *toolruntime.Registry, exec ToolExecutor) (toolruntime.Result, error) {
 	kind := in.Kind
 	if kind == "" {
 		kind = KindToolApproval
@@ -46,31 +48,34 @@ func (rg *RunRegistry) foldInteraction(ctx context.Context, in Interaction, appr
 	if !ok {
 		return toolruntime.Result{}, fmt.Errorf("no interaction handler registered for kind %q", kind)
 	}
-	return h.Fold(ctx, in, approve, tools)
+	return h.Fold(ctx, in, approve, tools, exec)
 }
 
 // --- tool_approval: execute the gated call on approve, deny on reject --------
 
 type toolApprovalHandler struct{}
 
-func (toolApprovalHandler) Fold(ctx context.Context, in Interaction, approve bool, tools *toolruntime.Registry) (toolruntime.Result, error) {
+func (toolApprovalHandler) Fold(ctx context.Context, in Interaction, approve bool, tools *toolruntime.Registry, exec ToolExecutor) (toolruntime.Result, error) {
 	if !approve {
 		return toolruntime.Result{Content: "the user denied permission to run " + in.ToolName, IsError: true}, nil
 	}
 	// Approved: execute the gated tool now (the approval is its authorization).
+	// Execution goes through exec — the loop's WrapToolCall chain — so redaction
+	// and the other wrap middleware govern approved execution exactly as they
+	// govern live dispatch.
 	if tools == nil {
 		return toolruntime.Result{}, errors.New("approved call needs a tool registry to execute")
 	}
 	var input map[string]any
 	_ = json.Unmarshal(in.Payload, &input)
-	return tools.CallAll(ctx, []toolruntime.Call{{ID: in.ToolCallID, Name: in.ToolName, Args: input}})[0], nil
+	return executeFoldCalls(ctx, exec, tools, []toolruntime.Call{{ID: in.ToolCallID, Name: in.ToolName, Args: input}})[0], nil
 }
 
 // --- ask_user: fold the structured answers, or a skip note --------------------
 
 type askUserHandler struct{}
 
-func (askUserHandler) Fold(_ context.Context, in Interaction, approve bool, _ *toolruntime.Registry) (toolruntime.Result, error) {
+func (askUserHandler) Fold(_ context.Context, in Interaction, approve bool, _ *toolruntime.Registry, _ ToolExecutor) (toolruntime.Result, error) {
 	if !approve {
 		// Skipped: the run continues without the input; the model decides next.
 		return toolruntime.Result{Content: "the user skipped these questions (no answer given)"}, nil
@@ -93,7 +98,7 @@ func (askUserHandler) Fold(_ context.Context, in Interaction, approve bool, _ *t
 
 type clientToolHandler struct{}
 
-func (clientToolHandler) Fold(_ context.Context, in Interaction, _ bool, tools *toolruntime.Registry) (toolruntime.Result, error) {
+func (clientToolHandler) Fold(_ context.Context, in Interaction, _ bool, tools *toolruntime.Registry, _ ToolExecutor) (toolruntime.Result, error) {
 	var res struct {
 		Output any    `json:"output"`
 		Error  string `json:"error"`

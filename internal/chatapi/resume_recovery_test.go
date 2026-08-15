@@ -24,7 +24,7 @@ type flakyFold struct {
 	calls *int
 }
 
-func (f flakyFold) Fold(ctx context.Context, in session.Interaction, approve bool, tools *toolruntime.Registry) (toolruntime.Result, error) {
+func (f flakyFold) Fold(ctx context.Context, in session.Interaction, approve bool, tools *toolruntime.Registry, _ session.ToolExecutor) (toolruntime.Result, error) {
 	*f.calls++
 	if *f.calls == 1 {
 		return toolruntime.Result{}, errors.New("fold boom")

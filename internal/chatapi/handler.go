@@ -350,6 +350,19 @@ const streamWriteTimeout = 30 * time.Second
 // was lost.
 const settlePollSilence = 5 * time.Second
 
+// settleCheckInitial / settleCheckMax bound the backoff between consecutive
+// ActiveRun fallback checks once the attach loop has entered the silence
+// fallback. The check is a DB query for a multi-instance attach (memory
+// runtime miss → PGStore.ActiveRun), so checking on every 250ms poll tick
+// would hit the DB at 4 qps per attached client for the whole duration of a
+// silent run (a 120s run_command emits no frames); backing off 1s → 5s caps
+// that at one query per 5s per client in steady state, at the price of
+// noticing a dropped-terminal-event settle up to 5s later.
+const (
+	settleCheckInitial = 1 * time.Second
+	settleCheckMax     = 5 * time.Second
+)
+
 // heartbeatInterval is how often the attach loop writes an SSE comment frame
 // (": ping\n\n") while its run is silent. Comment frames are invisible to
 // EventSource and assistant-ui decoders, but they keep the connection alive
@@ -436,12 +449,10 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loop := h.newLoop(r.Context(), h.systemPromptFor(r, req), req.Model)
-
 	// No runtime wired (tests/dev): stream the loop directly with no persistence,
 	// no registry, no run-state — the pre-registry behaviour.
 	if h.runtime == nil || h.registry == nil {
-		h.serveChatDirect(w, r, loop, history)
+		h.serveChatDirect(w, r, h.newLoop(r.Context(), h.systemPromptFor(r, req), req.Model), history)
 		return
 	}
 
@@ -499,6 +510,11 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Build the loop only AFTER the reject gates above: building one resolves
+	// the caller's provider (DB reads + key decryption), and a request the
+	// pending gate (409) or budget gate (429) rejects must not pay for it.
+	loop := h.newLoop(r.Context(), h.systemPromptFor(r, req), req.Model)
+
 	// Attach this session's sandbox-bound tools (file-tools) now that the
 	// session id is known. The binder ensures the session's sandbox and
 	// registers its file tools into the loop's registry.
@@ -509,13 +525,15 @@ func (h *Handler) serveChat(w http.ResponseWriter, r *http.Request) {
 	// Reconcile a decided-but-unfolded batch (a crash between the verdict
 	// commit and its fold): a new message must not bury the decided batch's
 	// tool_use — fold it now, through this run's registry and gate, so the run
-	// this submission starts sees a complete conversation. Fail-open: a
-	// reconcile error logs and the submission proceeds (the batch stays
-	// retriable via the verdict path).
+	// this submission starts sees a complete conversation. The fold's tool
+	// execution rides the loop's middleware chain (ToolExecutor) so redaction
+	// and friends apply exactly as in live dispatch. Fail-open: a reconcile
+	// error logs and the submission proceeds (the batch stays retriable via
+	// the verdict path).
 	if runID, err := h.registry.DecidedButUnfoldedRun(r.Context(), sessID); err != nil {
 		slog.Warn("reconcile decided batch", "session", sessID, "err", err)
 	} else if runID != "" {
-		if _, err := h.registry.FoldBatch(agent.ContextWithSessionID(r.Context(), sessID), sessID, runID, loop.Tools(), session.ToolGate(loop.Gate())); err != nil {
+		if _, err := h.registry.FoldBatch(agent.ContextWithSessionID(r.Context(), sessID), sessID, runID, loop.Tools(), session.ToolGate(loop.Gate()), loop.ToolExecutor()); err != nil {
 			slog.Warn("fold decided batch on new submission", "session", sessID, "run", runID, "err", err)
 		}
 	}
@@ -745,19 +763,41 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 	// history and start a fresh run to continue the conversation. The loop's
 	// execution gate rides along so un-gated siblings (including hard-denied
 	// calls, which never become interactions) are re-authorized at fold exactly
-	// as the dispatch screen would have. The ctx carries the session id: the
-	// gate resolves the session's permission mode from it, and the request ctx
-	// does not have it stamped (only run ctxs are).
-	history, err := h.registry.FoldBatch(agent.ContextWithSessionID(r.Context(), sessID), sessID, ap2.RunID, loop.Tools(), session.ToolGate(loop.Gate()))
+	// as the dispatch screen would have, and the fold's tool execution goes
+	// through the loop's middleware chain (ToolExecutor) so redaction and the
+	// durable step intents apply exactly as in live dispatch. The ctx carries
+	// the session id: the gate resolves the session's permission mode from it,
+	// and the request ctx does not have it stamped (only run ctxs are).
+	//
+	// The stream headers go out BEFORE the fold: folding executes the approved
+	// tools synchronously and an approved run_command can run for minutes,
+	// which the server's WriteTimeout (60s default) used to kill before the
+	// first byte — the client watched its verdict POST die and retried (the
+	// fold itself survived server-side via context.WithoutCancel, but the UX
+	// was approve → disconnect → retry). Headers arm the rolling write
+	// deadline, and heartbeat comment frames during the fold keep it — and
+	// idle-cutoff proxies — alive until the fresh run starts streaming. Past
+	// this point the response is a stream, so failures surface as error
+	// FRAMES, not HTTP statuses.
+	if !writeStreamHeaders(w) {
+		return
+	}
+	history, err := h.foldWithHeartbeat(r, w, sessID, ap2.RunID, loop)
 	if err != nil {
-		slog.Warn("fold batch", "session", sessID, "run", ap2.RunID, "err", err)
-		writeSSEError(w, "internal error")
+		if r.Context().Err() == nil {
+			slog.Warn("fold batch", "session", sessID, "run", ap2.RunID, "err", err)
+			writeSSEError(w, "internal error")
+		}
 		return
 	}
 	run, err := h.registry.Submit(r.Context(), sessID, session.RunWork{Loop: loop, History: history})
 	if err != nil {
 		if errors.Is(err, session.ErrRunActive) {
-			httpx.Error(w, http.StatusConflict, "a run is already active in this session")
+			// Headers are already out, so the 409 contract is unavailable;
+			// surface the conflict as a stream error frame. waitForIdle above
+			// already filtered the parking run, so this is a genuinely
+			// concurrent submission (another tab driving the session).
+			writeSSEError(w, "a run is already active in this session")
 			return
 		}
 		slog.Warn("submit run", "session", sessID, "err", err)
@@ -765,11 +805,43 @@ func (h *Handler) serveChatResume(w http.ResponseWriter, r *http.Request, av *ap
 		return
 	}
 
-	if !writeStreamHeaders(w) {
-		return
-	}
 	pre := []chunk{{"type": "data-session", "data": map[string]any{"id": sessID}, "transient": true}}
 	h.attach(w, r, sessID, run, 0, pre)
+}
+
+// foldWithHeartbeat runs the suspended-batch fold on a goroutine while the
+// handler emits SSE comment heartbeats, so a long approved tool call cannot
+// outrun the rolling write deadline (or an idle-cutoff proxy) before the
+// verdict run starts streaming. Only comment frames are written — a typed
+// chunk would corrupt the message stream the attach writes after. The
+// heartbeat loop ends before this returns, so the caller's attach is the
+// sole writer from then on. A client disconnect mid-fold aborts the wait,
+// not the fold: FoldBatch detaches from cancellation and commits on its own,
+// and the client's retry re-folds idempotently.
+func (h *Handler) foldWithHeartbeat(r *http.Request, w http.ResponseWriter, sessID, runID string, loop *agent.Loop) ([]provider.Message, error) {
+	type foldResult struct {
+		history []provider.Message
+		err     error
+	}
+	done := make(chan foldResult, 1)
+	go func() {
+		history, err := h.registry.FoldBatch(agent.ContextWithSessionID(r.Context(), sessID), sessID, runID, loop.Tools(), session.ToolGate(loop.Gate()), loop.ToolExecutor())
+		done <- foldResult{history, err}
+	}()
+	flusher := w.(http.Flusher)
+	emitter := newSSEEmitter(w, flusher, uuid.NewString(), "text-1", "reasoning-1")
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		case <-ticker.C:
+			emitter.ping()
+		case res := <-done:
+			return res.history, res.err
+		}
+	}
 }
 
 // waitForIdle blocks until the session has no active run (the single-active-run
@@ -1079,13 +1151,16 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 	// skips its ActiveRun check entirely; it only falls back to the DB after
 	// settlePollSilence of silence — a run that settled without reporting a
 	// terminal event (a dropped bus event, or a run force-settled without one)
-	// must be noticed somehow. A multi-instance attach (memory runtime miss →
-	// PGStore.ActiveRun per call) therefore hits the DB at most once per
-	// silence window per client while following an active run, instead of 4
-	// queries per second. The one-shot check above still bounds the settle
-	// latency at attach time, so the fallback window only stretches the
-	// pathological dropped-terminal-event case.
+	// must be noticed somehow. Once in the fallback, consecutive checks back
+	// off settleCheckBackoff (1s → 5s cap): a multi-instance attach (memory
+	// runtime miss → PGStore.ActiveRun per check) costs one DB query per
+	// backoff interval per client while following a silent-but-active run,
+	// instead of one per 250ms poll tick. The one-shot check above still
+	// bounds the settle latency at attach time, so the fallback only stretches
+	// the pathological dropped-terminal-event case.
 	lastFrame := time.Now()
+	settleCheckBackoff := settleCheckInitial
+	lastSettleCheck := time.Now()
 	for {
 		select {
 		case <-r.Context().Done():
@@ -1109,7 +1184,18 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 				continue
 			}
 			if !terminal {
+				// Throttle the fallback itself: without the backoff this
+				// branch runs on every 250ms tick for as long as a silent run
+				// stays active.
+				if time.Since(lastSettleCheck) < settleCheckBackoff {
+					continue
+				}
+				lastSettleCheck = time.Now()
 				if _, stillActive, _ := h.runtime.ActiveRun(r.Context(), sessionID); stillActive {
+					settleCheckBackoff *= 2
+					if settleCheckBackoff > settleCheckMax {
+						settleCheckBackoff = settleCheckMax
+					}
 					continue
 				}
 			}
@@ -1126,6 +1212,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			}
 			emitLifecycleEvent(r, emitter, e)
 			lastFrame = time.Now()
+			settleCheckBackoff = settleCheckInitial // frames flowing: next silence restarts the backoff
 			if terminalLifecycle(e.Kind) {
 				terminal = true
 			}
@@ -1152,6 +1239,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, sessionID strin
 			maxOffset = e.Offset
 			emitStreamEvent(r, emitter, e)
 			lastFrame = time.Now()
+			settleCheckBackoff = settleCheckInitial // frames flowing: next silence restarts the backoff
 		}
 	}
 }

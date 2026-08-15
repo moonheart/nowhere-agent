@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // ErrNoProvider is returned by the resolver when no enabled provider can serve
@@ -30,6 +31,11 @@ type Target struct {
 // registry edits and team reassignments take effect without a restart.
 type Resolver struct {
 	store Store
+	// Optional short-TTL caches (WithCacheTTL). Nil caches = the uncached
+	// per-request resolution tests and embedders get by default.
+	targets  *ttlCache[Target]
+	models   *ttlCache[[]Model]
+	enabledM *ttlCache[struct{}]
 }
 
 // NewResolver creates a Resolver over a Store.
@@ -37,10 +43,35 @@ func NewResolver(store Store) *Resolver {
 	return &Resolver{store: store}
 }
 
+// WithCacheTTL enables the short-lived in-process resolution cache (see
+// ttlCache). Production wires a few seconds; tests keep the default uncached
+// resolver so their store edits are visible on the very next call.
+func (r *Resolver) WithCacheTTL(ttl time.Duration) *Resolver {
+	if ttl > 0 {
+		r.targets = newTTLCache[Target](ttl)
+		r.models = newTTLCache[[]Model](ttl)
+		r.enabledM = newTTLCache[struct{}](ttl)
+	}
+	return r
+}
+
 // Resolve picks the provider+model for a user's chat run: the user's team
 // assignment (a system or team-owned provider and its default model) when one
 // exists, otherwise the platform default provider and its default model.
 func (r *Resolver) Resolve(ctx context.Context, userID string) (Target, error) {
+	if r.targets != nil {
+		if e, ok := r.targets.get("u:" + userID); ok {
+			return e.value, e.err
+		}
+	}
+	t, err := r.resolve(ctx, userID)
+	if r.targets != nil && (err == nil || errors.Is(err, ErrNoProvider)) {
+		r.targets.put("u:"+userID, t, err)
+	}
+	return t, err
+}
+
+func (r *Resolver) resolve(ctx context.Context, userID string) (Target, error) {
 	teamID, err := r.store.UserTeam(ctx, userID)
 	if err != nil {
 		return Target{}, err
@@ -58,6 +89,19 @@ func (r *Resolver) Resolve(ctx context.Context, userID string) (Target, error) {
 // ResolveForTeam is Resolve for the schedule trigger, which holds a task's team
 // id rather than a chat caller. An empty teamID resolves the platform default.
 func (r *Resolver) ResolveForTeam(ctx context.Context, teamID string) (Target, error) {
+	if r.targets != nil {
+		if e, ok := r.targets.get("t:" + teamID); ok {
+			return e.value, e.err
+		}
+	}
+	t, err := r.resolveForTeam(ctx, teamID)
+	if r.targets != nil && (err == nil || errors.Is(err, ErrNoProvider)) {
+		r.targets.put("t:"+teamID, t, err)
+	}
+	return t, err
+}
+
+func (r *Resolver) resolveForTeam(ctx context.Context, teamID string) (Target, error) {
 	if teamID != "" {
 		if t, err := r.resolveTeam(ctx, teamID); err == nil {
 			return t, nil
@@ -126,7 +170,7 @@ func (r *Resolver) modelFor(ctx context.Context, p Provider, modelID string) (st
 			return m.Name, nil
 		}
 	}
-	models, err := r.store.ListModels(ctx, p.ID)
+	models, err := r.listModels(ctx, p.ID)
 	if err != nil {
 		return "", err
 	}
@@ -143,6 +187,23 @@ func (r *Resolver) modelFor(ctx context.Context, p Provider, modelID string) (st
 	return "", fmt.Errorf("%w: provider %q has no enabled model", ErrNoProvider, p.Name)
 }
 
+// listModels returns a provider's models, cached when the resolver carries a
+// cache: one request consults the list several times (modelFor during
+// resolution, VisionModel and the model picker after it), and the list
+// changes only on an operator edit.
+func (r *Resolver) listModels(ctx context.Context, providerID string) ([]Model, error) {
+	if r.models != nil {
+		if e, ok := r.models.get(providerID); ok {
+			return e.value, e.err
+		}
+	}
+	models, err := r.store.ListModels(ctx, providerID)
+	if r.models != nil && err == nil {
+		r.models.put(providerID, models, nil)
+	}
+	return models, err
+}
+
 // ResolveModel maps an explicit model reference (a scheduled task's or agent
 // definition's model string) onto the resolved provider. Fail-closed: an empty
 // reference returns the target's default model, and a reference that names no
@@ -151,10 +212,23 @@ func (r *Resolver) ResolveModel(ctx context.Context, t Target, name string) (str
 	if name == "" {
 		return t.Model, nil
 	}
-	if _, err := r.store.EnabledModel(ctx, t.ProviderID, name); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return "", fmt.Errorf("%w: %q", ErrUnknownModel, name)
+	key := t.ProviderID + "\x00" + name
+	if r.enabledM != nil {
+		if e, ok := r.enabledM.get(key); ok {
+			if e.err != nil {
+				return "", e.err
+			}
+			return name, nil
 		}
+	}
+	_, err := r.store.EnabledModel(ctx, t.ProviderID, name)
+	if errors.Is(err, ErrNotFound) {
+		err = fmt.Errorf("%w: %q", ErrUnknownModel, name)
+	}
+	if r.enabledM != nil && (err == nil || errors.Is(err, ErrUnknownModel)) {
+		r.enabledM.put(key, struct{}{}, err)
+	}
+	if err != nil {
 		return "", err
 	}
 	return name, nil
@@ -165,7 +239,7 @@ func (r *Resolver) ResolveModel(ctx context.Context, t Target, name string) (str
 // vision-capable model when none is marked default. The second return is false
 // when the provider has no vision-capable model (the tool is then unavailable).
 func (r *Resolver) VisionModel(ctx context.Context, t Target) (string, bool) {
-	models, err := r.store.ListModels(ctx, t.ProviderID)
+	models, err := r.listModels(ctx, t.ProviderID)
 	if err != nil {
 		return "", false
 	}
@@ -187,7 +261,7 @@ func (r *Resolver) VisionModel(ctx context.Context, t Target) (string, bool) {
 // base URLs, or other provider internals; the caller already holds the
 // resolved Target (whose RawKey must stay server-side).
 func (r *Resolver) EnabledModels(ctx context.Context, t Target) ([]string, error) {
-	models, err := r.store.ListModels(ctx, t.ProviderID)
+	models, err := r.listModels(ctx, t.ProviderID)
 	if err != nil {
 		return nil, err
 	}

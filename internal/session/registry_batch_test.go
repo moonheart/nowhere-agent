@@ -101,7 +101,7 @@ func TestRegistryBatchDecisionFlow(t *testing.T) {
 
 	// Fold the whole batch: one user message with BOTH tool_results (approve → the
 	// executed result; reject → an is_error denial), matching the two tool_uses.
-	history, err := rg.FoldBatch(context.Background(), sess.ID, run.ID, loop.Tools(), nil)
+	history, err := rg.FoldBatch(context.Background(), sess.ID, run.ID, loop.Tools(), nil, nil)
 	if err != nil {
 		t.Fatalf("FoldBatch: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestRegistryDecidedButUnfoldedReconcile(t *testing.T) {
 	}
 
 	// Folding it clears the target.
-	if _, err := rg.FoldBatch(context.Background(), sess.ID, run.ID, loop.Tools(), nil); err != nil {
+	if _, err := rg.FoldBatch(context.Background(), sess.ID, run.ID, loop.Tools(), nil, nil); err != nil {
 		t.Fatalf("FoldBatch: %v", err)
 	}
 	if id, _ := rg.DecidedButUnfoldedRun(context.Background(), sess.ID); id != "" {
@@ -274,7 +274,7 @@ func TestRegistryDecidedButUnfoldedBehindFoldedNewerRun(t *testing.T) {
 	if _, _, err := rg.RecordDecision(context.Background(), queue[1].ID, false, nil); err != nil {
 		t.Fatalf("RecordDecision B2: %v", err)
 	}
-	if _, err := rg.FoldBatch(context.Background(), sess.ID, runB.ID, loop.Tools(), nil); err != nil {
+	if _, err := rg.FoldBatch(context.Background(), sess.ID, runB.ID, loop.Tools(), nil, nil); err != nil {
 		t.Fatalf("FoldBatch B: %v", err)
 	}
 
@@ -286,7 +286,7 @@ func TestRegistryDecidedButUnfoldedBehindFoldedNewerRun(t *testing.T) {
 	}
 
 	// Folding A clears the target.
-	if _, err := rg.FoldBatch(context.Background(), sess.ID, runA.ID, loop.Tools(), nil); err != nil {
+	if _, err := rg.FoldBatch(context.Background(), sess.ID, runA.ID, loop.Tools(), nil, nil); err != nil {
 		t.Fatalf("FoldBatch A: %v", err)
 	}
 	if id, _ := rg.DecidedButUnfoldedRun(context.Background(), sess.ID); id != "" {

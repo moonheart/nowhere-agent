@@ -497,6 +497,27 @@ func (rg *RunRegistry) RecordDecision(ctx context.Context, approvalID string, ap
 // Nil means no gate (tests / policy-free deployments).
 type ToolGate func(ctx context.Context, tool toolruntime.Tool) (deny bool, reason string)
 
+// ToolExecutor dispatches a batch of tool calls at fold time the way the
+// run's loop would — each call through the WrapToolCall middleware chain, so
+// fold-time execution is governed by the same middleware (redaction, durable
+// step intents, ...) as live dispatch. Production wires agent.Loop.ToolExecutor;
+// nil falls back to the bare registry's CallAll (tests / middleware-free
+// callers). The caller pre-screens the batch (malformed args, schema,
+// execution gate) before invoking it.
+type ToolExecutor func(ctx context.Context, calls []toolruntime.Call) []toolruntime.Result
+
+// executeFoldCalls routes fold-time dispatch through the loop's middleware
+// chain when an executor is wired, falling back to the bare registry
+// otherwise. The fallback keeps test and middleware-free callers working, but
+// any deployment that registers WrapToolCall middleware MUST pass an executor
+// or that middleware silently does not apply to fold-time execution.
+func executeFoldCalls(ctx context.Context, exec ToolExecutor, tools *toolruntime.Registry, calls []toolruntime.Call) []toolruntime.Result {
+	if exec != nil {
+		return exec(ctx, calls)
+	}
+	return tools.CallAll(ctx, calls)
+}
+
 // FoldBatch folds every interaction of one run (one gated batch) into a single
 // user message carrying each call's tool_result, persists it, and returns the
 // rebuilt history for a FRESH run to continue the conversation. Call it only
@@ -516,8 +537,10 @@ type ToolGate func(ctx context.Context, tool toolruntime.Tool) (deny bool, reaso
 //
 // tools may be nil only when no fold can require execution (all rejected /
 // ask_user / skipped). gate re-authorizes the un-gated sibling calls (see the
-// dispatch branch below); pass nil only when the caller has no policy.
-func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, tools *toolruntime.Registry, gate ToolGate) ([]provider.Message, error) {
+// dispatch branch below); pass nil only when the caller has no policy. exec
+// routes fold-time tool execution through the loop's WrapToolCall middleware
+// chain (agent.Loop.ToolExecutor); pass nil only when no middleware exists.
+func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, tools *toolruntime.Registry, gate ToolGate, exec ToolExecutor) ([]provider.Message, error) {
 	// The fold is the suspended batch's durable completion — a commit-class
 	// operation, not request-scoped work. Detach it from the caller's
 	// cancellation: a client disconnect after POSTing the final verdict must
@@ -575,13 +598,15 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 	// (concurrently, mirroring the loop's dispatch) so a resumed batch of several
 	// plain reads doesn't serialize.
 	//
-	// Execution contract: the fold dispatches through the bare tool registry
-	// (CallAll), NOT the loop's chainTool wrap chain — safe because no middleware
-	// implements WrapToolCall and CallAll replicates the loop's innermost
-	// realToolCall exactly (call-id ctx for progress nesting, per-tool timeout,
-	// unknown-tool guard). If a WrapToolCall middleware is ever added, it must be
-	// routed into the fold too — add an executor hook here rather than calling
-	// the registry directly.
+	// Execution contract: the fold dispatches through exec — the run loop's
+	// WrapToolCall middleware chain (agent.Loop.ToolExecutor) — so fold-time
+	// execution is governed by the SAME middleware as live dispatch. This was
+	// once a bare Registry.CallAll on the theory that "no middleware
+	// implements WrapToolCall"; that claim was false (RedactMW and the
+	// durable-accounting toolIntentMW both do), and the bypass let PII/
+	// secrets an approved tool echoed land in the durable record unredacted.
+	// CallAll remains only as the nil-executor fallback for tests and
+	// middleware-free callers (see executeFoldCalls).
 	//
 	// The loop's other dispatch screens are re-applied here for the same
 	// reason: the input-SCHEMA screen (below, alongside the gate) refuses
@@ -634,7 +659,7 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 			dispatchCalls = append(dispatchCalls, c)
 			continue
 		}
-		res, err := rg.foldInteraction(ctx, ap, ap.Status == InteractionResolved, tools)
+		res, err := rg.foldInteraction(ctx, ap, ap.Status == InteractionResolved, tools, exec)
 		if err != nil {
 			return nil, err
 		}
@@ -644,7 +669,7 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 		if tools == nil {
 			return nil, fmt.Errorf("resuming a suspended batch needs a tool registry to dispatch the un-gated calls")
 		}
-		got := tools.CallAll(ctx, dispatchCalls)
+		got := executeFoldCalls(ctx, exec, tools, dispatchCalls)
 		for j, i := range dispatchIdx {
 			results[i] = got[j]
 		}
@@ -744,7 +769,7 @@ func suspendedBatchCalls(stored []StoredMessage, runID string, snap SuspendedBat
 // the row decided and, when the batch is complete (the usual case for a single
 // gated call), folds the batch and returns the resume history. When siblings are
 // still pending it returns nil history — the caller must not resume yet.
-func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, result json.RawMessage, tools *toolruntime.Registry, gate ToolGate) (Interaction, []provider.Message, error) {
+func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bool, result json.RawMessage, tools *toolruntime.Registry, gate ToolGate, exec ToolExecutor) (Interaction, []provider.Message, error) {
 	ap, complete, err := rg.RecordDecision(ctx, approvalID, approve, result)
 	if err != nil {
 		return Interaction{}, nil, err
@@ -752,7 +777,7 @@ func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bo
 	if !complete {
 		return ap, nil, nil
 	}
-	history, err := rg.FoldBatch(ctx, ap.SessionID, ap.RunID, tools, gate)
+	history, err := rg.FoldBatch(ctx, ap.SessionID, ap.RunID, tools, gate, exec)
 	if err != nil {
 		return Interaction{}, nil, err
 	}
