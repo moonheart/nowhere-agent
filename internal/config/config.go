@@ -23,6 +23,9 @@ type Config struct {
 	// Conversation configures the durable conversation retention policy
 	// (ended-session hard delete; see Conversation).
 	Conversation Conversation
+	// Audit configures the audit-trail retention policy (age-based purge; see
+	// Audit).
+	Audit Audit
 	// Stream configures the live content broker (redis-stream-live).
 	Stream Stream
 	// Sandbox configures the per-session sandbox backend for built-in tools.
@@ -494,6 +497,18 @@ type Conversation struct {
 	// disables the sweep entirely (the default): conversations are retained
 	// forever unless the operator opts in, matching the pre-feature behavior.
 	RetentionDays int `envconfig:"CONVERSATION_RETENTION_DAYS" default:"0"`
+}
+
+// Audit configures the audit-trail retention policy: how long audit_log rows
+// are kept before an hourly sweep deletes them. The runtime setting
+// audit_retention_days overrides this live.
+type Audit struct {
+	// RetentionDays is how many days an audit row is kept before the hourly
+	// sweep purges it (the trail's only removal path — deletion by age, never
+	// by content, so the window stays tamper-evident). <= 0 disables the
+	// sweep (the default): the trail is retained forever unless the operator
+	// opts in, matching the pre-feature behavior.
+	RetentionDays int `envconfig:"AUDIT_RETENTION_DAYS" default:"0"`
 }
 
 // HTTP configures the gateway server.

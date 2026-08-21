@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"nowhere-agent/internal/audit"
@@ -25,6 +26,13 @@ func (d *serverDeps) wireIdentity(ctx context.Context) error {
 	// deployment the first random signup must not claim the admin role before
 	// operations can.
 	d.identityStore = identity.NewStore(d.pool).WithFirstAccountAdmin(cfg.Identity.BootstrapAdminEmail != "")
+	// TOTP seeds get the same encryption-at-rest as provider keys: a database
+	// leak must not hand out every account's second factor. Legacy plaintext
+	// rows keep reading until their next write re-encrypts them.
+	if d.enc != nil {
+		d.identityStore.WithEncryption(d.enc)
+		log.Info("totp seeds encrypted at rest (AES-256-GCM)")
+	}
 	d.identitySvc = identity.NewService(d.identityStore)
 
 	// Credential reaper: expired session tokens, phone OTPs, and service keys
@@ -55,6 +63,35 @@ func (d *serverDeps) wireIdentity(ctx context.Context) error {
 	// hard dependency, and write failures surface only in the server log.
 	d.auditLogger = audit.NewLogger(d.pool, log)
 	d.identityHandler.WithAudit(d.auditLogger)
+
+	// Audit-trail retention: append-only means unbounded growth without a
+	// policy, so an hourly pass purges rows older than AUDIT_RETENTION_DAYS
+	// (<= 0 disables, the default — the trail is kept forever unless the
+	// operator opts in). The window is runtime-tunable (audit_retention_days)
+	// via the 5s settings sync, mirroring the conversation/raw-log sweeps:
+	// the loop runs regardless and skips passes while the window is <= 0, so
+	// enabling retention at runtime works even when the boot value disabled
+	// it.
+	var auditRetention atomic.Int64
+	auditRetention.Store(int64(cfg.Audit.RetentionDays))
+	hourlySweep(ctx, log, "audit retention", func() error {
+		days := auditRetention.Load()
+		if days <= 0 {
+			return nil
+		}
+		cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+		removed, err := d.auditLogger.PurgeBefore(ctx, cutoff)
+		if err != nil {
+			return err
+		}
+		if removed > 0 {
+			log.Info("audit retention sweep purged rows", "count", removed)
+		}
+		return nil
+	})
+	d.settingsSync.Add(func() {
+		auditRetention.Store(int64(d.settings.Int(settings.KeyAuditRetentionDays)))
+	})
 
 	// Single-sign-on (enterprise-readiness P1-2): when OIDC_ISSUER is set, mount
 	// the authorization-code flow so users sign in via the enterprise IdP (钉钉 /

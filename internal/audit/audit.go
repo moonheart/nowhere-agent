@@ -5,8 +5,11 @@
 //
 // The design is deliberately small:
 //
-//   - A Logger wraps a *sql.DB and exposes one method, Log, which INSERTs a
-//     row. There is no update or delete path — the trail is append-only.
+//   - A Logger wraps a *sql.DB and exposes one write method, Log, which
+//     INSERTs a row. There is no update path and no per-row delete path — the
+//     trail is tamper-evident for its whole retention window. The one removal
+//     path is PurgeBefore, the operator's retention policy (the trail would
+//     otherwise grow without bound); it deletes by age, never by content.
 //   - Events are built with a fluent Event builder so call sites stay one
 //     line and cannot accidentally record a secret (there is no field for one).
 //   - Recording is best-effort: Log returns an error but never panics, and the
@@ -280,6 +283,22 @@ func (l *Logger) LogAndReport(ctx context.Context, e Event) {
 	if err := l.Log(ctx, e); err != nil {
 		l.log.Error("audit write failed; trail has a gap", "action", string(e.action), "err", err)
 	}
+}
+
+// PurgeBefore deletes rows older than cutoff and returns how many were
+// removed. It is the retention sweep's single removal path: deletion is by
+// age only, so the trail inside its retention window stays intact. Callers
+// gate on the configured window themselves (a disabled policy never calls).
+func (l *Logger) PurgeBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := l.db.ExecContext(ctx, `DELETE FROM audit_log WHERE created_at < $1`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("audit purge: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("audit purge: %w", err)
+	}
+	return n, nil
 }
 
 // List returns audit entries matching f, newest first, plus the total count for

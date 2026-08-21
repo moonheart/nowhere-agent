@@ -219,3 +219,44 @@ func TestLogAndReportSwallowsError(t *testing.T) {
 	log := NewLogger(db, nil)
 	log.LogAndReport(context.Background(), Success(ActionAuthLogin).Actor("x", "x@e.com")) // must not panic
 }
+
+// TestPurgeBefore: the retention sweep deletes rows by age only — rows older
+// than the cutoff go, newer rows stay. The test's "old" rows are backdated to
+// 2001 so the cutoff (2002) can never touch another test's (or a real
+// deployment's) recent rows — the age window itself is the scope.
+func TestPurgeBefore(t *testing.T) {
+	db := pgTestDB(t)
+	actorID := "aud-purge-" + randHex()
+	cleanupActor(t, db, actorID)
+	log := NewLogger(db, nil)
+	ctx := context.Background()
+
+	// Two rows backdated into 2001 (inside the purge window) and one live row
+	// (outside it).
+	for range 2 {
+		if _, err := db.Exec(`
+			INSERT INTO audit_log (created_at, actor_id, action, outcome)
+			VALUES ('2001-06-01T00:00:00Z', $1, 'auth.login', 'success')`, actorID); err != nil {
+			t.Fatalf("backdate insert: %v", err)
+		}
+	}
+	if err := log.Log(ctx, Success(ActionAuthLogin).Actor(actorID, "p@example.com")); err != nil {
+		t.Fatalf("live insert: %v", err)
+	}
+
+	removed, err := log.PurgeBefore(ctx, time.Date(2002, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want exactly the 2 backdated rows", removed)
+	}
+
+	entries, total, err := log.List(ctx, Filter{Actor: actorID})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 1 || len(entries) != 1 {
+		t.Fatalf("after purge: total=%d len=%d, want only the live row", total, len(entries))
+	}
+}

@@ -355,6 +355,7 @@ func Catalog() []KeyInfo {
 		{Key: KeyUploadMaxBytesPerUser, Group: GroupHTTP, Kind: KindInt, Description: "Max total stored upload bytes per user in bytes (overrides UPLOAD_MAX_BYTES_PER_USER). 0 = unlimited. Applied per USER to user-level uploads and per SESSION to a chat session's own images. Applied to the next upload."},
 		{Key: KeyWorkspaceRetentionDays, Group: GroupBackground, Kind: KindInt, Description: "Days an ENDED session's image directory is kept before the hourly sweep deletes it (overrides WORKSPACE_RETENTION_DAYS). 0 disables the sweep. Applies within an hour."},
 		{Key: KeyConversationRetentionDays, Group: GroupBackground, Kind: KindInt, Description: "Days an ENDED session's conversation is kept before the hourly sweep hard-deletes it and its messages (overrides CONVERSATION_RETENTION_DAYS). 0 disables the sweep. Applies within an hour."},
+		{Key: KeyAuditRetentionDays, Group: GroupBackground, Kind: KindInt, Description: "Days an audit-trail row is kept before the hourly sweep purges it (overrides AUDIT_RETENTION_DAYS). 0 disables the sweep — the trail is retained forever. Applies within an hour."},
 
 		// Auth / SSO.
 		{Key: KeyPhoneSMSURL, Group: GroupAuth, Kind: KindString, Description: "SMS-OTP gateway for phone login (overrides PHONE_SMS_URL): an http(s) URL that receives {\"phone\",\"code\"}, or log:// to print codes to the server log (dev only). Empty disables phone login on the login page. Applies to the next code request."},
@@ -514,6 +515,10 @@ const (
 	// the hourly sweep hard-deletes it (overrides CONVERSATION_RETENTION_DAYS);
 	// <= 0 disables the sweep.
 	KeyConversationRetentionDays = "conversation_retention_days"
+	// KeyAuditRetentionDays is how long an audit_log row is kept before the
+	// hourly sweep purges it (overrides AUDIT_RETENTION_DAYS); <= 0 disables
+	// the sweep.
+	KeyAuditRetentionDays = "audit_retention_days"
 
 	// Auth / SSO.
 	// KeyPhoneSMSURL is the SMS-OTP gateway for phone login (overrides

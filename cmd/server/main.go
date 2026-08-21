@@ -195,6 +195,8 @@ func run() error {
 		settings.KeyWorkspaceRetentionDays: mustJSON(cfg.Workspace.RetentionDays),
 		// Conversation retention (overrides CONVERSATION_RETENTION_DAYS live).
 		settings.KeyConversationRetentionDays: mustJSON(cfg.Conversation.RetentionDays),
+		// Audit-trail retention (overrides AUDIT_RETENTION_DAYS live).
+		settings.KeyAuditRetentionDays: mustJSON(cfg.Audit.RetentionDays),
 		// User image uploads (user-image-uploads quota; overrides
 		// UPLOAD_MAX_FILES_PER_USER / UPLOAD_MAX_BYTES_PER_USER live).
 		settings.KeyUploadMaxFilesPerUser: mustJSON(cfg.Upload.MaxFilesPerUser),
@@ -223,6 +225,20 @@ func run() error {
 	// starts once at the end of run().
 	settingsSync := settings.NewWatcher()
 
+	// Secret encryption at rest (SECRETS_MASTER_KEY): one encryptor shared by
+	// every store that persists credentials — provider registry keys, inbound
+	// webhook secrets, and TOTP seeds. Built before the wire phases so the
+	// identity phase (which runs first) gets the same protection. A malformed
+	// key fails the boot: silently booting unencrypted while the operator
+	// believes keys are protected is worse than not starting.
+	enc, err := buildEncryptor(cfg)
+	if err != nil {
+		return fmt.Errorf("secrets: %w", err)
+	}
+	if enc == nil {
+		log.Warn("SECRETS_MASTER_KEY unset: provider keys, webhook secrets and TOTP seeds stored PLAINTEXT; set it to enable encryption at rest")
+	}
+
 	// Auth surface (wire_identity.go): identity store/service/handler, the
 	// credential sweep, the shared audit logger, OIDC SSO, phone SMS-OTP,
 	// email password reset, and the admin bootstrap.
@@ -230,6 +246,7 @@ func run() error {
 		cfg: cfg, log: log, pool: pool, mux: mux,
 		health: health, metrics: metrics,
 		settings: settingsRuntime, settingsSync: settingsSync,
+		enc: enc,
 	}
 	if err := d.wireIdentity(ctx); err != nil {
 		return err

@@ -198,6 +198,64 @@ func TestResolverCacheNegative(t *testing.T) {
 	}
 }
 
+// TestTTLCacheCapacityBoundsKeySpace: user keys grow with the user base, so
+// the cache must stay at its capacity no matter how many distinct keys are
+// put — evicted keys simply re-resolve on their next request.
+func TestTTLCacheCapacityBoundsKeySpace(t *testing.T) {
+	c := newTTLCache[struct{}](time.Minute)
+	c.max = 8
+	for i := range 100 {
+		c.put("u:"+string(rune(i)), struct{}{}, nil)
+	}
+	if got := len(c.entries); got > c.max {
+		t.Fatalf("entries = %d, want <= max %d (the map must not grow with distinct keys)", got, c.max)
+	}
+}
+
+// TestTTLCacheEvictsExpiredFirst: at capacity, expired entries are reclaimed
+// before any live entry is evicted.
+func TestTTLCacheEvictsExpiredFirst(t *testing.T) {
+	c := newTTLCache[struct{}](20 * time.Millisecond)
+	c.max = 4
+	c.put("stale-1", struct{}{}, nil)
+	c.put("stale-2", struct{}{}, nil)
+	time.Sleep(40 * time.Millisecond)
+	c.put("live-1", struct{}{}, nil)
+	c.put("live-2", struct{}{}, nil)
+	c.put("live-3", struct{}{}, nil) // capacity reached: the two stale entries go
+	if _, ok := c.entries["stale-1"]; ok {
+		t.Error("expired entry stale-1 should have been evicted at capacity")
+	}
+	if _, ok := c.entries["stale-2"]; ok {
+		t.Error("expired entry stale-2 should have been evicted at capacity")
+	}
+	for _, k := range []string{"live-1", "live-2", "live-3"} {
+		if _, ok := c.entries[k]; !ok {
+			t.Errorf("live entry %s must survive while expired entries exist", k)
+		}
+	}
+}
+
+// TestTTLCacheEvictsOldestWhenAllLive: with no expired entries at capacity,
+// the entry closest to expiring is dropped — never the key being put.
+func TestTTLCacheEvictsOldestWhenAllLive(t *testing.T) {
+	c := newTTLCache[struct{}](time.Minute)
+	c.max = 2
+	c.put("a", struct{}{}, nil)
+	c.put("b", struct{}{}, nil)
+	c.entries["a"] = ttlCacheEntry[struct{}]{until: time.Now()} // a is the oldest
+	c.put("c", struct{}{}, nil)
+	if _, ok := c.entries["a"]; ok {
+		t.Error("the entry closest to expiring (a) should be evicted first")
+	}
+	if _, ok := c.entries["c"]; !ok {
+		t.Error("the just-put key (c) must be present")
+	}
+	if got := len(c.entries); got != 2 {
+		t.Errorf("entries = %d, want exactly max 2", got)
+	}
+}
+
 // TestResolverCacheOffByDefault: the plain constructor stays uncached so
 // existing callers and tests see store edits on the very next call.
 func TestResolverCacheOffByDefault(t *testing.T) {

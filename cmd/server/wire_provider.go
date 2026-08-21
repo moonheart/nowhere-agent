@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -24,16 +23,11 @@ func (d *serverDeps) wireProviderRegistry(ctx context.Context) error {
 	// provider; every decision is resolved per request, so registry edits and
 	// reassignments take effect without a restart.
 	d.provStore = providerreg.NewPGStore(d.pool)
-	enc, err := buildEncryptor(cfg)
-	if err != nil {
-		return fmt.Errorf("secrets: %w", err)
-	}
-	d.enc = enc
-	if enc != nil {
-		d.provStore.WithEncryption(enc)
+	// The encryptor was built in run() before the identity phase (TOTP seeds
+	// use it too); here the provider registry attaches it for API keys.
+	if d.enc != nil {
+		d.provStore.WithEncryption(d.enc)
 		log.Info("provider registry keys encrypted at rest (AES-256-GCM)")
-	} else {
-		log.Warn("SECRETS_MASTER_KEY unset: provider registry keys stored PLAINTEXT; set it to enable encryption at rest")
 	}
 	// The resolver caches resolutions for a few seconds (WithCacheTTL): one
 	// chat submission resolves the caller's target, the tool binder resolves

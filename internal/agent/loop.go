@@ -376,38 +376,22 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// which aborts the run (settled like a provider failure).
 		for _, h := range l.before {
 			if err := h.BeforeModel(ctx, state); err != nil {
-				if errors.Is(err, ErrAbortRun) {
-					slog.Error("agent: BeforeModel hook aborted the run", "iter", iter, "err", err)
-					l.emitStepFinish(ctx, emit, ModelResult{}, "error", false)
-					l.runAfterRun(ctx, state)
-					_ = emit.Emit(ctx, KindError, err.Error())
-					return state.Produced, err
-				}
+			if errors.Is(err, ErrAbortRun) {
+				slog.Error("agent: BeforeModel hook aborted the run", "iter", iter, "err", err)
+				return l.failRun(ctx, emit, state, ModelResult{}, "error", err)
+			}
 				slog.Warn("agent: BeforeModel hook failed", "err", err)
 			}
 		}
 
 		res, err := l.attempt(ctx, state, emit)
 		if err != nil {
-			if ctx.Err() != nil {
-				slog.Info("agent: run cancelled", "iter", iter, "ctx_err", ctx.Err(), "attempt_err", err)
-				// Close the step opened at iter>0 before the terminal frame,
-				// symmetric with the error path below: a step must not dangle.
-				// Detach from the cancelled ctx so the frame survives the
-				// emitter's ctx guard (same rationale as reportTerminal);
-				// "other" is the reason the transport maps cancellation to.
-				l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
-				l.reportTerminal(ctx, state)
-				l.emitCancelled(ctx, emit)
-				return state.Produced, ctx.Err()
-			}
-			slog.Error("agent: provider attempt failed; run aborting", "iter", iter, "err", err, "view_msgs", len(state.View))
-			// Close the step before the terminal error frame, symmetric with
-			// every other exit: a step opened at iter>0 must not dangle.
-			l.emitStepFinish(ctx, emit, res, "error", false)
-			l.runAfterRun(ctx, state)
-			_ = emit.Emit(ctx, KindError, err.Error())
-			return state.Produced, err
+		if ctx.Err() != nil {
+			slog.Info("agent: run cancelled", "iter", iter, "ctx_err", ctx.Err(), "attempt_err", err)
+			return l.cancelRun(ctx, emit, state, res, ctx.Err())
+		}
+		slog.Error("agent: provider attempt failed; run aborting", "iter", iter, "err", err, "view_msgs", len(state.View))
+		return l.failRun(ctx, emit, state, res, "error", err)
 		}
 		if res.Usage != nil {
 			state.Usage.InputTokens += res.Usage.InputTokens
@@ -430,10 +414,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// guards below.
 		if len(res.Calls) == 0 && len(res.Assistant.Content) == 0 {
 			emptyErr := fmt.Errorf("provider returned an empty response: no content, no tool calls (stop reason: %s)", stopReasonText(res.Stop))
-			l.emitStepFinish(ctx, emit, res, "error", false)
-			l.runAfterRun(ctx, state)
-			_ = emit.Emit(ctx, KindError, emptyErr.Error())
-			return state.Produced, emptyErr
+			return l.failRun(ctx, emit, state, res, "error", emptyErr)
 		}
 		// Recoverable-truncation guard (change durable-run-accounting): a
 		// max_tokens stop with no tool calls whose output is below the intended
@@ -450,10 +431,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				// compaction the request cannot fit. Fail with neutral wording;
 				// the response stays discarded (never persisted).
 				truncErr := fmt.Errorf("response was truncated before completion")
-				l.emitStepFinish(ctx, emit, res, "error", false)
-				l.runAfterRun(ctx, state)
-				_ = emit.Emit(ctx, KindError, truncErr.Error())
-				return state.Produced, truncErr
+				return l.failRun(ctx, emit, state, res, "error", truncErr)
 			}
 			state.overflowRecovered = true
 			// Carry the discarded response's usage on the signal: the retry's
@@ -485,16 +463,13 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// pairing rationale as the pre-dispatch cancel guard below.
 		for i := len(l.afterModel) - 1; i >= 0; i-- {
 			if err := l.afterModel[i].AfterModel(ctx, state); err != nil {
-				if errors.Is(err, ErrAbortRun) {
-					slog.Error("agent: AfterModel hook aborted the run", "iter", iter, "err", err)
-					if len(res.Calls) > 0 {
-						l.recordToolResults(ctx, emit, state, res.Calls, abortedCallResults(res.Calls))
-					}
-					l.emitStepFinish(ctx, emit, res, "error", false)
-					l.runAfterRun(ctx, state)
-					_ = emit.Emit(ctx, KindError, err.Error())
-					return state.Produced, err
+			if errors.Is(err, ErrAbortRun) {
+				slog.Error("agent: AfterModel hook aborted the run", "iter", iter, "err", err)
+				if len(res.Calls) > 0 {
+					l.recordToolResults(ctx, emit, state, res.Calls, abortedCallResults(res.Calls))
 				}
+				return l.failRun(ctx, emit, state, res, "error", err)
+			}
 				slog.Warn("agent: AfterModel hook failed", "err", err)
 			}
 		}
@@ -517,12 +492,10 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		if len(res.Calls) == 0 {
 			if res.Stop == provider.StopMaxTokens && !genuineLength {
 				// Unclassifiable truncation (no cap, or no reported usage):
-				// surface it as an error rather than a silent done.
+				// surface it as an error rather than a silent done. The step
+				// closes "length" so the transport classifies the truncation.
 				truncErr := fmt.Errorf("response was truncated before completion")
-				l.emitStepFinish(ctx, emit, res, "length", false)
-				l.runAfterRun(ctx, state)
-				_ = emit.Emit(ctx, KindError, truncErr.Error())
-				return state.Produced, truncErr
+				return l.failRun(ctx, emit, state, res, "length", truncErr)
 			}
 			if res.Stop == provider.StopUnknown {
 				// The provider closed the stream without reporting a finish
@@ -532,10 +505,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				// possibly cut-off answer off as complete. Both shipped
 				// adapters always report a reason.
 				stopErr := fmt.Errorf("provider closed the stream without a finish reason; the response may be incomplete")
-				l.emitStepFinish(ctx, emit, res, "error", false)
-				l.runAfterRun(ctx, state)
-				_ = emit.Emit(ctx, KindError, stopErr.Error())
-				return state.Produced, stopErr
+				return l.failRun(ctx, emit, state, res, "error", stopErr)
 			}
 			if res.Stop != provider.StopEndTurn && !genuineLength {
 				// Any other reported reason means the output ended early
@@ -546,27 +516,18 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 				// above exist to catch. A genuine output-limit stop is the
 				// sanctioned exception: it completes normally below.
 				stopErr := fmt.Errorf("response ended early (stop reason: %s); the output may be incomplete", res.Stop)
-				l.emitStepFinish(ctx, emit, res, "error", false)
-				l.runAfterRun(ctx, state)
-				_ = emit.Emit(ctx, KindError, stopErr.Error())
-				return state.Produced, stopErr
+				return l.failRun(ctx, emit, state, res, "error", stopErr)
 			}
 			// Honour a cancellation that landed while the final answer streamed: the
 			// answer is complete and already durable, but the caller asked to stop —
 			// report the run cancelled, symmetric with the pre-dispatch guard below
 			// and the iteration guard above.
 			if err := ctx.Err(); err != nil {
-				l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
-				l.reportTerminal(ctx, state)
-				l.emitCancelled(ctx, emit)
-				return state.Produced, err
+				return l.cancelRun(ctx, emit, state, res, err)
 			}
 			slog.Info("agent: run complete", "iterations", iter+1, "input_tokens", state.Usage.InputTokens, "output_tokens", state.Usage.OutputTokens,
 				"cache_read_tokens", state.Usage.CacheReadTokens, "cache_write_tokens", state.Usage.CacheWriteTokens, "cache_hit_pct", cacheHitPct(state.Usage))
-			l.emitStepFinish(ctx, emit, res, "stop", false)
-			l.runAfterRun(ctx, state)
-			_ = emit.Emit(ctx, KindDone, nil)
-			return state.Produced, nil
+			return l.succeedRun(ctx, emit, state, res, "stop")
 		}
 
 		// Don't start a tool batch the caller has already cancelled. The
@@ -578,11 +539,7 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 		// durable scan) see the dangling call.
 		if err := ctx.Err(); err != nil {
 			l.recordToolResults(ctx, emit, state, res.Calls, cancelledCallResults(res.Calls))
-			// Close the step opened at iter>0, symmetric with every other exit.
-			l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
-			l.reportTerminal(ctx, state)
-			l.emitCancelled(ctx, emit)
-			return state.Produced, err
+			return l.cancelRun(ctx, emit, state, res, err)
 		}
 
 		// Truncation guard (capability-gap L1, tool-call half). Reaching here with
@@ -676,17 +633,11 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 			for _, gate := range gated {
 				if err := emit.Emit(ctx, KindInterrupt, *gate); err != nil {
 					l.recordToolResults(ctx, emit, state, res.Calls, interruptFailedCallResults(res.Calls))
-					l.emitStepFinish(ctx, emit, res, "error", false)
-					l.runAfterRun(ctx, state)
-					_ = emit.Emit(ctx, KindError, err.Error())
-					return state.Produced, err
+					return l.failRun(ctx, emit, state, res, "error", err)
 				}
 			}
 			slog.Info("agent: run ended awaiting client interactions", "batch", len(gated), "first_tool", gated[0].ToolName, "first_kind", gated[0].Kind)
-			l.emitStepFinish(ctx, emit, res, "tool-calls", false)
-			l.runAfterRun(ctx, state)
-			_ = emit.Emit(ctx, KindDone, nil)
-			return state.Produced, nil
+			return l.succeedRun(ctx, emit, state, res, "tool-calls")
 		}
 
 		// Dispatch tool calls (concurrently) and append results.
@@ -698,12 +649,51 @@ func (l *Loop) Run(ctx context.Context, history []provider.Message, emit Emitter
 	// error frame rather than a silent stop: without this emit the run still flips
 	// to failed (registry.execute), but the client sees the stream just end with no
 	// explanation. Emit KindError so a terminal frame always accompanies the failure.
-	// Close the step first, symmetric with every other exit.
 	err := fmt.Errorf("max iterations (%d) exceeded", l.config.MaxIterations)
-	l.emitStepFinish(ctx, emit, ModelResult{}, "error", false)
+	return l.failRun(ctx, emit, state, ModelResult{}, "error", err)
+}
+
+// failRun performs the run's terminal-ERROR sequence and returns the values
+// the caller returns with: close the current step (stepReason classifies the
+// step for the transport — "error", or "length" for a truncation), fire the
+// AfterRun hooks (usage reporting), and emit the terminal KindError frame.
+// EVERY error exit of Run goes through here: the step-finish ↔ error-frame
+// pairing is the invariant the transport and the durable record rely on (a
+// step must not dangle; a failure must carry a terminal frame), and one shared
+// sequence is what keeps the exits symmetric. ctx is NOT detached: an error
+// exit happens on a live ctx (a cancelled one takes the cancelRun path).
+func (l *Loop) failRun(ctx context.Context, emit Emitter, state *RunState, res ModelResult, stepReason string, err error) ([]provider.Message, error) {
+	l.emitStepFinish(ctx, emit, res, stepReason, false)
 	l.runAfterRun(ctx, state)
 	_ = emit.Emit(ctx, KindError, err.Error())
 	return state.Produced, err
+}
+
+// cancelRun performs the run's terminal-CANCEL sequence and returns the values
+// the caller returns with: close the current step (a step opened at iter>0
+// must not dangle), fire the AfterRun hooks, and emit the terminal
+// KindCancelled frame. The step close is detached from the cancelled ctx so
+// the frame survives the emitter's ctx guard — the same commit-class
+// rationale reportTerminal/emitCancelled detach for; "other" is the reason
+// the transport maps cancellation to. Callers that must answer a produced
+// tool batch first do so before calling (see the pre-dispatch cancel guard).
+func (l *Loop) cancelRun(ctx context.Context, emit Emitter, state *RunState, res ModelResult, err error) ([]provider.Message, error) {
+	l.emitStepFinish(context.WithoutCancel(ctx), emit, res, "other", false)
+	l.reportTerminal(ctx, state)
+	l.emitCancelled(ctx, emit)
+	return state.Produced, err
+}
+
+// succeedRun performs the run's terminal-SUCCESS sequence and returns the
+// values the caller returns with: close the current step (stepReason is "stop"
+// for a natural completion, "tool-calls" for a run that ended at the
+// interaction gate), fire the AfterRun hooks, and emit the terminal KindDone
+// frame.
+func (l *Loop) succeedRun(ctx context.Context, emit Emitter, state *RunState, res ModelResult, stepReason string) ([]provider.Message, error) {
+	l.emitStepFinish(ctx, emit, res, stepReason, false)
+	l.runAfterRun(ctx, state)
+	_ = emit.Emit(ctx, KindDone, nil)
+	return state.Produced, nil
 }
 
 // reportTerminal fires AfterRun hooks on the cancellation paths, detached from

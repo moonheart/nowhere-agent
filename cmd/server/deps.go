@@ -51,6 +51,10 @@ type serverDeps struct {
 	metrics      *observability.Metrics
 	settings     *settings.Runtime
 	settingsSync *settings.Watcher
+	// enc is the shared secret encryptor (SECRETS_MASTER_KEY), consumed by
+	// the identity (TOTP seeds), provider-registry (API keys) and inbound
+	// (webhook secrets) phases. Nil when no master key is configured.
+	enc *secrets.Encryptor
 
 	// wireIdentity.
 	identityStore   *identity.Store
@@ -61,7 +65,6 @@ type serverDeps struct {
 
 	// wireProviderRegistry.
 	provStore    *providerreg.PGStore
-	enc          *secrets.Encryptor
 	provResolver *providerreg.Resolver
 	recorder     *provider.RawRecorder
 

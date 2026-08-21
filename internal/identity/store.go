@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"nowhere-agent/internal/secrets"
 )
 
 // Store persists identity data in Postgres.
@@ -18,9 +20,22 @@ type Store struct {
 	// role before operations can — only a deployment that explicitly set
 	// BOOTSTRAP_ADMIN_EMAIL opts in (see cmd/server wiring).
 	firstAccountAdmin bool
+	// enc encrypts TOTP seeds at rest (WithEncryption). Nil stores plaintext,
+	// matching the pre-encryption schema; plaintext rows keep reading through
+	// the encryptor's legacy fallback until they are rewritten.
+	enc *secrets.Encryptor
 }
 
 func NewStore(db *sql.DB) *Store { return &Store{db: db} }
+
+// WithEncryption enables encryption-at-rest for TOTP seeds (the same AES-256-
+// GCM envelope provider keys and inbound webhook secrets use). A TOTP seed is
+// as sensitive as a password: a read-only database leak must not hand out
+// every account's second factor.
+func (s *Store) WithEncryption(enc *secrets.Encryptor) *Store {
+	s.enc = enc
+	return s
+}
 
 // WithFirstAccountAdmin toggles the "first account on an empty platform
 // becomes admin" bootstrap. Off by default; cmd/server enables it exactly when
