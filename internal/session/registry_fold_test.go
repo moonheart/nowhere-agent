@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,70 @@ import (
 	"nowhere-agent/internal/redact"
 	"nowhere-agent/internal/toolruntime"
 )
+
+// TestFoldHistoryBounded: the fold's history rebuild is capped at
+// foldHistoryLimit (mirroring the chat side's rebuildHistoryLimit): a longer
+// conversation loads only its newest tail and announces the cut with the same
+// truncation marker a fresh run gets, instead of paying an unbounded DB
+// read / JSON decode per resume.
+func TestFoldHistoryBounded(t *testing.T) {
+	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
+	rg := NewRunRegistry(rt).WithMessageStore(NewMemMessageStore())
+	ctx := context.Background()
+
+	for i := range foldHistoryLimit + 5 {
+		if _, err := rg.msgStore.AppendMessage(ctx, StoredMessage{
+			SessionID: "s1", Role: provider.RoleUser,
+			Content: []provider.Block{{Type: provider.BlockText, Text: fmt.Sprintf("m%d", i)}},
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+
+	stored, history, err := rg.foldHistory(ctx, "s1")
+	if err != nil {
+		t.Fatalf("foldHistory: %v", err)
+	}
+	if len(stored) != foldHistoryLimit {
+		t.Fatalf("stored = %d messages, want the bounded tail %d", len(stored), foldHistoryLimit)
+	}
+	if len(history) != foldHistoryLimit+1 {
+		t.Fatalf("history = %d messages, want tail %d + the truncation marker", len(history), foldHistoryLimit)
+	}
+	if got := history[0].Content[0].Text; !strings.Contains(got, "truncated") {
+		t.Errorf("history[0] = %q, want the truncation marker", got)
+	}
+	// The tail is the NEWEST messages: the oldest loaded is m5.
+	if got := history[1].Content[0].Text; got != "m5" {
+		t.Errorf("history[1] = %q, want m5 (the oldest message inside the bound)", got)
+	}
+}
+
+// TestFoldHistoryShortSessionUncut: a conversation under the bound loads
+// whole, with no marker.
+func TestFoldHistoryShortSessionUncut(t *testing.T) {
+	rt := NewRuntime(NewMemStore()).WithBus(NewMemBus())
+	rg := NewRunRegistry(rt).WithMessageStore(NewMemMessageStore())
+	ctx := context.Background()
+	for i := range 3 {
+		if _, err := rg.msgStore.AppendMessage(ctx, StoredMessage{
+			SessionID: "s2", Role: provider.RoleUser,
+			Content: []provider.Block{{Type: provider.BlockText, Text: fmt.Sprintf("m%d", i)}},
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	_, history, err := rg.foldHistory(ctx, "s2")
+	if err != nil {
+		t.Fatalf("foldHistory: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("history = %d messages, want the whole 3-message conversation (no marker)", len(history))
+	}
+	if strings.Contains(history[0].Content[0].Text, "truncated") {
+		t.Errorf("history[0] = %q, want the first real message, not a marker", history[0].Content[0].Text)
+	}
+}
 
 // countTool records how many times it executed.
 type countTool struct {
