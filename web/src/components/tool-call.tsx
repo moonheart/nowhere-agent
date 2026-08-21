@@ -34,8 +34,25 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { Input } from "@/components/ui/input";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  Questionnaire,
+  QuestionnaireItem,
+  QuestionnaireTitle,
+  QuestionnaireChoices,
+  QuestionnaireChoice,
+  QuestionnaireChoiceDescription,
+  QuestionnaireInput,
+  QuestionnaireActions,
+  QuestionnaireSubmit,
+  QuestionnaireSkip,
+  QuestionnairePrevious,
+  QuestionnaireNext,
+} from "@/components/ui/questionnaire";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Progress } from "@/components/ui/progress";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Marker, MarkerContent } from "@/components/ui/marker";
 import { cn } from "@/lib/utils";
 import { t } from "@/lib/i18n";
 
@@ -96,16 +113,7 @@ const SubagentCall: FC<ToolCallMessagePartProps> = (props) => {
   const mode = liveParts.length > 0 ? "live" : replayMessages.length > 0 ? "replay" : "result";
 
   return (
-    <Collapsible
-      open={open}
-      onOpenChange={setOpen}
-      className={cn(
-        "mb-2 rounded-xl border text-sm",
-        isError
-          ? "border-destructive/30 bg-destructive/5"
-          : "border-primary/30 bg-primary/5",
-      )}
-    >
+    <Collapsible open={open} onOpenChange={setOpen} className="mb-2 w-full max-w-full text-sm">
       <CallHeader
         icon={<Bot className="size-3.5 shrink-0 text-primary" />}
         name={toolName}
@@ -114,7 +122,8 @@ const SubagentCall: FC<ToolCallMessagePartProps> = (props) => {
         expanded={open}
         badge={live && live.depth > 1 ? `L${live.depth}` : undefined}
       />
-      <CollapsibleContent className="max-h-96 space-y-2 overflow-y-auto border-t border-primary/20 px-3 py-2">
+      {running && <Progress value={null} className="mt-1 w-full pl-5" />}
+      <CollapsibleContent className="mt-1 max-h-96 w-full space-y-2 overflow-y-auto pl-5">
         {mode === "live" && (
           <>
             <SubParts parts={liveParts} running={running} />
@@ -268,26 +277,9 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
   const resultText = toText(result);
 
   return (
-    <Collapsible
-      open={expanded}
-      onOpenChange={setManual}
-      className={cn(
-        "mb-2 rounded-xl border text-sm",
-        isError
-          ? "border-destructive/30 bg-destructive/5"
-          : approval?.kind === "client_tool"
-            ? "border-sky-500/30 bg-sky-500/5"
-            : approval
-              ? "border-amber-500/40 bg-amber-500/5"
-              : "border-border bg-muted/50",
-      )}
-    >
-      <CallHeader
-        name={toolName}
-        running={running}
-        isError={isError}
-        expanded={expanded}
-      />
+    <Collapsible open={expanded} onOpenChange={setManual} className="mb-2 w-full max-w-full text-sm">
+      <CallHeader name={toolName} running={running} isError={isError} expanded={expanded} />
+      {running && <Progress value={null} className="mt-1 w-full pl-5" />}
       {approval?.kind === "ask_user" ? (
         isHead ? <AskUserGate approval={approval} /> : <QueuedNote />
       ) : approval?.kind === "client_tool" ? (
@@ -299,14 +291,25 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
           <QueuedNote />
         )
       ) : null}
-      <CollapsibleContent className="space-y-2 border-t border-border px-3 py-2 font-mono text-xs leading-relaxed">
+      <CollapsibleContent className="mt-1 w-full space-y-2 pl-5 font-mono text-xs leading-relaxed">
         {argsText && (
           <div>
-            <div className="mb-1 font-sans text-muted-foreground">arguments</div>
-            <pre className="break-all whitespace-pre-wrap text-foreground/70">
-              {argsText}
-            </pre>
+            <div className="mb-1 flex items-center gap-2 font-sans text-muted-foreground">
+              <span>arguments</span>
+              <Popover>
+                <PopoverTrigger render={<Button variant="ghost" size="xs" className="h-6 px-1.5 text-[10px]">预览</Button>} />
+                <PopoverContent side="right" align="start" className="max-h-64 w-80 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">
+                  {argsText}
+                </PopoverContent>
+              </Popover>
+            </div>
+            <pre className="break-all whitespace-pre-wrap text-foreground/70">{argsText}</pre>
           </div>
+        )}
+        {argsText && (resultText || isError) && (
+          <Marker variant="separator" className="my-1 opacity-50">
+            <MarkerContent>↓</MarkerContent>
+          </Marker>
         )}
         {(resultText || isError) && (
           <div>
@@ -330,11 +333,9 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
 // multi-call batch: it is not yet actionable, and becomes live once the head of
 // the queue is decided. Rendered instead of the interactive gate.
 const QueuedNote: FC = () => (
-  <div className="flex items-center gap-2 border-t border-amber-500/30 px-3 py-2.5">
+  <div className="mt-1 flex items-center gap-2 pl-5 py-1">
     <ShieldAlert className="size-4 shrink-0 text-amber-600/60 dark:text-amber-500/60" />
-    <p className="text-[13px] text-muted-foreground">
-      {t("approval.waitingEarlier")}
-    </p>
+    <p className="text-[13px] text-muted-foreground">{t("approval.waitingEarlier")}</p>
   </div>
 );
 
@@ -369,7 +370,7 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
     }
   };
   return (
-    <div className="border-t border-amber-500/30 px-3 py-2.5">
+    <div className="mt-1 pl-5 py-1">
       <div className="flex items-start gap-2">
         <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-500" />
         <div className="min-w-0 flex-1">
@@ -377,31 +378,22 @@ const ApprovalGate: FC<{ approval: ToolApproval; argsText?: string }> = ({
             {t("approval.approveRunning", { tool: approval.toolName })}
           </p>
           {argsText && (
-            <pre className="mt-1 max-h-24 overflow-y-auto rounded bg-amber-500/10 p-1.5 font-mono text-[11px] break-all whitespace-pre-wrap text-amber-800 dark:text-amber-300">
+            <pre className="mt-1 max-h-24 overflow-y-auto rounded bg-muted p-1.5 font-mono text-[11px] break-all whitespace-pre-wrap text-foreground/70">
               {argsText}
             </pre>
           )}
           <div className="mt-2 flex gap-2">
-            <Button
-              size="sm"
-              disabled={busy !== null}
-              onClick={() => void decide(true)}
-            >
+            <Button size="sm" disabled={busy !== null} onClick={() => void decide(true)}>
               {busy === "approve" ? t("approval.approving") : t("approval.approve")}
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy !== null}
-              onClick={() => void decide(false)}
-            >
+            <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void decide(false)}>
               {busy === "deny" ? t("approval.denying") : t("approval.deny")}
             </Button>
           </div>
           {error && (
-            <p className="mt-2 rounded border border-destructive/30 bg-destructive/5 px-2 py-1 text-[12px] text-destructive">
-              {error}
-            </p>
+            <Alert variant="destructive" className="mt-2">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
           )}
         </div>
       </div>
@@ -430,12 +422,7 @@ const ClientToolGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
     }
   };
   return (
-    <div
-      className={cn(
-        "flex items-start gap-2 border-t border-sky-500/30 px-3 py-2.5",
-        failure && "border-destructive/30 bg-destructive/5",
-      )}
-    >
+    <div className={cn("mt-1 flex items-start gap-2 pl-5 py-1", failure && "rounded bg-destructive/5")}>
       {failure ? (
         <TriangleAlert className="mt-0.5 size-4 shrink-0 text-destructive" />
       ) : (
@@ -533,85 +520,86 @@ const AskUserGate: FC<{ approval: ToolApproval }> = ({ approval }) => {
 
   if (questions.length === 0) return null;
   return (
-    <div className="border-t border-primary/20 bg-primary/5 px-3 py-2.5">
-      <div className="flex items-start gap-2">
-        <HelpCircle className="mt-0.5 size-4 shrink-0 text-primary" />
-        <div className="min-w-0 flex-1 space-y-3">
-          {questions.map((q, qi) => {
-            const chosen = answers[qi] ?? [];
-            const customText = custom[qi] ?? "";
-            return (
-              <div key={qi}>
-                <p className="text-[13px] font-medium text-foreground">
-                  {q.header && (
-                    <Badge
-                      variant="secondary"
-                      className="mr-1.5 h-4 px-1 text-[10px]"
-                    >
-                      {q.header}
-                    </Badge>
-                  )}
-                  {q.question}
-                </p>
-                <ToggleGroup
-                  variant="outline"
-                  size="sm"
-                  multiple={!!q.multiselect}
-                  disabled={busy}
-                  value={chosen}
-                  onValueChange={(next) => choose(qi, next)}
-                  className="mt-1.5 flex-wrap"
-                >
-                  {q.options.map((opt) => (
-                    <ToggleGroupItem
+    <div className="mt-1 w-full pl-5">
+      <Questionnaire className="gap-3">
+        <div className="flex items-center gap-2">
+          <HelpCircle className="size-4 shrink-0 text-primary" />
+        </div>
+        {questions.map((q, qi) => {
+          const chosen = answers[qi] ?? [];
+          const customText = custom[qi] ?? "";
+          return (
+            <QuestionnaireItem key={qi} name={`q-${qi}`} multiple={!!q.multiselect} className="gap-2">
+              <QuestionnaireTitle className="text-[13px]">
+                {q.header && (
+                  <Badge variant="secondary" className="mr-1.5 h-4 px-1 text-[10px]">
+                    {q.header}
+                  </Badge>
+                )}
+                {q.question}
+              </QuestionnaireTitle>
+              <QuestionnaireChoices className="mt-1">
+                {q.options.map((opt) => {
+                  const checked = chosen.includes(opt.label);
+                  return (
+                    <QuestionnaireChoice
                       key={opt.label}
                       value={opt.label}
-                      title={opt.description}
-                      className={cn(
-                        "bg-background aria-pressed:bg-primary aria-pressed:text-primary-foreground",
-                        opt.recommended &&
-                          "border-primary/40 text-primary hover:text-primary",
-                      )}
+                      checked={checked}
+                      disabled={busy}
+                      onChange={(e) => {
+                        const nextChecked = (e.target as HTMLInputElement).checked;
+                        if (q.multiselect) {
+                          const next = nextChecked ? [...chosen, opt.label] : chosen.filter((v) => v !== opt.label);
+                          choose(qi, next);
+                        } else {
+                          choose(qi, nextChecked ? [opt.label] : []);
+                        }
+                      }}
+                      className={cn(opt.recommended && "border-primary/40")}
                     >
                       {opt.label}
-                      {opt.recommended && !chosen.includes(opt.label) && (
-                        <span className="text-[9px] text-primary/70">★</span>
+                      {opt.description && (
+                        <QuestionnaireChoiceDescription>{opt.description}</QuestionnaireChoiceDescription>
                       )}
-                    </ToggleGroupItem>
-                  ))}
-                </ToggleGroup>
-                <Input
-                  type="text"
-                  value={customText}
-                  disabled={busy}
-                  onChange={(e) => setCustomAnswer(qi, e.target.value)}
-                  placeholder={t("ask.customPlaceholder")}
-                  aria-label={t("ask.customAria")}
-                  className="mt-1.5 h-7 bg-background text-xs"
-                />
-              </div>
-            );
-          })}
-          <div className="flex gap-2 pt-1">
-            <Button size="sm" disabled={busy} onClick={() => void submit()}>
-              {busy ? t("ask.sending") : t("ask.submit")}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={() => void skip()}
-            >
-              {t("ask.skip")}
-            </Button>
-          </div>
-          {error && (
-            <p className="rounded border border-destructive/30 bg-destructive/5 px-2 py-1 text-[12px] text-destructive">
-              {error}
-            </p>
-          )}
-        </div>
-      </div>
+                      {opt.recommended && !checked && (
+                        <span className="ml-auto text-[9px] text-primary/70">★</span>
+                      )}
+                    </QuestionnaireChoice>
+                  );
+                })}
+              </QuestionnaireChoices>
+              <QuestionnaireInput
+                value={customText}
+                disabled={busy}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustomAnswer(qi, e.target.value)}
+                placeholder={t("ask.customPlaceholder")}
+                aria-label={t("ask.customAria")}
+                className="mt-1 h-8 text-xs"
+              />
+            </QuestionnaireItem>
+          );
+        })}
+        <QuestionnaireActions className="pt-1">
+          <QuestionnairePrevious size="sm" variant="outline" disabled={busy}>
+            {t("ask.previous")}
+          </QuestionnairePrevious>
+          <QuestionnaireSkip size="sm" variant="outline" disabled={busy} onClick={() => void skip()}>
+            {t("ask.skip")}
+          </QuestionnaireSkip>
+          <QuestionnaireNext size="sm" disabled={busy}>
+            {t("ask.next")}
+          </QuestionnaireNext>
+          <QuestionnaireSubmit size="sm" disabled={busy} onClick={() => void submit()}>
+            {busy ? t("ask.sending") : t("ask.submit")}
+          </QuestionnaireSubmit>
+        </QuestionnaireActions>
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+      </Questionnaire>
     </div>
   );
 };
@@ -661,31 +649,27 @@ const CallHeader: FC<{
   icon?: React.ReactNode;
   badge?: string;
 }> = ({ name, running, isError, expanded, icon, badge }) => (
-  <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2 text-left text-muted-foreground transition-colors hover:text-foreground">
+  <CollapsibleTrigger className="inline-flex items-center gap-1.5 py-1 text-left text-muted-foreground transition-colors hover:text-foreground">
+    {expanded ? <ChevronDown className="size-3.5 shrink-0" /> : <ChevronRight className="size-3.5 shrink-0" />}
     {running ? (
       <LoaderCircle className="size-3.5 shrink-0 animate-spin text-primary" />
     ) : (
-      <span
-        className={cn(
-          "inline-block size-2 shrink-0 rounded-full",
-          isError ? "bg-destructive" : "bg-emerald-500",
-        )}
-      />
+      <span className={cn("inline-block size-2 shrink-0 rounded-full", isError ? "bg-destructive" : "bg-emerald-500")} />
     )}
     {icon}
-    <span className="font-mono font-medium">{name}</span>
+    <HoverCard>
+      <HoverCardTrigger>
+        <span className="font-mono font-medium">{name}</span>
+      </HoverCardTrigger>
+      <HoverCardContent className="max-w-xs font-mono text-xs break-all">
+        {name} — {running ? "执行中" : isError ? "失败" : "完成"}，悬浮查看详情，点击收起/展开
+      </HoverCardContent>
+    </HoverCard>
     {badge && (
       <Badge variant="secondary" className="h-4 px-1 text-[10px]">
         {badge}
       </Badge>
     )}
-    <span className="text-xs">
-      {running ? "running…" : isError ? "error" : "done"}
-    </span>
-    {expanded ? (
-      <ChevronDown className="ml-auto size-3.5" />
-    ) : (
-      <ChevronRight className="ml-auto size-3.5" />
-    )}
+    <span className="text-xs">{running ? "running…" : isError ? "error" : "done"}</span>
   </CollapsibleTrigger>
 );
