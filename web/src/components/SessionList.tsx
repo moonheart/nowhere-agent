@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, MessageSquare, Plus, Search, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, MoreHorizontal, Pencil, Pin, PinOff, Plus, Search, Trash2 } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Separator } from "@/components/ui/separator";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import {
   cancelSession,
   deleteSession,
@@ -23,11 +32,26 @@ import {
 import {
   Item,
   ItemContent,
-  ItemDescription,
-  ItemMedia,
   ItemTitle,
 } from "@/components/ui/item";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { t, useLang } from "@/lib/i18n";
 import { reportNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
@@ -43,10 +67,58 @@ type Props = {
   refreshToken: number;
 };
 
+const PIN_STORAGE_KEY = "nowhere.pinnedSessions";
+const TITLE_OVERRIDE_KEY = "nowhere.sessionTitleOverrides";
+const PINNED_COLLAPSED_KEY = "nowhere.pinnedCollapsed";
+const RECENT_COLLAPSED_KEY = "nowhere.recentCollapsed";
+
+function loadPinned(): Set<string> {
+  try {
+    const raw = localStorage.getItem(PIN_STORAGE_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return new Set();
+    return new Set(arr.filter((x): x is string => typeof x === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function savePinned(ids: Set<string>) {
+  try {
+    localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // ignore quota
+  }
+}
+
+function loadTitleOverrides(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(TITLE_OVERRIDE_KEY);
+    if (!raw) return {};
+    const obj = JSON.parse(raw) as unknown;
+    if (!obj || typeof obj !== "object") return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      if (typeof v === "string" && v.trim()) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveTitleOverrides(map: Record<string, string>) {
+  try {
+    localStorage.setItem(TITLE_OVERRIDE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore quota
+  }
+}
+
 // SessionList is the left sidebar of conversations. Selecting one switches the
-// active thread; "New chat" starts a fresh session; the trash icon deletes one.
-// The list is loaded from the backend in pages of SESSION_PAGE_SIZE, newest
-// first; scrolling near the bottom fetches the next page automatically.
+// active thread; "New chat" starts a fresh session; the menu per row offers
+// rename / pin / delete.
 export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refreshToken }: Props) => {
   const lang = useLang();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -70,6 +142,41 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   const seqRef = useRef(0);
   // Sentinel at the bottom of the list; becoming visible triggers the next page.
   const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  // Local UI state: pinned set + title overrides (persisted in localStorage
+  // until a real PATCH /api/chat/sessions/{id} endpoint exists).
+  const [pinnedIds, setPinnedIds] = useState<Set<string>>(() => loadPinned());
+  const [titleOverrides, setTitleOverrides] = useState<Record<string, string>>(() => loadTitleOverrides());
+  const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [pinnedCollapsed, setPinnedCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(PINNED_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [recentCollapsed, setRecentCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(RECENT_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(PINNED_COLLAPSED_KEY, pinnedCollapsed ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [pinnedCollapsed]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(RECENT_COLLAPSED_KEY, recentCollapsed ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [recentCollapsed]);
 
   useEffect(() => {
     const id = setTimeout(() => setDebounced(query.trim()), 250);
@@ -115,6 +222,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   );
 
   const loadMore = useCallback(async () => {
+    if (recentCollapsed) return;
     if (!nextCursor || loadingMore) return;
     const seq = seqRef.current;
     setLoadingMore(true);
@@ -131,7 +239,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
     }
     setSessions((prev) => [...prev, ...page.sessions]);
     setNextCursor(page.nextCursor);
-  }, [nextCursor, loadingMore, debounced, fetchPage]);
+  }, [nextCursor, loadingMore, debounced, fetchPage, recentCollapsed]);
 
   useEffect(() => {
     queryRef.current = debounced;
@@ -140,7 +248,10 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
 
   // Infinite scroll: when the bottom sentinel scrolls into view (rootMargin
   // preloads a screenful) and more pages exist, fetch the next one.
+  // Paused while "最近" is collapsed — otherwise the collapsed height makes
+  // the sentinel immediately intersect (240px margin) and pages all sessions.
   useEffect(() => {
+    if (recentCollapsed) return;
     const el = sentinelRef.current;
     if (!el) return;
     const observer = new IntersectionObserver(
@@ -151,7 +262,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [loadMore]);
+  }, [loadMore, recentCollapsed]);
 
   const handleDelete = async (id: string) => {
     // Deleting hides the whole conversation; confirm before acting (follows
@@ -170,15 +281,73 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
     } else {
       void refresh(debounced);
     }
+    // also drop local overrides/pins for the deleted session
+    setPinnedIds((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      savePinned(next);
+      return next;
+    });
+    setTitleOverrides((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      saveTitleOverrides(next);
+      return next;
+    });
   };
+
+  const togglePin = useCallback((id: string) => {
+    setPinnedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      savePinned(next);
+      return next;
+    });
+  }, []);
+
+  const openRename = useCallback((s: SessionSummary) => {
+    const cur = titleOverrides[s.id] ?? s.title ?? "";
+    setRenameTarget(s);
+    setRenameDraft(cur);
+  }, [titleOverrides]);
+
+  const commitRename = useCallback(() => {
+    if (!renameTarget) return;
+    const id = renameTarget.id;
+    const nextTitle = renameDraft.trim();
+    if (!nextTitle) {
+      reportNotice(t("chat.renameFailed"));
+      return;
+    }
+    // Optimistic local update — persists across refreshes until backend supports rename.
+    // When a PATCH endpoint is added, call it here and fall back to local on 404.
+    setSessions((prev) => prev.map((x) => (x.id === id ? { ...x, title: nextTitle } : x)));
+    setTitleOverrides((prev) => {
+      const next = { ...prev, [id]: nextTitle };
+      saveTitleOverrides(next);
+      return next;
+    });
+    setRenameTarget(null);
+  }, [renameTarget, renameDraft]);
 
   // The list is already the server's answer: the search box re-fetches with q,
   // so (unlike a client-side filter) old pages are searchable too. The search
   // box stays visible after a search with no hits, so it can be changed.
   const showSearch = sessions.length > 0 || query.trim() !== "";
 
+  const withDisplayTitle = sessions.map((s) => ({
+    raw: s,
+    displayTitle: titleOverrides[s.id] ?? s.title,
+  }));
+  // pinned first, preserving server order within each group
+  const pinned = withDisplayTitle.filter((x) => pinnedIds.has(x.raw.id));
+  const recent = withDisplayTitle.filter((x) => !pinnedIds.has(x.raw.id));
+
   return (
-    <aside className="flex h-full w-64 flex-col border-r border-border bg-muted/50">
+    <aside className="flex h-full w-full flex-col border-r border-border bg-muted/50">
       <div className="space-y-2 border-b border-border p-3">
         <Button size="lg" className="w-full" onClick={onNew}>
           <Plus />
@@ -221,7 +390,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
             <Empty className="p-4">
               <EmptyHeader>
                 <EmptyMedia variant="icon">
-                  <MessageSquare />
+                  <Search />
                 </EmptyMedia>
                 <EmptyTitle>{t("chat.noConversations")}</EmptyTitle>
                 <EmptyDescription>{t("chat.noConversationsHint")}</EmptyDescription>
@@ -250,61 +419,181 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
               {t("chat.searching")}
             </div>
           )}
-          <ul className="flex flex-col gap-0.5">
-            {sessions.map((s) => {
+          {/* Pinned / Recent separated, each collapsible */}
+          {(() => {
+            const renderRow = ({ raw: s, displayTitle }: { raw: SessionSummary; displayTitle: string }) => {
               const active = s.id === currentId;
+              const isPinned = pinnedIds.has(s.id);
+              const timeLabel = relTime(s.updatedAt, lang);
+              const fullTime = (() => {
+                try {
+                  return new Date(s.updatedAt).toLocaleString(lang === "zh" ? "zh-CN" : "en-US", {
+                    year: "numeric",
+                    month: "2-digit",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  });
+                } catch {
+                  return timeLabel;
+                }
+              })();
               return (
-                <li key={s.id} className="group relative">
-                  <Item
-                    size="sm"
+                <li key={s.id} className="group relative list-none">
+                  <ContextMenu>
+                    <ContextMenuTrigger>
+                      <Item
+                        size="xs"
+                        className={cn(
+                          "cursor-pointer gap-2 pr-2 text-left font-normal",
+                          active ? "bg-primary/10 text-foreground" : "text-foreground hover:bg-muted",
+                        )}
+                        render={<button type="button" onClick={() => onSelect(s.id)} />}
+                      >
+                    <ItemContent className="min-w-0 gap-0">
+                      <ItemTitle className="w-full min-w-0">
+                        <span className="min-w-0 flex-1 truncate">{displayTitle || t("chat.untitled")}</span>
+                      </ItemTitle>
+                    </ItemContent>
+                      </Item>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-40">
+                      <ContextMenuItem onClick={() => openRename(s)}>
+                        <Pencil /> {t("chat.rename")}
+                      </ContextMenuItem>
+                      <ContextMenuItem onClick={() => togglePin(s.id)}>
+                        {isPinned ? <PinOff /> : <Pin />} {isPinned ? t("chat.unpin") : t("chat.pin")}
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem variant="destructive" onClick={() => void handleDelete(s.id)}>
+                        <Trash2 /> {t("chat.deleteConversation")}
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                  <div
                     className={cn(
-                      "cursor-pointer pr-9 text-left",
-                      active
-                        ? "bg-primary/10 text-foreground"
-                        : "text-foreground/80 hover:bg-muted",
+                      "pointer-events-none absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-muted/90 px-0.5 py-0.5 backdrop-blur-sm transition-opacity",
+                      "opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 has-[[data-state=open]]:pointer-events-auto has-[[data-state=open]]:opacity-100",
+                      active && "bg-primary/10",
                     )}
-                    render={
-                      <button type="button" onClick={() => onSelect(s.id)} />
-                    }
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
                   >
-                    <ItemMedia variant="icon">
-                      <MessageSquare
-                        className={
-                          active ? "text-primary" : "text-muted-foreground"
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <span className="max-w-[72px] truncate px-1 text-xs whitespace-nowrap text-muted-foreground">
+                            {timeLabel}
+                          </span>
                         }
                       />
-                    </ItemMedia>
-                    {/* min-w-0 on the content column: without it the flex item
-                        refuses to shrink below its text width and the title
-                        spills out of the w-64 sidebar instead of truncating. */}
-                    <ItemContent className="min-w-0 gap-0.5">
-                      <ItemTitle className="w-full min-w-0">
-                        <span className="truncate">
-                          {s.title || t("chat.untitled")}
-                        </span>
-                      </ItemTitle>
-                      <ItemDescription className="text-xs">
-                        {relTime(s.updatedAt, lang)}
-                      </ItemDescription>
-                    </ItemContent>
-                  </Item>
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={t("chat.deleteConversation")}
-                    title={t("chat.deleteConversation")}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleDelete(s.id);
-                    }}
-                    className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100"
-                  >
-                    <Trash2 />
-                  </Button>
+                      <TooltipContent side="top">{fullTime}</TooltipContent>
+                    </Tooltip>
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label={isPinned ? t("chat.unpin") : t("chat.pin")}
+                      title={isPinned ? t("chat.unpin") : t("chat.pin")}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        togglePin(s.id);
+                      }}
+                      className={cn("size-6 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground", isPinned && "text-primary")}
+                    >
+                      {isPinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger
+                        render={
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            aria-label={t("chat.moreActions")}
+                            title={t("chat.moreActions")}
+                            className="size-6 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground"
+                          />
+                        }
+                      >
+                        <MoreHorizontal className="size-3.5" />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" side="bottom" sideOffset={6} alignOffset={-4} className="w-40">
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openRename(s);
+                          }}
+                        >
+                          <Pencil />
+                          {t("chat.rename")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            togglePin(s.id);
+                          }}
+                        >
+                          {isPinned ? <PinOff /> : <Pin />}
+                          {isPinned ? t("chat.unpin") : t("chat.pin")}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDelete(s.id);
+                          }}
+                        >
+                          <Trash2 />
+                          {t("chat.deleteConversation")}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
                 </li>
               );
-            })}
-          </ul>
+            };
+            return (
+              <div className="flex flex-col gap-3">
+                {/* Pinned section */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setPinnedCollapsed((v) => !v)}
+                    className="flex w-full items-center gap-1 rounded px-1 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                    aria-expanded={!pinnedCollapsed}
+                  >
+                    {pinnedCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                    <span>{t("chat.pinned")}</span>
+                    <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] leading-none">{pinned.length}</span>
+                  </button>
+                  {!pinnedCollapsed && (
+                    <>
+                      {pinned.length > 0 ? (
+                        <ul className="mt-1 flex flex-col gap-px">{pinned.map(renderRow)}</ul>
+                      ) : (
+                        <div className="px-2 py-1 text-xs text-muted-foreground/70">{t("chat.noPinned")}</div>
+                      )}
+                    </>
+                  )}
+                </div>
+                <Separator />
+                {/* Recent section */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setRecentCollapsed((v) => !v)}
+                    className="flex w-full items-center gap-1 rounded px-1 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                    aria-expanded={!recentCollapsed}
+                  >
+                    {recentCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                    <span>{t("chat.recent")}</span>
+                    <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] leading-none">{recent.length}</span>
+                  </button>
+                  {!recentCollapsed && <ul className="mt-1 flex flex-col gap-px">{recent.map(renderRow)}</ul>}
+                </div>
+              </div>
+            );
+          })()}
           <div ref={sentinelRef} className="h-px" aria-hidden="true" />
           {loadingMore && (
             <div className="flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground">
@@ -314,6 +603,39 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
           )}
         </div>
       </ScrollArea>
+
+      <Dialog open={!!renameTarget} onOpenChange={(open) => (!open ? setRenameTarget(null) : null)}>
+        <DialogContent className="sm:max-w-sm" onClick={(e) => e.stopPropagation()}>
+          <DialogHeader>
+            <DialogTitle>{t("chat.renameTitle")}</DialogTitle>
+            <DialogDescription className="sr-only">{t("chat.renameTitle")}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-1">
+            <Label htmlFor="rename-input" className="sr-only">
+              {t("chat.rename")}
+            </Label>
+            <Input
+              id="rename-input"
+              value={renameDraft}
+              onChange={(e) => setRenameDraft(e.target.value)}
+              placeholder={t("chat.renamePlaceholder")}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter") commitRename();
+                if (e.key === "Escape") setRenameTarget(null);
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRenameTarget(null)}>
+              {t("chat.renameCancel")}
+            </Button>
+            <Button onClick={commitRename} disabled={!renameDraft.trim()}>
+              {t("chat.renameConfirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </aside>
   );
 };

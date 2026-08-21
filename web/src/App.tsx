@@ -2,13 +2,17 @@ import { lazy, useEffect, useState } from "react";
 import { Link, Route, Routes, useSearchParams } from "react-router-dom";
 import { AssistantRuntimeProvider, useThread } from "@assistant-ui/react";
 import { useDataStreamRuntime } from "@assistant-ui/react-data-stream";
-import { LogOut, Settings } from "lucide-react";
+import { LogOut, PanelLeft, PanelLeftClose, Settings } from "lucide-react";
 import { AdminLayout } from "@/components/admin/AdminLayout";
 import { Thread } from "@/components/thread";
 import { LoginForm } from "@/components/login";
 import { SessionList } from "@/components/SessionList";
 import { RightPanel } from "@/components/right-panel";
 import { Button, buttonVariants } from "@/components/ui/button";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Toaster } from "@/components/ui/toast";
+import { Command, CommandDialog, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem, CommandShortcut } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
 import { getToken, logout, consumeSSORedirect } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
@@ -350,6 +354,31 @@ function LangToggle() {
 
 function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
   const [conversationKey, setConversationKey] = useState(0);
+  const [leftCollapsed, setLeftCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("nowhere.leftCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("nowhere.leftCollapsed", leftCollapsed ? "1" : "0");
+    } catch {
+      // ignore quota
+    }
+  }, [leftCollapsed]);
+  const [commandOpen, setCommandOpen] = useState(false);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setCommandOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   // The URL is the shareable source of truth for the active conversation: the
   // `session` query carries its id, so a reload/deep-link reopens it and the
   // address bar always reflects what you're chatting in.
@@ -466,6 +495,16 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
   return (
     <div className="flex h-dvh flex-col bg-background text-foreground">
       <header className="flex h-12 items-center gap-3 border-b border-border px-4">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={leftCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          title={leftCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          onClick={() => setLeftCollapsed((v) => !v)}
+          className="shrink-0"
+        >
+          {leftCollapsed ? <PanelLeft /> : <PanelLeftClose />}
+        </Button>
         <div className="flex items-center gap-2">
           <span className="flex size-6 items-center justify-center rounded-lg bg-primary text-xs font-bold text-primary-foreground">
             n
@@ -505,25 +544,81 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
         </div>
       </header>
       <div className="flex min-h-0 flex-1">
-        <SessionList
-          currentId={activeSessionId}
-          onSelect={switchTo}
-          onNew={startNewChat}
-          onDeleteCurrent={handleDeleteCurrent}
-          refreshToken={listVersion}
-        />
-        <main className="min-w-0 flex-1 bg-background">
-          {/* key on Chat itself (not just the provider inside it): switching /
-              starting a chat must rebuild the WHOLE Chat, including its runtime.
-              Without it, Chat survives the switch and keeps the previous
-              conversation's runtime — the remounted provider's cards then render
-              that stale runtime's old messages under the NEW epoch and re-report
-              them into the right panel, leaking the prior chat's files into a
-              fresh conversation's Workspace. A fresh runtime starts empty and
-              reloads only the now-current session's history. */}
-          <Chat key={conversationKey} conversationKey={conversationKey} sessionId={activeSessionId} onSession={handleNewSession} />
-        </main>
-        <RightPanel />
+        {!leftCollapsed && (
+          <div className="w-64 shrink-0">
+            <SessionList
+              currentId={activeSessionId}
+              onSelect={switchTo}
+              onNew={startNewChat}
+              onDeleteCurrent={handleDeleteCurrent}
+              refreshToken={listVersion}
+            />
+          </div>
+        )}
+        <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
+        <ResizablePanel defaultSize={72} minSize={40} id="center">
+          <main className="flex h-full min-w-0 flex-1 flex-col bg-background">
+            {/* key on Chat itself (not just the provider inside it): switching /
+                starting a chat must rebuild the WHOLE Chat, including its runtime.
+                Without it, Chat survives the switch and keeps the previous
+                conversation's runtime — the remounted provider's cards then render
+                that stale runtime's old messages under the NEW epoch and re-report
+                them into the right panel, leaking the prior chat's files into a
+                fresh conversation's Workspace. A fresh runtime starts empty and
+                reloads only the now-current session's history. */}
+            <Chat key={conversationKey} conversationKey={conversationKey} sessionId={activeSessionId} onSession={handleNewSession} />
+          </main>
+        </ResizablePanel>
+        <ResizableHandle withHandle />
+        <ResizablePanel defaultSize={24} minSize={16} maxSize={40} collapsible collapsedSize={0}>
+          <RightPanel />
+        </ResizablePanel>
+      </ResizablePanelGroup>
+      <CommandDialog open={commandOpen} onOpenChange={setCommandOpen}>
+        <Command>
+          <CommandInput placeholder="搜索会话或执行指令…" />
+          <CommandList>
+            <CommandEmpty>无结果</CommandEmpty>
+            <CommandGroup heading="操作">
+              <CommandItem
+                onSelect={() => {
+                  setCommandOpen(false);
+                  startNewChat();
+                }}
+              >
+                新建对话 <CommandShortcut>⌘N</CommandShortcut>
+              </CommandItem>
+              <CommandItem
+                onSelect={() => {
+                  setCommandOpen(false);
+                  setLeftCollapsed((v) => !v);
+                }}
+              >
+                {leftCollapsed ? "展开侧边栏" : "收起侧边栏"}
+              </CommandItem>
+              <CommandItem
+                onSelect={() => {
+                  setCommandOpen(false);
+                  window.location.href = "/admin";
+                }}
+              >
+                前往控制台
+              </CommandItem>
+            </CommandGroup>
+            <CommandGroup heading="会话">
+              <CommandItem
+                onSelect={() => {
+                  setCommandOpen(false);
+                  if (activeSessionId) switchTo(activeSessionId);
+                }}
+              >
+                当前会话
+                {activeSessionId && <CommandShortcut>{activeSessionId.slice(0, 6)}</CommandShortcut>}
+              </CommandItem>
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </CommandDialog>
       </div>
     </div>
   );
@@ -575,30 +670,34 @@ export default function App() {
   }
 
   return (
-    <Routes>
-      <Route path="/" element={<ChatApp onSignedOut={() => setToken(null)} />} />
-      <Route path="/admin" element={<AdminLayout />}>
-        <Route index element={<ProfilePage />} />
-        <Route path="usage" element={<MyUsagePage />} />
-        <Route path="memories" element={<MyMemoriesPage />} />
-        <Route path="skills" element={<MySkillsPage />} />
-        <Route path="agents" element={<MyAgentDefsPage />} />
-        <Route path="scheduled-tasks" element={<ScheduledTasksPage />} />
-        <Route path="teams" element={<TeamsPage />} />
-        <Route path="teams/:teamId" element={<TeamDetailPage />} />
-        <Route path="platform/users" element={<PlatformUsersPage />} />
-        <Route path="platform/teams" element={<PlatformTeamsPage />} />
-        <Route path="platform/usage" element={<PlatformUsagePage />} />
-        <Route path="platform/quotas" element={<PlatformQuotasPage />} />
-        <Route path="platform/providers" element={<PlatformProvidersPage />} />
-        <Route path="platform/memories" element={<PlatformMemoriesPage />} />
-        <Route path="platform/skills" element={<PlatformSkillsPage />} />
-        <Route path="platform/agents" element={<PlatformAgentDefsPage />} />
-        <Route path="platform/audit" element={<PlatformAuditPage />} />
-        <Route path="platform/settings" element={<PlatformSettingsPage />} />
-      </Route>
-      {/* Anything else falls back to the chat view rather than a blank page. */}
-      <Route path="*" element={<ChatApp onSignedOut={() => setToken(null)} />} />
-    </Routes>
+    <TooltipProvider>
+      <Toaster>
+        <Routes>
+          <Route path="/" element={<ChatApp onSignedOut={() => setToken(null)} />} />
+          <Route path="/admin" element={<AdminLayout />}>
+            <Route index element={<ProfilePage />} />
+            <Route path="usage" element={<MyUsagePage />} />
+            <Route path="memories" element={<MyMemoriesPage />} />
+            <Route path="skills" element={<MySkillsPage />} />
+            <Route path="agents" element={<MyAgentDefsPage />} />
+            <Route path="scheduled-tasks" element={<ScheduledTasksPage />} />
+            <Route path="teams" element={<TeamsPage />} />
+            <Route path="teams/:teamId" element={<TeamDetailPage />} />
+            <Route path="platform/users" element={<PlatformUsersPage />} />
+            <Route path="platform/teams" element={<PlatformTeamsPage />} />
+            <Route path="platform/usage" element={<PlatformUsagePage />} />
+            <Route path="platform/quotas" element={<PlatformQuotasPage />} />
+            <Route path="platform/providers" element={<PlatformProvidersPage />} />
+            <Route path="platform/memories" element={<PlatformMemoriesPage />} />
+            <Route path="platform/skills" element={<PlatformSkillsPage />} />
+            <Route path="platform/agents" element={<PlatformAgentDefsPage />} />
+            <Route path="platform/audit" element={<PlatformAuditPage />} />
+            <Route path="platform/settings" element={<PlatformSettingsPage />} />
+          </Route>
+          {/* Anything else falls back to the chat view rather than a blank page. */}
+          <Route path="*" element={<ChatApp onSignedOut={() => setToken(null)} />} />
+        </Routes>
+      </Toaster>
+    </TooltipProvider>
   );
 }
