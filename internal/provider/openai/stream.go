@@ -88,10 +88,13 @@ func (u *usage) cacheRead() int {
 // thinking block at index 0, answer text to a text block at index 1, and tool
 // calls follow. Pure (fed decoded JSON, no I/O).
 type streamDecoder struct {
-	started      bool
-	thinkingOpen bool
-	textOpen     bool
-	seenToolIDs  map[int]string
+	started             bool
+	thinkingOpen        bool
+	textOpen            bool
+	seenToolIDs         map[int]string // canonical tool index -> id
+	providerToCanonical map[int]int    // provider tool_calls[].index -> canonical
+	nextToolIndex       int
+	finishEmitted       bool
 }
 
 // Block indexes in the canonical stream.
@@ -102,13 +105,23 @@ const (
 )
 
 func newStreamDecoder() *streamDecoder {
-	return &streamDecoder{seenToolIDs: map[int]string{}}
+	return &streamDecoder{seenToolIDs: map[int]string{}, providerToCanonical: map[int]int{}}
 }
 
 // feed parses one SSE data payload and returns the canonical events to emit.
 func (d *streamDecoder) feed(data []byte) []provider.Event {
 	if string(data) == "[DONE]" {
-		return d.finish()
+		hasTools := len(d.seenToolIDs) > 0
+		hasContent := d.thinkingOpen || d.textOpen || hasTools
+		evs := d.finish()
+		if !d.finishEmitted && hasContent {
+			reason := provider.StopEndTurn
+			if hasTools {
+				reason = provider.StopToolUse
+			}
+			evs = append(evs, provider.Event{Type: provider.EventMessageStop, StopReason: reason})
+		}
+		return evs
 	}
 	var c chunk
 	if err := json.Unmarshal(data, &c); err != nil {
@@ -180,30 +193,64 @@ func (d *streamDecoder) feed(data []byte) []provider.Event {
 		}
 
 		for _, tc := range ch.Delta.ToolCalls {
-			if tc.ID != "" && d.seenToolIDs[tc.Index] != tc.ID {
-				// Some OpenAI-compatible gateways repeat the tool-call id on
-				// every arguments chunk. The block was already started for the
-				// same id at this index — a second BlockStart would violate the
-				// loop's duplicate-block contract and hard-fail the run. A
-				// DIFFERENT id at a reused index still starts (a genuine
-				// protocol violation, which the loop's duplicate check catches).
-				d.seenToolIDs[tc.Index] = tc.ID
-				events = append(events, provider.Event{
-					Type:  provider.EventBlockStart,
-					Index: tc.Index + toolBaseIndex,
-					Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: tc.ID, ToolName: tc.Function.Name, ToolInput: map[string]any{}},
-				})
+			pIdx := tc.Index
+			canonical := -1
+			if tc.ID != "" {
+				if existing, ok := d.providerToCanonical[pIdx]; ok {
+					if d.seenToolIDs[existing] == tc.ID {
+						canonical = existing
+					} else {
+						// Different id at same provider index: proxy collapsed
+						// parallel calls onto index 0. Allocate a new canonical
+						// index so the second call doesn't collide at
+						// toolBaseIndex+pIdx and hard-fail the loop.
+						canonical = d.nextToolIndex
+						d.nextToolIndex++
+						d.providerToCanonical[pIdx] = canonical
+						d.seenToolIDs[canonical] = tc.ID
+						events = append(events, provider.Event{
+							Type:  provider.EventBlockStart,
+							Index: canonical + toolBaseIndex,
+							Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: tc.ID, ToolName: tc.Function.Name, ToolInput: map[string]any{}},
+						})
+					}
+				} else {
+					canonical = d.nextToolIndex
+					d.nextToolIndex++
+					d.providerToCanonical[pIdx] = canonical
+					d.seenToolIDs[canonical] = tc.ID
+					events = append(events, provider.Event{
+						Type:  provider.EventBlockStart,
+						Index: canonical + toolBaseIndex,
+						Block: &provider.Block{Type: provider.BlockToolUse, ToolUseID: tc.ID, ToolName: tc.Function.Name, ToolInput: map[string]any{}},
+					})
+				}
+			} else if tc.Function.Arguments != "" {
+				if c, ok := d.providerToCanonical[pIdx]; ok {
+					canonical = c
+				} else {
+					// Arguments without a prior start: fallback to pIdx
+					canonical = pIdx
+				}
 			}
 			if tc.Function.Arguments != "" {
+				if canonical == -1 {
+					if c, ok := d.providerToCanonical[pIdx]; ok {
+						canonical = c
+					} else {
+						canonical = pIdx
+					}
+				}
 				events = append(events, provider.Event{
 					Type:  provider.EventBlockDelta,
-					Index: tc.Index + toolBaseIndex,
+					Index: canonical + toolBaseIndex,
 					Delta: tc.Function.Arguments,
 				})
 			}
 		}
 		if ch.FinishReason != "" {
 			events = append(events, d.finish()...)
+			d.finishEmitted = true
 			// Surface why generation ended (finish_reason) so the loop can tell a
 			// natural stop from a "length" truncation. Usage arrives in a later
 			// chunk (include_usage) as its own EventMessageStop; the loop merges.
