@@ -32,8 +32,8 @@ func TestMCPDefaults(t *testing.T) {
 	if cfg.MCP.Enabled {
 		t.Error("MCP should be disabled by default")
 	}
-	if cfg.MCP.SearxngURL != "https://searxng-mcp.moonheart.dev/mcp" {
-		t.Errorf("got searxng url %q, want hosted default", cfg.MCP.SearxngURL)
+	if cfg.MCP.SearxngURL != "" {
+		t.Errorf("got searxng url %q, want empty (legacy MCP searxng retired, use native web_search)", cfg.MCP.SearxngURL)
 	}
 }
 

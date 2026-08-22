@@ -162,20 +162,19 @@ type Upload struct {
 	MaxBytesPerUser int64 `envconfig:"UPLOAD_MAX_BYTES_PER_USER" default:"209715200"` // 200 MiB
 }
 
-// MCP configures the MCP client integrations. The modern form is MCP_SERVERS:
-// a JSON array of servers (see internal/mcp.ServerConfig), so any number of
-// enterprise MCP servers — knowledge bases, ITSM, internal tooling — can be
-// attached. The legacy MCP_ENABLED + MCP_SEARXNG_URL pair still works as the
-// single-server SearXNG integration; it maps to one server named "searxng"
-// when MCP_SERVERS is empty.
+// MCP configures the MCP client integrations via MCP_SERVERS: a JSON array
+// of servers (see internal/mcp.ServerConfig), so any number of enterprise
+// MCP servers — knowledge bases, ITSM, internal tooling — can be attached.
+// The legacy MCP_ENABLED + MCP_SEARXNG_URL SearXNG integration has been
+// retired; SearXNG is now provided as native web_search / web_url_read tools
+// backed by https://searchng.moonheart.dev. The legacy fields remain for
+// backwards compat but are ignored.
 type MCP struct {
-	// Servers is a JSON array of {name, url, headers, timeout}. When set it
-	// replaces the legacy single-server configuration entirely.
+	// Servers is a JSON array of {name, url, headers, timeout}.
 	Servers string `envconfig:"MCP_SERVERS" default:""`
-	// Enabled gates the built-in SearXNG integration (legacy form; ignored
-	// when Servers is set).
+	// Enabled gates the built-in SearXNG integration (deprecated; ignored).
 	Enabled    bool   `envconfig:"MCP_ENABLED" default:"false"`
-	SearxngURL string `envconfig:"MCP_SEARXNG_URL" default:"https://searxng-mcp.moonheart.dev/mcp"`
+	SearxngURL string `envconfig:"MCP_SEARXNG_URL" default:""`
 }
 
 // Dreaming configures the offline dreaming worker (capability-gap K1) and the

@@ -786,6 +786,11 @@ func (d *serverDeps) wireChat(ctx context.Context) error {
 				}
 			}
 		}
+		// web_search + web_url_read backed by https://searchng.moonheart.dev
+		// (replaces the legacy mcp_searxng_* MCP tools). Always available,
+		// RiskNetwork so the permission gate governs them.
+		reg.Register(builtin.NewWebSearch())
+		reg.Register(builtin.NewWebURLRead())
 		// MCP tools (network): registered into the same run registry so
 		// children scoped from it inherit them. The manager is always
 		// non-nil (an empty boot config builds an empty one); Tools()

@@ -180,7 +180,8 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 				// parsed but violate the tool's declared input schema must not
 				// execute at fold either — answer with the same structured
 				// error dispatch would have produced.
-				if verr := toolruntime.ValidateArgs(tool.Schema(), c.Args); verr != nil {
+				// Strip UI description before validation (loop injects it for display).
+				if verr := toolruntime.ValidateArgs(tool.Schema(), stripDescription(c.Args)); verr != nil {
 					results[i] = toolruntime.Result{Content: "invalid tool arguments: " + verr.Error(), IsError: true}
 					continue
 				}
@@ -197,6 +198,9 @@ func (rg *RunRegistry) FoldBatch(ctx context.Context, sessionID, runID string, t
 				}
 			}
 			dispatchIdx = append(dispatchIdx, i)
+			// Strip UI description before execution.
+			c.Args = stripDescription(c.Args)
+			allCalls[i].Args = stripDescription(allCalls[i].Args)
 			dispatchCalls = append(dispatchCalls, c)
 			continue
 		}
@@ -358,4 +362,21 @@ func (rg *RunRegistry) Decide(ctx context.Context, approvalID string, approve bo
 		return Interaction{}, nil, err
 	}
 	return ap, history, nil
+}
+
+func stripDescription(args map[string]any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	if _, ok := args["description"]; !ok {
+		return args
+	}
+	out := make(map[string]any, len(args)-1)
+	for k, v := range args {
+		if k == "description" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }

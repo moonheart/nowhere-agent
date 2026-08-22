@@ -455,22 +455,12 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-// initialMCPServers resolves the boot MCP server list: MCP_SERVERS when set,
-// otherwise the legacy MCP_ENABLED + MCP_SEARXNG_URL SearXNG integration
-// mapped to a single "searxng" server. It seeds the runtime default AND
-// builds the boot manager, so both stay in lockstep.
+// initialMCPServers resolves the boot MCP server list from MCP_SERVERS.
+// The legacy MCP_ENABLED + MCP_SEARXNG_URL SearXNG integration has been
+// retired; web_search / web_url_read are now native tools backed by
+// https://searchng.moonheart.dev, so no implicit "searxng" server is created.
 func initialMCPServers(cfg config.Config) string {
-	if cfg.MCP.Servers != "" {
-		return cfg.MCP.Servers
-	}
-	if cfg.MCP.Enabled {
-		b, err := json.Marshal([]mcp.ServerConfig{{Name: "searxng", URL: cfg.MCP.SearxngURL}})
-		if err != nil {
-			return ""
-		}
-		return string(b)
-	}
-	return ""
+	return cfg.MCP.Servers
 }
 
 // noProviderAdapter fails every generation with the resolver's ErrNoProvider.

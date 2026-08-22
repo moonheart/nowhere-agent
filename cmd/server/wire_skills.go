@@ -37,7 +37,7 @@ func (d *serverDeps) wireSkillsAndMemory() {
 // to the next run — no restart.
 func (d *serverDeps) baseSystemFor() string {
 	if d.settings.String(settings.KeySystemLang) == "zh" {
-		return "你是 nowhere-agent,一名乐于助人的 AI 助手。请用中文思考并回复,除非用户明确要求其他语言。"
+		return "你是 nowhere-agent,一名乐于助人的 AI 助手。请用中文思考并回复,除非用户明确要求其他语言。\n\n调用工具时请在参数中添加 `description` 字段，用一句话中文说明本次调用的目的（10-30字，如\"读取配置文件\"、\"安装依赖并验证\"、\"搜索网页：xxx\"），该字段仅供界面展示，不影响工具执行。"
 	}
-	return "You are nowhere-agent, a helpful AI assistant."
+	return "You are nowhere-agent, a helpful AI assistant.\n\nWhen calling tools, include a brief `description` field (10-30 chars) summarizing the purpose for UI display, e.g. \"read config\" or \"install deps and verify\". This field is UI-only and does not affect execution."
 }

@@ -302,10 +302,71 @@ func (l *Loop) toolDefs() []provider.ToolDefinition {
 		defs = append(defs, provider.ToolDefinition{
 			Name:        t.Name(),
 			Description: t.Description(),
-			InputSchema: t.Schema(),
+			InputSchema: withDescriptionProp(t.Schema()),
 		})
 	}
 	return defs
+}
+
+// withDescriptionProp returns a shallow copy of schema with an optional
+// `description` string property injected for UI display. The model is
+// instructed (via system prompt) to fill it with a brief, human-readable
+// purpose for each tool call (e.g. "安装依赖" rather than raw shell).
+// The field is optional, never required, and stripped before execution.
+func withDescriptionProp(schema map[string]any) map[string]any {
+	if schema == nil {
+		return nil
+	}
+	props, _ := schema["properties"].(map[string]any)
+	if props == nil {
+		// No structured properties (e.g. test echoTool `{"type":"object"}`):
+		// injecting would change permissiveness and the compression budget.
+		// Real user-facing tools always declare properties, so skip here.
+		return schema
+	}
+	if _, exists := props["description"]; exists {
+		return schema
+	}
+	// shallow copy top-level
+	out := make(map[string]any, len(schema)+1)
+	for k, v := range schema {
+		out[k] = v
+	}
+	// shallow copy properties and inject
+	newProps := make(map[string]any, len(props)+1)
+	for k, v := range props {
+		newProps[k] = v
+	}
+	newProps["description"] = map[string]any{
+		"type": "string",
+	}
+	out["properties"] = newProps
+	return out
+}
+
+// stripDescription returns a copy of args without the UI `description` key.
+// The loop validates with the injected schema but executes without it.
+func stripDescription(args map[string]any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	if _, ok := args["description"]; !ok {
+		return args
+	}
+	out := make(map[string]any, len(args)-1)
+	for k, v := range args {
+		if k == "description" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// schemaForValidation returns the schema to use when validating incoming
+// tool args (with the UI description property injected so it is accepted).
+func schemaForValidation(t toolruntime.Tool) map[string]any {
+	return withDescriptionProp(t.Schema())
 }
 
 // Run executes the loop for a conversation history, streaming output to the
@@ -1126,7 +1187,7 @@ func (l *Loop) interactionGate(ctx context.Context, calls []toolruntime.Call) []
 			// park an approval / question set / client round-trip: the run
 			// would suspend (and put a card in front of the user) for a call
 			// that can never execute. Dispatch answers the violation inline.
-			if verr := toolruntime.ValidateArgs(tool.Schema(), c.Args); verr != nil {
+			if verr := toolruntime.ValidateArgs(schemaForValidation(tool), stripDescription(c.Args)); verr != nil {
 				continue
 			}
 		}
@@ -1185,10 +1246,13 @@ func (l *Loop) dispatch(ctx context.Context, emit Emitter, calls []toolruntime.C
 		// but violate the tool's declared input schema (wrong-typed fields,
 		// missing required) never execute — the structured error names the
 		// offending field so the model can re-issue with corrected arguments.
-		if verr := toolruntime.ValidateArgs(tool.Schema(), c.Args); verr != nil {
+		if verr := toolruntime.ValidateArgs(schemaForValidation(tool), stripDescription(c.Args)); verr != nil {
 			results[i] = toolruntime.Result{Content: "invalid tool arguments: " + verr.Error(), IsError: true}
 			continue
 		}
+		// Strip UI description before execution.
+		c.Args = stripDescription(c.Args)
+		calls[i].Args = c.Args
 		// Execution-permission gate (D10): authorize the call by the tool's risk
 		// before dispatch. A denied call is not executed; the reason is fed back as
 		// an error result so the model can adapt.
@@ -1266,6 +1330,8 @@ func (l *Loop) ToolExecutor() func(ctx context.Context, calls []toolruntime.Call
 				results[i] = toolruntime.Result{Content: fmt.Sprintf("unknown tool: %s (available tools: %s)", c.Name, strings.Join(l.tools.Names(), ", ")), IsError: true}
 				continue
 			}
+			c.Args = stripDescription(c.Args)
+			calls[i].Args = c.Args
 			live = append(live, &ToolCall{Call: c, Tool: tool})
 			liveIdx = append(liveIdx, i)
 		}
