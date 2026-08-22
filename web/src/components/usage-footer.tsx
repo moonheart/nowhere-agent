@@ -1,5 +1,6 @@
 import type { FC } from "react";
 import { useMessage } from "@assistant-ui/react";
+import { cn } from "@/lib/utils";
 
 type UsageData = {
   inputTokens?: number;
@@ -33,7 +34,7 @@ function fmt(n: number): string {
  * Renders a compact token-usage footer under an assistant reply: input/output
  * tokens plus the prompt-prefix cache hit rate when caching was active.
  */
-export const UsageFooter: FC = () => {
+export const UsageFooter: FC<{ className?: string }> = ({ className }) => {
   const usage = useMessage((s) => pickUsage(s.metadata));
   if (!usage) return null;
 
@@ -50,7 +51,7 @@ export const UsageFooter: FC = () => {
       : null;
 
   return (
-    <div className="mt-2 flex items-center gap-1.5 border-t border-border pt-1.5 text-[11px] text-muted-foreground">
+    <div className={cn("mt-2 flex items-center gap-1.5 border-t border-border pt-1.5 text-[11px] text-muted-foreground", className)}>
       <span title="input tokens">↑{fmt(input)}</span>
       <span aria-hidden>·</span>
       <span title="output tokens">↓{fmt(output)}</span>

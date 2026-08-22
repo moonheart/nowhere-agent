@@ -504,12 +504,17 @@ func (s *PGStore) SetRunUsage(ctx context.Context, runID string, u *provider.Usa
 // ActiveRun returns the in-progress run for a session, or false.
 func (s *PGStore) ActiveRun(ctx context.Context, sessionID string) (Run, bool, error) {
 	var r Run
+	var finished sql.NullTime
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, session_id, seq, status, created_at
+		SELECT id, session_id, seq, status, created_at, finished_at
 		FROM runs
 		WHERE session_id = $1 AND status IN ('queued','running')
 		ORDER BY seq DESC LIMIT 1`, sessionID).
-		Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt)
+		Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt, &finished)
+	if finished.Valid {
+		t := finished.Time
+		r.FinishedAt = &t
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, false, nil
 	}
@@ -540,7 +545,7 @@ func (s *PGStore) FailStrandedRuns(ctx context.Context) (int, error) {
 // intents before settling it (change durable-run-accounting).
 func (s *PGStore) StrandedRuns(ctx context.Context) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, seq, status, created_at,
+		SELECT id, session_id, seq, status, created_at, finished_at,
 			usage_input, usage_output, usage_cache_read, usage_cache_write
 		FROM runs
 		WHERE status IN ('queued','running','waiting_approval')
@@ -708,7 +713,7 @@ func (s *PGStore) NextRunSeq(ctx context.Context, sessionID string) (int, error)
 // RunsForSession returns all runs in a session ordered by seq, for history replay.
 func (s *PGStore) RunsForSession(ctx context.Context, sessionID string) ([]Run, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, seq, status, created_at,
+		SELECT id, session_id, seq, status, created_at, finished_at,
 			usage_input, usage_output, usage_cache_read, usage_cache_write
 		FROM runs
 		WHERE session_id = $1
@@ -734,8 +739,13 @@ func (s *PGStore) RunsForSession(ctx context.Context, sessionID string) ([]Run, 
 func scanRun(rows *sql.Rows) (Run, error) {
 	var r Run
 	var in, out, cr, cw sql.NullInt64
-	if err := rows.Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt, &in, &out, &cr, &cw); err != nil {
+	var finished sql.NullTime
+	if err := rows.Scan(&r.ID, &r.SessionID, &r.Seq, &r.Status, &r.CreatedAt, &finished, &in, &out, &cr, &cw); err != nil {
 		return Run{}, fmt.Errorf("scan run: %w", err)
+	}
+	if finished.Valid {
+		t := finished.Time
+		r.FinishedAt = &t
 	}
 	if in.Valid {
 		r.Usage = &provider.Usage{

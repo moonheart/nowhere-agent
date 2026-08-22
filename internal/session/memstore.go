@@ -336,6 +336,10 @@ func (m *MemStore) UpdateRunStatus(_ context.Context, runID string, status RunSt
 	defer m.mu.Unlock()
 	if r, ok := m.runs[runID]; ok {
 		r.Status = status
+		if status.Terminal() {
+			now := time.Now()
+			r.FinishedAt = &now
+		}
 	}
 	return nil
 }
@@ -389,9 +393,12 @@ func (m *MemStore) FailStrandedRuns(_ context.Context) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
+	now := time.Now()
 	for _, r := range m.runs {
 		if r.Status == RunQueued || r.Status == RunRunning {
 			r.Status = RunFailed
+			t := now
+			r.FinishedAt = &t
 			n++
 		}
 	}

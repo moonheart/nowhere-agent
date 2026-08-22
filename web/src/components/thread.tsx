@@ -1,23 +1,16 @@
-import type { ChangeEvent, ClipboardEvent, FC, PropsWithChildren } from "react";
+import type { ChangeEvent, ClipboardEvent, FC } from "react";
 import { useRef, useState } from "react";
 import {
   ThreadPrimitive,
   ComposerPrimitive,
   MessagePrimitive,
   useAui,
-  useMessage,
-  useThread,
-  useThreadRuntime,
-  type ThreadMessage,
 } from "@assistant-ui/react";
 import { ArrowDown, ArrowUp, Loader2, Paperclip, X } from "lucide-react";
-import { Reasoning } from "@/components/reasoning";
 import { StopButton } from "@/components/stop-button";
-import { ToolCall } from "@/components/tool-call";
-import { MarkdownText } from "@/components/markdown-text";
+import { AssistantTurn } from "@/components/assistant-turn";
 import { MessageImage, ImageThumb, AuthenticatedImg } from "@/components/message-image";
-import { DataUI, GenerativeUIFromMetadata } from "@/components/generative-ui";
-import { UsageFooter } from "@/components/usage-footer";
+import { DataUI } from "@/components/generative-ui";
 import { PlanPanel } from "@/components/plan-panel";
 import { PendingNotice } from "@/components/pending-notice";
 import { t } from "@/lib/i18n";
@@ -176,141 +169,22 @@ const UserMessage: FC = () => (
   </MessagePrimitive.Root>
 );
 
-// ToolGroupWithUI renders a run's consecutive tool-call cards, then any
-// generative UI the message's metadata carries. The live data-generative-ui
-// frame lands on the message that made the call, so the card renders right
-// after its tool card — the same position history puts the rebuilt content
-// part (after the tool call, before the trailing text). A message without a
-// spec renders nothing extra.
-const ToolGroupWithUI: FC<PropsWithChildren> = ({ children }) => (
-  <>
-    {children}
-    <GenerativeUIFromMetadata />
-  </>
-);
-
 const AssistantMessage: FC = () => (
   <MessagePrimitive.Root asChild>
     <Message>
-      {/* ghost is shadcn's "this turn isn't a bubble": no border, no fill, no
-          padding, and max-w-full instead of the 80% a bubble is capped at. The
-          assistant's reply reads as page content, and the blocks inside it —
-          reasoning, tool calls — keep their own frames instead of nesting a
-          box in a box. */}
+      {/* ghost keeps the assistant reply as page content (max-w-full), not a bubble.
+          The turn header/steps/final answer are rendered by AssistantTurn:
+          header shows 处理中/已处理 + 计时，中间 1..N-1 步可折叠，最后正文外显。 */}
       <Bubble variant="ghost">
         <BubbleContent>
-          <MessagePrimitive.Parts
-            components={{
-              Text: MarkdownText,
-              Reasoning,
-              Image: MessageImage,
-              data: { Fallback: DataUI },
-              tools: { Fallback: ToolCall },
-              ToolGroup: ToolGroupWithUI,
-            }}
-          />
-          <UsageFooter />
-          <FailedTurnNotice />
+          <AssistantTurn />
         </BubbleContent>
       </Bubble>
     </Message>
   </MessagePrimitive.Root>
 );
 
-// pickFailedError extracts the failure marker a HISTORY-reloaded message
-// carries: the server rebuild echoes a failed run's terminal error as
-// metadata.error on the assistant turn (history.go). The LIVE path marks the
-// same failure via the message status instead, which pickLiveFailedError reads
-// — one notice covers both, so a failed run shows the error + retry both live
-// and after a refresh.
-function pickFailedError(metadata: unknown): string | null {
-  const e = (metadata as { error?: unknown } | undefined)?.error;
-  return typeof e === "string" && e.length > 0 ? e : null;
-}
 
-// pickLiveFailedError extracts the terminal error from a LIVE-failed message's
-// status. The ui-message-stream decoder routes the server's error frame into
-// status {type:"incomplete", reason:"error", error: <text>}; the finish frame's
-// "length" reason (a non-continued truncation) is a failure too, shown with a
-// generic message when no error detail was recorded.
-function pickLiveFailedError(m: ThreadMessage): string | null {
-  const st = m.status;
-  if (!st || st.type !== "incomplete" || st.reason === "cancelled") return null;
-  const e = st.error;
-  if (typeof e === "string" && e.length > 0) return e;
-  if (
-    e &&
-    typeof e === "object" &&
-    "message" in e &&
-    typeof e.message === "string" &&
-    e.message.length > 0
-  ) {
-    return e.message;
-  }
-  return st.reason === "error" || st.reason === "length"
-    ? "The reply ended before completion."
-    : null;
-}
-
-// userMessageText concatenates a user message's text parts, the content a
-// retry re-submits (images are not carried over — the retried turn is text).
-function userMessageText(m: ThreadMessage): string {
-  return m.content
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("\n");
-}
-
-// FailedTurnNotice renders the failed-run marker on an assistant message: the
-// terminal error text plus a Retry button that re-submits the user message
-// preceding this failed reply through the normal composer send path (same
-// POST /api/chat; the server rebuilds authoritative history from the message
-// store, so retrying is just sending the same text again). It renders nothing
-// once the message carries no failure marker.
-const FailedTurnNotice: FC = () => {
-  const metaError = useMessage((s) => pickFailedError(s.metadata));
-  const liveError = useMessage((s) => pickLiveFailedError(s));
-  const msgId = useMessage((s) => s.id);
-  const threadRuntime = useThreadRuntime();
-  const isRunning = useThread((s) => s.isRunning);
-  const errorText = liveError ?? metaError;
-  if (!errorText) return null;
-
-  const retry = () => {
-    if (isRunning) return;
-    const msgs = threadRuntime.getState().messages;
-    const idx = msgs.findIndex((m) => m.id === msgId);
-    for (let i = idx - 1; i >= 0; i--) {
-      const m = msgs[i];
-      if (m.role !== "user") continue;
-      const text = userMessageText(m);
-      if (!text) continue;
-      // Never clobber a draft the user is typing: append the retried message
-      // to whatever is already in the composer.
-      const draft = threadRuntime.composer.getState().text.trim();
-      threadRuntime.composer.setText(draft ? `${draft}\n${text}` : text);
-      threadRuntime.composer.send();
-      return;
-    }
-  };
-
-  return (
-    <div className="mt-2 flex items-center gap-3 rounded-lg border border-red-600/30 bg-red-500/10 px-3 py-2">
-      <p className="min-w-0 flex-1 text-xs text-muted-foreground">{errorText}</p>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        disabled={isRunning}
-        title={t("chat.rerunTitle")}
-        onClick={retry}
-        className="shrink-0"
-      >
-        {t("chat.retry")}
-      </Button>
-    </div>
-  );
-};
 
 const Composer: FC<{ sessionId: string | null }> = ({ sessionId }) => {
   // Staged image attachments for the current turn: chips render here, and the

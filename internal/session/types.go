@@ -96,6 +96,9 @@ type Run struct {
 	Seq       int
 	Status    RunStatus
 	CreatedAt time.Time
+	// FinishedAt is set when the run reaches a terminal status (done/failed/cancelled).
+	// Nil while the run is still queued/running. Persisted as runs.finished_at.
+	FinishedAt *time.Time
 	// TeamID attributes the run to the team whose provider key billed it
 	// (enterprise-readiness P1-3). Empty when the run fell back to the platform
 	// key. It records attribution, not membership, so it survives the team being

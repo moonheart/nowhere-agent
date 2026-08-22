@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"nowhere-agent/internal/httpx"
 	"nowhere-agent/internal/provider"
@@ -31,6 +32,16 @@ type historyMetadata struct {
 	// (change failed-run-retry): the client renders the failure notice and a
 	// retry affordance from it. Empty on successful turns.
 	Error string `json:"error,omitempty"`
+	// Timing carries the turn's wall-clock duration so a reloaded client can
+	// show “耗时 Xs” without client-side localStorage (server-persisted, A).
+	Timing *historyTiming `json:"timing,omitempty"`
+}
+
+// historyTiming is the subset of MessageTiming we populate for history reloads.
+// Only totalStreamTime is needed for the turn header; the live stream still
+// drives streamStartTime/firstTokenTime.
+type historyTiming struct {
+	TotalStreamTime int `json:"totalStreamTime,omitempty"`
 }
 
 // historyUsageData is one unstable_data entry: {name:"usage", data:{...}}.
@@ -314,12 +325,30 @@ func (h *Handler) buildHistoryFrom(r *http.Request, sessionID string, stored []s
 	// message's metadata; echoed on the merged turn so a reloaded client can
 	// show why the run stopped (change failed-run-retry).
 	var curError string
+	// Server-persisted turn duration (A): runID -> totalStreamTime ms from runs.finished_at.
+	// Lets a reloaded client show “耗时 Xs” without localStorage.
+	runDurations := map[string]int{}
+	var curRunID string
+	if h.runtime != nil {
+		if runs, err := h.runtime.RunsForSession(r.Context(), sessionID); err == nil {
+			for _, run := range runs {
+				if run.FinishedAt != nil && !run.CreatedAt.IsZero() {
+					ms := int(run.FinishedAt.Sub(run.CreatedAt).Milliseconds())
+					if ms > 0 && ms < int(24*time.Hour.Milliseconds()) {
+						runDurations[run.ID] = ms
+					}
+				}
+			}
+		}
+	}
 	flush := func() {
 		if cur != nil && len(cur.Content) > 0 {
 			// Attach the turn's accumulated LLM usage as an unstable_data entry
-			// so the client renders it like the live data-usage frame, and the
-			// failed-run error (if any) so the client can offer a retry.
-			if curHasUsage || curError != "" {
+			// so the client renders it like the live data-usage frame, the
+			// failed-run error (if any) so the client can offer a retry, and the
+			// server-persisted timing so refresh keeps “耗时”.
+			hasTiming := curRunID != "" && runDurations[curRunID] > 0
+			if curHasUsage || curError != "" || hasTiming {
 				md := &historyMetadata{}
 				if curHasUsage {
 					md.UnstableData = []historyUsageData{{
@@ -335,11 +364,15 @@ func (h *Handler) buildHistoryFrom(r *http.Request, sessionID string, stored []s
 				if curError != "" {
 					md.Error = curError
 				}
+				if hasTiming {
+					md.Timing = &historyTiming{TotalStreamTime: runDurations[curRunID]}
+				}
 				cur.Metadata = md
 			}
 			msgs = append(msgs, *cur)
 		}
 		cur = nil
+		curRunID = ""
 		curUsage = provider.Usage{}
 		curHasUsage = false
 		curError = ""
@@ -349,6 +382,9 @@ func (h *Handler) buildHistoryFrom(r *http.Request, sessionID string, stored []s
 		case m.Role == provider.RoleAssistant:
 			if cur == nil {
 				cur = &historyMessage{ID: fmt.Sprintf("msg-%d", m.ID), Role: "assistant"}
+			}
+			if curRunID == "" {
+				curRunID = m.RunID
 			}
 			// A failed run's last assistant message carries its terminal error
 			// as metadata; the turn it belongs to echoes it (later messages of

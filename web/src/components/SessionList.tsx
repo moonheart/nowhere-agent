@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Loader2, MoreHorizontal, Pencil, Pin, PinOff, Plus, Search, Trash2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { Separator } from "@/components/ui/separator";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -30,12 +29,6 @@ import {
   InputGroupInput,
 } from "@/components/ui/input-group";
 import {
-  Item,
-  ItemContent,
-  ItemTitle,
-} from "@/components/ui/item";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -55,6 +48,20 @@ import { Label } from "@/components/ui/label";
 import { t, useLang } from "@/lib/i18n";
 import { reportNotice } from "@/lib/notice";
 import { cn } from "@/lib/utils";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuItem,
+  SidebarMenuButton,
+  SidebarRail,
+  SidebarSeparator,
+} from "@/components/ui/sidebar";
+import { Collapsible, CollapsibleContent } from "@/components/ui/collapsible";
 
 type Props = {
   currentId: string | null;
@@ -119,6 +126,8 @@ function saveTitleOverrides(map: Record<string, string>) {
 // SessionList is the left sidebar of conversations. Selecting one switches the
 // active thread; "New chat" starts a fresh session; the menu per row offers
 // rename / pin / delete.
+// Composition follows https://ui.shadcn.com/docs/components/base/sidebar.md :
+// Sidebar > SidebarHeader / SidebarContent > SidebarGroup > SidebarMenu
 export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refreshToken }: Props) => {
   const lang = useLang();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -346,32 +355,158 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
   const pinned = withDisplayTitle.filter((x) => pinnedIds.has(x.raw.id));
   const recent = withDisplayTitle.filter((x) => !pinnedIds.has(x.raw.id));
 
-  return (
-    <aside className="flex h-full w-full flex-col border-r border-border bg-muted/50">
-      <div className="space-y-2 border-b border-border p-3">
-        <Button size="lg" className="w-full" onClick={onNew}>
-          <Plus />
-          {t("chat.new")}
-        </Button>
-        {showSearch && (
-          <InputGroup className="bg-background">
-            <InputGroupAddon>
-              <Search />
-            </InputGroupAddon>
-            <InputGroupInput
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t("chat.searchChats")}
-              aria-label={t("chat.searchChats")}
+  const renderRow = ({ raw: s, displayTitle }: { raw: SessionSummary; displayTitle: string }) => {
+    const active = s.id === currentId;
+    const isPinned = pinnedIds.has(s.id);
+    const timeLabel = relTime(s.updatedAt, lang);
+    const fullTime = (() => {
+      try {
+        return new Date(s.updatedAt).toLocaleString(lang === "zh" ? "zh-CN" : "en-US", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+      } catch {
+        return timeLabel;
+      }
+    })();
+    return (
+      <SidebarMenuItem key={s.id} className="group/item relative">
+        <ContextMenu>
+          <ContextMenuTrigger className="w-full">
+            <SidebarMenuButton
+              isActive={active}
+              tooltip={displayTitle || t("chat.untitled")}
+              onClick={() => onSelect(s.id)}
+              className="pr-8"
+            >
+              <span className="truncate">{displayTitle || t("chat.untitled")}</span>
+            </SidebarMenuButton>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="w-40">
+            <ContextMenuItem onClick={() => openRename(s)}>
+              <Pencil /> {t("chat.rename")}
+            </ContextMenuItem>
+            <ContextMenuItem onClick={() => togglePin(s.id)}>
+              {isPinned ? <PinOff /> : <Pin />} {isPinned ? t("chat.unpin") : t("chat.pin")}
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem variant="destructive" onClick={() => void handleDelete(s.id)}>
+              <Trash2 /> {t("chat.deleteConversation")}
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+        <div
+          className={cn(
+            "pointer-events-none absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-sidebar px-0.5 py-0.5 backdrop-blur-sm transition-opacity",
+            "opacity-0 group-hover/item:pointer-events-auto group-hover/item:opacity-100 group-focus-within/item:pointer-events-auto group-focus-within/item:opacity-100 has-[[data-state=open]]:pointer-events-auto has-[[data-state=open]]:opacity-100",
+            active && "bg-sidebar-accent",
+          )}
+          onClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <span className="max-w-[72px] truncate px-1 text-xs whitespace-nowrap text-muted-foreground">
+                  {timeLabel}
+                </span>
+              }
             />
-          </InputGroup>
-        )}
-      </div>
+            <TooltipContent side="top">{fullTime}</TooltipContent>
+          </Tooltip>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={isPinned ? t("chat.unpin") : t("chat.pin")}
+            title={isPinned ? t("chat.unpin") : t("chat.pin")}
+            onClick={(e) => {
+              e.stopPropagation();
+              togglePin(s.id);
+            }}
+            className={cn("size-6 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground", isPinned && "text-primary")}
+          >
+            {isPinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={t("chat.moreActions")}
+                  title={t("chat.moreActions")}
+                  className="size-6 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground"
+                />
+              }
+            >
+              <MoreHorizontal className="size-3.5" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" side="bottom" sideOffset={6} alignOffset={-4} className="w-40">
+              <DropdownMenuItem
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openRename(s);
+                }}
+              >
+                <Pencil />
+                {t("chat.rename")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={(e) => {
+                  e.stopPropagation();
+                  togglePin(s.id);
+                }}
+              >
+                {isPinned ? <PinOff /> : <Pin />}
+                {isPinned ? t("chat.unpin") : t("chat.pin")}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleDelete(s.id);
+                }}
+              >
+                <Trash2 />
+                {t("chat.deleteConversation")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </SidebarMenuItem>
+    );
+  };
 
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="p-2">
+  return (
+    <>
+      <Sidebar collapsible="offcanvas" variant="sidebar">
+        <SidebarHeader className="gap-3 border-b p-3">
+          <Button size="lg" className="w-full" onClick={onNew}>
+            <Plus />
+            {t("chat.new")}
+          </Button>
+          {showSearch && (
+            <InputGroup className="bg-background">
+              <InputGroupAddon>
+                <Search />
+              </InputGroupAddon>
+              <InputGroupInput
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t("chat.searchChats")}
+                aria-label={t("chat.searchChats")}
+              />
+            </InputGroup>
+          )}
+        </SidebarHeader>
+
+        <SidebarContent className="gap-0 p-2">
           {loadError && (
-            <div className="mb-1 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
               <span>{t("chat.loadError")}</span>
               <Button
                 variant="ghost"
@@ -383,9 +518,7 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
               </Button>
             </div>
           )}
-          {/* The error banner and the empty states are mutually exclusive: a
-              failed load must not read as "no conversations yet", so the
-              empty states yield to loadError. */}
+          {/* The error banner and the empty states are mutually exclusive */}
           {!loading && !loadError && sessions.length === 0 && debounced === "" && (
             <Empty className="p-4">
               <EmptyHeader>
@@ -404,9 +537,6 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
                   <Search />
                 </EmptyMedia>
                 <EmptyTitle>{t("chat.noMatches")}</EmptyTitle>
-                {/* The debounced term is what the backend actually searched:
-                    the live query would lag the real search during the
-                    debounce window. */}
                 <EmptyDescription>
                   {t("chat.noMatchesHint", { term: debounced })}
                 </EmptyDescription>
@@ -419,190 +549,70 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
               {t("chat.searching")}
             </div>
           )}
-          {/* Pinned / Recent separated, each collapsible */}
-          {(() => {
-            const renderRow = ({ raw: s, displayTitle }: { raw: SessionSummary; displayTitle: string }) => {
-              const active = s.id === currentId;
-              const isPinned = pinnedIds.has(s.id);
-              const timeLabel = relTime(s.updatedAt, lang);
-              const fullTime = (() => {
-                try {
-                  return new Date(s.updatedAt).toLocaleString(lang === "zh" ? "zh-CN" : "en-US", {
-                    year: "numeric",
-                    month: "2-digit",
-                    day: "2-digit",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  });
-                } catch {
-                  return timeLabel;
-                }
-              })();
-              return (
-                <li key={s.id} className="group relative list-none">
-                  <ContextMenu>
-                    <ContextMenuTrigger>
-                      <Item
-                        size="xs"
-                        className={cn(
-                          "cursor-pointer gap-2 pr-2 text-left font-normal",
-                          active ? "bg-primary/10 text-foreground" : "text-foreground hover:bg-muted",
-                        )}
-                        render={<button type="button" onClick={() => onSelect(s.id)} />}
-                      >
-                    <ItemContent className="min-w-0 gap-0">
-                      <ItemTitle className="w-full min-w-0">
-                        <span className="min-w-0 flex-1 truncate">{displayTitle || t("chat.untitled")}</span>
-                      </ItemTitle>
-                    </ItemContent>
-                      </Item>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent className="w-40">
-                      <ContextMenuItem onClick={() => openRename(s)}>
-                        <Pencil /> {t("chat.rename")}
-                      </ContextMenuItem>
-                      <ContextMenuItem onClick={() => togglePin(s.id)}>
-                        {isPinned ? <PinOff /> : <Pin />} {isPinned ? t("chat.unpin") : t("chat.pin")}
-                      </ContextMenuItem>
-                      <ContextMenuSeparator />
-                      <ContextMenuItem variant="destructive" onClick={() => void handleDelete(s.id)}>
-                        <Trash2 /> {t("chat.deleteConversation")}
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
-                  <div
-                    className={cn(
-                      "pointer-events-none absolute top-1/2 right-1 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-muted/90 px-0.5 py-0.5 backdrop-blur-sm transition-opacity",
-                      "opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 has-[[data-state=open]]:pointer-events-auto has-[[data-state=open]]:opacity-100",
-                      active && "bg-primary/10",
-                    )}
-                    onClick={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
-                  >
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={
-                          <span className="max-w-[72px] truncate px-1 text-xs whitespace-nowrap text-muted-foreground">
-                            {timeLabel}
-                          </span>
-                        }
-                      />
-                      <TooltipContent side="top">{fullTime}</TooltipContent>
-                    </Tooltip>
-                    <Button
-                      variant="ghost"
-                      size="icon-xs"
-                      aria-label={isPinned ? t("chat.unpin") : t("chat.pin")}
-                      title={isPinned ? t("chat.unpin") : t("chat.pin")}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        togglePin(s.id);
-                      }}
-                      className={cn("size-6 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground", isPinned && "text-primary")}
-                    >
-                      {isPinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
-                    </Button>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger
-                        render={
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            aria-label={t("chat.moreActions")}
-                            title={t("chat.moreActions")}
-                            className="size-6 shrink-0 text-muted-foreground hover:bg-accent hover:text-foreground"
-                          />
-                        }
-                      >
-                        <MoreHorizontal className="size-3.5" />
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" side="bottom" sideOffset={6} alignOffset={-4} className="w-40">
-                        <DropdownMenuItem
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openRename(s);
-                          }}
-                        >
-                          <Pencil />
-                          {t("chat.rename")}
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            togglePin(s.id);
-                          }}
-                        >
-                          {isPinned ? <PinOff /> : <Pin />}
-                          {isPinned ? t("chat.unpin") : t("chat.pin")}
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void handleDelete(s.id);
-                          }}
-                        >
-                          <Trash2 />
-                          {t("chat.deleteConversation")}
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </div>
-                </li>
-              );
-            };
-            return (
-              <div className="flex flex-col gap-3">
-                {/* Pinned section */}
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => setPinnedCollapsed((v) => !v)}
-                    className="flex w-full items-center gap-1 rounded px-1 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                    aria-expanded={!pinnedCollapsed}
-                  >
-                    {pinnedCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
-                    <span>{t("chat.pinned")}</span>
-                    <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] leading-none">{pinned.length}</span>
-                  </button>
-                  {!pinnedCollapsed && (
-                    <>
-                      {pinned.length > 0 ? (
-                        <ul className="mt-1 flex flex-col gap-px">{pinned.map(renderRow)}</ul>
-                      ) : (
-                        <div className="px-2 py-1 text-xs text-muted-foreground/70">{t("chat.noPinned")}</div>
-                      )}
-                    </>
+
+          {/* Pinned group — collapsible per https://ui.shadcn.com/docs/components/base/sidebar.md#collapsible */}
+          <Collapsible open={!pinnedCollapsed} onOpenChange={(open) => setPinnedCollapsed(!open)} className="group/collapsible">
+            <SidebarGroup className="p-0">
+              <SidebarGroupLabel
+                className="flex w-full items-center gap-1 pr-8 text-xs"
+              >
+                <button
+                  type="button"
+                  onClick={() => setPinnedCollapsed((v) => !v)}
+                  className="flex flex-1 items-center gap-1 rounded px-1 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+                  aria-expanded={!pinnedCollapsed}
+                >
+                  {pinnedCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                  <span>{t("chat.pinned")}</span>
+                  <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] leading-none">{pinned.length}</span>
+                </button>
+              </SidebarGroupLabel>
+              <CollapsibleContent>
+                <SidebarGroupContent>
+                  {pinned.length > 0 ? (
+                    <SidebarMenu className="gap-px">{pinned.map(renderRow)}</SidebarMenu>
+                  ) : (
+                    <div className="px-2 py-1 text-xs text-muted-foreground/70">{t("chat.noPinned")}</div>
                   )}
-                </div>
-                <Separator />
-                {/* Recent section */}
-                <div>
-                  <button
-                    type="button"
-                    onClick={() => setRecentCollapsed((v) => !v)}
-                    className="flex w-full items-center gap-1 rounded px-1 py-1 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                    aria-expanded={!recentCollapsed}
-                  >
-                    {recentCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
-                    <span>{t("chat.recent")}</span>
-                    <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] leading-none">{recent.length}</span>
-                  </button>
-                  {!recentCollapsed && <ul className="mt-1 flex flex-col gap-px">{recent.map(renderRow)}</ul>}
-                </div>
-              </div>
-            );
-          })()}
-          <div ref={sentinelRef} className="h-px" aria-hidden="true" />
-          {loadingMore && (
-            <div className="flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground">
-              <Loader2 className="size-3.5 animate-spin" />
-              {t("chat.loadingMore")}
-            </div>
-          )}
-        </div>
-      </ScrollArea>
+                </SidebarGroupContent>
+              </CollapsibleContent>
+            </SidebarGroup>
+          </Collapsible>
+
+          <SidebarSeparator className="my-3" />
+
+          <Collapsible open={!recentCollapsed} onOpenChange={(open) => setRecentCollapsed(!open)} className="group/collapsible">
+            <SidebarGroup className="p-0">
+              <SidebarGroupLabel className="flex w-full items-center gap-1 pr-8 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setRecentCollapsed((v) => !v)}
+                  className="flex flex-1 items-center gap-1 rounded px-1 py-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+                  aria-expanded={!recentCollapsed}
+                >
+                  {recentCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                  <span>{t("chat.recent")}</span>
+                  <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] leading-none">{recent.length}</span>
+                </button>
+              </SidebarGroupLabel>
+              <CollapsibleContent>
+                <SidebarGroupContent>
+                  <SidebarMenu className="gap-px">{recent.map(renderRow)}</SidebarMenu>
+                  <div ref={sentinelRef} className="h-px" aria-hidden="true" />
+                  {loadingMore && (
+                    <div className="flex items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground">
+                      <Loader2 className="size-3.5 animate-spin" />
+                      {t("chat.loadingMore")}
+                    </div>
+                  )}
+                </SidebarGroupContent>
+              </CollapsibleContent>
+            </SidebarGroup>
+          </Collapsible>
+        </SidebarContent>
+
+        <SidebarRail />
+      </Sidebar>
 
       <Dialog open={!!renameTarget} onOpenChange={(open) => (!open ? setRenameTarget(null) : null)}>
         <DialogContent className="sm:max-w-sm" onClick={(e) => e.stopPropagation()}>
@@ -636,6 +646,6 @@ export const SessionList = ({ currentId, onSelect, onNew, onDeleteCurrent, refre
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </aside>
+    </>
   );
 };

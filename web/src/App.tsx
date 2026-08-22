@@ -2,7 +2,7 @@ import { lazy, useEffect, useState } from "react";
 import { Link, Route, Routes, useSearchParams } from "react-router-dom";
 import { AssistantRuntimeProvider, useThread } from "@assistant-ui/react";
 import { useDataStreamRuntime } from "@assistant-ui/react-data-stream";
-import { LogOut, PanelLeft, PanelLeftClose, Settings } from "lucide-react";
+import { LogOut, Settings } from "lucide-react";
 import { AdminLayout } from "@/components/admin/AdminLayout";
 import { Thread } from "@/components/thread";
 import { LoginForm } from "@/components/login";
@@ -13,6 +13,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
 import { Command, CommandDialog, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem, CommandShortcut } from "@/components/ui/command";
+import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
 import { getToken, logout, consumeSSORedirect } from "@/lib/auth";
 import { getSessionId, setSessionId, clearSessionId } from "@/lib/thread";
@@ -493,72 +494,57 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
   };
 
   return (
-    <div className="flex h-dvh flex-col bg-background text-foreground">
-      <header className="flex h-12 items-center gap-3 border-b border-border px-4">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={leftCollapsed ? "展开侧边栏" : "收起侧边栏"}
-          title={leftCollapsed ? "展开侧边栏" : "收起侧边栏"}
-          onClick={() => setLeftCollapsed((v) => !v)}
-          className="shrink-0"
-        >
-          {leftCollapsed ? <PanelLeft /> : <PanelLeftClose />}
-        </Button>
-        <div className="flex items-center gap-2">
-          <span className="flex size-6 items-center justify-center rounded-lg bg-primary text-xs font-bold text-primary-foreground">
-            n
-          </span>
-          <span className="text-sm font-semibold tracking-tight">
-            nowhere-agent
-          </span>
-        </div>
-        <div className="ml-auto flex items-center gap-1">
-          {/* UI language toggle: a user override (nowhere.lang) beats the
-              browser locale; the header re-renders via useLang, other t()
-              consumers pick the new language up on their next render. */}
-          <LangToggle />
-          {/* buttonVariants, not <Button render={<Link/>}>: base-ui's Button
-              assumes a native <button>, and telling it otherwise costs the
-              anchor its link semantics (middle-click, open in new tab). */}
-          <Link
-            to="/admin"
-            title="Settings and administration"
-            className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
-          >
-            <Settings />
-            Console
-          </Link>
-          <Button
-            variant="ghost"
-            size="sm"
-            title="Sign out"
-            onClick={() => {
-              clearSessionId();
-              void logout().finally(onSignedOut);
-            }}
-          >
-            <LogOut />
-            Sign out
-          </Button>
-        </div>
-      </header>
-      <div className="flex min-h-0 flex-1">
-        {!leftCollapsed && (
-          <div className="w-64 shrink-0">
-            <SessionList
-              currentId={activeSessionId}
-              onSelect={switchTo}
-              onNew={startNewChat}
-              onDeleteCurrent={handleDeleteCurrent}
-              refreshToken={listVersion}
-            />
+    <SidebarProvider
+      open={!leftCollapsed}
+      onOpenChange={(open) => setLeftCollapsed(!open)}
+      style={{ "--sidebar-width": "16rem", "--sidebar-width-icon": "3rem" } as React.CSSProperties}
+    >
+      <SessionList
+        currentId={activeSessionId}
+        onSelect={switchTo}
+        onNew={startNewChat}
+        onDeleteCurrent={handleDeleteCurrent}
+        refreshToken={listVersion}
+      />
+      <SidebarInset className="flex min-h-0 flex-1 flex-col bg-background text-foreground">
+        <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4">
+          {/* SidebarTrigger is the canonical toggle per https://ui.shadcn.com/docs/components/base/sidebar.md#sidebartrigger */}
+          <SidebarTrigger className="-ml-1" />
+          <div className="flex items-center gap-2">
+            <span className="flex size-6 items-center justify-center rounded-lg bg-primary text-xs font-bold text-primary-foreground">
+              n
+            </span>
+            <span className="text-sm font-semibold tracking-tight">nowhere-agent</span>
           </div>
-        )}
-        <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
-        <ResizablePanel defaultSize={72} minSize={40} id="center">
-          <main className="flex h-full min-w-0 flex-1 flex-col bg-background">
-            {/* key on Chat itself (not just the provider inside it): switching /
+          <div className="ml-auto flex items-center gap-1">
+            <LangToggle />
+            <Link
+              to="/admin"
+              title="Settings and administration"
+              className={cn(buttonVariants({ variant: "ghost", size: "sm" }))}
+            >
+              <Settings />
+              Console
+            </Link>
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Sign out"
+              onClick={() => {
+                clearSessionId();
+                void logout().finally(onSignedOut);
+              }}
+            >
+              <LogOut />
+              Sign out
+            </Button>
+          </div>
+        </header>
+        <div className="flex min-h-0 flex-1">
+          <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
+            <ResizablePanel defaultSize={72} minSize={40} id="center">
+              <main className="flex h-full min-w-0 flex-1 flex-col bg-background">
+                {/* key on Chat itself (not just the provider inside it): switching /
                 starting a chat must rebuild the WHOLE Chat, including its runtime.
                 Without it, Chat survives the switch and keeps the previous
                 conversation's runtime — the remounted provider's cards then render
@@ -566,61 +552,67 @@ function ChatApp({ onSignedOut }: { onSignedOut: () => void }) {
                 them into the right panel, leaking the prior chat's files into a
                 fresh conversation's Workspace. A fresh runtime starts empty and
                 reloads only the now-current session's history. */}
-            <Chat key={conversationKey} conversationKey={conversationKey} sessionId={activeSessionId} onSession={handleNewSession} />
-          </main>
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel defaultSize={24} minSize={16} maxSize={40} collapsible collapsedSize={0}>
-          <RightPanel />
-        </ResizablePanel>
-      </ResizablePanelGroup>
-      <CommandDialog open={commandOpen} onOpenChange={setCommandOpen}>
-        <Command>
-          <CommandInput placeholder="搜索会话或执行指令…" />
-          <CommandList>
-            <CommandEmpty>无结果</CommandEmpty>
-            <CommandGroup heading="操作">
-              <CommandItem
-                onSelect={() => {
-                  setCommandOpen(false);
-                  startNewChat();
-                }}
-              >
-                新建对话 <CommandShortcut>⌘N</CommandShortcut>
-              </CommandItem>
-              <CommandItem
-                onSelect={() => {
-                  setCommandOpen(false);
-                  setLeftCollapsed((v) => !v);
-                }}
-              >
-                {leftCollapsed ? "展开侧边栏" : "收起侧边栏"}
-              </CommandItem>
-              <CommandItem
-                onSelect={() => {
-                  setCommandOpen(false);
-                  window.location.href = "/admin";
-                }}
-              >
-                前往控制台
-              </CommandItem>
-            </CommandGroup>
-            <CommandGroup heading="会话">
-              <CommandItem
-                onSelect={() => {
-                  setCommandOpen(false);
-                  if (activeSessionId) switchTo(activeSessionId);
-                }}
-              >
-                当前会话
-                {activeSessionId && <CommandShortcut>{activeSessionId.slice(0, 6)}</CommandShortcut>}
-              </CommandItem>
-            </CommandGroup>
-          </CommandList>
-        </Command>
-      </CommandDialog>
-      </div>
-    </div>
+                <Chat
+                  key={conversationKey}
+                  conversationKey={conversationKey}
+                  sessionId={activeSessionId}
+                  onSession={handleNewSession}
+                />
+              </main>
+            </ResizablePanel>
+            <ResizableHandle withHandle />
+            <ResizablePanel defaultSize={24} minSize={16} maxSize={40} collapsible collapsedSize={0}>
+              <RightPanel />
+            </ResizablePanel>
+          </ResizablePanelGroup>
+        </div>
+        <CommandDialog open={commandOpen} onOpenChange={setCommandOpen}>
+          <Command>
+            <CommandInput placeholder="搜索会话或执行指令…" />
+            <CommandList>
+              <CommandEmpty>无结果</CommandEmpty>
+              <CommandGroup heading="操作">
+                <CommandItem
+                  onSelect={() => {
+                    setCommandOpen(false);
+                    startNewChat();
+                  }}
+                >
+                  新建对话 <CommandShortcut>⌘N</CommandShortcut>
+                </CommandItem>
+                <CommandItem
+                  onSelect={() => {
+                    setCommandOpen(false);
+                    setLeftCollapsed((v) => !v);
+                  }}
+                >
+                  {leftCollapsed ? "展开侧边栏" : "收起侧边栏"}
+                </CommandItem>
+                <CommandItem
+                  onSelect={() => {
+                    setCommandOpen(false);
+                    window.location.href = "/admin";
+                  }}
+                >
+                  前往控制台
+                </CommandItem>
+              </CommandGroup>
+              <CommandGroup heading="会话">
+                <CommandItem
+                  onSelect={() => {
+                    setCommandOpen(false);
+                    if (activeSessionId) switchTo(activeSessionId);
+                  }}
+                >
+                  当前会话
+                  {activeSessionId && <CommandShortcut>{activeSessionId.slice(0, 6)}</CommandShortcut>}
+                </CommandItem>
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </CommandDialog>
+      </SidebarInset>
+    </SidebarProvider>
   );
 }
 
