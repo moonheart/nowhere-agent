@@ -15,13 +15,16 @@ marked.setOptions({ gfm: true, breaks: true });
  */
 export const MarkdownText: FC<TextMessagePartProps> = ({ text }) => {
   const html = useMemo(() => {
-    const raw = marked.parse(text) as string;
+    let raw = marked.parse(text) as string;
+    // External links open in a new window.
+    raw = raw.replace(/<a /g, '<a target="_blank" rel="noopener noreferrer" ');
     // marked (v5+) does NOT escape raw HTML — it passes tags straight
     // through — and its sanitize option was removed; model output (chat text,
     // tool results, subagent parts) is therefore untrusted and must be
     // stripped before it lands in dangerouslySetInnerHTML. style is forbidden
     // outright: CSS is a paste-up channel for hidden/overlapping content.
-    return DOMPurify.sanitize(raw, { FORBID_ATTR: ["style"] });
+    // Explicitly allow target (DOMPurify strips it by default without rel).
+    return DOMPurify.sanitize(raw, { FORBID_ATTR: ["style"], ADD_ATTR: ["target"] });
   }, [text]);
   return (
     <div

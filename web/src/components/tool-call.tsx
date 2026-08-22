@@ -4,9 +4,11 @@ import {
   Bot,
   ChevronDown,
   ChevronRight,
+  Globe,
   HelpCircle,
   Laptop,
   LoaderCircle,
+  Search,
   ShieldAlert,
   TriangleAlert,
 } from "lucide-react";
@@ -48,13 +50,99 @@ import {
   QuestionnairePrevious,
   QuestionnaireNext,
 } from "@/components/ui/questionnaire";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Marker, MarkerContent } from "@/components/ui/marker";
 import { cn } from "@/lib/utils";
 import { t } from "@/lib/i18n";
+
+function extractDescription(argsText: string | undefined): string | undefined {
+  if (!argsText) return undefined;
+  try {
+    const obj = JSON.parse(argsText) as Record<string, unknown>;
+    if (typeof obj?.description === "string" && obj.description.trim()) {
+      return obj.description.trim();
+    }
+  } catch {
+    // partial JSON during streaming: regex fallback
+    const m = argsText.match(/"description"\s*:\s*"((?:\\"|[^"])*)"/);
+    if (m) {
+      try {
+        return JSON.parse(`"${m[1]}"`) as string;
+      } catch {
+        return m[1];
+      }
+    }
+  }
+  return undefined;
+}
+
+function fallbackHint(_toolName: string, argsText: string | undefined): string | undefined {
+  if (!argsText) return undefined;
+  try {
+    const obj = JSON.parse(argsText) as Record<string, unknown>;
+    if (typeof obj?.url === "string" && obj.url) return obj.url.slice(0, 80);
+    if (typeof obj?.path === "string" && obj.path) return obj.path as string;
+    if (typeof obj?.command === "string" && obj.command) {
+      const s = (obj.command as string).trim();
+      return s.length > 80 ? s.slice(0, 80) + "…" : s;
+    }
+    if (typeof obj?.pattern === "string" && obj.pattern) return `搜索 ${(obj.pattern as string).slice(0, 40)}`;
+    if (typeof obj?.query === "string" && obj.query) return (obj.query as string).trim().slice(0, 60);
+    if (typeof obj?.prompt === "string" && obj.prompt) return (obj.prompt as string).trim().slice(0, 60);
+  } catch {
+    // partial JSON fallbacks
+    const urlMatch = argsText.match(/"url"\s*:\s*"([^"]+)"/);
+    if (urlMatch) return urlMatch[1].slice(0, 80);
+    const pathMatch = argsText.match(/"path"\s*:\s*"([^"]+)"/);
+    if (pathMatch) return pathMatch[1];
+    const queryMatch = argsText.match(/"query"\s*:\s*"((?:\\"|[^"])*)"/);
+    if (queryMatch) {
+      try {
+        return (JSON.parse(`"${queryMatch[1]}"`) as string).trim().slice(0, 60);
+      } catch {
+        return queryMatch[1].slice(0, 60);
+      }
+    }
+    const cmdMatch = argsText.match(/"command"\s*:\s*"((?:\\"|[^"])*)"/);
+    if (cmdMatch) {
+      try {
+        const s = JSON.parse(`"${cmdMatch[1]}"`) as string;
+        return s.trim().slice(0, 80);
+      } catch {
+        return cmdMatch[1].slice(0, 80);
+      }
+    }
+  }
+  return undefined;
+}
+
+// Convert web_search result text ( "1. title\n   URL: https://...\n   snippet" )
+// into markdown where only the title is shown and the link is embedded in it.
+function searchResultToMarkdown(text: string): string {
+  const blocks = text.trim().split(/\n\s*\n/);
+  const md = blocks
+    .map((block) => {
+      const lines = block.split("\n");
+      if (lines.length < 2) return "";
+      const m1 = lines[0].match(/^\s*\d+\.\s+(.*)/);
+      const title = m1 ? m1[1].trim() : lines[0].trim();
+      const m2 = lines[1].match(/URL:\s*(\S+)/);
+      const url = m2 ? m2[1].trim() : "";
+      if (!title) return "";
+      const prefix = lines[0].match(/^\s*(\d+)\./)?.[1] ?? "";
+      const num = prefix ? `${prefix}. ` : "";
+      if (url) {
+        // Escape brackets in title
+        const escTitle = title.replace(/[\[\]]/g, "");
+        return `${num}[${escTitle}](${url})`;
+      }
+      return `${num}${title}`;
+    })
+    .filter(Boolean)
+    .join("\n");
+  return md || text.trim();
+}
 
 /**
  * Renders a tool call (file read/write, etc.) as a collapsible block in the
@@ -68,22 +156,28 @@ import { t } from "@/lib/i18n";
  * spawn_agent — looks exactly like the parent's.
  */
 export const ToolCall: FC<ToolCallMessagePartProps> = (props) => {
-  if (props.toolName === "spawn_agent") {
-    return <SubagentCall {...props} />;
-  }
+  if (props.toolName === "spawn_agent") return <SubagentCall {...props} />;
+  if (props.toolName === "web_search") return <WebSearchCall {...props} />;
+  if (props.toolName === "web_url_read") return <WebUrlReadCall {...props} />;
   return <GenericCall {...props} />;
 };
 
 // dispatch routes any tool call to its renderer; GenericCall uses it so a
 // subagent's nested spawn_agent recurses into SubagentCall.
-const dispatch: FC<ToolCallMessagePartProps> = (props) =>
-  props.toolName === "spawn_agent" ? <SubagentCall {...props} /> : <GenericCall {...props} />;
+const dispatch: FC<ToolCallMessagePartProps> = (props) => {
+  if (props.toolName === "spawn_agent") return <SubagentCall {...props} />;
+  if (props.toolName === "web_search") return <WebSearchCall {...props} />;
+  if (props.toolName === "web_url_read") return <WebUrlReadCall {...props} />;
+  return <GenericCall {...props} />;
+};
 
 /* ---------- spawn_agent (recursive) ---------- */
 
 const SubagentCall: FC<ToolCallMessagePartProps> = (props) => {
-  const { toolName, result, isError, status, toolCallId } = props;
+  const { toolName, result, isError, status, toolCallId, argsText } = props;
   const running = status?.type === "running";
+  const description = extractDescription(argsText);
+  const hint = !description ? fallbackHint(toolName, argsText) : undefined;
 
   // Auto-collapse: open while running, snap shut the moment it completes. The
   // user can still re-open manually afterwards.
@@ -117,6 +211,7 @@ const SubagentCall: FC<ToolCallMessagePartProps> = (props) => {
       <CallHeader
         icon={<Bot className="size-3.5 shrink-0 text-primary" />}
         name={toolName}
+        description={description ?? hint}
         running={running}
         isError={isError}
         expanded={open}
@@ -152,6 +247,131 @@ const SubagentCall: FC<ToolCallMessagePartProps> = (props) => {
             )}
           </>
         )}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+};
+
+/* ---------- web_search ---------- */
+const WebSearchCall: FC<ToolCallMessagePartProps> = (props) => {
+  const { toolName, argsText, result, isError, status, toolCallId } = props;
+  const running = status?.type === "running";
+  const description = extractDescription(argsText);
+  const hint = !description ? fallbackHint(toolName, argsText) : undefined;
+  const [manual, setManual] = useState<boolean | undefined>(undefined);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (wasRunning.current && !running) setManual(undefined);
+    wasRunning.current = running;
+  }, [running]);
+  const expanded = manual ?? running;
+  const approval = useApproval(toolCallId);
+  const queue = usePendingInteractions();
+  const isHead = approval !== undefined && queue.length > 0 && queue[0].toolCallId === approval.toolCallId;
+  const permissionMode = usePermissionMode();
+  const hideApproval = permissionMode === "allow_all" && approval?.kind !== "ask_user" && approval?.kind !== "client_tool";
+  useReport(props, running);
+  const resultText = toText(result);
+  const mdResult = resultText ? searchResultToMarkdown(resultText) : "";
+
+  return (
+    <Collapsible open={expanded} onOpenChange={setManual} className="mb-2 w-full max-w-full text-sm">
+      <CallHeader
+        icon={<Search className="size-3.5 shrink-0 text-blue-600 dark:text-blue-400" />}
+        name={toolName}
+        description={description ?? hint}
+        running={running}
+        isError={isError}
+        expanded={expanded}
+      />
+      {running && <Progress value={null} className="mt-1 w-full pl-5" />}
+      {approval?.kind === "ask_user" ? (
+        isHead ? <AskUserGate approval={approval} /> : <QueuedNote />
+      ) : approval?.kind === "client_tool" ? (
+        <ClientToolGate approval={approval} />
+      ) : approval && !hideApproval ? (
+        isHead ? <ApprovalGate approval={approval} argsText={argsText} /> : <QueuedNote />
+      ) : null}
+      <CollapsibleContent className="mt-1 max-h-72 w-full space-y-2 overflow-y-auto pl-5">
+        {(mdResult || isError) && (
+          <div className={isError ? "font-mono text-xs text-destructive" : ""}>
+            {isError ? (
+              <pre className="break-all whitespace-pre-wrap">{resultText || "(no output)"}</pre>
+            ) : (
+              <MarkdownText type="text" text={mdResult} status={completeStatus} />
+            )}
+          </div>
+        )}
+        {!running && !resultText && !isError && <div className="text-xs text-muted-foreground">(no results)</div>}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+};
+
+/* ---------- web_url_read ---------- */
+const WebUrlReadCall: FC<ToolCallMessagePartProps> = (props) => {
+  const { toolName, argsText, result, isError, status, toolCallId } = props;
+  const running = status?.type === "running";
+  const description = extractDescription(argsText);
+  const hint = !description ? fallbackHint(toolName, argsText) : undefined;
+  const [manual, setManual] = useState<boolean | undefined>(undefined);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (wasRunning.current && !running) setManual(undefined);
+    wasRunning.current = running;
+  }, [running]);
+  const expanded = manual ?? running;
+  const approval = useApproval(toolCallId);
+  const queue = usePendingInteractions();
+  const isHead = approval !== undefined && queue.length > 0 && queue[0].toolCallId === approval.toolCallId;
+  const permissionMode = usePermissionMode();
+  const hideApproval = permissionMode === "allow_all" && approval?.kind !== "ask_user" && approval?.kind !== "client_tool";
+  useReport(props, running);
+  const resultText = toText(result);
+  // Extract URL for a clickable header link
+  let url = "";
+  try {
+    const obj = JSON.parse(argsText || "{}") as Record<string, unknown>;
+    if (typeof obj?.url === "string") url = obj.url as string;
+  } catch {
+    const m = argsText?.match(/"url"\s*:\s*"([^"]+)"/);
+    if (m) url = m[1];
+  }
+
+  return (
+    <Collapsible open={expanded} onOpenChange={setManual} className="mb-2 w-full max-w-full text-sm">
+      <CallHeader
+        icon={<Globe className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />}
+        name={toolName}
+        description={description ?? hint}
+        running={running}
+        isError={isError}
+        expanded={expanded}
+      />
+      {running && <Progress value={null} className="mt-1 w-full pl-5" />}
+      {approval?.kind === "ask_user" ? (
+        isHead ? <AskUserGate approval={approval} /> : <QueuedNote />
+      ) : approval?.kind === "client_tool" ? (
+        <ClientToolGate approval={approval} />
+      ) : approval && !hideApproval ? (
+        isHead ? <ApprovalGate approval={approval} argsText={argsText} /> : <QueuedNote />
+      ) : null}
+      <CollapsibleContent className="mt-1 max-h-72 w-full space-y-2 overflow-y-auto pl-5">
+        {url && (
+          <a href={url} target="_blank" rel="noreferrer" className="break-all font-mono text-[11px] text-muted-foreground underline-offset-2 hover:underline">
+            {url}
+          </a>
+        )}
+        {(resultText || isError) && (
+          <div className={isError ? "font-mono text-xs text-destructive" : ""}>
+            {isError ? (
+              <pre className="break-all whitespace-pre-wrap">{resultText || "(no output)"}</pre>
+            ) : (
+              <MarkdownText type="text" text={resultText} status={completeStatus} />
+            )}
+          </div>
+        )}
+        {!running && !resultText && !isError && <div className="text-xs text-muted-foreground">(no content)</div>}
       </CollapsibleContent>
     </Collapsible>
   );
@@ -240,6 +460,8 @@ const Dispatch = dispatch;
 const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
   const { toolName, argsText, result, isError, status, toolCallId } = props;
   const running = status?.type === "running";
+  const description = extractDescription(argsText);
+  const hint = !description ? fallbackHint(toolName, argsText) : undefined;
   // undefined = follow the default (open while running, closed when done);
   // true/false = the user's explicit toggle, which wins until the run ends.
   // This lets a user collapse a large tool call (e.g. a streaming write_file)
@@ -278,7 +500,7 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
 
   return (
     <Collapsible open={expanded} onOpenChange={setManual} className="mb-2 w-full max-w-full text-sm">
-      <CallHeader name={toolName} running={running} isError={isError} expanded={expanded} />
+      <CallHeader name={toolName} description={description ?? hint} running={running} isError={isError} expanded={expanded} />
       {running && <Progress value={null} className="mt-1 w-full pl-5" />}
       {approval?.kind === "ask_user" ? (
         isHead ? <AskUserGate approval={approval} /> : <QueuedNote />
@@ -291,18 +513,10 @@ const GenericCall: FC<ToolCallMessagePartProps> = (props) => {
           <QueuedNote />
         )
       ) : null}
-      <CollapsibleContent className="mt-1 w-full space-y-2 pl-5 font-mono text-xs leading-relaxed">
+      <CollapsibleContent className="mt-1 max-h-64 w-full space-y-2 overflow-y-auto pl-5 font-mono text-xs leading-relaxed">
         {argsText && (
           <div>
-            <div className="mb-1 flex items-center gap-2 font-sans text-muted-foreground">
-              <span>arguments</span>
-              <Popover>
-                <PopoverTrigger render={<Button variant="ghost" size="xs" className="h-6 px-1.5 text-[10px]">预览</Button>} />
-                <PopoverContent side="right" align="start" className="max-h-64 w-80 overflow-auto font-mono text-xs break-all whitespace-pre-wrap">
-                  {argsText}
-                </PopoverContent>
-              </Popover>
-            </div>
+            <div className="mb-1 font-sans text-muted-foreground">arguments</div>
             <pre className="break-all whitespace-pre-wrap text-foreground/70">{argsText}</pre>
           </div>
         )}
@@ -640,36 +854,37 @@ function useReport(
 }
 
 // CallHeader is the always-visible row that toggles the block. It must sit
-// inside a Collapsible: it IS the trigger.
+// inside a Collapsible: it IS the trigger. The visible label is the
+// human-readable description (or its fallback hint); the raw tool name only
+// appears inside the hover card.
 const CallHeader: FC<{
   name: string;
+  description?: string;
   running: boolean;
   isError?: boolean;
   expanded: boolean;
   icon?: React.ReactNode;
   badge?: string;
-}> = ({ name, running, isError, expanded, icon, badge }) => (
-  <CollapsibleTrigger className="inline-flex items-center gap-1.5 py-1 text-left text-muted-foreground transition-colors hover:text-foreground">
-    {expanded ? <ChevronDown className="size-3.5 shrink-0" /> : <ChevronRight className="size-3.5 shrink-0" />}
-    {running ? (
-      <LoaderCircle className="size-3.5 shrink-0 animate-spin text-primary" />
-    ) : (
-      <span className={cn("inline-block size-2 shrink-0 rounded-full", isError ? "bg-destructive" : "bg-emerald-500")} />
-    )}
-    {icon}
-    <HoverCard>
-      <HoverCardTrigger>
-        <span className="font-mono font-medium">{name}</span>
-      </HoverCardTrigger>
-      <HoverCardContent className="max-w-xs font-mono text-xs break-all">
-        {name} — {running ? "执行中" : isError ? "失败" : "完成"}，悬浮查看详情，点击收起/展开
-      </HoverCardContent>
-    </HoverCard>
-    {badge && (
-      <Badge variant="secondary" className="h-4 px-1 text-[10px]">
-        {badge}
-      </Badge>
-    )}
-    <span className="text-xs">{running ? "running…" : isError ? "error" : "done"}</span>
-  </CollapsibleTrigger>
-);
+}> = ({ name, description, running, isError, expanded, icon, badge }) => {
+  const label = description?.trim() ? description.trim() : "";
+  return (
+    <CollapsibleTrigger className="inline-flex max-w-full items-center gap-1.5 py-1 text-left text-muted-foreground transition-colors hover:text-foreground">
+      {expanded ? <ChevronDown className="size-3.5 shrink-0" /> : <ChevronRight className="size-3.5 shrink-0" />}
+      {running ? (
+        <LoaderCircle className="size-3.5 shrink-0 animate-spin text-primary" />
+      ) : (
+        <span className={cn("inline-block size-2 shrink-0 rounded-full", isError ? "bg-destructive" : "bg-emerald-500")} />
+      )}
+      {icon}
+      <span className="max-w-[260px] truncate text-xs font-medium text-foreground/80">
+        {label || <span className="font-mono text-[11px] text-muted-foreground">{name}</span>}
+      </span>
+      {badge && (
+        <Badge variant="secondary" className="h-4 px-1 text-[10px]">
+          {badge}
+        </Badge>
+      )}
+      <span className="shrink-0 text-xs">{running ? "running…" : isError ? "error" : "done"}</span>
+    </CollapsibleTrigger>
+  );
+};
